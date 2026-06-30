@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 FTS全文搜索</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html" class="active">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第21章 FTS全文搜索</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们学习了虚拟表接口——SQLite 的"存储引擎插件系统"。这一章我们来探索虚拟表家族中最重要的成员——<strong>FTS（Full-Text Search）全文搜索模块</strong>。</p>
+
+        <p>想象一下：你有数千篇文章，想找到所有包含"SQLite 性能优化"的文章。用 <code>LIKE '%SQLite%性能%优化%'</code> 不仅慢，而且无法实现精确短语匹配、按相关性排序等高级功能。FTS 就是为此而生的——它把倒排索引引擎装进了 SQLite。</p>
+
+        <div class="highlight">
+            <strong>FTS 是什么？</strong> SQLite 内置的全文搜索引擎，基于倒排索引实现，支持短语搜索、前缀搜索、布尔搜索和自定义排序。FTS3/4/5 三代变体代码位于 <code>ext/fts3/</code> 和 <code>ext/fts5/</code> 目录。
+        </div>
+
+        <h2>FTS3/4/5 的演进</h2>
+
+        <table>
+            <thead>
+                <tr><th>版本</th><th>引入时间</th><th>核心特点</th><th>代码位置</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>FTS3</td><td>3.6.0 (2009)</td><td>基础倒排索引，MATCH 语法</td><td><code>ext/fts3/fts3.c</code></td></tr>
+                <tr><td>FTS4</td><td>3.7.4 (2011)</td><td>压缩存储 compress/uncompress、matchinfo()</td><td><code>ext/fts3/fts3.c</code>（同文件）</td></tr>
+                <tr><td>FTS5</td><td>3.9.0 (2015)</td><td>全新架构、BM25 排名、列查询</td><td><code>ext/fts5/fts5*.c</code></td></tr>
+            </tbody>
+        </table>
+
+        <p>FTS3 和 FTS4 共享同一个 <code>fts3.c</code> 源码文件——FTS4 只是在 FTS3 基础上增加了额外功能。FTS5 则是完全重写的架构。</p>
+
+        <h2>倒排索引数据结构</h2>
+
+        <p>倒排索引和传统 B-Tree 的"正向索引"恰好相反：正向索引回答"这篇文档里有哪些词"，倒排索引回答"这个词出现在哪些文档中"。</p>
+
+        <pre><code>/* FTS3/4 的倒排索引结构（逻辑上） */
+/*
+ * 每个 segment 包含 term → doclist 的映射。
+ * doclist 格式：
+ * +------------------+------------------+-------+
+ * | docid (varint)   | position list    | docid | ...
+ * +------------------+------------------+-------+
+ *
+ * position list 是变长编码的词位置数组，用于短语查询。
+ */
+
+/* segment 合并操作的核心结构 */
+typedef struct Fts3SegReader Fts3SegReader;
+struct Fts3SegReader {
+  int iStartBlock;
+  int iEndBlock;
+  const char *zTerm;       /* 当前 term */
+  int nTerm;
+  const char *aDoclist;    /* 当前 term 的文档列表 */
+  int nDoclist;
+};</code></pre>
+
+        <p><strong>Segment 合并</strong> 是 FTS 索引维护的核心。插入新文档时，FTS 不会立即重建整个索引，而是创建小 segment。后台合并进程将小 segment 归并为大 segment——类似于 LSM-Tree 的 compaction。如果大量写入时发现 FTS 表越来越慢，通常是合并策略需要调优。</p>
+
+        <h2>分词器实现</h2>
+
+        <p>分词器将文本切分成词条。默认的 <code>simple</code> 分词器按空格和标点切分并转小写：</p>
+
+        <pre><code>/* fts3_tokenizer1.c — simple 分词器的核心 */
+static int simpleNext(sqlite3_tokenizer_cursor *pCursor,
+  const char **ppToken, int *pnToken,
+  int *piStartOffset, int *piEndOffset, int *piPosition){
+  simple_tokenizer_cursor *c = (simple_tokenizer_cursor *)pCursor;
+  while( c-&gt;iOffset &lt; c-&gt;nInput ){
+    int i = c-&gt;iOffset;
+    unsigned char ch = c-&gt;zInput[i];
+    /* 跳过分隔符 */
+    if( ch==' ' || ch==',' || ch=='.' || ch&lt;=0x20 ){
+      c-&gt;iOffset++; continue;
+    }
+    int start = i;
+    while( i&lt;c-&gt;nInput &amp;&amp; !(c-&gt;zInput[i]==' ' || c-&gt;zInput[i]==',') ) i++;
+    *ppToken = &amp;c-&gt;zInput[start];
+    *pnToken = i - start;
+    *piStartOffset = start; *piEndOffset = i;
+    *piPosition = c-&gt;iToken++;
+    c-&gt;iOffset = i;
+    return SQLITE_OK;
+  }
+  return SQLITE_DONE;
+}</code></pre>
+
+        <p>SQLite 还提供了 <code>porter</code>（词干提取，搜索 "running" 匹配 "run"）和 <code>unicode61</code>（支持非拉丁文字）两种内置分词器。中文文本用 <code>unicode61</code> 会按单字切分，如需精确中文分词需集成自定义分词器。</p>
+
+        <div class="tip">
+            💡 FTS 表创建时通过 <code>tokenize=</code> 选项指定分词器。例如 <code>CREATE VIRTUAL TABLE t USING fts4(content, tokenize=porter unicode61)</code> 组合使用词干提取和 Unicode 分词。
+        </div>
+
+        <h2>FTS 查询</h2>
+
+        <pre><code>-- 创建 FTS4/5 表
+CREATE VIRTUAL TABLE docs USING fts4(title, content);
+
+-- 简单查询
+SELECT * FROM docs WHERE content MATCH 'SQLite';
+SELECT * FROM docs WHERE content MATCH 'SQLite OR 性能';
+
+-- 短语查询
+SELECT * FROM docs WHERE content MATCH '"数据库引擎"';
+
+-- 前缀/布尔查询
+SELECT * FROM docs WHERE content MATCH 'SQL*';
+SELECT * FROM docs WHERE docs MATCH 'SQLite NOT Oracle';
+
+-- FTS4 辅助函数
+SELECT highlight(docs, 0, '&lt;b&gt;', '&lt;/b&gt;') FROM docs WHERE content MATCH 'SQLite';
+SELECT offsets(docs) FROM docs WHERE content MATCH 'SQLite';
+SELECT matchinfo(docs) FROM docs WHERE content MATCH 'SQLite';</code></pre>
+
+        <div class="warning">
+            ⚠️ <strong>MATCH 与子查询：</strong> 不要写 <code>SELECT * FROM t WHERE rowid IN (SELECT docid FROM t WHERE content MATCH 'x')</code>。外层 <code>rowid IN</code> 会绕过 FTS 索引，导致回表逐行检查。直接用 <code>SELECT * FROM t WHERE content MATCH 'x'</code>，让 MATCH 驱动查询。
+        </div>
+
+        <h2>FTS4 压缩与 FTS5 改进</h2>
+
+        <p>FTS4 的 <code>compress</code>/<code>uncompress</code> 选项在数据写入时压缩、读取时解压。使用 zlib 压缩后，索引磁盘占用可减少约 60-70%，对移动端和嵌入式设备意义重大。</p>
+
+        <p>FTS5（3.9.0+）是彻底重写的设计，核心改进：</p>
+
+        <ul>
+            <li><strong>内置 BM25 排名</strong> — <code>SELECT *, rank FROM t WHERE t MATCH 'x' ORDER BY rank</code></li>
+            <li><strong>前缀索引</strong> — 通过 <code>prefix='2,3'</code> 选项加速前缀查询</li>
+            <li><strong>列权重</strong> — <code>title^10, content^1</code> 让标题匹配权重更高</li>
+            <li><strong>64 位 docid</strong> — 支持更大的表</li>
+        </ul>
+
+        <table>
+            <thead>
+                <tr><th>功能</th><th>FTS3/4</th><th>FTS5</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>排名算法</td><td>需 matchinfo 自己算</td><td>内置 BM25</td></tr>
+                <tr><td>压缩存储</td><td>compress/uncompress</td><td>自带压缩</td></tr>
+                <tr><td>前缀索引</td><td>不直接支持</td><td>prefix 选项原生支持</td></tr>
+                <tr><td>列权重</td><td>不支持</td><td>title^10 语法</td></tr>
+                <tr><td>NGram 索引</td><td>不支持</td><td>tokenize=ngram</td></tr>
+            </tbody>
+        </table>
+
+        <h2>真实故事：FTS 在移动端搜索中的应用</h2>
+
+        <p>2019 年我参与了一个手机笔记应用的开发。用户写了数千条笔记，需要全局搜索标题和正文、按相关性排序并高亮关键词。</p>
+
+        <p>第一版用 <code>LIKE '%keyword%'</code>，笔记超过 500 条后搜索响应飙升到 3-5 秒。第二版用 FTS4 加触发器同步主表和索引表，搜索响应降到 <strong>50 毫秒以下</strong>，同时支持了短语搜索和近似匹配。FTS 索引额外占用约原始文本 30% 的空间，在移动端完全可以接受。</p>
+
+        <p>但是遇到了一个坑：批量导入时如果禁用了触发器，FTS 索引会与主表不一致。最终修复是在每次应用启动时执行 <code>INSERT INTO t(t) VALUES('rebuild')</code> 重建索引，虽然需要 1-2 秒，但确保了数据一致性。</p>
+
+        <div class="highlight">
+            <strong>移动端黄金组合：</strong> FTS 的倒排索引天然适合"写少读多"的移动端场景。笔记、短信、通讯录这些写入频率低但搜索频率高的数据，使用 FTS 可获得媲美原生搜索引擎的体验，且无需维护独立的搜索引擎服务。
+        </div>
+
+        <p>好了，这一章我们从倒排索引的数据结构出发，理解了分词器、MATCH 查询、FTS4 压缩和 FTS5 改进，最后分享了移动端实战故事。下一章我们要聊一个更"神奇"的特性——<strong>表达式索引与自修复</strong>。你会看到 SQLite 3.53.0 是怎么实现"索引自己修复自己"的。我们第 22 章见。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 虚拟表与扩展</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html" class="active">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第20章 虚拟表与扩展</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们学习了内置函数机制——通过注册回调函数来扩展 SQLite。这一章我们要聊一个更强大的扩展体系——<strong>虚拟表（Virtual Table）</strong>。</p>
+
+        <p>函数给 SQLite 加"新公式"，虚拟表则给 SQLite 加"新数据源"。通过虚拟表接口，你可以用 SQL 查询任意数据——内存数组、CSV 文件、HTTP 接口、甚至另一个数据库。你写 <code>SELECT * FROM my_vtab WHERE id = 42</code>，背后调用的是你自己实现的 C 函数。</p>
+
+        <div class="highlight">
+            <strong>一句话：</strong> 虚拟表接口是 SQLite 的"存储引擎插件系统"，把存储和查询的底层实现完全开放给开发者。
+        </div>
+
+        <h2>虚拟表接口 — sqlite3_module</h2>
+
+        <p>虚拟表的心脏是 <code>sqlite3_module</code> 结构体，定义在 <code>sqlite3.h</code> 中。它包含虚拟表需要实现的全部回调方法：</p>
+
+        <pre><code>struct sqlite3_module {
+  int iVersion;
+  /* 生命周期 */
+  int (*xCreate)(sqlite3*, void *pAux, int argc, const char *const*argv,
+                 sqlite3_vtab **ppVTab, char **pzErr);
+  int (*xConnect)(sqlite3*, void *pAux, int argc, const char *const*argv,
+                  sqlite3_vtab **ppVTab, char **pzErr);
+  int (*xBestIndex)(sqlite3_vtab *pVTab, sqlite3_index_info*);
+  int (*xDisconnect)(sqlite3_vtab *pVTab);
+  int (*xDestroy)(sqlite3_vtab *pVTab);
+  /* 游标操作（必须实现） */
+  int (*xOpen)(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor);
+  int (*xClose)(sqlite3_vtab_cursor*);
+  int (*xFilter)(sqlite3_vtab_cursor*, int idxNum, const char *idxStr,
+                 int argc, sqlite3_value **argv);
+  int (*xNext)(sqlite3_vtab_cursor*);
+  int (*xEof)(sqlite3_vtab_cursor*);
+  int (*xColumn)(sqlite3_vtab_cursor*, sqlite3_context*, int);
+  int (*xRowid)(sqlite3_vtab_cursor*, sqlite3_int64 *pRowid);
+  /* DML 可选 */
+  int (*xUpdate)(sqlite3_vtab*, int, sqlite3_value**, sqlite3_int64*);
+};</code></pre>
+
+        <p>在这众多回调中，<strong>6 个是必须实现的</strong>：</p>
+
+        <table>
+            <thead>
+                <tr><th>回调</th><th>时机</th><th>职责</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>xCreate</code></td><td><code>CREATE VIRTUAL TABLE</code></td><td>创建并初始化虚拟表</td></tr>
+                <tr><td><code>xConnect</code></td><td>打开数据库时</td><td>连接已有虚拟表</td></tr>
+                <tr><td><code>xBestIndex</code></td><td>查询规划</td><td>报告支持哪些过滤条件</td></tr>
+                <tr><td><code>xOpen</code></td><td>每次查询开始</td><td>分配游标</td></tr>
+                <tr><td><code>xClose</code></td><td>查询结束</td><td>释放游标</td></tr>
+                <tr><td><code>xDisconnect</code></td><td>关闭数据库</td><td>断开连接</td></tr>
+            </tbody>
+        </table>
+
+        <p>xCreate 和 xConnect 的区别在于：xCreate 在第一次 <code>CREATE VIRTUAL TABLE</code> 时被调用，同时负责"创建"和"连接"；xConnect 在后续打开数据库时只负责"连接"。对于只读虚拟表（如 CSV 读取器），两者可以完全相同。</p>
+
+        <h2>虚拟表生命周期</h2>
+
+        <p>虚拟表从创建到销毁经历完整的生命周期：</p>
+
+        <pre><code>/*
+  CREATE VIRTUAL TABLE → xCreate()
+  SELECT FROM vtab      → xConnect() → xBestIndex()
+                         → xOpen() → xFilter()
+                         → LOOP: xEof()? xColumn()+xNext()
+                         → xClose()
+  DROP TABLE            → xDisconnect() → xDestroy()
+*/</code></pre>
+
+        <p>最关键的环节是 <strong>xBestIndex + xFilter</strong> 这对组合。xBestIndex 在查询规划时被调用，接收 <code>sqlite3_index_info</code> 结构，其中包含 WHERE 子句中所有可用条件。你根据这些条件选择最优策略，设置 <code>estimatedCost</code>（估计成本）。SQLite 会选择成本最低的方案。</p>
+
+        <div class="tip">
+            💡 虚拟表的第一原则：<strong>永远不要在 xOpen 中做重活儿</strong>。xOpen 只分配游标内存，真正的初始化放到 xFilter 中。否则查询规划器在试探阶段就会做大量无用功。
+        </div>
+
+        <h2>carray 扩展源码</h2>
+
+        <p>来看一个简洁但完整的虚拟表实现——<strong>carray</strong>（<code>ext/misc/carray.c</code>），它把 C 语言的数组暴露为 SQL 表。</p>
+
+        <pre><code>/* carray 虚拟表的核心结构 */
+typedef struct carray_cursor {
+  sqlite3_vtab_cursor base;
+  sqlite3_int64 iRowid;     /* 当前行号 */
+  const void *pPtr;         /* 数组指针 */
+  int nVal;                 /* 数组长度 */
+  int eType;                /* 元素类型 */
+} carray_cursor;
+
+/* xConnect — 声明表模式 */
+static int carrayConnect(sqlite3 *db, void *pAux, int argc,
+                         const char *const*argv,
+                         sqlite3_vtab **ppVTab, char **pzErr){
+  carray_vtab *pNew = sqlite3_malloc(sizeof(carray_vtab));
+  memset(pNew, 0, sizeof(*pNew));
+  sqlite3_declare_vtab(db, "CREATE TABLE x(value ANY, ptr ANY, count INT)");
+  *ppVTab = (sqlite3_vtab*)pNew;
+  return SQLITE_OK;
+}
+
+/* xFilter — 通过参数获取数组指针、长度和类型 */
+static int carrayFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
+                        const char *idxStr, int argc, sqlite3_value **argv){
+  carray_cursor *pCur = (carray_cursor*)pVtabCursor;
+  pCur-&gt;pPtr = (void*)(sqlite3_value_int64(argv[0]));
+  pCur-&gt;nVal = sqlite3_value_int(argv[1]);
+  pCur-&gt;eType = argc&gt;=3 ? sqlite3_value_int(argv[2]) : 1;
+  pCur-&gt;iRowid = 1;
+  return SQLITE_OK;
+}</code></pre>
+
+        <p>使用方式是通过指针绑定将 C 数组指针传给 SQL：</p>
+
+        <pre><code>int aVals[] = {10, 20, 30, 40, 50};
+sqlite3_bind_pointer(pStmt, 1, aVals, "carray", 0);
+sqlite3_bind_int(pStmt, 2, 5);
+/* SELECT * FROM carray(?1, ?2); → 返回 5 行 */</code></pre>
+
+        <h2>generate_series 内置虚拟表</h2>
+
+        <p>从 3.32.0 开始，<code>generate_series</code> 作为内置虚拟表提供（需 <code>-DSQLITE_ENABLE_GENERATE_SERIES</code> 编译）。它的核心在于 xBestIndex 识别 START/STOP/STEP 约束：</p>
+
+        <pre><code>static int seriesBestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo){
+  for(int i=0; i&lt;pIdxInfo-&gt;nConstraint; i++){
+    if( !pIdxInfo-&gt;aConstraint[i].usable ) continue;
+    int iCol = pIdxInfo-&gt;aConstraint[i].iColumn;
+    if( iCol==0 &amp;&amp; pIdxInfo-&gt;aConstraint[i].op==SQLITE_INDEX_CONSTRAINT_EQ ){
+      pIdxInfo-&gt;aConstraintUsage[i].argvIndex = 1; /* START */
+      pIdxInfo-&gt;idxNum |= 1;
+    }else if( iCol==1 &amp;&amp; ... ){ /* STOP */  pIdxInfo-&gt;aConstraintUsage[i].argvIndex = 2; }
+    else if( iCol==2 &amp;&amp; ... ){ /* STEP */  pIdxInfo-&gt;aConstraintUsage[i].argvIndex = 3; }
+  }
+  pIdxInfo-&gt;estimatedCost = 100;
+  return SQLITE_OK;
+}
+/* 使用：SELECT value FROM generate_series(1, 10, 2); */</code></pre>
+
+        <div class="highlight">
+            <strong>设计启发：</strong> generate_series 不预生成全部数据，而是在 xNext 中逐步计算下一个值。这种"按需计算"的懒加载模式让虚拟表可以处理理论上无限的数据流。
+        </div>
+
+        <h2>最佳实践与踩坑故事</h2>
+
+        <table>
+            <thead>
+                <tr><th>实践</th><th>好做法</th><th>坏做法</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>xOpen/xClose</td><td>仅分配/释放游标内存</td><td>在 xOpen 中扫描数据或打开文件</td></tr>
+                <tr><td>xBestIndex</td><td>根据实际能力填写 cost</td><td>总是返回固定 cost 0</td></tr>
+                <tr><td>xFilter</td><td>只定位到第一个匹配行</td><td>在 xFilter 中加载全部数据到内存</td></tr>
+                <tr><td>xColumn</td><td>只返回当前行的列值</td><td>在 xColumn 中推进游标位置</td></tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            ⚠️ <strong>真实踩坑：</strong> 我曾为内部工具编写 CSV 虚拟表，在 xOpen 中直接解析了整个 CSV 文件。小文件没事，但某天同事导入了一个 500MB 的日志 CSV——SQLite 直接 OOM。修复方式是把解析逻辑移到 xNext 中逐行读取，xFilter 只打开文件句柄。修复后同样的 500MB 文件在 64MB 内存的嵌入式设备上跑得稳稳当当。
+        </div>
+
+        <h2>实战：内存键值存储虚拟表</h2>
+
+        <p>最后我们来设计一个内存键值存储虚拟表 <code>kvstore</code>。它使用哈希表存储键值对，在 xBestIndex 中区分"点查"（直接哈希定位）和"全表扫描"两种策略：</p>
+
+        <pre><code>/* 核心：xBestIndex 中判断是否有点查条件 */
+static int kvBestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo){
+  for(int i=0; i&lt;pIdxInfo-&gt;nConstraint; i++){
+    if( pIdxInfo-&gt;aConstraint[i].usable &amp;&amp;
+        pIdxInfo-&gt;aConstraint[i].iColumn==0 &amp;&amp;  /* key 列 */
+        pIdxInfo-&gt;aConstraint[i].op==SQLITE_INDEX_CONSTRAINT_EQ ){
+      pIdxInfo-&gt;aConstraintUsage[i].argvIndex = 1;
+      pIdxInfo-&gt;idxNum = 1;          /* 点查模式 */
+      pIdxInfo-&gt;estimatedCost = 1.0;  /* 成本极低 */
+      pIdxInfo-&gt;estimatedRows = 1;
+      return SQLITE_OK;
+    }
+  }
+  pIdxInfo-&gt;estimatedCost = 100.0;   /* 全表扫描，成本高 */
+  return SQLITE_OK;
+}
+/* 注册：sqlite3_create_module(db, "kvstore", &amp;kvModule, 0); */</code></pre>
+
+        <p>好了，这一章我们从虚拟表的接口设计和生命周期出发，通过 carray 和 generate_series 两个经典实现深入理解了虚拟表的工作原理，最后分享了最佳实践和实战例子。虚拟表是 SQLite 扩展能力的"大招"。下一章将探索虚拟表家族中最重要的成员——<strong>FTS 全文搜索</strong>。我们第 21 章见。</p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

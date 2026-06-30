@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 内置函数实现</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html" class="active">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第19章 内置函数实现</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们深入了查询规划器，这一章来聊一个更"接地气"的话题——<strong>内置函数</strong>。当你写 <code>SELECT LOWER(name), COUNT(*) FROM users</code> 时，这些函数到底是怎样实现的？答案是：它们通过一套统一的 <strong>函数注册与回调机制</strong> 实现，并且这套机制完全开放——你可以把自己写的 C 函数注册进去，让 SQLite 在 SQL 中直接调用。</p>
+
+        <div class="highlight">
+            <strong>内核视角：</strong> 标量函数、聚合函数和窗口函数，本质上都是"注册了回调的 FuncDef 对象"。理解了这个模型，你就能随心所欲地扩展 SQLite 的 SQL 表达力。
+        </div>
+
+        <h2>函数注册机制</h2>
+
+        <p>一切从 <code>sqlite3CreateFunc()</code> 开始。它在 <code>func.c</code> 中定义，是内置函数和自定义函数的共同注册入口。注册后的函数被存储在 <code>FuncDef</code> 结构中：</p>
+
+        <pre><code>typedef struct FuncDef FuncDef;
+struct FuncDef {
+  i8 nArg;                     /* 参数个数（-1 表示可变） */
+  u8 funcFlags;                /* SQLITE_FUNC_* 标志位 */
+  void *pUserData;             /* 用户自定义数据 */
+  void (*xSFunc)(sqlite3_context*,int,sqlite3_value**); /* 标量回调 */
+  void (*xFinalize)(sqlite3_context*);                  /* 聚合回调 */
+};</code></pre>
+
+        <p>函数查找的核心机制是哈希表。在 <code>db-&gt;aFunc.a[]</code> 数组中，SQLite 维护了按函数名散列的查找表。查找函数 <code>sqlite3FindFunction()</code> 实现"参数个数最佳匹配"策略——你调用的函数参数个数越匹配，优先级越高。如果系统中只有可变参数版本（<code>nArg==-1</code>），也会被匹配。</p>
+
+        <table>
+            <thead>
+                <tr><th>注册方式</th><th>回调类型</th><th>例子</th><th>源码文件</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>sqlite3CreateFunc</code></td><td>xSFunc</td><td>标量函数 LOWER</td><td><code>func.c</code></td></tr>
+                <tr><td><code>sqlite3CreateFunc</code> + xStep/xFinal</td><td>聚合函数</td><td>COUNT, SUM</td><td><code>func.c</code></td></tr>
+                <tr><td><code>sqlite3_window_link</code></td><td>窗口函数</td><td>row_number</td><td><code>window.c</code></td></tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            💡 SQLite 的内置函数通过 <code>sqlite3BuiltinFunctions()</code> 懒加载注册——第一次使用时才添加到哈希表，避免了启动时的内存开销。
+        </div>
+
+        <h2>标量函数的实现模式</h2>
+
+        <p>标量函数输入一行数据输出一个值。实现模式非常简单：注册一个 <code>xFunc</code> 回调，通过 <code>sqlite3_value_*()</code> 读取参数，通过 <code>sqlite3_result_*()</code> 输出结果。</p>
+
+        <p>来看 <code>lower()</code> 函数的实现：</p>
+
+        <pre><code>static void lowerFunc(sqlite3_context *context, int argc, sqlite3_value **argv){
+  const unsigned char *zIn = sqlite3_value_text(argv[0]);
+  int n = sqlite3_value_bytes(argv[0]);
+  char *zOut = sqlite3_malloc(n+1);   /* 申请输出缓冲区 */
+  if( zOut==0 ){
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+  for(int i=0; i&lt;n; i++){
+    zOut[i] = sqlite3Tolower(zIn[i]); /* 逐字符转小写 */
+  }
+  zOut[n] = '\0';
+  sqlite3_result_text(context, zOut, n, sqlite3_free); /* 所有权转移 */
+}</code></pre>
+
+        <p>注意 <code>sqlite3_result_text()</code> 的最后一个参数是释放回调——传 <code>sqlite3_free</code> 表示把内存所有权移交给 SQLite，由它负责释放；传 <code>SQLITE_TRANSIENT</code> 则 SQLite 会自己拷贝一份。</p>
+
+        <h2>聚合函数实现</h2>
+
+        <p>聚合函数采用 <strong>xStep + xFinal</strong> 两阶段模式——xStep 每行调用一次累加状态，xFinal 在处理完毕后输出结果。状态通过 <code>sqlite3_aggregate_context()</code> 分配：</p>
+
+        <pre><code>/* COUNT() 聚合的实现 */
+typedef struct CountCtx CountCtx;
+struct CountCtx { i64 n; };
+
+static void countStep(sqlite3_context *context, int argc, sqlite3_value **argv){
+  CountCtx *p = (CountCtx*)sqlite3_aggregate_context(context, sizeof(*p));
+  if( p &amp;&amp; (argc==0 || sqlite3_value_type(argv[0])!=SQLITE_NULL) ){
+    p-&gt;n++;             /* COUNT(*) 无条件递增，COUNT(col) 跳过 NULL */
+  }
+}
+
+static void countFinalize(sqlite3_context *context){
+  CountCtx *p = (CountCtx*)sqlite3_aggregate_context(context, 0);
+  sqlite3_result_int64(context, p ? p-&gt;n : 0);
+}</code></pre>
+
+        <div class="warning">
+            ⚠️ <code>sqlite3_aggregate_context()</code> 的第一个参数传大小来初始化聚合上下文，后续传 0 获取已分配的指针。务必在 xStep 中传入正确的大小初始化，否则返回 NULL。
+        </div>
+
+        <h2>Window Function 框架</h2>
+
+        <p>窗口函数（3.25.0 引入）和聚合函数有很深的关系——<strong>窗口函数就是"带窗口的聚合函数"</strong>。同一个 xStep/xFinal 回调可以同时在 GROUP BY 聚合和窗口函数中使用，区别在于：普通聚合对全体行调用一次 xFinal，窗口函数为每一行调用一次 xFinal（只在窗口范围内有效）。</p>
+
+        <p>纯计算窗口函数如 <code>row_number()</code> 更简单——本质就是一个自增计数器：</p>
+
+        <pre><code>static void row_numberStep(sqlite3_context *context, int NotUsed,
+                            sqlite3_value **NotUsed2){
+  sqlite3_int64 *p = (sqlite3_int64*)sqlite3_aggregate_context(context, sizeof(*p));
+  if( p ) (*p)++;
+}
+static void row_numberFinalize(sqlite3_context *context){
+  sqlite3_int64 *p = (sqlite3_int64*)sqlite3_aggregate_context(context, 0);
+  sqlite3_result_int64(context, p ? *p : 0);
+}</code></pre>
+
+        <h2>常用函数的源码走读</h2>
+
+        <p>我们来快速走读几个典型函数在 <code>func.c</code> 中的实现：</p>
+
+        <table>
+            <thead>
+                <tr><th>函数</th><th>注册名</th><th>xFunc</th><th>要点</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>LOWER/UPPER</td><td><code>lower</code>/<code>upper</code></td><td><code>lowerFunc</code>/<code>upperFunc</code></td><td>仅处理 ASCII 字符集</td></tr>
+                <tr><td>SUBSTR</td><td><code>substr</code></td><td><code>substrFunc</code></td><td>同时处理 2 参数和 3 参数版本</td></tr>
+                <tr><td>LENGTH</td><td><code>length</code></td><td><code>lengthFunc</code></td><td>3.54.0 纯 ASCII 快速路径</td></tr>
+                <tr><td>LIKE</td><td><code>like</code></td><td><code>likeFunc</code></td><td>支持 ESCAPE 子句</td></tr>
+                <tr><td>COALESCE</td><td><code>coalesce</code></td><td>内联处理</td><td>不走 FuncDef，语法层展开</td></tr>
+            </tbody>
+        </table>
+
+        <p>以 <code>LENGTH</code> 在 3.54.0 中的性能增强为例：当字符串字节数等于字符数时（纯 ASCII 字符串），直接返回字节数，避免逐字扫描 UTF-8 序列的开销。这个优化在大量英文文本的场景下非常有效。</p>
+
+        <h2>日期时间函数 (date.c)</h2>
+
+        <p>日期时间函数全部位于 <code>src/date.c</code> 中，包括 <code>datetime()</code>、<code>date()</code>、<code>time()</code>、<code>strftime()</code>、<code>julianday()</code>、<code>unixepoch()</code> 等。所有函数共享同一个核心解析引擎 <code>parseModifier()</code>，通过"修饰符链"逐步转换时间字符串。</p>
+
+        <p>内部使用儒略日（Julian Day）作为中间表示，所有时间操作都转化为浮点数。计算两个日期的天数差只需一次浮点减法，无需处理闰年闰月。</p>
+
+        <pre><code>/* date.c — 时间对象结构 */
+typedef struct DateTime DateTime;
+struct DateTime {
+  sqlite3_int64 iJD;   /* 儒略日（毫秒精度） */
+  int Y, M, D, h, m, s;
+  int validYMD, validHMS, validJD;
+  int tz;              /* 时区偏移（分钟） */
+};</code></pre>
+
+        <div class="highlight">
+            <strong>生产环境建议：</strong> 自定义函数注册时尽量使用 <code>SQLITE_DETERMINISTIC</code> 标志，告诉 SQLite 函数的返回值完全由参数决定。这样查询规划器可以在常量折叠优化中提前计算函数值，提升查询性能。
+        </div>
+
+        <h2>实战：编写自定义函数</h2>
+
+        <p>假设我们要实现一个 <code>CHAR_LEN(s)</code> 函数，计算 UTF-8 字符串的"视觉长度"——忽略零宽字符和组合字符。这个流程代表了所有自定义函数的完整生命周期：编写 C 代码 → 编译动态库 → 在 SQLite 中加载 → 在 SQL 中使用。</p>
+
+        <pre><code>#include &lt;sqlite3ext.h&gt;
+SQLITE_EXTENSION_INIT1
+
+static void charlenFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
+  const unsigned char *z = sqlite3_value_text(argv[0]);
+  int n = sqlite3_value_bytes(argv[0]), charCount = 0, i = 0;
+  while( i &lt; n ){
+    unsigned char c = z[i];
+    int byteLen = (c &lt; 0x80) ? 1 : ((c &amp; 0xE0)==0xC0) ? 2 :
+                  ((c &amp; 0xF0)==0xE0) ? 3 : ((c &amp; 0xF8)==0xF0) ? 4 : 0;
+    if( byteLen==0 ){ i++; continue; }
+    if( byteLen==3 ){ /* 跳过零宽字符 */ }
+    charCount++; i += byteLen;
+  }
+  sqlite3_result_int(ctx, charCount);
+}
+
+int sqlite3_extension_init(sqlite3 *db, char **pzErrMsg,
+                           const sqlite3_api_routines *pApi){
+  SQLITE_EXTENSION_INIT2(pApi);
+  sqlite3_create_function(db, "CHAR_LEN", 1,
+    SQLITE_UTF8|SQLITE_DETERMINISTIC, 0, charlenFunc, 0, 0);
+  return SQLITE_OK;
+}
+
+/* 编译：gcc -g -fPIC -shared charlen.c -o charlen.so */
+/* 使用：.load ./charlen; SELECT CHAR_LEN('hello'); → 5 */</code></pre>
+
+        <p>好了，这一章我们从函数注册机制出发，深入理解了标量、聚合和窗口函数的实现模式，走读了几个常用函数的源码，还亲手编写了自定义函数。下一章我们将探索更强大的扩展机制——<strong>虚拟表</strong>。函数扩展给 SQLite 加"公式"，虚拟表则给 SQLite 加"新数据源"。我们第 20 章见。</p>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

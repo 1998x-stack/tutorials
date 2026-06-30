@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 动态窗口法DWA</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是路径规划</a></li>
+            <li><a href="02.html">第2章 状态空间与构型空间</a></li>
+            <li><a href="03.html">第3章 图论基础</a></li>
+            <li><a href="04.html">第4章 栅格地图与代价地图</a></li>
+            <li><a href="05.html">第5章 启发式搜索入门</a></li>
+            <li><a href="06.html">第6章 Dijkstra算法</a></li>
+            <li><a href="07.html">第7章 A*算法</a></li>
+            <li><a href="08.html">第8章 A*改进与变体</a></li>
+            <li><a href="09.html">第9章 D* Lite增量搜索</a></li>
+            <li><a href="10.html">第10章 JPS跳点搜索</a></li>
+            <li><a href="11.html">第11章 RRT快速随机树</a></li>
+            <li><a href="12.html">第12章 RRT*渐进最优</a></li>
+            <li><a href="13.html">第13章 PRM概率路线图</a></li>
+            <li><a href="14.html">第14章 采样方法大对比</a></li>
+            <li><a href="15.html">第15章 路径平滑与后处理</a></li>
+            <li><a href="16.html" class="active">第16章 动态窗口法DWA</a></li>
+            <li><a href="17.html">第17章 人工势场法</a></li>
+            <li><a href="18.html">第18章 运动学约束与曲线</a></li>
+            <li><a href="19.html">第19章 动态环境重规划</a></li>
+            <li><a href="20.html">第20章 多目标路径规划</a></li>
+            <li><a href="21.html">第21章 多机器人协调</a></li>
+            <li><a href="22.html">第22章 优化模型方法</a></li>
+            <li><a href="23.html">第23章 可视化与调试</a></li>
+            <li><a href="24.html">第24章 算法性能基准测试</a></li>
+            <li><a href="25.html">第25章 仿真到实车部署</a></li>
+            <li><a href="26.html">第26章 学习型路径规划</a></li>
+            <li><a href="27.html">第27章 前沿趋势与未来</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <p>大家好，欢迎来到第16章。上一章我们学习了如何对全局规划器输出的原始路径进行后处理——简化、平滑、检查曲率。但有一个核心问题：我们假设环境是静态的。如果在你规划完路径之后，一个行人突然出现在你的路径前方，怎么办？全局路径重新规划需要几百毫秒，而碰撞只在一瞬间。我们需要一种能够<strong>实时</strong>响应局部环境变化的规划方法。这正是DWA——动态窗口法——要解决的问题。</p>
+
+        <p>DWA由Dieter Fox等人于1997年提出，是移动机器人领域最具影响力的局部规划算法之一。它的思想如此直观且高效，以至于二十多年后的今天，它仍然是ROS（机器人操作系统）中默认的局部规划器之一，被成千上万的机器人使用。理解DWA，就等于掌握了局部避障的"第一性原理"。</p>
+
+        <h2>DWA的核心思想</h2>
+
+        <p>DWA的核心思想可以用三个关键词概括：<strong>速度空间搜索、动态窗口、预测→评分→执行</strong>。</p>
+
+        <p>首先，DWA不是在位置空间中搜索下一个目标点，而是在<strong>速度空间</strong>中搜索。对于差速驱动机器人，速度空间由两个维度组成：线速度v和角速度ω。每个(v, ω)组合对应一条圆弧轨迹。DWA的工作就是在每一控制周期内，从所有可能的(v, ω)中选出最好的一个。</p>
+
+        <p>这就是"动态窗口"的由来——机器人不是在所有可能的(v, ω)中搜索，而是在一个<strong>动态的、受限于当前运动状态和物理约束的窗口</strong>中搜索。这个窗口就是"当前时刻机器人实际能够达到的速度集合"。每次控制周期，DWA执行以下三步：</p>
+
+        <ol>
+            <li><strong>预测</strong>——对窗口内的每个(v, ω)，模拟未来一段时间内机器人的运动轨迹。</li>
+            <li><strong>评分</strong>——用目标导向、避障安全、运动效率三个指标对每条轨迹打分。</li>
+            <li><strong>执行</strong>——选出得分最高的(v, ω)作为控制指令发送给底层控制器。</li>
+        </ol>
+
+        <p>下一时刻，重复上述过程。这种"每周期重新规划"的架构使得DWA能够自然应对动态障碍物——即使一个行人突然闯入路径，也只需一个控制周期（通常是100毫秒）就能做出反应。</p>
+
+        <h2>动态窗口</h2>
+
+        <p>理解动态窗口的关键在于：机器人不是全能的，它的速度变化受到物理限制。动态窗口就是将这些限制形式化成一组约束，得到一个"可行速度的集合"。</p>
+
+        <p>动态窗口由三组约束的交集构成：</p>
+
+        <p><strong>1. 速度边界约束：</strong>机器人硬件本身决定的极限速度。线速度不能超过最大线速度v_max，也不能反向倒车超过最大倒车速度v_min（通常为负值）。角速度同理：ω ∈ [ω_min, ω_max]。这是最外层的速度范围。</p>
+
+        <p><strong>2. 动力学约束（动态窗口的核心）：</strong>由于电机和轮胎的物理限制，机器人在一个控制周期dt内无法无限快地改变速度。可达到的线速度必须满足：v ∈ [v_curr - a_max · dt, v_curr + a_max · dt]，其中a_max是最大线加速度。角速度同理：ω ∈ [ω_curr - α_max · dt, ω_curr + α_max · dt]。这个约束决定了速度变化的"敏捷性"——这就是"动态"二字的含义，因为窗口随着当前速度的变化而动态移动。</p>
+
+        <p><strong>3. 安全约束：</strong>即便某个(v, ω)在边界内且可达，也不能导致碰撞。对于每条候选轨迹，DWA需要计算在当前位置停车所需的距离，并确保在到达障碍物之前能够完全停下。这相当于给速度窗口又增加了一个动态的剪切边界。</p>
+
+        <p>这三个约束取交集，得到的就是最终的动态窗口——这个窗口通常只是全部速度空间中一个很小的区域，但正是这个窗口保证了所有候选速度都是"既可达又安全"的。</p>
+
+        <h2>轨迹评分函数</h2>
+
+        <p>有了候选速度集，DWA需要在其中选出"最好的"那个。这通过一个评分函数来实现。每条候选轨迹被赋予一个分数：</p>
+
+        <p style="text-align: center;"><strong>G(v, ω) = α · heading(v, ω) + β · clearance(v, ω) + γ · velocity(v, ω)</strong></p>
+
+        <p>三个分量的含义如下：</p>
+
+        <ul>
+            <li><strong>heading(v, ω)：朝向评分</strong>——衡量按当前(v, ω)运动一段时间后，机器人的朝向与目标方向之间的夹角。夹角越小，评分越高。这个分量引导机器人朝向目标前进。</li>
+            <li><strong>clearance(v, ω)：安全评分</strong>——衡量按当前(v, ω)运动时，轨迹与最近障碍物之间的距离。距离越远，评分越高。这个分量防止机器人撞上障碍物。</li>
+            <li><strong>velocity(v, ω)：效率评分</strong>——直接与线速度v的大小成正比。速度越快，评分越高。这个分量鼓励机器人尽快抵达目标。</li>
+        </ul>
+
+        <p>α、β、γ是权重参数，它们的设置直接影响DWA的行为风格，后面我们会详细讨论。</p>
+
+        <p>在实际实现中，每个分量都会归一化到[0, 1]区间，避免某个分量因为量级差异而主导评分。归一化后，三个加权分量求和，得分最高的(v, ω)即为当前控制周期的输出。</p>
+
+        <table>
+            <tr>
+                <th>参数</th>
+                <th>符号</th>
+                <th>典型值范围</th>
+                <th>设得太低</th>
+                <th>设得太高</th>
+            </tr>
+            <tr>
+                <td>朝向权重</td>
+                <td>α</td>
+                <td>0.5 - 2.0</td>
+                <td>机器人偏离目标，漫无目的地游荡</td>
+                <td>机器人"贪近路"，可能忽略障碍物径直冲向目标</td>
+            </tr>
+            <tr>
+                <td>安全权重</td>
+                <td>β</td>
+                <td>0.5 - 3.0</td>
+                <td>避障反应迟钝，容易碰撞</td>
+                <td>机器人"过于胆小"，在空旷环境中也小心翼翼，甚至不敢前进</td>
+            </tr>
+            <tr>
+                <td>速度权重</td>
+                <td>γ</td>
+                <td>0.1 - 1.0</td>
+                <td>机器人行动缓慢、犹豫不决</td>
+                <td>机器人横冲直撞，过弯不减速</td>
+            </tr>
+            <tr>
+                <td>预测时间</td>
+                <td>Δt</td>
+                <td>1.0 - 4.0 s</td>
+                <td>只看眼前，规划短视，容易陷入局部</td>
+                <td>计算量大增，且远期预测精度下降</td>
+            </tr>
+        </table>
+
+        <h2>手写DWA</h2>
+
+        <p>理论讲完了，让我们动手实现一个完整的DWA。下面这段Python代码实现了DWA的核心逻辑，包括动态窗口计算、轨迹预测、评分和搜索。配合matplotlib可以实时可视化运行结果。</p>
+
+        <pre><code>import numpy as np
+import math
+
+class DWA:
+    def __init__(self):
+        # 机器人运动学参数
+        self.max_speed = 1.0          # 最大线速度 (m/s)
+        self.min_speed = -0.5         # 最小线速度 (m/s, 负值表示倒车)
+        self.max_yaw_rate = 40.0 * math.pi / 180.0  # 最大角速度 (rad/s)
+        self.max_accel = 0.3          # 最大线加速度 (m/s²)
+        self.max_delta_yaw_rate = 40.0 * math.pi / 180.0  # 最大角加速度 (rad/s²)
+        self.dt = 0.1                 # 控制周期 (s)
+        self.predict_time = 3.0       # 轨迹预测时长 (s)
+        # 评分权重
+        self.heading_weight = 0.8
+        self.clearance_weight = 0.1
+        self.velocity_weight = 0.1
+        # 分辨率
+        self.v_reso = 0.05
+        self.yaw_rate_reso = math.pi / 180.0 * 5
+
+    def motion_model(self, state, v, w):
+        """根据当前状态和速度预测下一时刻状态（差速驱动模型）。"""
+        x, y, theta = state
+        x_next = x + v * math.cos(theta) * self.dt
+        y_next = y + v * math.sin(theta) * self.dt
+        theta_next = theta + w * self.dt
+        return np.array([x_next, y_next, theta_next])
+
+    def predict_trajectory(self, state, v, w):
+        """对给定的(v, w)预测未来一段时间的轨迹。"""
+        trajectory = []
+        traj_state = np.array(state)
+        for _ in range(int(self.predict_time / self.dt)):
+            traj_state = self.motion_model(traj_state, v, w)
+            trajectory.append(traj_state.copy())
+        return np.array(trajectory)
+
+    def calc_dynamic_window(self, state):
+        """计算动态窗口 = 速度边界 ∩ 动力学约束 ∩ 安全约束。"""
+        x, y, theta, v_curr, w_curr = state
+
+        # 速度边界
+        vs = [self.min_speed, self.max_speed,
+              -self.max_yaw_rate, self.max_yaw_rate]
+
+        # 动力学约束
+        va = [v_curr - self.max_accel * self.dt,
+              v_curr + self.max_accel * self.dt,
+              w_curr - self.max_delta_yaw_rate * self.dt,
+              w_curr + self.max_delta_yaw_rate * self.dt]
+
+        # 取交集
+        v_min = max(vs[0], va[0])
+        v_max = min(vs[1], va[1])
+        w_min = max(vs[2], va[2])
+        w_max = min(vs[3], va[3])
+
+        return [v_min, v_max, w_min, w_max]
+
+    def calc_clearance(self, trajectory, obstacles):
+        """计算轨迹与障碍物的最小距离。"""
+        min_dist = float('inf')
+        for traj_pt in trajectory:
+            for obs in obstacles:
+                d = np.linalg.norm(traj_pt[:2] - obs)
+                if d < min_dist:
+                    min_dist = d
+        return min_dist
+
+    def score_trajectory(self, trajectory, goal, obstacles, v):
+        """对单条轨迹评分。"""
+        # heading评分：模拟终点朝向与目标方向的夹角
+        dx = goal[0] - trajectory[-1, 0]
+        dy = goal[1] - trajectory[-1, 1]
+        goal_theta = math.atan2(dy, dx)
+        theta_diff = abs(goal_theta - trajectory[-1, 2])
+        heading_score = math.pi - theta_diff
+
+        # clearance评分
+        clearance_score = min(
+            self.calc_clearance(trajectory, obstacles), 2.0)
+
+        # velocity评分
+        velocity_score = abs(v)
+
+        return heading_score, clearance_score, velocity_score
+
+    def search(self, state, goal, obstacles):
+        """在动态窗口中搜索最优速度。"""
+        dw = self.calc_dynamic_window(state)
+        best_v = best_w = 0.0
+        best_score = -float('inf')
+
+        # 在动态窗口内离散搜索
+        v_samples = np.arange(dw[0], dw[1], self.v_reso)
+        w_samples = np.arange(dw[2], dw[3], self.yaw_rate_reso)
+
+        for v in v_samples:
+            for w in w_samples:
+                trajectory = self.predict_trajectory(state, v, w)
+                h, c, vel = self.score_trajectory(
+                    trajectory, goal, obstacles, v)
+
+                # 归一化后加权求和
+                score = (self.heading_weight * h +
+                         self.clearance_weight * c +
+                         self.velocity_weight * vel)
+
+                if score > best_score:
+                    best_score = score
+                    best_v = v
+                    best_w = w
+
+        return best_v, best_w
+
+    def step(self, state, goal, obstacles):
+        """执行一个控制周期：搜索 → 执行 → 更新状态。"""
+        v, w = self.search(state, goal, obstacles)
+        new_state = self.motion_model(state, v, w)
+        new_state = np.append(new_state, [v, w])
+        return new_state, (v, w)</code></pre>
+
+        <p>上面这段代码虽然只有一百多行，但已经实现了一个完整可用的DWA。在ROS的导航栈中，DWA被实现为dwa_local_planner包，其核心逻辑与此完全一致，只是增加了更多工程化的细节：代价地图层的障碍物查询优化、多层评分函数、速度平滑后处理等等。</p>
+
+        <div class="highlight">
+            <strong>参数调优经验谈：</strong>DWA的调参是一个玄学与科学并存的过程。heading权重（α）太低，机器人会在目标点附近转圈找不到方向；clearance权重（β）太高，机器人在空旷环境中也会像"老奶奶过马路"一样磨蹭不前；velocity权重（γ）太高，机器人会在弯道上猛冲然后眼睁睁看着自己撞墙。一个实用的调参策略是：先固定预测时间为2-3秒，然后从小到大调整α、β、γ，观察仿真中机器人的行为变化。记住DWA的座右铭——"预测、评分、执行、重复"——每个控制周期都在做相同的事，只要评分函数能正确反映你的设计意图，机器人就会表现出你想要的行为。
+        </div>
+
+        <p>说到调参，我想起一个很有意思的真实案例。2018年，国内一家机器人配送公司在校园里做无人车测试。他们的车用的就是DWA局部规划器。在连续几天的测试中，车辆在通过一个U形弯时总是"犹豫不决"——先往前冲一点，然后急刹车，再慢慢试探，重复好几次才通过弯道。团队怀疑是定位不准，更换了更贵的激光雷达；又怀疑是控制滞后，升级了电机驱动。问题始终没有解决。最后，一个刚入职的实习生注意到clearance权重被设成了5.0——比默认值高了10倍。原因是有位前辈觉得"避障最重要"，于是把β拉满了。结果就是机器人对任何障碍物都"恐惧万分"，连距离墙壁30厘米的弯道都不敢正常通过。改回0.5后，车辆丝滑过弯。很多时候，问题不在硬件，而在一个数字。</p>
+
+        <p>DWA最大的优势是简洁和高效——每周期只搜索两个维度（v, ω），计算量可控，在嵌入式系统上也能实时运行。但它也有局限性：它只考虑当前速度窗口中的候选轨迹，"目光"局限于预测时间窗口内，因此本质上是一种贪心策略，容易陷入局部最优。在复杂迷宫中，DWA如果没有全局路径的引导，可能会困在死胡同里。因此，实际应用中DWA几乎总是与全局规划器配合使用——全局规划器提供一条宏观路径作为"指引"，DWA负责在局部层面跟踪并避障。</p>
+
+        <p>下一章，我们将学习另一种同样经典但思路完全不同的局部规划方法——人工势场法（APF）。DWA在速度空间中搜索，而APF在力场中"漂流"。两种哲学，各有千秋。我们第17章见。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

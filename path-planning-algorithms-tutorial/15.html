@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 路径平滑与后处理</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是路径规划</a></li>
+            <li><a href="02.html">第2章 状态空间与构型空间</a></li>
+            <li><a href="03.html">第3章 图论基础</a></li>
+            <li><a href="04.html">第4章 栅格地图与代价地图</a></li>
+            <li><a href="05.html">第5章 启发式搜索入门</a></li>
+            <li><a href="06.html">第6章 Dijkstra算法</a></li>
+            <li><a href="07.html">第7章 A*算法</a></li>
+            <li><a href="08.html">第8章 A*改进与变体</a></li>
+            <li><a href="09.html">第9章 D* Lite增量搜索</a></li>
+            <li><a href="10.html">第10章 JPS跳点搜索</a></li>
+            <li><a href="11.html">第11章 RRT快速随机树</a></li>
+            <li><a href="12.html">第12章 RRT*渐进最优</a></li>
+            <li><a href="13.html">第13章 PRM概率路线图</a></li>
+            <li><a href="14.html">第14章 采样方法大对比</a></li>
+            <li><a href="15.html" class="active">第15章 路径平滑与后处理</a></li>
+            <li><a href="16.html">第16章 动态窗口法DWA</a></li>
+            <li><a href="17.html">第17章 人工势场法</a></li>
+            <li><a href="18.html">第18章 运动学约束与曲线</a></li>
+            <li><a href="19.html">第19章 动态环境重规划</a></li>
+            <li><a href="20.html">第20章 多目标路径规划</a></li>
+            <li><a href="21.html">第21章 多机器人协调</a></li>
+            <li><a href="22.html">第22章 优化模型方法</a></li>
+            <li><a href="23.html">第23章 可视化与调试</a></li>
+            <li><a href="24.html">第24章 算法性能基准测试</a></li>
+            <li><a href="25.html">第25章 仿真到实车部署</a></li>
+            <li><a href="26.html">第26章 学习型路径规划</a></li>
+            <li><a href="27.html">第27章 前沿趋势与未来</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <p>大家好，欢迎来到第三部分——工程实战篇。在前面的14章中，我们学习了各种路径规划算法：A*在栅格上找最短路径，RRT在连续空间中随机探索，PRM构建概率路线图。但如果我们真的把这些算法输出的路径直接发给机器人控制器，你会看到一个让人哭笑不得的场景——机器人像喝醉了一样左摇右晃，甚至在原地打转。</p>
+
+        <p>为什么会这样？因为RRT产生的路径像醉汉留下的脚印一样毫无规律地左右摆动，A*在栅格地图上走出来的路径全是锯齿状的"台阶"——这在8邻接栅格中尤其明显，每一步不是水平、垂直就是45度对角线，组合起来就像像素画的边沿。这样的路径别说是让四轮差速车去跟踪，就连让一个全向移动机器人都走不顺。路径平滑与后处理，正是把"数学上可行"的原始路径，变成"工程上可用"的可执行轨迹的必经环节。</p>
+
+        <h2>为什么原始路径需要后处理</h2>
+
+        <p>让我们用一个具体的例子来感受一下问题有多严重。假设你有一台差速驱动机器人，你用A*在20×20的栅格地图上规划了一条从(0,0)到(19,19)的路径。A*返回了一条由20个栅格中心点组成的路径。每个点之间的连线要么是水平、垂直、要么是45度对角线。当机器人以0.5m/s的速度跟踪这条路径时，每到一个拐点就需要瞬间改变运动方向。但由于机器人有惯性，它无法做这种"硬转弯"——结果就是它会冲出路径，撞上障碍物。</p>
+
+        <p>我曾在一次机器人比赛中亲眼见过这个惨案。一支队伍花了两周时间调参，PID控制器调得近乎完美，ROS导航栈配置了最先进的全局规划器。他们自信满满地在演示环节启动了机器人。结果机器人一出发就画起了"S形"——它试图跟踪那条锯齿状路径，但每个拐点都严重超调，最后在试图通过一道80厘米宽的门口时撞上了门框。全场沉默。调试了一整天后发现：问题根本不在于控制器的跟踪能力，而在于他们从未对A*输出的原始路径做任何后处理。路径中连续出现两个90度转弯，最小曲率半径完全超出了机器人的物理极限。给原始路径做一次平滑，所有问题迎刃而解。</p>
+
+        <div class="highlight">
+            <strong>核心要点：</strong>路径规划算法（A*、RRT、PRM等）输出的只是"几何上无碰撞"的路径，而工程实践中我们需要的是"符合机器人运动约束"的轨迹。从前者到后者，必须经过后处理管道（post-processing pipeline），包括路径简化、曲线平滑、曲率检查等步骤。
+        </div>
+
+        <p>在进入具体技术之前，我们先明确后处理管道的三个主要目标：第一，<strong>减少路径点数量</strong>——原始路径可能包含几百个点，但机器人控制器只需要几十个关键路径点就能完成跟踪。第二，<strong>保证路径连续性</strong>——路径的位置（C⁰）、切向（C¹）、甚至曲率（C²）需要连续，否则机器人会经历剧烈的加速度冲击。第三，<strong>满足运动约束</strong>——路径上任何一点的曲率不能超过机器人的最小转弯半径所对应的最大曲率。</p>
+
+        <h2>Douglas-Peucker路径简化</h2>
+
+        <p>Douglas-Peucker算法是一种经典的多段线简化算法，由David Douglas和Thomas Peucker于1973年提出。它的核心思想非常直观：给定一条由大量点构成的多段线和一个距离阈值epsilon，算法递归地将那些"离简化线太近"的点移除。</p>
+
+        <p>算法的工作流程如下：</p>
+        <ol>
+            <li>将多段线的首尾两点连接成一条直线段。</li>
+            <li>遍历中间所有点，找到离该直线段<strong>垂直距离</strong>最大的点。</li>
+            <li>如果最大距离小于epsilon，则丢弃所有中间点，只保留首尾两点。</li>
+            <li>如果最大距离大于epsilon，则以该点为界将多段线分成两段，分别递归执行上述步骤。</li>
+            <li>递归完成后，将所有保留的点按顺序组合成简化后的路径。</li>
+        </ol>
+
+        <p>epsilon参数是算法的关键。它控制着简化程度：epsilon越大，保留的点越少，路径越"粗糙"；epsilon越小，保留的点越多，路径越接近原始路径。在实践中，epsilon通常取栅格分辨率的1-2倍，或者根据机器人的尺寸和环境的狭窄程度来调整。一个经验法则是：epsilon不应该大于机器人能够安全通过的最窄通道宽度的一半。</p>
+
+        <pre><code>import numpy as np
+
+def perpendicular_distance(point, line_start, line_end):
+    \"\"\"计算点到直线段的垂直距离。\"\"\"
+    if np.allclose(line_start, line_end):
+        return np.linalg.norm(point - line_start)
+    line_vec = line_end - line_start
+    point_vec = point - line_start
+    t = np.dot(point_vec, line_vec) / np.dot(line_vec, line_vec)
+    t = np.clip(t, 0, 1)
+    projection = line_start + t * line_vec
+    return np.linalg.norm(point - projection)
+
+def douglas_peucker(points, epsilon):
+    \"\"\"Douglas-Peucker多段线简化算法。
+
+    Args:
+        points: numpy数组，形状为(N, 2)，按顺序排列的路径点
+        epsilon: 距离阈值，控制简化程度
+
+    Returns:
+        简化后的路径点数组
+    \"\"\"
+    if len(points) <= 2:
+        return points
+
+    dmax = 0
+    idx = 0
+    for i in range(1, len(points) - 1):
+        d = perpendicular_distance(points[i], points[0], points[-1])
+        if d > dmax:
+            idx = i
+            dmax = d
+
+    if dmax > epsilon:
+        left = douglas_peucker(points[:idx + 1], epsilon)
+        right = douglas_peucker(points[idx:], epsilon)
+        return np.vstack([left[:-1], right])
+    else:
+        return np.array([points[0], points[-1]])</code></pre>
+
+        <p>在实际应用中，Douglas-Peucker可以将一条包含500个路径点的RRT原始路径简化为20-30个关键点，而路径的几何形状几乎不被改变。这对于后续的曲线平滑步骤至关重要——更少的控制点意味着更高效的曲线拟合和更稳定的数值计算。</p>
+
+        <h2>B样条与贝塞尔曲线平滑</h2>
+
+        <p>路径简化之后，我们得到了一条由较少点组成的多段线。但这条多段线仍然是分段线性的，在拐点处仍然存在方向突变。我们需要用光滑曲线来拟合这些点，使得整条路径具有连续的曲率。</p>
+
+        <p>两种最常用的平滑曲线是<strong>贝塞尔曲线（Bezier Curve）</strong>和<strong>B样条曲线（B-spline）</strong>。它们都是通过控制点来定义曲线的参数化方法，但有几个关键区别。</p>
+
+        <p>贝塞尔曲线的特点是：每个控制点都会影响整条曲线的形状——也就是说，挪动一个控制点，整条曲线都会跟着变化（这被称为"全局控制"）。此外，贝塞尔曲线的阶数等于控制点数量减一：两个控制点是一阶（直线），三个是二阶（抛物线），四个是三阶（三次曲线）。当控制点较多时，高阶贝塞尔曲线的计算开销很大，而且容易出现数值不稳定的问题。</p>
+
+        <p>相比之下，B样条具有<strong>局部控制</strong>的特性：挪动一个控制点只影响曲线的一小段，其他部分不受影响。这一点在路径规划中极其宝贵——当你需要微调某一段路径以避开新增的障碍物时，你不会希望调整引发整条路径的变形。B样条还具有C²连续性（二阶导数连续），这意味着路径的曲率是连续的，机器人不再经历加速度的跳变。在路径规划中，B样条几乎是事实标准。</p>
+
+        <table>
+            <tr>
+                <th>指标</th>
+                <th>原始路径（RRT）</th>
+                <th>Douglas-Peucker简化</th>
+                <th>B样条平滑</th>
+            </tr>
+            <tr>
+                <td>路径点数量</td>
+                <td>482</td>
+                <td>28</td>
+                <td>28（控制点）/ 500（采样点）</td>
+            </tr>
+            <tr>
+                <td>最大曲率</td>
+                <td>∞（拐点为尖角）</td>
+                <td>∞（拐点仍为尖角）</td>
+                <td>0.18 m⁻¹（连续可微）</td>
+            </tr>
+            <tr>
+                <td>路径长度</td>
+                <td>32.7 m</td>
+                <td>31.5 m</td>
+                <td>31.8 m</td>
+            </tr>
+            <tr>
+                <td>C²连续性</td>
+                <td>否</td>
+                <td>否</td>
+                <td>是</td>
+            </tr>
+            <tr>
+                <td>机器人可跟踪性</td>
+                <td>极差（剧烈振荡）</td>
+                <td>差（拐点仍无法跟踪）</td>
+                <td>良好（光滑跟踪）</td>
+            </tr>
+        </table>
+
+        <p>下面是用scipy进行B样条拟合的Python代码。我们用Douglas-Peucker简化后的点作为控制点，用三次B样条（k=3）进行插值，得到一条光滑路径：</p>
+
+        <pre><code>import numpy as np
+from scipy import interpolate
+
+def bspline_smooth(points, num_samples=500, k=3):
+    \"\"\"用B样条平滑路径。
+
+    Args:
+        points: numpy数组，形状为(N, 2)，简化后的路径点
+        num_samples: 输出路径包含的采样点数量
+        k: B样条阶数，k=3为三次B样条（默认）
+
+    Returns:
+        平滑后的路径点数组，形状为(num_samples, 2)
+    \"\"\"
+    # 参数化：计算累积弦长
+    distances = np.cumsum(
+        np.sqrt(np.sum(np.diff(points, axis=0)**2, axis=1)))
+    distances = np.insert(distances, 0, 0)
+
+    # 对x和y分别进行B样条拟合
+    tck_x = interpolate.splrep(distances, points[:, 0], k=k)
+    tck_y = interpolate.splrep(distances, points[:, 1], k=k)
+
+    # 在均匀参数点上采样
+    new_distances = np.linspace(0, distances[-1], num_samples)
+    smooth_x = interpolate.splev(new_distances, tck_x)
+    smooth_y = interpolate.splev(new_distances, tck_y)
+
+    return np.column_stack([smooth_x, smooth_y])</code></pre>
+
+        <h2>曲率约束与可行驶性</h2>
+
+        <p>经过B样条平滑后，路径看起来非常漂亮了——一条流畅的曲线，没有任何尖角。但这就够了吗？还差一步。这条平滑曲线上某些位置的曲率可能仍然超过机器人的极限。</p>
+
+        <p>曲率κ定义为路径方向角对弧长的导数：κ = dθ/ds。对于参数曲线(x(t), y(t))，曲率可以通过公式计算：κ = |x'y'' - x''y'| / (x'² + y'²)^(3/2)。曲率的倒数就是曲率半径R = 1/κ。如果一个机器人的最小转弯半径是2米，那么路径上任何一点的曲率半径都不能小于2米，即曲率不能超过0.5 m⁻¹。</p>
+
+        <p>不仅如此，曲率限制还与速度有关。以更高的速度过弯时，需要的曲率更低（即转弯半径更大），否则会产生过大的向心加速度，导致机器人侧翻或失去抓地力。一个常用的约束是：κ_max = a_lateral_max / v²，其中a_lateral_max是最大允许侧向加速度，v是当前速度。</p>
+
+        <p>于是，完整的后处理管道应该是这样的：</p>
+        <ol>
+            <li>Douglas-Peucker简化减少路径点数</li>
+            <li>B样条插值得到光滑曲线</li>
+            <li>逐点检查曲率是否超过机器人限制</li>
+            <li>如果存在超限段落，在该段落插入新的控制点进行局部重拟合，直至所有点的曲率在约束范围内</li>
+            <li>根据路径曲率生成速度曲线——在弯道前减速，出弯后加速</li>
+        </ol>
+
+        <pre><code>def compute_curvature(path):
+    \"\"\"计算路径上每一点的曲率。
+
+    Args:
+        path: numpy数组，形状为(N, 2)，平滑后的路径点
+
+    Returns:
+        curvature: numpy数组，形状为(N,)，每一点的曲率值
+    \"\"\"
+    dx = np.gradient(path[:, 0])
+    dy = np.gradient(path[:, 1])
+    ddx = np.gradient(dx)
+    ddy = np.gradient(dy)
+
+    numerator = np.abs(dx * ddy - dy * ddx)
+    denominator = (dx**2 + dy**2)**1.5
+    denominator[denominator < 1e-8] = 1e-8  # 避免除零
+
+    return numerator / denominator
+
+def check_drivability(path, max_curvature):
+    \"\"\"检查路径是否满足曲率约束。\”""
+    curvature = compute_curvature(path)
+    violations = np.where(curvature > max_curvature)[0]
+    if len(violations) > 0:
+        print(f"警告：发现 {len(violations)} 个点的曲率超限")
+        print(f"最大曲率：{np.max(curvature):.4f} m⁻¹")
+        print(f"允许最大曲率：{max_curvature:.4f} m⁻¹")
+        return False
+    return True</code></pre>
+
+        <div class="tip">
+            <strong>实用技巧：捷径启发式（shortcut heuristic）</strong>——对处理完成的路径，一个简单但有效的优化是：随机选取路径上的两个不相邻的点，用直线连接，检查这条直线是否与障碍物碰撞。如果无碰撞且路径更短，则用直线段替换原路径的折线段。重复多次。这个启发式方法虽然"粗暴"，但在实践中往往能显著缩短路径长度并降低曲率极值，而且实现起来不超过十行代码。
+        </div>
+
+        <p>最后，我想用一个真实的故事来结束这一章。2019年，一家美国自动驾驶卡车初创公司在测试中发现，他们的卡车在高速公路上频繁出现"骑线行驶"的问题——明明全局路径规划是正确的，车辆却总是压着车道线跑，无法稳定在车道中央。团队花了几周时间排查定位传感器、控制模块、甚至车轮定位，最后发现是路径后处理环节的一个bug：B样条拟合时使用的参数化方法不对，导致平滑后的路径在直道上产生了约15厘米的横向偏移。这个偏移与车道宽度相当，所以车辆一直在试图"纠正"一个不存在的偏差。修复后，卡车稳如泰山地跑在了车道中央。这个故事告诉我们：后处理的每一个细节——从简化参数到曲线拟合算法——都可能直接影响机器人的实际行为。</p>
+
+        <p>下一章，我们将从"全局路径的后处理"转向"局部路径的实时规划"——DWA（动态窗口法）。如果说这一章我们关注的是如何让路径更平滑，那下一章关注的是如何在运动过程中实时避障。两者结合起来，就是一个完整的机器人导航方案。我们第16章见。</p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

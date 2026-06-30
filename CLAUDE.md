@@ -62,12 +62,13 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `antenna-propagation-tutorial/` | 电波传播与天线 | 28 | `https://1998x-stack.github.io/antenna-propagation-tutorial/` |
 | `sensor-network-tutorial/` | 传感网技术 | 28 | `https://1998x-stack.github.io/sensor-network-tutorial/` |
 
-### 经济 / 金融 (7)
+### 经济 / 金融 (8)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `economics-principles-tutorial/` | 经济学原理 | 28 | `https://1998x-stack.github.io/economics-principles-tutorial/` |
 | `macroeconomics-tutorial/` | 宏观经济学 | 28 | `https://1998x-stack.github.io/macroeconomics-tutorial/` |
 | `microeconomics-tutorial/` | 微观经济学 | 28 | `https://1998x-stack.github.io/microeconomics-tutorial/` |
+| `monetary-banking-tutorial/` | 货币银行学 | 28 | `https://1998x-stack.github.io/monetary-banking-tutorial/` |
 | `financial-analysis-tutorial/` | 金融分析 | 28 | `https://1998x-stack.github.io/financial-analysis-tutorial/` |
 | `financial-statement-analysis-tutorial/` | 财报实战分析 | 28 | `https://1998x-stack.github.io/financial-statement-analysis-tutorial/` |
 | `cryptocurrency-tutorial/` | 加密货币 | 28 | `https://1998x-stack.github.io/cryptocurrency-tutorial/` |

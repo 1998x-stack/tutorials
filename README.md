@@ -62,13 +62,14 @@ A collection of 44 free, comprehensive technical tutorials in Chinese — from f
 | 📡 | 电波传播与天线 · 从入门到精通 | 28 | [antenna-propagation-tutorial](https://1998x-stack.github.io/antenna-propagation-tutorial/) |
 | 📡 | 传感网技术 · 从入门到精通 | 28 | [sensor-network-tutorial](https://1998x-stack.github.io/sensor-network-tutorial/) |
 
-### 经济 / 金融 (7 courses)
+### 经济 / 金融 (8 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
 | 📈 | 经济学原理 | 28 | [economics-principles-tutorial](https://1998x-stack.github.io/economics-principles-tutorial/) |
 | 📊 | 宏观经济学 | 28 | [macroeconomics-tutorial](https://1998x-stack.github.io/macroeconomics-tutorial/) |
 | 📊 | 微观经济学：从稀缺到均衡 | 28 | [microeconomics-tutorial](https://1998x-stack.github.io/microeconomics-tutorial/) |
+| 🏦 | 货币银行学（货币金融学） | 28 | [monetary-banking-tutorial](https://1998x-stack.github.io/monetary-banking-tutorial/) |
 | 💹 | 金融分析实战体系 | 28 | [financial-analysis-tutorial](https://1998x-stack.github.io/financial-analysis-tutorial/) |
 | 📊 | 财报实战分析 | 28 | [financial-statement-analysis-tutorial](https://1998x-stack.github.io/financial-statement-analysis-tutorial/) |
 | 🪙 | 比特币与加密货币 | 28 | [cryptocurrency-tutorial](https://1998x-stack.github.io/cryptocurrency-tutorial/) |

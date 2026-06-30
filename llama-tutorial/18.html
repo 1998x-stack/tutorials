@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 评估体系与基准测试 — LLaMA 完全拆解教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦙 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLaMA系列概述</a></li>
+            <li><a href="02.html">第2章 Transformer回顾与LLaMA总览</a></li>
+            <li><a href="03.html">第3章 RoPE旋转位置编码</a></li>
+            <li><a href="04.html">第4章 RMSNorm归一化</a></li>
+            <li><a href="05.html">第5章 SwiGLU激活函数</a></li>
+            <li><a href="06.html">第6章 分词器与词表设计</a></li>
+            <li><a href="07.html">第7章 缩放定律与训练策略</a></li>
+            <li><a href="08.html">第8章 GQA分组查询注意力</a></li>
+            <li><a href="09.html">第9章 预训练数据工程</a></li>
+            <li><a href="10.html">第10章 训练稳定性与优化器</a></li>
+            <li><a href="11.html">第11章 LLaMA 1完整预训练流程</a></li>
+            <li><a href="12.html">第12章 LLaMA 2对话模型与SFT</a></li>
+            <li><a href="13.html">第13章 RLHF全流程</a></li>
+            <li><a href="14.html">第14章 安全对齐与幻觉抑制</a></li>
+            <li><a href="15.html">第15章 模型量化与推理加速</a></li>
+            <li><a href="16.html">第16章 分布式训练策略</a></li>
+            <li><a href="17.html">第17章 上下文窗口扩展</a></li>
+            <li><a href="18.html" class="active">第18章 评估体系与基准测试</a></li>
+            <li><a href="19.html">第19章 LLaMA 3大规模训练系统</a></li>
+            <li><a href="20.html">第20章 多模态融合</a></li>
+            <li><a href="21.html">第21章 工具调用与代码能力</a></li>
+            <li><a href="22.html">第22章 多语言扩展策略</a></li>
+            <li><a href="23.html">第23章 HuggingFace生态与模型加载</a></li>
+            <li><a href="24.html">第24章 LoRA微调实战</a></li>
+            <li><a href="25.html">第25章 推理部署方案</a></li>
+            <li><a href="26.html">第26章 LLaMA 3.2边缘部署与小模型</a></li>
+            <li><a href="27.html">第27章 LLaMA 4展望与MoE架构</a></li>
+            <li><a href="28.html">第28章 开源LLM生态与未来趋势</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第18章 评估体系与基准测试</h2>
+
+        <p>我们在前面的17章里花了很多时间讨论LLaMA"怎么做"——架构设计、训练方法、量化技巧、并行策略。但有一个更根本的问题一直没来得及回答：<strong>LLaMA到底有多好？</strong>这个问题看似简单，实际却异常复杂。因为"好"不是一个单维度的概念——在医疗问答上表现好的模型，可能在代码生成上一塌糊涂；在英语任务上得高分的模型，可能在中文理解上不忍直视。</p>
+
+        <p>更棘手的是，LLM的评估本身就是一个还未被完全解决的开放问题。MMLU考了80分的模型真的比考了78分的更好吗？如果模型在GSM8K上得高分但"作弊"了（因为训练数据里包含了测试题的变体），这个分数还代表能力吗？如果一个模型通过了律师资格考试但告诉用户"将律师加入汤中"，它算聪明还是愚蠢？</p>
+
+        <p>这一章我们会系统梳理LLaMA的评估体系：从标准基准测试的设计原理，到LLaMA各代在这些测试上的表现对比，再到评估中常见的陷阱和教训。读完这一章，你不仅知道LLaMA"有多好"，更知道如何独立判断一个模型的好坏。</p>
+
+        <h3>18.1 LLM评估分类</h3>
+
+        <p>LLM的能力不是单一的。学术界和工业界一般将LLM的评估分为以下几大类：</p>
+
+        <table>
+            <tr>
+                <th>能力维度</th>
+                <th>代表基准</th>
+                <th>评估内容</th>
+                <th>LLaMA的优势领域</th>
+            </tr>
+            <tr>
+                <td>知识理解</td>
+                <td>MMLU, ARC, TriviaQA</td>
+                <td>世界知识、常识、学科知识</td>
+                <td>强（大规模预训练数据覆盖广）</td>
+            </tr>
+            <tr>
+                <td>语言推理</td>
+                <td>HellaSwag, WinoGrande</td>
+                <td>常识推理、因果关系判断</td>
+                <td>强（RoPE+SwiGLU提升推理能力）</td>
+            </tr>
+            <tr>
+                <td>数学推理</td>
+                <td>GSM8K, MATH</td>
+                <td>算术运算、数学解题、逻辑推理</td>
+                <td>中（405B强，小模型偏弱）</td>
+            </tr>
+            <tr>
+                <td>代码生成</td>
+                <td>HumanEval, MBPP</td>
+                <td>代码补全、bug修复、算法实现</td>
+                <td>强（训练数据含25%代码）</td>
+            </tr>
+            <tr>
+                <td>多语言</td>
+                <td>MGSM, Flores-200</td>
+                <td>非英语语言的理解和生成</td>
+                <td>中上（英语为主，多语言较弱）</td>
+            </tr>
+            <tr>
+                <td>安全与对齐</td>
+                <td>TruthfulQA, BBQ</td>
+                <td>幻觉率、偏见检测、有害内容</td>
+                <td>强（RLHF+安全训练）</td>
+            </tr>
+        </table>
+
+        <p>这些维度之间并不是独立的。数学推理能力的提升往往会带动代码生成能力的提升（因为两者都需要结构化思维），而知识理解的增强也会改善语言推理。但反过来，代码能力强不一定意味着安全性好——事实上，一个代码能力强但没有经过安全对齐的模型，可能比代码能力弱但安全对齐好的模型更危险。</p>
+
+        <h3>18.2 MMLU：知识的"高考"</h3>
+
+        <p>MMLU（Massive Multitask Language Understanding）是目前最广泛使用的LLM评估基准之一。它包含57个学科领域的约14000道选择题，涵盖了从高中物理到国际法、从临床知识到计算机科学等方方面面。MMLU被称为"LLM的高考"——它考察的是模型的<strong>知识广度和理解深度</strong>。</p>
+
+        <p>MMLU的设计非常精心。每个学科的问题都是4选1的选择题，要求模型在没有任何额外背景知识的情况下选出正确答案。问题难度从基础（如"光合作用发生在植物的哪个部位？"）到高深（如"根据海牙公约，武装冲突中对文化财产的保护原则不包括以下哪项？"）不等。</p>
+
+        <p>以下是LLaMA各代模型在MMLU上的表现：</p>
+
+        <table>
+            <tr>
+                <th>模型</th>
+                <th>参数量</th>
+                <th>MMLU (5-shot)</th>
+                <th>GSM8K (8-shot)</th>
+                <th>HumanEval (pass@1)</th>
+                <th>MATH (4-shot)</th>
+            </tr>
+            <tr>
+                <td>LLaMA 1</td>
+                <td>7B</td>
+                <td>38.8%</td>
+                <td>12.6%</td>
+                <td>13.4%</td>
+                <td>6.2%</td>
+            </tr>
+            <tr>
+                <td>LLaMA 1</td>
+                <td>13B</td>
+                <td>46.9%</td>
+                <td>22.3%</td>
+                <td>21.8%</td>
+                <td>8.5%</td>
+            </tr>
+            <tr>
+                <td>LLaMA 1</td>
+                <td>65B</td>
+                <td>63.4%</td>
+                <td>51.7%</td>
+                <td>37.2%</td>
+                <td>16.8%</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2</td>
+                <td>7B</td>
+                <td>45.3%</td>
+                <td>16.8%</td>
+                <td>18.9%</td>
+                <td>7.8%</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2</td>
+                <td>13B</td>
+                <td>54.8%</td>
+                <td>34.5%</td>
+                <td>26.7%</td>
+                <td>10.2%</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2</td>
+                <td>70B</td>
+                <td>68.9%</td>
+                <td>63.8%</td>
+                <td>48.6%</td>
+                <td>21.3%</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3</td>
+                <td>8B</td>
+                <td>66.7%</td>
+                <td>51.6%</td>
+                <td>44.1%</td>
+                <td>23.5%</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3</td>
+                <td>70B</td>
+                <td>82.0%</td>
+                <td>86.5%</td>
+                <td>72.8%</td>
+                <td>49.3%</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3</td>
+                <td>405B</td>
+                <td>87.8%</td>
+                <td>93.6%</td>
+                <td>82.6%</td>
+                <td>58.9%</td>
+            </tr>
+        </table>
+
+        <p>这张表信息量巨大。首先，<strong>缩放效应非常明显</strong>：从7B到405B，MMLU分数从38.8%跃升到87.8%，提升了近50个百分点。其次，<strong>代际进步一样显著</strong>：LLaMA 3 8B（66.7%）已经超过了LLaMA 1 65B（63.4%）——一个只有其1/8的模型，因为更好的训练数据和架构改进，就能击败大得多的前代模型。最后，<strong>不同能力的缩放速度不同</strong>：GSM8K（数学推理）从7B到405B提升了7.4倍，而MMLU（知识）只提升了2.3倍——这说明推理能力比知识记忆更需要大模型的支持。</p>
+
+        <div class="tip">
+            <strong>观察：</strong> LLaMA 3 8B在GSM8K上的分数（51.6%）几乎是LLaMA 2 70B（63.8%）的量级，但模型小了近9倍。这意味着如果你只需要数学推理能力，完全可以用8B模型量化后部署到边缘设备上，而不需要70B这样的大模型。这再次印证了第7章缩放定律中讲到的"模型容量与任务复杂度"的关系。
+        </div>
+
+        <h3>18.3 各维度的代表性基准</h3>
+
+        <p>除了MMLU，LLM评估中还有几个必须了解的核心基准。</p>
+
+        <h4>GSM8K与MATH：数学推理的试金石</h4>
+
+        <p>GSM8K包含8500道小学数学应用题，难度大约是小学五六年级水平。但它对LLM来说并不简单——因为这些题目要求多步推理（通常需要3-8步），并且大部分题目都有一个"干扰数字"（distractor number），需要模型判断哪些信息是必要的。GSM8K使用chain-of-thought（CoT）prompting来评估，模型需要输出完整的推理过程后再给出最终答案。</p>
+
+        <p>MATH则更难——它包含5000道高中数学和竞赛级别的题目，来自AMC、AIME、美国数学竞赛等。MATH考察的不只是计算能力，还有数学概念的理解和创造性解题策略。LLaMA 3 405B在MATH上达到了58.9%，这已经是一个相当高的水平——意味着它能在超过一半的高中数学竞赛题上给出正确答案。</p>
+
+        <h4>HumanEval：代码能力的标尺</h4>
+
+        <p>HumanEval是OpenAI发布的代码生成测试集，包含164道手写的编程题，每道题有完整的函数签名、docstring和测试用例。评估标准是pass@k——模型生成k个代码样本，只要有一个能通过所有测试用例就算成功。</p>
+
+        <p>LLaMA 3 405B在HumanEval pass@1上达到82.6%，这是一个令人印象深刻的数字。它意味着在单次采样中，模型就有82.6%的概率生成一个完全正确的函数实现。相比LLaMA 1 65B的37.2%，这是一个质的飞跃。这里的改进不仅来自模型变大，更来自LLaMA 3训练数据中代码占比的大幅提升（约25%）。</p>
+
+        <div class="highlight">
+            <strong>一个值得注意的细节：</strong> HumanEval的题目相对简单（主要是算法基础题），而且大部分题目在GitHub上有类似的实现。这意味着模型可能在训练数据中"见过"类似的代码——这就是基准污染问题。为了解决这个问题，研究者们推出了HumanEval+（增加更严格的测试用例）、EvalPlus等增强版本。在LLaMA 3的评估中，Meta同时报告了在原始HumanEval和增强版本上的分数。
+        </div>
+
+        <h3>18.4 开源评估框架</h3>
+
+        <p>自己写评估代码非常繁琐——你需要加载模型、格式化prompt、设置few-shot样例、解析模型的输出、计算统计指标。幸运的是，社区已经开发出了成熟的评估框架。</p>
+
+        <p><strong>lm-evaluation-harness（EleutherAI）</strong> 是最早也是最广泛使用的评估框架。它支持200+个评估基准，统一的接口设计让你只需几行代码就能评估一个模型。它的工作流程是：加载模型 → 加载基准数据集 → 格式化prompt（使用模板系统） → 逐批推理 → 记录并汇总结果。</p>
+
+        <p><strong>OpenCompass（上海AI Lab）</strong> 是另一个流行的评估框架，尤其在中英文双语评估上表现突出。它的特点包括：支持分布式评估（在多卡上并行跑评估）、自动报告生成、以及更丰富的多语言支持。</p>
+
+        <pre><code># 使用lm-evaluation-harness评估LLaMA
+# 安装: pip install lm-eval
+
+# 评估LLaMA 3 8B在MMLU和GSM8K上的表现
+lm_eval --model hf \
+    --model_args pretrained=meta-llama/Meta-Llama-3-8B \
+    --tasks mmlu,gsm8k \
+    --num_fewshot 5 \
+    --batch_size 4 \
+    --output_path ./results/
+
+# 输出示例:
+# |  Task   |Version| Metric |Value |   |Stderr|
+# |---------|------:|--------|-----:|---|-----:|
+# | mmlu    |      1|acc     | 0.667|   | 0.012|
+# | gsm8k   |      3|acc     | 0.516|   | 0.014|</code></pre>
+
+        <p>在使用这些框架时有一个非常重要的细节：<strong>评估设置必须完全匹配</strong>。不同的few-shot数量、不同的prompt模板、不同的生成参数（温度、top-p）都会导致分数差异。所以当你看到一篇论文报告了某个分数时，必须确认它使用的评估框架和设置是否和你的一致。</p>
+
+        <h3>18.5 人工评估与自动评估</h3>
+
+        <p>自动评估（如MMLU、GSM8K）有明确的正确/错误标准，客观且可复现。但它有一个根本缺陷：<strong>自动评估无法衡量"对话质量"</strong>。一个模型可能在MMLU上得90分，但在真实对话中表现得像机器人一样生硬。</p>
+
+        <p>这就是人工评估的价值所在。LLaMA 2的RLHF训练就大量依赖人工评估。Meta设计了一套4点量表评估体系：</p>
+
+        <ul>
+            <li><strong>4分（优秀）：</strong> 回答准确、完整、有帮助，且风格自然</li>
+            <li><strong>3分（良好）：</strong> 回答基本正确，但可能缺少一些细节</li>
+            <li><strong>2分（一般）：</strong> 回答部分正确，但有明显错误或遗漏</li>
+            <li><strong>1分（差）：</strong> 回答错误、无关或有害</li>
+        </ul>
+
+        <p>评估员（labelers）来自专业标注团队，经过严格的培训和一致性校验。每次比较两个模型的输出时，至少由3个评估员独立评分，取中位数作为最终分数。LLaMA 2-Chat在RLHF的每次迭代中都进行了这样的人工评估——一组评估员判断"哪个版本的回答更好"，然后根据偏好数据训练奖励模型。</p>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong> 我参与过一个项目，试图用GPT-4自动评估来替代人工评估。具体做法是让GPT-4给两个模型的输出打分，然后取偏好。初期结果看起来不错——GPT-4的评分和人类评分的一致性达到了80%左右。但深入分析后发现，GPT-4在"风格"评分上严重偏向"更长、更啰嗦"的回答。后来我们发现，GPT-4对自身产生的回答风格有系统性的偏好（self-enhancement bias）。这个教训是：<strong>自动评估可以节省成本，但不能完全替代人工评估——尤其是在衡量"有用性"和"自然度"这类主观维度时。</strong>
+        </div>
+
+        <h3>18.6 评估中的常见陷阱</h3>
+
+        <p>LLM评估中充满了各种"看起来很高但实际上没用"的陷阱。了解这些陷阱，比记住几个分数数字重要得多。</p>
+
+        <p><strong>陷阱一：基准污染（Data Contamination）</strong></p>
+
+        <p>这是最经典也最棘手的评估陷阱。如果训练数据中包含了测试集的样本（或其变体），那么模型在测试集上的高分就不能代表真正的能力。举个极端例子：如果预训练数据中包含了MMLU的全部14000道题，那模型只需要"记住"答案就能得满分——这不是理解，而是记忆。</p>
+
+        <p>LLaMA 3在训练数据过滤时做了n-gram去重——如果某个13-gram同时出现在训练数据和测试集中，就把它从训练数据中移除。但n-gram去重不能解决所有问题，因为测试题的"变体"（比如换了一些数字或措辞）可能没有被检测到。Meta在LLaMA 3论文中专门用了一节讨论污染检测，他们用MMLU的"污染版本"（故意污染部分测试数据）来验证过滤效果。</p>
+
+        <p><strong>陷阱二：评估标准不统一</strong></p>
+
+        <p>同一份基准测试，不同的论文用不同的设置进行评估，导致分数无法直接比较。常见的差异包括：</p>
+
+        <ul>
+            <li><strong>Few-shot数量不同：</strong> MMLU默认是5-shot，但有些论文用0-shot或10-shot</li>
+            <li><strong>Prompt模板不同：</strong> 即使是5-shot，样例的选择顺序也会影响分数</li>
+            <li><strong>生成参数不同：</strong> greedy decoding（temperature=0） vs 采样（temperature>0）会得到不同的结果</li>
+            <li><strong>评估指标不同：</strong> pass@1 vs pass@10 vs pass@100，对于同一个模型来说差异巨大</li>
+        </ul>
+
+        <p><strong>陷阱三：评测指标的欺骗性</strong></p>
+
+        <p>这是我最想强调的一点：<strong>高分不等于好模型。</strong>来看一个具体的例子。某个模型在MMLU上得了85分，另一个模型得了82分。你觉得前一个更好对吗？但如果告诉你，模型A对"法律"类别的题目得了90分但在"医学"类别只有60分，而模型B在所有类别都稳定在80-84分。在真实应用中，模型B可能比模型A更好，因为它的知识分布更均衡，没有严重的短板。</p>
+
+        <p>另一个经典例子：在GSM8K上，模型A得了90分，模型B得了85分。但模型A生成的解题步骤经常有逻辑跳跃，只是最终答案碰巧对了；模型B的每一步推理都严谨。如果我们要部署到教育场景（需要给学生展示推理过程），模型B显然是更好的选择。</p>
+
+        <div class="highlight">
+            <strong>评估的黄金法则：</strong> 不要只看单一指标的平均分。要看（1）各个子领域的分数分布；（2）错误的类型分析（是知识缺失、逻辑错误、还是格式问题）；（3）在你的目标场景上的实际表现。一个分数只能告诉你"这个模型在某个测试上的表现"，不能告诉你"这个模型在你的场景中好不好用"。
+        </div>
+
+        <h3>18.7 LLaMA评估方法论</h3>
+
+        <p>最后，来看Meta在LLaMA论文中使用的评估方法论。了解这些细节对你阅读论文和复现结果至关重要。</p>
+
+        <p><strong>Few-shot设置：</strong> LLaMA的评估遵循"标准化"设置。MMLU使用5-shot，从训练集中随机抽取5个带答案的样例作为示范，然后要求模型回答第6个问题。GSM8K使用8-shot chain-of-thought——给8个带解题步骤的示范，模型需要同时输出推理过程和最终答案。MATH使用4-shot，并提供类似于"let's think step by step"的prompt。</p>
+
+        <p><strong>Prompt模板统一：</strong> 为了消除prompt工程带来的偏差，LLaMA团队对所有基准测试使用了标准化的prompt模板。这些模板在论文附录中公开，任何人都可以复现。模板的设计经过大量实验，确保不同模型在相同输入下可公平比较。</p>
+
+        <p><strong>温度设置：</strong> 对于选择题基准（如MMLU），使用greedy decoding（temperature=0），确保结果确定可复现。对于生成式基准（如HumanEval），使用temperature=0.1（低但非零，允许少量随机性），并报告多次采样的平均结果。</p>
+
+        <p><strong>结果报告的透明度：</strong> LLaMA论文不仅报告了平均分，还报告了各子领域的分数、误差范围、以及与其他模型在相同设置下的对比。这种透明度是开源评估的标杆——相比某些闭源模型"只告诉你结果不告诉你方法"的做法，LLaMA的评估报告显然更有学术价值。</p>
+
+        <div class="tip">
+            <strong>小彩蛋：</strong> LLaMA 3论文中有一张非常有意思的图——"模型在MMLU各科分数 vs 训练数据中该科目占比"的散点图。你会发现一个反直觉的现象：某些科目（如法律）的训练数据占比不多但模型得分很高，而另一些科目（如医学）数据占比多但得分反而不高。这说明"数据量"不是决定模型能力的唯一因素——数据的<strong>质量和多样性</strong>可能更重要。这也呼应了我们在第9章中讲到的数据工程的核心思想。
+        </div>
+
+        <p>评估体系是理解LLaMA能力和局限性的窗口。没有科学的评估，一切关于模型"好不好"的讨论都是空谈。好在得益于社区长期的努力——MMLU、GSM8K、HumanEval等基准的成熟，以及lm-evaluation-harness、OpenCompass等框架的标准化——我们现在有了一套相对可靠的工具来衡量模型的真实能力。</p>
+
+        <p>从下一章开始，我们将进入第五部分，专门拆解LLaMA 3的深度专题。首先登场的是第19章——LLaMA 3大规模训练系统。我们会走进Meta的16K GPU训练中心，看看405B模型的训练是如何管理、监控和故障恢复的。这绝对是一场工程盛宴。</p>
+
+        <p><strong>下一章预告：第19章 LLaMA 3大规模训练系统——16K GPU、3900万GPU时、405B参数的训练史诗。</strong></p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

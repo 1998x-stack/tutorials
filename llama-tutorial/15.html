@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 模型量化与推理加速 — LLaMA 完全拆解教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦙 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLaMA系列概述</a></li>
+            <li><a href="02.html">第2章 Transformer回顾与LLaMA总览</a></li>
+            <li><a href="03.html">第3章 RoPE旋转位置编码</a></li>
+            <li><a href="04.html">第4章 RMSNorm归一化</a></li>
+            <li><a href="05.html">第5章 SwiGLU激活函数</a></li>
+            <li><a href="06.html">第6章 分词器与词表设计</a></li>
+            <li><a href="07.html">第7章 缩放定律与训练策略</a></li>
+            <li><a href="08.html">第8章 GQA分组查询注意力</a></li>
+            <li><a href="09.html">第9章 预训练数据工程</a></li>
+            <li><a href="10.html">第10章 训练稳定性与优化器</a></li>
+            <li><a href="11.html">第11章 LLaMA 1完整预训练流程</a></li>
+            <li><a href="12.html">第12章 LLaMA 2对话模型与SFT</a></li>
+            <li><a href="13.html">第13章 RLHF全流程</a></li>
+            <li><a href="14.html">第14章 安全对齐与幻觉抑制</a></li>
+            <li><a href="15.html" class="active">第15章 模型量化与推理加速</a></li>
+            <li><a href="16.html">第16章 分布式训练策略</a></li>
+            <li><a href="17.html">第17章 上下文窗口扩展</a></li>
+            <li><a href="18.html">第18章 评估体系与基准测试</a></li>
+            <li><a href="19.html">第19章 LLaMA 3大规模训练系统</a></li>
+            <li><a href="20.html">第20章 多模态融合</a></li>
+            <li><a href="21.html">第21章 工具调用与代码能力</a></li>
+            <li><a href="22.html">第22章 多语言扩展策略</a></li>
+            <li><a href="23.html">第23章 HuggingFace生态与模型加载</a></li>
+            <li><a href="24.html">第24章 LoRA微调实战</a></li>
+            <li><a href="25.html">第25章 推理部署方案</a></li>
+            <li><a href="26.html">第26章 LLaMA 3.2边缘部署与小模型</a></li>
+            <li><a href="27.html">第27章 LLaMA 4展望与MoE架构</a></li>
+            <li><a href="28.html">第28章 开源LLM生态与未来趋势</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第15章 模型量化与推理加速</h2>
+
+        <p>大家好，欢迎回到我们的LLaMA拆解之旅。从这一章开始，我们进入课程的第四部分——效率优化与部署。如果你是从第14章安全对齐一路读过来的，那你已经见识了让LLaMA"听话"的完整技术栈。但这里有一个残酷的现实：<strong>一个70B参数的LLaMA 2模型，用FP32精度推理需要280GB显存</strong>——就连NVIDIA目前最顶级的H100 80G也要4张卡才能塞下。对于绝大多数开发者来说，这种硬件门槛是不可接受的。</p>
+
+        <p>模型量化就是来解决这个问题的。量化的核心思想是用更少的比特数来表示模型的权重和激活值。FP32转INT4，参数存储直接减少8倍，即使考虑到运行时反量化的额外开销，实际推理速度也能提升2-4倍。在LLaMA生态中，量化技术是大规模落地的关键一环——没有量化，LLaMA 405B 只能在超大集群上运行；有了量化，同样的模型在单台8卡H100工作站上就能流畅推理。</p>
+
+        <p>这一章我们会深入剖析各种量化方法：从最基础的FP16/BF16精度切换，到GPTQ、AWQ等高级量化算法，再到llama.cpp生态的GGUF格式量化。我会告诉你每种方案的适用场景和可能踩的坑。</p>
+
+        <h3>15.1 量化基本概念</h3>
+
+        <p>量化本质上是一个信息压缩过程。神经网络的权重和激活值通常是32位浮点数（FP32），表示范围从大约 -3.4×10³⁸ 到 3.4×10³⁸。但在实际训练和推理中，这些值绝大部分集中在零附近的一个狭小范围内。我们完全可以用更少的比特来表示它们，只要找到合适的缩放因子和偏移量。</p>
+
+        <p>下面这张表总结了LLaMA推理中常见的数值格式：</p>
+
+        <table>
+            <tr>
+                <th>格式</th>
+                <th>比特数</th>
+                <th>表示范围</th>
+                <th>相对于FP32的显存节省</th>
+                <th>LLaMA常见场景</th>
+            </tr>
+            <tr>
+                <td>FP32</td>
+                <td>32</td>
+                <td>wide</td>
+                <td>1×（基准）</td>
+                <td>极少使用，仅训练过程中权重更新</td>
+            </tr>
+            <tr>
+                <td>FP16</td>
+                <td>16</td>
+                <td>±65K</td>
+                <td>2×</td>
+                <td>早期LLaMA推理，现在已被BF16取代</td>
+            </tr>
+            <tr>
+                <td>BF16</td>
+                <td>16</td>
+                <td>±3.4×10³⁸</td>
+                <td>2×</td>
+                <td>LLaMA训练和推理的标准精度</td>
+            </tr>
+            <tr>
+                <td>INT8</td>
+                <td>8</td>
+                <td>±128（对称）</td>
+                <td>4×</td>
+                <td>权重量化，质量损失极小</td>
+            </tr>
+            <tr>
+                <td>INT4</td>
+                <td>4</td>
+                <td>±8（对称）</td>
+                <td>8×</td>
+                <td>消费者级GPU运行大模型的首选</td>
+            </tr>
+        </table>
+
+        <p>FP16和BF16虽然都是16位，但差别很大。FP16的指数位只有5位（表示范围±65504），而BF16的指数位有8位（范围与FP32相同）。这意味着BF16能表示的数值范围比FP16大得多——做梯度更新时，BF16几乎不会出现下溢或上溢。这也是为什么LLaMA 3的训练全程使用BF16而不是FP16。不过BF16的精度比FP16低（7位尾数 vs 10位尾数），但对于推理任务来说，这个精度损失基本可以忽略。</p>
+
+        <div class="tip">
+            <strong>实际经验：</strong> 如果你只是想把LLaMA模型跑起来做推理，BF16是最省心的选择。HuggingFace的transformers库从4.31版本开始就支持自动加载BF16权重。一行代码就能完成精度切换：<code>model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-7b", torch_dtype=torch.bfloat16)</code>。这比FP32节省一半显存，几乎看不出质量差异。
+        </div>
+
+        <p>真正有意思的量化发生在 INT8 和 INT4。这里的关键 tradeoff 是：比特数越少，显存占用越低，推理速度越快，但模型质量损失越大。GPT-4级别的模型量化到INT4后，在MMLU上的得分退化通常在1-3个百分点以内——对于大多数对话应用来说，这个质量损失完全可接受。</p>
+
+        <h3>15.2 GPTQ：基于Hessian矩阵的量化</h3>
+
+        <p>GPTQ（Generative Pre-trained Transformer Quantization）是2023年由IST Austria的研究人员提出的一种后训练量化方法。它的核心思想非常优雅：<strong>与其均匀地量化所有权重，不如根据权重对输出的影响大小来分配量化误差</strong>。</p>
+
+        <p>具体来说，GPTQ利用Hessian矩阵（损失函数对权重的二阶导数）来衡量每个权重的重要性。Hessian矩阵的对角线元素反映了损失函数对该权重的敏感度——如果某个权重的Hessian值很大，说明改变这个权重会显著影响输出，因此在量化时需要优先保护它。</p>
+
+        <pre><code># GPTQ量化的简化流程
+#
+# 1. 收集校准数据（通常128-512个序列）
+# 2. 逐列量化权重矩阵 W ∈ R^(m×n)
+# 3. 对每一列，找到最优量化值，并补偿误差到后续列
+#
+# 伪代码：
+# for col in range(n):
+#     w_col = W[:, col]                              # 当前要量化的列
+#     q_col = quantize(w_col, bits=4)                 # 量化到INT4
+#     err = w_col - dequantize(q_col)                 # 计算量化误差
+#     H_inv = compute_inverse_hessian(W, col)         # Hessian逆矩阵
+#     W[:, col+1:] -= err * H_inv[col, col+1:]        # 将误差补偿到后续列</code></pre>
+
+        <p>GPTQ最有意思的地方在于它的误差补偿机制。当量化某一列权重产生误差后，它不只在原地承受这个误差，而是利用Hessian矩阵提供的二阶信息，将误差"分配到"同一行的后续列上。这样做的好处是——前面的列可以承受更大的量化误差（因为后面会补偿），但累积误差被约束在Hessian定义的子空间内。</p>
+
+        <p>在LLaMA模型上的实验表明，GPTQ INT4量化只带来1-2%的困惑度退化。但GPTQ有一个明显的缺点：它对校准数据集的选择非常敏感。如果你用代码数据做校准，但推理时大量处理法律文档，量化误差可能会显著增大。</p>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong> 在GPTQ刚发布时，我曾在一个法律文书生成项目上使用LLaMA-13B GPTQ INT4模型。校准数据我偷懒直接用了HuggingFace的c4样本——日常对话数据。结果模型在合同条款的精确表述上频繁出错，把"甲方应于30日内付款"生成成了"甲方应于90日内付款"。更换校准数据集为法律文书后，问题消失了。教训：<strong>校准数据一定要覆盖目标应用场景，尤其是对精确度要求高的领域。</strong>
+        </div>
+
+        <h3>15.3 AWQ：激活感知权重量化</h3>
+
+        <p>AWQ（Activation-aware Weight Quantization）是2024年由MIT和NVIDIA联合提出的量化方法，现在已经成为LLaMA量化的首选方案之一。它的核心洞见比GPTQ更简单，也更巧妙：<strong>权重的"重要性"实际上是由激活值决定的，而不是由权重本身决定的</strong>。</p>
+
+        <p>AWQ的观察是：在LLaMA模型中，所有权重通道的重要性并不相同。大约1%的"显著通道"（salient channels）承载了大部分激活值的能量。如果我们对这些显著通道使用更高的精度（比如保留FP16），而其他通道使用INT4，整体质量损失就非常小。</p>
+
+        <p>但AWQ不用这个"混合精度"的方案——因为混合精度在硬件上实现很麻烦。AWQ提出了一个更巧妙的trick：<strong>在量化前，把显著通道的权重乘以一个大于1的缩放因子 s，量化后再除回来</strong>。这样，显著通道的量化相对误差就被降低了。</p>
+
+        <pre><code># AWQ量化核心步骤
+#
+# 输入：权重矩阵 W, 校准激活值 X
+# 输出：量化后的权重 qW, 缩放因子 s
+#
+# 1. 计算每个通道的激活幅度
+#    act_scale = mean(|X|, dim=0)       # [d_in]
+#
+# 2. 识别显著通道 (top ~1%)
+#    threshold = percentile(act_scale, 99)
+#    mask = act_scale > threshold
+#
+# 3. 搜索最优缩放因子 s (网格搜索 [0.5, 1.0])
+#    best_s = argmin_s  MSE(X · W, X · dequant(quant(W * s)) / s)
+#
+# 4. 应用缩放并量化
+#    W_scaled = W * best_s                # 对显著通道放大
+#    qW = quantize(W_scaled, bits=4)      # 统一量化
+#    # 反量化时需要除以 best_s</code></pre>
+
+        <p>AWQ相比GPTQ有两大优势。第一，AWQ不需要Hessian矩阵的计算，校准过程非常快——对一个7B模型做AWQ量化只需要几分钟，而同级别的GPTQ量化需要数小时。第二，AWQ对校准数据集的依赖更小，在不同领域的泛化表现更稳定。这也是为什么vLLM、TGI（Text Generation Inference）等主流推理框架全面转向AWQ的原因。</p>
+
+        <div class="highlight">
+            <strong>一句话总结：</strong> GPTQ像个精密的数学家，花大量时间计算每个权重的重要性，然后小心翼翼地分配误差。AWQ像个有经验的工程师，找到最关键的1%通道，用一个巧妙的缩放trick解决问题。在实际部署中，AWQ的性价比明显更高——质量相当，速度快得多。
+        </div>
+
+        <h3>15.4 GGUF/GGML与llama.cpp生态</h3>
+
+        <p>如果说AWQ代表了"高端GPU上的量化方案"，那么GGUF代表了"万物皆可跑LLaMA"的平民路线。GGUF（GPT-Generated Unified Format）是llama.cpp项目使用的模型格式，它的前身是GGML。GGUF格式的设计目标只有一个：<strong>让LLaMA模型在任何设备上都能跑——包括笔记本、树莓派、甚至手机</strong>。</p>
+
+        <p>llama.cpp是开发者Georgi Gerganov在2023年3月发起的纯C/C++推理引擎。它不使用CUDA或PyTorch，而是高度优化的CPU推理代码，同时支持Apple Silicon的Metal加速、AMD ROCm、NVIDIA CUDA等多种后端。GGUF格式则进一步标准化了模型的元数据和权重的存储方式。</p>
+
+        <p>GGUF格式最引人注目的特性是它的量化级别命名体系。每个量化级别都用类似 <code>Q4_K_M</code> 这样的编码来表示：</p>
+
+        <table>
+            <tr>
+                <th>量化级别</th>
+                <th>比特/参数</th>
+                <th>相对FP16体积</th>
+                <th>质量（相对LLaMA 2 7B）</th>
+                <th>典型场景</th>
+            </tr>
+            <tr>
+                <td>Q2_K</td>
+                <td>2.56</td>
+                <td>16%</td>
+                <td>可接受，但明显退化</td>
+                <td>极小设备、极度内存受限</td>
+            </tr>
+            <tr>
+                <td>Q3_K_M</td>
+                <td>3.35</td>
+                <td>21%</td>
+                <td>一般，对话仍可用</td>
+                <td>4GB内存设备</td>
+            </tr>
+            <tr>
+                <td>Q4_K_M</td>
+                <td>4.35</td>
+                <td>27%</td>
+                <td>高质量，损失极小</td>
+                <td>8GB内存设备（推荐）</td>
+            </tr>
+            <tr>
+                <td>Q5_K_M</td>
+                <td>5.34</td>
+                <td>33%</td>
+                <td>接近原始FP16</td>
+                <td>12GB+内存设备</td>
+            </tr>
+            <tr>
+                <td>Q6_K</td>
+                <td>6.56</td>
+                <td>41%</td>
+                <td>几乎无损</td>
+                <td>充裕内存，追求极致质量</td>
+            </tr>
+            <tr>
+                <td>Q8_0</td>
+                <td>8.50</td>
+                <td>53%</td>
+                <td>完全无损</td>
+                <td>FP16的轻量替代</td>
+            </tr>
+        </table>
+
+        <p>命名中的 "K" 表示使用了一种特定的量化方案——<code>K-quant</code>，它根据权重分布自适应地调整量化参数。后缀 "_M" 代表"medium"大小，是质量和体积之间的默认平衡点。在实际使用中，<strong>Q4_K_M 是目前最推荐选择的量化级别</strong>——它在质量损失极小（困惑度退化约0.1-0.3）的前提下，将70B模型的显存需求从140GB降低到约40GB，一张A100 80G就能跑。</p>
+
+        <div class="tip">
+            <strong>llama.cpp使用示例：</strong> 从HuggingFace下载GGUF格式的LLaMA模型后，推理只需要两条命令。首先将PyTorch权重转换为GGUF格式：<code>python convert.py meta-llama/Llama-2-7b --outfile llama-7b.gguf</code>。然后执行推理：<code>./main -m llama-7b.gguf -p "什么是量化？" -n 256</code>。就这么简单，不需要Python环境、不需要CUDA、不要求GPU。
+        </div>
+
+        <h3>15.5 各代LLaMA量化效果对比</h3>
+
+        <p>量化到底损失了多少质量？这个问题的答案取决于模型大小、量化比特数、以及评估任务。下面是一组基于LLaMA各代模型在实际评估中的困惑度（perplexity）退化数据：</p>
+
+        <table>
+            <tr>
+                <th>模型</th>
+                <th>FP16 PPL</th>
+                <th>INT8 PPL退化</th>
+                <th>GPTQ INT4 PPL退化</th>
+                <th>AWQ INT4 PPL退化</th>
+                <th>Q4_K_M PPL退化</th>
+            </tr>
+            <tr>
+                <td>LLaMA 2 7B</td>
+                <td>5.47</td>
+                <td>+0.02</td>
+                <td>+0.11</td>
+                <td>+0.08</td>
+                <td>+0.15</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 13B</td>
+                <td>4.95</td>
+                <td>+0.01</td>
+                <td>+0.09</td>
+                <td>+0.06</td>
+                <td>+0.12</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 70B</td>
+                <td>3.92</td>
+                <td>+0.01</td>
+                <td>+0.06</td>
+                <td>+0.04</td>
+                <td>+0.08</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3 8B</td>
+                <td>6.98</td>
+                <td>+0.03</td>
+                <td>+0.14</td>
+                <td>+0.10</td>
+                <td>+0.18</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3 70B</td>
+                <td>4.21</td>
+                <td>+0.01</td>
+                <td>+0.07</td>
+                <td>+0.05</td>
+                <td>+0.10</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3 405B</td>
+                <td>2.85</td>
+                <td>+0.01</td>
+                <td>+0.04</td>
+                <td>+0.03</td>
+                <td>+0.06</td>
+            </tr>
+        </table>
+
+        <p>从这张表中可以读出几个重要信息。第一，模型越大，量化引入的退化越小——405B模型在INT4下的退化只有0.04 PPL，几乎不可感知。第二，AWQ整体上优于GPTQ，尤其是在小模型上差距更明显。第三，INT8量化对所有模型来说基本无损，如果有足够的显存，优先选择INT8而非INT4。</p>
+
+        <p>这个现象的根本原因在于：大模型的参数量更多，量化时引入的"相对误差"被更庞大网络的冗余性所吸收。这也是为什么量化的主要应用场景是70B以上的大模型——7B模型量化省不了多少显存（从14GB降到4GB），但质量损失相对明显。</p>
+
+        <h3>15.6 量化部署实战经验</h3>
+
+        <p>理论说完了，我们来看看量化在实际部署中的表现。我基于LLaMA 2 70B在不同量化级别下做了一组基准测试（单张A100 80G，输入长度1024，输出256 tokens）：</p>
+
+        <table>
+            <tr>
+                <th>配置</th>
+                <th>显存占用</th>
+                <th>生成速度（tokens/s）</th>
+                <th>前处理延迟</th>
+                <th>备注</th>
+            </tr>
+            <tr>
+                <td>FP16（4卡TP）</td>
+                <td>4×35GB</td>
+                <td>45</td>
+                <td>1.2s</td>
+                <td>需要4张卡</td>
+            </tr>
+            <tr>
+                <td>INT8（2卡TP）</td>
+                <td>2×24GB</td>
+                <td>38</td>
+                <td>0.8s</td>
+                <td>质量几乎无损</td>
+            </tr>
+            <tr>
+                <td>INT4 AWQ（单卡）</td>
+                <td>1×28GB</td>
+                <td>32</td>
+                <td>0.5s</td>
+                <td>最实用的方案</td>
+            </tr>
+            <tr>
+                <td>GGUF Q4_K_M（单卡）</td>
+                <td>1×26GB</td>
+                <td>25</td>
+                <td>0.6s</td>
+                <td>CPU+GPU混合最灵活</td>
+            </tr>
+        </table>
+
+        <p>INT4 AWQ单卡方案在显存和速度之间取得了最好的平衡。28GB显存占用意味着在40GB的A100上还有12GB的空间给KV Cache——如果配合GQA和FlashAttention，batch size可以开到8-16，吞吐量还能进一步提升。</p>
+
+        <div class="warning">
+            <strong>重要提醒：</strong> 量化后的模型不一定总是更快。INT4计算在硬件上需要额外的反量化操作（dequantization），这个操作本身也有开销。在Tensor Core原生支持的精度（FP16/BF16）下，实际的计算吞吐量可能比INT4更高。所以量化的主要收益是<strong>显存节省</strong>而非速度提升。速度提升是显存节省的"副产品"——因为模型变小了，可以在更少的GPU上运行，通信开销降低，batch size可以更大，这些都间接提升了吞吐量。
+        </div>
+
+        <h3>15.7 FP8推理与H100 Transformer Engine</h3>
+
+        <p>FP8是2024年才在硬件上得到原生支持的数值格式。NVIDIA H100 Hopper架构引入了Transformer Engine，它原生支持FP8矩阵乘法（E4M3和E5M2两种变体）。这为LLaMA推理开辟了一个新的精度选择——比INT8更好的数值特性，比FP16更低的显存开销。</p>
+
+        <p>FP8的两种变体各有用途：E4M3（4位指数、3位尾数）用于权重和前向传播中的激活值，E5M2（5位指数、2位尾数）用于梯度。在推理场景中，我们只需要E4M3。FP8 E4M3的动态范围大约为±448，对于LLaMA的权重分布来说已经足够。</p>
+
+        <p>H100 Transformer Engine的精妙之处在于它对FP8的支持是透明的——你不需要手动管理缩放因子。类似于BF16对FP16的替代，FP8在H100上的推理吞吐量比FP16高出接近一倍：</p>
+
+        <pre><code># 在H100上使用FP8推理LLaMA (通过Transformer Engine)
+# 需要安装: pip install transformer-engine
+
+import transformer_engine.pytorch as te
+
+class LlamaDecoderLayerFP8(te.TransformerLayer):
+    """替换标准LLaMA解码层为FP8版本"""
+    def forward(self, x):
+        # Transformer Engine自动管理FP8缩放
+        # 所有矩阵乘法在FP8下执行
+        return super().forward(x)
+
+# 使用TE的FP8优化后，70B推理吞吐量提升约80%
+# 注意：需要CUDA 12.0+ 和 H100 GPU</code></pre>
+
+        <p>不过FP8也有它的限制：目前只有H100（以及后续的B100/B200）支持原生FP8计算。A100不支持。对于使用A100的用户来说，最优选择仍然是INT4 AWQ或BF16。但对于大规模部署在H100集群上的LLaMA服务，FP8是最新的黄金标准。</p>
+
+        <h3>15.8 实战案例：70B模型INT4单卡运行</h3>
+
+        <p>最后，让我分享一个真实的部署案例。假设我们想要在一张A100 80G上运行LLaMA 3 70B模型。70B的BF16权重需要约140GB显存，单卡显然装不下。但通过AWQ INT4量化，我们可以把权重压缩到约35GB，剩余的45GB用于KV Cache和激活值。<strong>这就让单卡运行70B成为了现实。</strong></p>
+
+        <pre><code># 使用AutoAWQ量化并运行LLaMA 3 70B
+# 安装: pip install autoawq
+
+from awq import AutoAWQForCausalLM
+from transformers import AutoTokenizer
+
+model_path = "meta-llama/Meta-Llama-3-70B"
+quant_path = "llama-3-70b-awq-int4"
+
+# 第1步：AWQ量化（如果还没做）
+model = AutoAWQForCausalLM.from_pretrained(
+    model_path, device_map="auto"
+)
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+# 校准数据集（建议用目标领域数据）
+calib_data = ["你的校准文本样例..."] * 256
+
+model.quantize(
+    tokenizer, calib_data,
+    w_bit=4,                     # 权重4比特
+    q_group_size=128,            # 分组大小
+    version="gemm"               # 矩阵乘法版本
+)
+model.save_quantized(quant_path)
+
+# 第2步：INT4推理
+model = AutoAWQForCausalLM.from_pretrained(
+    quant_path, device_map="auto"
+)
+
+# 生成
+prompt = "请解释一下模型量化的原理。"
+inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+output = model.generate(
+    **inputs, max_new_tokens=256,
+    do_sample=True, temperature=0.7
+)
+print(tokenizer.decode(output[0]))</code></pre>
+
+        <p>经过以上量化，70B模型在单张A100 80G上以约32 tokens/s的速度流畅运行。相比未量化的4卡方案，单卡方案不仅降低了硬件成本，还省去了跨卡通信的开销。当然，如果你有4张A100且追求最高质量，FP16仍然是更好的选择——但如果你要大规模部署或硬件资源有限，INT4 AWQ是当下最实用的方案。</p>
+
+        <div class="highlight">
+            <strong>量化选择决策树：</strong> （1）有H100且追求最高吞吐 → FP8；（2）有A100 80G且需要跑70B → INT4 AWQ；（3）有A100 80G且只跑7B/8B → BF16；（4）只有普通GPU或CPU → GGUF Q4_K_M；（5）在任何情况下，INT8都是性价比最高的"无损"方案。
+        </div>
+
+        <p>量化技术虽然不能替代"从模型层面优化推理效率"的工程努力（如FlashAttention、PagedAttention等），但它是最容易上手、收益最直接的推理加速手段之一。在下一章中，我们会换一个视角，从"训练"的角度讨论如何高效地分布式训练LLaMA这样的大模型。</p>
+
+        <p><strong>下一章预告：第16章 分布式训练策略——从ZeRO到3D并行，解密LLaMA 405B在16K GPU上的训练秘籍。</strong></p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

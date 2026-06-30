@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 重排与业务规则</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 推荐系统概览</a></li>
+            <li><a href="02.html">第2章 推荐系统简史</a></li>
+            <li><a href="03.html">第3章 推荐系统的评估体系</a></li>
+            <li><a href="04.html">第4章 协同过滤：推荐的基石</a></li>
+            <li><a href="05.html">第5章 矩阵分解与隐语义模型</a></li>
+            <li><a href="06.html">第6章 特征工程（上）</a></li>
+            <li><a href="07.html">第7章 特征工程（下）</a></li>
+            <li><a href="08.html">第8章 从LR到FM：特征交叉的进化</a></li>
+            <li><a href="09.html">第9章 Wide&Deep与DeepFM</a></li>
+            <li><a href="10.html">第10章 DCN与xDeepFM</a></li>
+            <li><a href="11.html">第11章 DIN：深度兴趣网络</a></li>
+            <li><a href="12.html">第12章 DIEN与序列模型</a></li>
+            <li><a href="13.html">第13章 召回模型（上）：双塔与向量检索</a></li>
+            <li><a href="14.html">第14章 召回模型（下）：多兴趣与图召回</a></li>
+            <li><a href="15.html">第15章 排序模型深入</a></li>
+            <li><a href="16.html">第16章 多任务学习</a></li>
+            <li><a href="17.html" class="active">第17章 重排与业务规则</a></li>
+            <li><a href="18.html">第18章 实时推荐系统</a></li>
+            <li><a href="19.html">第19章 冷启动问题</a></li>
+            <li><a href="20.html">第20章 推荐系统消偏</a></li>
+            <li><a href="21.html">第21章 强化学习在推荐中的应用</a></li>
+            <li><a href="22.html">第22章 多模态与内容理解</a></li>
+            <li><a href="23.html">第23章 推荐系统工具链</a></li>
+            <li><a href="24.html">第24章 大模型驱动的新一代推荐</a></li>
+            <li><a href="25.html">第25章 LLM推荐的工业实践</a></li>
+            <li><a href="26.html">第26章 前沿趋势盘点</a></li>
+            <li><a href="27.html">第27章 推荐系统架构设计</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第17章 重排与业务规则</h1>
+
+        <p>回顾一下我们走过的推荐链路。前几章的排序模型告诉了我们"每个物品的用户点击概率是多少"。有了这个分数，理论上就能给所有物品排个名次了，对吧？如果事情真这么简单，那推荐系统工程师可能是世界上最轻松的工作了。</p>
+
+        <p>但现实是：精排模型输出的排名，直接拿给用户看，效果往往很差。为什么？因为精排模型是<strong>逐物品打分</strong>（Point-wise）的——它独立地评估每个物品与用户的相关性，完全不考虑物品之间的相互关系。这就造成了一个经典的问题：五个完全相似的物品（比如五款不同颜色的同款手机壳）占据了推荐流的前五位。每个单独看，精排模型都觉得"挺好的"，但对用户来说，这简直是灾难。</p>
+
+        <p>重排（Re-Ranking）就是来解决这个问题的。它不是重新训一个模型，而是在精排分数的基础上，从<strong>列表层面</strong>（List-wise）做全局优化——保证多样性、执行业务规则、控制展示节奏。它是推荐链路的最后一道防线，也是直接影响用户体验的环节。</p>
+
+        <div class="highlight">
+            <p><strong>关键洞察：</strong>大部分用户对推荐系统的抱怨——"怎么老是推荐一样的东西"、"我昨天才看过的又推给我"——问题通常不在精排模型，而在重排。精排模型说"这几个都相关"，重排说"但不能全上"。重排出问题，用户骂的是整个推荐系统。</p>
+        </div>
+
+        <h2>2. MMR：在相关性中注入多样性</h2>
+
+        <p>MMR（Maximal Marginal Relevance）是重排领域最经典、最简洁、也最广泛使用的算法之一。最早由Jaime Carbonell和Jade Goldstein在1998年提出，用于信息检索中的多样性优化，后来被推荐系统界"借"了过来，一用就是二十年。</p>
+
+        <p>MMR的核心思想非常直观：每一步选择下一个物品时，既考虑它与用户的相关性，又考虑它与已选物品的差异性。用数学公式来表达：</p>
+
+        <pre><code>MMR = argmax_{i in Candidates} [ λ * Rel(i) - (1-λ) * max_{j in Selected} Sim(i, j) ]
+
+其中：
+- Rel(i): 物品i与用户的相关性分数（精排模型的输出）
+- Sim(i, j): 物品i与已选物品j之间的相似度
+- λ: 平衡参数，λ=1时只有相关性，λ=0时只有多样性</code></pre>
+
+        <p>算法流程是一个简单的贪心过程：</p>
+
+        <pre><code>import numpy as np
+
+def mmr_selection(scores, similarity_matrix, lambda_param=0.5, top_k=10):
+    """
+    MMR贪心选择算法
+
+    Parameters:
+    - scores: list of float, 精排模型输出的相关性分数
+    - similarity_matrix: np.ndarray, 物品间的相似度矩阵 (n x n)
+    - lambda_param: float, 平衡相关性和多样性, [0, 1]
+    - top_k: int, 需要选择的物品数
+
+    Returns:
+    - selected_indices: list of int, 选中的物品索引
+    """
+    n = len(scores)
+    candidates = set(range(n))
+    selected = []
+
+    for _ in range(min(top_k, n)):
+        best_score = -float('inf')
+        best_item = None
+
+        for i in candidates:
+            # 相关性项
+            relevance = scores[i]
+
+            # 多样性惩罚：与已选物品的最大相似度
+            if selected:
+                max_sim = max(similarity_matrix[i][j] for j in selected)
+            else:
+                max_sim = 0
+
+            # MMR分数
+            mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
+
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_item = i
+
+        if best_item is not None:
+            selected.append(best_item)
+            candidates.remove(best_item)
+
+    return selected</code></pre>
+
+        <p>MMR的优势在于它的<strong>可解释性和可控性</strong>。λ参数的意义非常直观——你可以精确地告诉业务方"λ=0.7意味着我们70%看重相关性，30%看重多样性"。当业务方说"最近推荐太重复了"的时候，你只需要把λ调低一点。当他们说"推荐的内容不太相关"的时候，把λ调高一点。一个参数就能平滑地控制相关性和多样性的tradeoff。</p>
+
+        <p>MMR的局限在于：它只考虑了物品间的<strong>两两相似度</strong>，没有考虑更全局的多样性。比如你可能希望推荐列表中每个类别的物品不超过2个——这种约束MMR处理不了，需要更复杂的算法或直接上规则。</p>
+
+        <h2>3. DPP：行列式点过程</h2>
+
+        <p>DPP（Determinantal Point Process）是比MMR更"数学化"的多样性控制方法。它不依赖贪心启发式，而是用一个概率模型来描述"什么样的物品集合是好的"。</p>
+
+        <p>理解DPP的关键在于搞懂它的<strong>核矩阵</strong>（Kernel Matrix）。核矩阵L是一个n×n的半正定矩阵，其中L_ij衡量物品i和物品j的"质量×相似度"。具体来说，通常将L分解为：L_ij = q_i × q_j × S_ij，其中q_i是物品i的质量分数（精排输出），S_ij是物品i和j的相似度。</p>
+
+        <p>那么，DPP给一个物品集合Y（Y是候选集的一个子集）赋予的概率是：</p>
+
+        <pre><code>P(Y) = det(L_Y) / det(L + I)
+
+其中 L_Y 是核矩阵L在Y上的子矩阵
+det(L_Y) 衡量了Y的"体积" = 质量 × 多样性</code></pre>
+
+        <p>为什么det能衡量多样性？几何上，核矩阵的行列式等于各物品向量张成的平行多面体的体积。如果两个物品非常相似，它们的向量几乎平行，体积接近于0——行列式接近于0。如果所有物品都互不相同，向量彼此正交，体积最大——行列式最大。所以，最大化det(L_Y)就是在"质量和多样性"之间找到最优平衡。</p>
+
+        <p>DPP的MAP（Maximum a Posteriori）推理也是一个贪心过程——每次选一个能使det(L_Y)增量最大的物品加入。虽然理论上是NP-hard，但贪心算法在实践中效果很好。</p>
+
+        <p>DPP相比MMR的优势：</p>
+        <ul>
+            <li><strong>全局性</strong>：MMR只考虑"与已选物品的最大相似度"，DPP通过行列式考虑了集合的整体几何结构</li>
+            <li><strong>自然性</strong>：DPP的概率建模让"高质量×高多样性"的集合具有更高的出现概率，感觉上更"自然"</li>
+            <li><strong>可扩展性</strong>：通过核矩阵的低秩近似，DPP可以在大规模候选集上高效计算</li>
+        </ul>
+
+        <p>DPP的缺点是理论门槛略高，对团队成员的数学功底有一定要求。如果团队里大部分人搞不懂行列式的几何意义，出了问题排查起来会比较痛苦。MMR虽然朴素，但大家都能理解。</p>
+
+        <div class="tip">
+            <p><strong>工业小贴士：</strong>MMR和DPP不是非此即彼的选择。在实践中，很多团队的做法是：先用MMR做一轮粗粒度的多样性控制（快速、可解释），再用DPP在候选集上做精细化重排。前者保证"不犯错"，后者追求"更优"。</p>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>MMR</th>
+                    <th>DPP</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>核心原理</strong></td>
+                    <td>贪心最大化相关性与多样性的加权和</td>
+                    <td>用行列式度量集合的"体积"（质量×多样性）</td>
+                </tr>
+                <tr>
+                    <td><strong>计算复杂度</strong></td>
+                    <td>O(kn)，k为选择数，n为候选数</td>
+                    <td>O(kn²)，需要频繁计算行列式</td>
+                </tr>
+                <tr>
+                    <td><strong>控制参数</strong></td>
+                    <td>λ：单一参数控制多样性强度</td>
+                    <td>核矩阵L（含质量q和相似度S），控制更精细</td>
+                </tr>
+                <tr>
+                    <td><strong>多样性范围</strong></td>
+                    <td>局部：只考虑与已选物品的最大相似度</td>
+                    <td>全局：通过行列式考虑整个子集的结构</td>
+                </tr>
+                <tr>
+                    <td><strong>可解释性</strong></td>
+                    <td>高：λ的意义直白，业务方容易理解</td>
+                    <td>低：需要理解行列式的几何含义</td>
+                </tr>
+                <tr>
+                    <td><strong>适用场景</strong></td>
+                    <td>快速上线、业务方参与度高的团队</td>
+                    <td>精细化重排、追求极致体验的成熟团队</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>4. 业务规则引擎</h2>
+
+        <p>除了算法层面的多样性控制，重排阶段还有一个同样重要的任务：执行业务规则。模型追求的是"最优"，但业务需要的是"正确"。重排是模型和业务之间的最后一道"翻译器"。</p>
+
+        <p>常见的业务规则包括：</p>
+
+        <h3>去重</h3>
+        <p>同一个作者的作品不要连续出现，同一个话题的视频不要贴在一起，同一个品牌的商品不要霸屏。去重可以基于元数据（作者ID、品类ID、品牌ID）或者基于embedding相似度。一般来说，基于元数据的去重更可靠，基于embedding的去重更细致。</p>
+
+        <h3>类目多样性硬约束</h3>
+        <p>比如"每10个推荐物品中，最多3个来自同一二级类目"。这不是一个软性的MMR惩罚，而是一个硬性的业务规则——违反就不可接受。典型场景：电商推荐中，不能10个商品全是食品类，虽然你确实对食品感兴趣。</p>
+
+        <h3>冷启动物品扶持</h3>
+        <p>新发布的内容或新上架的商品，缺乏交互数据，精排模型给的分自然会偏低。如果不做任何干预，冷启动物品永远上不了推荐流。业务规则可以对新物品添加一个"新鲜度加成"——比如在精排分数上加一个系数f(new) = 1 / (1 + t / T)，t是新物品的上架时长。</p>
+
+        <h3>广告插入策略</h3>
+        <p>广告是推荐系统的重要收入来源，但插多了影响体验。常见的做法是通过规则控制在第3、7、15等固定位置插入广告位。这些规则通常由产品和商业团队制定，重排模块只需要忠实执行。</p>
+
+        <h3>新鲜度衰减</h3>
+        <p>用户已经看过但不感兴趣的内容（被划走、被跳过），重排阶段应该降低其排名。实现方式是在精排分数上乘以一个衰减因子，衰减幅度由"被忽略次数"决定。</p>
+
+        <div class="warning">
+            <p><strong>真实故事：短时间快手DPP带来的奇迹</strong></p>
+            <p>某短视频平台在改版前，推荐流的重排策略极其简单——精排分数排序 + 简单的同作者去重。用户反馈中"推荐太重复"的投诉占了约30%。推荐团队在两周内上线了基于DPP的重排模块，没有改动任何召回和精排模型，上线一周后：用户平均观看时长提升了8%，"推荐太重复"的投诉下降了60%。团队leader后来总结说："我们当时一直觉得问题在模型精度上，花了很多精力调DeepFM。实际上模型已经够好了，是我们没有把模型的输出转换成好的用户体验。重排才是打通'模型精度→用户体验'的最后一公里。"</p>
+        </div>
+
+        <p>这个案例告诉我们：模型优化和重排优化不是竞争关系，而是互补的。模型负责"猜你喜欢什么"，重排负责"把喜欢的呈现好"。前者解决的是信息精度，后者解决的是体验质量。两者缺一不可。</p>
+
+        <p>但重排也带来了一个副作用——让推荐系统的pipeline变得更长、更复杂。每一层都在修改前一层的排序结果，整个链路的优化和问题排查变得越来越困难。而这引出了更系统性的问题：如何保证从用户行为产生到推荐结果返回，整个链路的延迟可控？如何让推荐系统在用户行为的"下一秒"就做出反应？这就是我们下一章的主题——<strong>实时推荐系统</strong>。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

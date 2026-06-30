@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 多任务学习</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 推荐系统概览</a></li>
+            <li><a href="02.html">第2章 推荐系统简史</a></li>
+            <li><a href="03.html">第3章 推荐系统的评估体系</a></li>
+            <li><a href="04.html">第4章 协同过滤：推荐的基石</a></li>
+            <li><a href="05.html">第5章 矩阵分解与隐语义模型</a></li>
+            <li><a href="06.html">第6章 特征工程（上）</a></li>
+            <li><a href="07.html">第7章 特征工程（下）</a></li>
+            <li><a href="08.html">第8章 从LR到FM：特征交叉的进化</a></li>
+            <li><a href="09.html">第9章 Wide&Deep与DeepFM</a></li>
+            <li><a href="10.html">第10章 DCN与xDeepFM</a></li>
+            <li><a href="11.html">第11章 DIN：深度兴趣网络</a></li>
+            <li><a href="12.html">第12章 DIEN与序列模型</a></li>
+            <li><a href="13.html">第13章 召回模型（上）：双塔与向量检索</a></li>
+            <li><a href="14.html">第14章 召回模型（下）：多兴趣与图召回</a></li>
+            <li><a href="15.html">第15章 排序模型深入</a></li>
+            <li><a href="16.html" class="active">第16章 多任务学习</a></li>
+            <li><a href="17.html">第17章 重排与业务规则</a></li>
+            <li><a href="18.html">第18章 实时推荐系统</a></li>
+            <li><a href="19.html">第19章 冷启动问题</a></li>
+            <li><a href="20.html">第20章 推荐系统消偏</a></li>
+            <li><a href="21.html">第21章 强化学习在推荐中的应用</a></li>
+            <li><a href="22.html">第22章 多模态与内容理解</a></li>
+            <li><a href="23.html">第23章 推荐系统工具链</a></li>
+            <li><a href="24.html">第24章 大模型驱动的新一代推荐</a></li>
+            <li><a href="25.html">第25章 LLM推荐的工业实践</a></li>
+            <li><a href="26.html">第26章 前沿趋势盘点</a></li>
+            <li><a href="27.html">第27章 推荐系统架构设计</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第16章 多任务学习</h1>
+
+        <p>上一章我们深入了排序模型，从粗排到精排，从GBDT到深度学习。但有一个问题我们一直没碰——精排模型通常只预测一个目标，比如CTR。但在真实的产品中，我们需要考虑的事情远不止"用户会不会点"。</p>
+
+        <p>想象你是一个短视频平台的推荐工程师。你的推荐系统需要同时关注：用户会不会点进这个视频（CTR），点进去之后会不会看完（完播率），会不会点赞（点赞率），会不会关注作者（关注率），会不会分享（分享率），会不会下单（CVR）……这些目标有时是互相促进的，有时却是互相冲突的。比如一个"震惊体"标题可能CTR很高，但完播率很低。一个深度科普视频可能完播率很高，但分享率一般。</p>
+
+        <p>那么问题来了：你要为每个目标单独训练一个模型吗？还是用一个模型同时预测所有目标？多任务学习（Multi-Task Learning, MTL）就是为了回答这个问题而生的。</p>
+
+        <h2>1. 为什么需要多任务</h2>
+
+        <p>先说直觉：如果一个模型同时学习CTR和CVR，它应该比两个独立模型学得更好——因为CTR和CVR共享了用户的兴趣表征。点击行为告诉我们用户对什么感兴趣，转化行为告诉我们用户愿意为什么付费。这两种信号来自同一个用户的同一个决策过程，分开学确实浪费了共享信息。</p>
+
+        <p>但更根本的原因，藏在<strong>样本选择偏差</strong>（Sample Selection Bias）里。</p>
+
+        <p>假设你为CVR单独训练一个模型。问题是：转化行为只在"点击了"的样本上发生。没有点击的商品，你不知道用户是否愿意购买。所以传统的CVR模型只能在点击样本上训练——这就产生了严重的偏差。在训练集上，模型看到的是"点击了且转化了"vs"点击了但没转化"，但在推理时，它需要对所有曝光商品预测CVR，包括那些从来没有被点击过的。训练分布和推理分布不一致，这就是sample selection bias。</p>
+
+        <p>更著名的表述是"CTR × CVR"问题：用户从曝光到最终购买，实际上经历了一个漏斗——曝光 → 点击 → 转化。完整的后验概率是 P(转化 | 曝光) = P(点击 | 曝光) × P(转化 | 点击, 曝光)。如果用两个单独训练的模型分别预测CTR和CVR，再乘起来算CTCVR，误差会被放大。</p>
+
+        <p>多任务学习正是解决这类问题的有效框架。接下来我们看几个里程碑式的多任务模型。</p>
+
+        <h2>2. ESMM：全空间多任务建模</h2>
+
+        <p>2018年，阿里巴巴发表了ESMM（Entire Space Multi-Task Model），这是推荐系统多任务学习领域最具影响力的论文之一。ESMM的核心洞察极其优雅：不要在点击样本上训练CVR，而是在全量曝光样本上间接学习CVR。</p>
+
+        <p>怎么做到的？ESMM同时预测三个量：</p>
+
+        <ul>
+            <li><strong>CTR</strong>：P(点击 | 曝光)，用全量曝光样本训练</li>
+            <li><strong>CTCVR</strong>：P(点击且转化 | 曝光)，用全量曝光样本训练</li>
+            <li><strong>CVR</strong>：P(转化 | 点击)，不直接训练，而是通过 CTCVR / CTR 间接得到</li>
+        </ul>
+
+        <p>数学上：CTCVR = CTR × CVR，所以 CVR = CTCVR / CTR。ESMM的架构包含两个并行的tower——CTR tower和CVR tower，共享底层的embedding层。CTR tower预测CTR，CVR tower预测CVR。训练时，两个tower的预测值相乘得到CTCVR，用CTCVR的损失去更新CVR tower的参数。这样一来，CVR tower接收到了来自"全量曝光样本"的梯度信号，而不仅仅是点击样本——全空间训练的目标达成了。</p>
+
+        <p>这个设计的精妙之处在于：CVR tower的输入特征是全量样本，但它的梯度只通过CTCVR损失回传。这相当于CVR tower在"全空间"上做表示学习，但只在"点击空间"上做分类——两个tower共享的embedding在曝光和点击样本上都得到了更新，缓解了样本选择偏差。</p>
+
+        <div class="highlight">
+            <p><strong>关键洞察：</strong>ESMM的贡献不在于模型架构有多复杂，而在于它重新定义了"训练数据应该从哪来"。在ESMM之前，大家都在想"怎么在点击样本上更好地预测CVR"。ESMM说：别在点击样本上做文章了，去全曝光空间看看。这种"换个数据流视角"的思路，比调模型结构带来的收益大得多。</p>
+        </div>
+
+        <h2>3. MMOE：多门控专家混合</h2>
+
+        <p>ESMM解决了"样本选择偏差"的问题，但它采用的还是"共享底层 + 任务特定上层"的硬参数共享架构（Hard Parameter Sharing）。这种架构的局限性在于：当任务之间差异较大时，共享底层的表征可能对两边的任务都不是最优的。</p>
+
+        <p>2018年，Google发表了MMOE（Multi-gate Mixture-of-Experts），提出了一个更灵活的多任务框架。MMOE的核心思想是：不共享一个底层网络，而是共享多个"专家网络"（Experts），然后为每个任务学习一个"门控网络"（Gate），控制每个专家对该任务的贡献权重。</p>
+
+        <p>来看MMOE的门控网络实现：</p>
+
+        <pre><code>import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MMOE(nn.Module):
+    def __init__(self, input_dim, expert_dim, num_experts, num_tasks):
+        super().__init__()
+        self.num_experts = num_experts
+        self.num_tasks = num_tasks
+
+        # 多个共享专家网络
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(input_dim, expert_dim),
+                nn.ReLU(),
+                nn.Dropout(0.1)
+            )
+            for _ in range(num_experts)
+        ])
+
+        # 每个任务有自己的门控网络
+        self.gates = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(input_dim, num_experts),
+                nn.Softmax(dim=-1)
+            )
+            for _ in range(num_tasks)
+        ])
+
+        # 每个任务的输出层
+        self.towers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(expert_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1),
+                nn.Sigmoid()
+            )
+            for _ in range(num_tasks)
+        ])
+
+    def forward(self, x):
+        # 所有专家输出: [batch, num_experts, expert_dim]
+        expert_outputs = torch.stack(
+            [expert(x) for expert in experts], dim=1
+        )
+
+        outputs = []
+        for i in range(self.num_tasks):
+            # 任务i的门控权重: [batch, num_experts]
+            gate_weights = self.gates[i](x).unsqueeze(-1)  # [batch, num_experts, 1]
+            # 加权融合专家输出: [batch, expert_dim]
+            weighted = (gate_weights * expert_outputs).sum(dim=1)
+            # 任务特定输出层
+            out = self.towers[i](weighted)
+            outputs.append(out)
+
+        return outputs</code></pre>
+
+        <p>MMOE的精妙之处在于：不同的任务可以从同一个专家池中选择不同的专家组合。比如CTR任务可能更依赖"短期兴趣专家"，而CVR任务可能更依赖"长期消费能力专家"。门控网络自动学会了这种分工。</p>
+
+        <p>相比硬参数共享，MMOE的优势非常明显：当两个任务的相关性较低时（比如CTR和完播率），硬参数共享会强迫网络找出一个"对两个任务都没那么差"的表征，效果必然打折扣。而MMOE允许两个任务使用不同的专家组合——甚至完全使用不同的专家——从而在同一个模型中实现了"共享一部分，独立一部分"。</p>
+
+        <h2>4. PLE：渐进式分层提取</h2>
+
+        <p>MMOE很强，但它也有自己的问题——最突出的就是<strong>跷跷板现象</strong>（Seesaw Phenomenon）：提升一个任务的指标，往往会导致另一个任务指标下降。这在任务相关性较低时尤其严重。</p>
+
+        <p>2020年，腾讯发表了PLE（Progressive Layered Extraction），尝试从根本上解决跷跷板问题。PLE的核心创新有两层：</p>
+
+        <p><strong>第一层：任务特定专家 + 共享专家</strong>。MMOE中所有专家都是全局共享的，而PLE引入了"任务特定专家"——这些专家只服务于某一个任务，保证每个任务至少有一部分"专属于自己的参数"，不会被其他任务干扰。</p>
+
+        <p><strong>第二层：分层渐进式提取</strong>。PLE不是单层的专家网络，而是多层结构。低层提取低级共享模式，高层提取任务特定模式。每一层都包含共享专家和任务特定专家，层与层之间通过路由机制连接。</p>
+
+        <p>这种设计的直觉是：不同的任务在最底层可能共享很多特征（比如"用户是谁"、"物品是什么"），但越往上走，各任务需要的表征越分化。PLE的分层结构正是为了适配这种"先共享后分化"的需求。</p>
+
+        <p>下表对比了几种多任务架构的关键差异：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>架构</th>
+                    <th>提出时间</th>
+                    <th>任务相关性要求</th>
+                    <th>参数量</th>
+                    <th>跷跷板抵抗</th>
+                    <th>训练复杂度</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Shared Bottom</strong></td>
+                    <td>经典</td>
+                    <td>高（任务需高度相关）</td>
+                    <td>低</td>
+                    <td>差</td>
+                    <td>最低</td>
+                </tr>
+                <tr>
+                    <td><strong>ESMM</strong></td>
+                    <td>2018</td>
+                    <td>高（CTR与CVR天然耦合）</td>
+                    <td>中</td>
+                    <td>中</td>
+                    <td>低</td>
+                </tr>
+                <tr>
+                    <td><strong>MMOE</strong></td>
+                    <td>2018</td>
+                    <td>中（门控机制提供灵活性）</td>
+                    <td>中高</td>
+                    <td>中</td>
+                    <td>中</td>
+                </tr>
+                <tr>
+                    <td><strong>PLE</strong></td>
+                    <td>2020</td>
+                    <td>低（可处理冲突任务）</td>
+                    <td>高</td>
+                    <td>强</td>
+                    <td>高</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <p><strong>工业小贴士：</strong>如果这是你第一次做多任务推荐，不要一上来就上MMOE或PLE。从Shared Bottom + 任务特定head开始——这个简单的基线在大部分场景下已经够用。如果离线评估发现任务之间确实有冲突（优化的A提升B下降），再升级到MMOE。只有在MMOE也扛不住跷跷板问题时，才值得考虑PLE。越过越复杂不是本事，用最合适的复杂度解决问题才是。</p>
+        </div>
+
+        <h2>5. 多目标跷跷板问题</h2>
+
+        <p>聊了这么多模型，我们来面对一个最现实的难题：跷跷板问题是多任务学习中的"房间里的大象"，每个人都知道它存在，但没人能完美解决。</p>
+
+        <div class="warning">
+            <p><strong>真实故事：优化了CTR，CVR掉了</strong></p>
+            <p>某电商团队花了三个月做多任务推荐。第一轮，他们重点优化CTR——各种特征工程、模型调参，CTR涨了15%，团队很开心。一周后发现CVR跌了5%。分析原因：模型学会了推荐"点击率高但转化率低"的内容——比如标题党、低价引流品。第二轮，他们同时优化CTR和CVR，这次两个指标都稳住了，但用户平均停留时长（dwell time）开始下降——模型推荐的内容"点击就能买"，但用户逛的乐趣减少了。第三轮，他们把停留时长也加入多任务训练目标，三个目标互相制约，AUC都不错，但最终GMV（成交总额）反而没涨。花了六个月，兜兜转转回到原点。最后他们做了一件很朴素的事：用业务权重把多个目标线性组合成一个综合打分——CTR权重0.3，CVR权重0.5，停留时长权重0.2，然后让精排模型直接优化这个综合分数。效果竟然比复杂的多任务架构还要好。</p>
+        </div>
+
+        <p>这个故事的启示是什么？多任务学习是一个技术框架，但最终你面对的是<strong>多目标优化</strong>（Multi-Objective Optimization）问题。在工程上，有以下几种实用策略：</p>
+
+        <ul>
+            <li><strong>标量化</strong>（Scalarization）：将多个目标加权求和为一个综合指标，用单任务模型优化。简单粗暴，但在很多场景下足够有效。</li>
+            <li><strong>帕累托优化</strong>（Pareto Optimization）：不追求"所有目标都最好"，而是追求"在不损害任何一个目标的前提下，尽可能提升其他目标"。找到帕累托前沿上的解。</li>
+            <li><strong>约束优化</strong>（Constrained Optimization）：选定一个主要目标（比如GMV），把其他目标设置为约束条件（比如"CTR不低于当前水平的95%"）。把多目标问题转化为带约束的单目标问题。</li>
+            <li><strong>动态权重调整</strong>：让权重随业务目标动态变化。比如促销期间提高CVR权重，平时提高CTR权重。</li>
+        </ul>
+
+        <p>多任务学习技术从ESMM到MMOE再到PLE，解决的核心问题始终是"如何让多个任务在一个模型中和谐共处"。跷跷板现象的本质是任务之间的数据分布差异和信息冲突——没有任何架构能完全消除这种冲突，只能尽量缓解。在实际工程中，懂得在什么时候用多任务、什么时候放弃多任务，比掌握所有模型细节更重要。</p>
+
+        <p>好了，多任务学习就聊到这里。精排模型给出了每个物品的分数，多任务学习确保了分数综合考虑了多个目标。但精排的输出是按"单点"逐物品打分——它没有考虑物品之间的相互影响。五个相似的内容挤在前五名，即使每个单独看都很好，用户体验也是很差的。这就引出了下一阶段的工作：在精排之后，我们需要一个专门负责"列表级优化"的模块——<strong>重排与业务规则</strong>，这就是下一章的内容。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

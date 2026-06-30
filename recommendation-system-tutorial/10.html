@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 DCN与xDeepFM</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 推荐系统概览</a></li>
+            <li><a href="02.html">第2章 推荐系统简史</a></li>
+            <li><a href="03.html">第3章 推荐系统的评估体系</a></li>
+            <li><a href="04.html">第4章 协同过滤：推荐的基石</a></li>
+            <li><a href="05.html">第5章 矩阵分解与隐语义模型</a></li>
+            <li><a href="06.html">第6章 特征工程（上）</a></li>
+            <li><a href="07.html">第7章 特征工程（下）</a></li>
+            <li><a href="08.html">第8章 从LR到FM：特征交叉的进化</a></li>
+            <li><a href="09.html">第9章 Wide&Deep与DeepFM</a></li>
+            <li><a href="10.html" class="active">第10章 DCN与xDeepFM</a></li>
+            <li><a href="11.html">第11章 DIN：深度兴趣网络</a></li>
+            <li><a href="12.html">第12章 DIEN与序列模型</a></li>
+            <li><a href="13.html">第13章 召回模型（上）：双塔与向量检索</a></li>
+            <li><a href="14.html">第14章 召回模型（下）：多兴趣与图召回</a></li>
+            <li><a href="15.html">第15章 排序模型深入</a></li>
+            <li><a href="16.html">第16章 多任务学习</a></li>
+            <li><a href="17.html">第17章 重排与业务规则</a></li>
+            <li><a href="18.html">第18章 实时推荐系统</a></li>
+            <li><a href="19.html">第19章 冷启动问题</a></li>
+            <li><a href="20.html">第20章 推荐系统消偏</a></li>
+            <li><a href="21.html">第21章 强化学习在推荐中的应用</a></li>
+            <li><a href="22.html">第22章 多模态与内容理解</a></li>
+            <li><a href="23.html">第23章 推荐系统工具链</a></li>
+            <li><a href="24.html">第24章 大模型驱动的新一代推荐</a></li>
+            <li><a href="25.html">第25章 LLM推荐的工业实践</a></li>
+            <li><a href="26.html">第26章 前沿趋势盘点</a></li>
+            <li><a href="27.html">第27章 推荐系统架构设计</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第10章 DCN与xDeepFM</h1>
+
+        <p>上一章的DeepFM看起来已经很完美了对吧？FM负责二阶交叉，DNN负责高阶交叉——分工明确，效果出色。但细心的你可能已经发现了一个问题：DNN真的在"负责任"地进行高阶交叉吗？</p>
+
+        <p>答案可能让你失望——DNN的高阶交叉是"隐式的"。我们把特征embedding拼在一起，丢进全连接层，经过几层非线性变换，你根本不知道模型学到了几阶交叉、交叉了哪些特征。就像一个黑盒子，你只知道它输入一堆特征、输出一个分数，但中间发生了什么——不清楚。</p>
+
+        <p>本章的两个主角——DCN（Deep & Cross Network）和xDeepFM——正是为了解决这个问题而生。</p>
+
+        <h2>1. 为什么需要显式特征交叉</h2>
+
+        <p>让我们把问题说得更具体一些。假设我们有三个特征：用户性别、物品类别、当前时间段。DeepFM中的DNN可能会学到"男性 × 电子产品 × 晚上"这个三阶交叉模式，但这个模式是隐含在DNN的参数空间里的，我们无法知道它具体学到了哪些交叉。</p>
+
+        <p>为什么这是个问题？有三个原因：</p>
+
+        <ul>
+            <li><strong>不可控</strong>：你不知道模型在交叉什么特征，也就无法针对性地优化。如果某个业务上重要的交叉没有被模型捕获，你只能"加大DNN层数"来赌一把。</li>
+            <li><strong>浪费参数</strong>：DNN在做交叉时，所有特征都参与了所有层级的计算——即使某些特征之间完全没有交互的必要。这浪费了大量的参数在无意义的计算上。</li>
+            <li><strong>难以解释</strong>：当模型推荐出了问题（比如推荐了完全不相关的内容），你很难追溯到"是哪个特征交叉导致的"。</li>
+        </ul>
+
+        <p>所以，学术界和工业界开始思考：能不能设计一种结构，让模型显式地、可控制地进行有限阶的特征交叉？</p>
+
+        <div class="highlight">
+            <p><strong>核心洞察：</strong>DeepFM中的FM只能做到二阶交叉，DNN虽然理论上可以做到任意阶交叉，但它是隐式的、不可控的。我们需要一个中间地带——一种能够显式地进行有限阶（比如三阶、四阶）特征交叉的模块。</p>
+        </div>
+
+        <h2>2. DCN-V1/V2：交叉网络的演进</h2>
+
+        <p>2017年，Google在Wide&Deep论文之后不久，又提出了<strong>Deep & Cross Network（DCN）</strong>。DCN的核心是一个<strong>Cross Network</strong>——一种专门用于显式特征交叉的网络结构。</p>
+
+        <p>Cross Network的每一层是这样计算的：</p>
+
+        <pre><code>x_{l+1} = x_0 * (w^T x_l) + b + x_l</code></pre>
+
+        <p>我们来拆解这个公式。x_0 是输入的embedding向量，x_l 是第 l 层的输出。每一层做的事情是：</p>
+
+        <ul>
+            <li>用 x_l 和一个可学习的权重向量 w 做内积，得到一个标量</li>
+            <li>将这个标量与 x_0 相乘（广播乘法），得到"x_0 的某个方向的伸缩"</li>
+            <li>加上偏置 b 和残差连接 x_l</li>
+        </ul>
+
+        <p>这个结构的精妙之处在于每一层增加了一阶交叉的"度数"。第1层输出包含了 x_0 的一阶和二阶交叉（因为 x_0 * (w^T x_0) 涉及了二阶）。第2层在此基础上增加三阶，以此类推。所以一个有 L 层的Cross Network，最多可以捕获 L+1 阶的特征交叉。</p>
+
+        <p>来看一个简化的实现：</p>
+
+        <pre><code>import torch
+import torch.nn as nn
+
+class CrossLayer(nn.Module):
+    """单个Cross Network层"""
+    def __init__(self, dim):
+        super().__init__()
+        self.w = nn.Parameter(torch.randn(dim))
+        self.b = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x_0, x_l):
+        # x_{l+1} = x_0 * (w^T x_l) + b + x_l
+        cross = (self.w @ x_l) * x_0 + self.b + x_l
+        return cross
+
+class CrossNetwork(nn.Module):
+    """多层Cross Network"""
+    def __init__(self, dim, num_layers=3):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            CrossLayer(dim) for _ in range(num_layers)
+        ])
+
+    def forward(self, x_0):
+        x_l = x_0
+        for layer in self.layers:
+            x_l = layer(x_0, x_l)
+        return x_l</code></pre>
+
+        <p>DCN在2017年刚提出时使用的是一维向量 w（即每层只有一个标量做交叉）。这个版本后来被称为<strong>DCN-V1</strong>。2020年，Google发布了<strong>DCN-V2</strong>，核心改进是将 w 从向量升级为矩阵 W。</p>
+
+        <p>V2的公式变成了：</p>
+
+        <pre><code>x_{l+1} = x_0 * (W x_l) + b + x_l</code></pre>
+
+        <p>这个变化带来的影响是巨大的——V1的每层只有 O(d) 个参数（d 是embedding维度），而V2的每层有 O(d²) 个参数。参数量大了 d 倍，但表达能力也相应提升了。DCN-V2还引入了一个"低秩近似"的trick：将 W 分解为两个低秩矩阵的乘积，在保持大部分表达能力的同时控制参数量。</p>
+
+        <div class="tip">
+            <p><strong>工业小贴士：</strong>DCN-V2的参数量巨大，直接使用可能对训练和推理造成压力。Google论文中的实验表明，使用 rank=16 或 rank=32 的低秩近似，可以在保留95%以上效果的同时，将参数量降低一个数量级。部署时建议从低秩版本开始，如果有余力再尝试完整版本。</p>
+        </div>
+
+        <h2>3. xDeepFM的CIN网络</h2>
+
+        <p>2018年，中科大和微软联合提出了<strong>xDeepFM</strong>（论文全称：xDeepFM: Combining Explicit and Implicit Feature Interactions for Recommender Systems）。xDeepFM引入了一个全新的结构——<strong>Compressed Interaction Network（CIN）</strong>。</p>
+
+        <p>CIN的设计思路和Cross Network完全不同。Cross Network是在"向量级别"做交叉——两个向量相乘得到一个标量。而CIN是在"元素级别"做交叉——embedding向量的每个维度分别进行交互，保留了更细粒度的信息。</p>
+
+        <p>CIN的核心操作可以理解为：</p>
+
+        <ul>
+            <li>输入是多组embedding（每个field对应一个embedding向量）</li>
+            <li>每层通过"外积 + 卷积"的方式生成新的一组embedding</li>
+            <li>每层生成的embedding经过sum pooling后拼接到输出中</li>
+        </ul>
+
+        <p>更直观地说，CIN在做的是一种"特征维度的交互图"：第1层产生所有二阶的维度级交叉，第2层产生三阶的，以此类推。每一层的输出都直接拼入最终的特征向量，让后面的DNN和输出层可以访问所有阶的交叉信息。</p>
+
+        <p>xDeepFM的完整架构是：<strong>Embedding → [CIN + DNN] → 合并 → 输出</strong>。CIN提供显式的有限阶交叉，DNN提供隐式的高阶交叉，两者互补。</p>
+
+        <div class="warning">
+            <p><strong>踩坑提醒：</strong>CIN的计算复杂度较高——每层的复杂度是 O(m²·d·H)（m是field数，d是embedding维度，H是隐藏单元数）。在field数量很大（>200）的场景下，CIN的训练速度会明显慢于DCN和DeepFM。我见过一个团队在300+field的数据上使用xDeepFM，训练时间比DeepFM多了5倍，而AUC提升只有0.1%。这种情况下，xDeepFM的投入产出比并不划算。</p>
+        </div>
+
+        <h2>4. 模型选型实战指南</h2>
+
+        <p>面对这么多模型——DeepFM、DCN-V2、xDeepFM、AutoInt等等——工程师和团队该如何选择？下面的表格可以帮助你做决策：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>模型</th>
+                    <th>交叉方式</th>
+                    <th>最高交叉阶数</th>
+                    <th>参数效率</th>
+                    <th>训练速度</th>
+                    <th>部署复杂度</th>
+                    <th>最佳适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>DeepFM</strong></td>
+                    <td>FM（二阶）+ DNN（隐式高阶）</td>
+                    <td>二阶显式, 任意阶隐式</td>
+                    <td>★★★★★</td>
+                    <td>★★★★★</td>
+                    <td>低</td>
+                    <td>通用基线, 大多数场景首选</td>
+                </tr>
+                <tr>
+                    <td><strong>DCN-V1</strong></td>
+                    <td>CrossNetwork (向量级)</td>
+                    <td>L+1阶显式</td>
+                    <td>★★★★</td>
+                    <td>★★★★★</td>
+                    <td>低</td>
+                    <td>需要可控高阶交叉</td>
+                </tr>
+                <tr>
+                    <td><strong>DCN-V2</strong></td>
+                    <td>CrossNetwork (矩阵级)</td>
+                    <td>L+1阶显式</td>
+                    <td>★★（完整版）<br>★★★★（低秩版）</td>
+                    <td>★★★</td>
+                    <td>中</td>
+                    <td>数据量大、重视高阶交叉</td>
+                </tr>
+                <tr>
+                    <td><strong>xDeepFM</strong></td>
+                    <td>CIN（元素级显式）</td>
+                    <td>L+1阶显式</td>
+                    <td>★★</td>
+                    <td>★★</td>
+                    <td>高</td>
+                    <td>field数少、追求极致精度</td>
+                </tr>
+                <tr>
+                    <td><strong>AutoInt</strong></td>
+                    <td>Multi-head Self-Attention</td>
+                    <td>任意阶</td>
+                    <td>★★★</td>
+                    <td>★★★</td>
+                    <td>中</td>
+                    <td>序列特征丰富、需要可解释性</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <p><strong>实际建议：</strong>对大多数团队来说，DeepFM或DCN-V2（低秩版）是最保险的选择。xDeepFM的CIN虽然理论上更强大，但在实际工业场景中，它带来的边际收益通常不足以覆盖增加的计算和工程复杂度。我的原则是——如果你的DeepFM baseline经过充分调参后，AUC已经达到0.78，而工程师花两周时间上线xDeepFM可能只能提到0.785，那这两周时间不如花在特征工程或数据质量上。</p>
+        </div>
+
+        <p>回顾一下，我们从Wide&Deep走到了DeepFM，再到DCN和xDeepFM。你会发现一个清晰的趋势：模型越来越关注"如何让特征交叉变得更可控、更显式"。但到目前为止，我们讨论的所有模型都忽略了一个重要的问题——用户的兴趣是动态变化的。你的模型把用户今天的行为和上周的行为一视同仁地混合在一起，但显然，昨天点击的内容比一个月前点击的内容更能反映当前的兴趣。</p>
+
+        <p>下一章，我们将进入深度兴趣网络（DIN）的世界——它用注意力机制来解决"用户的静态embedding无法刻画动态兴趣"这个核心问题。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

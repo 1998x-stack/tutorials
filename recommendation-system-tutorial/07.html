@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 特征工程（下）</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 推荐系统概览</a></li>
+            <li><a href="02.html">第2章 推荐系统简史</a></li>
+            <li><a href="03.html">第3章 推荐系统的评估体系</a></li>
+            <li><a href="04.html">第4章 协同过滤：推荐的基石</a></li>
+            <li><a href="05.html">第5章 矩阵分解与隐语义模型</a></li>
+            <li><a href="06.html">第6章 特征工程（上）</a></li>
+            <li><a href="07.html" class="active">第7章 特征工程（下）</a></li>
+            <li><a href="08.html">第8章 从LR到FM：特征交叉的进化</a></li>
+            <li><a href="09.html">第9章 Wide&Deep与DeepFM</a></li>
+            <li><a href="10.html">第10章 DCN与xDeepFM</a></li>
+            <li><a href="11.html">第11章 DIN：深度兴趣网络</a></li>
+            <li><a href="12.html">第12章 DIEN与序列模型</a></li>
+            <li><a href="13.html">第13章 召回模型（上）：双塔与向量检索</a></li>
+            <li><a href="14.html">第14章 召回模型（下）：多兴趣与图召回</a></li>
+            <li><a href="15.html">第15章 排序模型深入</a></li>
+            <li><a href="16.html">第16章 多任务学习</a></li>
+            <li><a href="17.html">第17章 重排与业务规则</a></li>
+            <li><a href="18.html">第18章 实时推荐系统</a></li>
+            <li><a href="19.html">第19章 冷启动问题</a></li>
+            <li><a href="20.html">第20章 推荐系统消偏</a></li>
+            <li><a href="21.html">第21章 强化学习在推荐中的应用</a></li>
+            <li><a href="22.html">第22章 多模态与内容理解</a></li>
+            <li><a href="23.html">第23章 推荐系统工具链</a></li>
+            <li><a href="24.html">第24章 大模型驱动的新一代推荐</a></li>
+            <li><a href="25.html">第25章 LLM推荐的工业实践</a></li>
+            <li><a href="26.html">第26章 前沿趋势盘点</a></li>
+            <li><a href="27.html">第27章 推荐系统架构设计</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第7章 特征工程（下）</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们聊了离线统计特征——用户画像、物品属性、聚合统计、特征交叉。那个世界是"静止"的：我们有一批日志数据，特征一天算一次，灌进模型训练。但推荐系统的真实运行环境是<strong>动态的</strong>——用户的兴趣每分钟都在变化，爆款内容在几分钟内就能传遍全站。能不能捕捉这些"实时信号"，往往决定了推荐系统效果的上限。</p>
+
+        <p>这一章，我们聚焦实时特征、Embedding特征以及Feature Store的工程实践。这些内容更偏向"工程"而非"算法"，但它们是让特征真正发挥作用的关键。</p>
+
+        <h2>1. 实时特征：数据流动起来</h2>
+
+        <h3>1.1 为什么要做实时特征？</h3>
+
+        <p>离线特征（T+1计算）的问题是：模型看到的是"昨天的用户"。如果用户昨天晚上看了一大堆编程教程，今天早上打开App，离线特征里还没有"最近编程兴趣"的信号——模型只能沿用昨天的老画像，推荐结果仍然是游戏、娱乐类内容。</p>
+
+        <p>实时特征解决的就是这个"信息滞后"问题。用户的每一次点击、每一次滑动，都应该在<strong>秒级甚至毫秒级</strong>内反映到下一次推荐请求的特征中。</p>
+
+        <h3>1.2 实时特征的类型</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>实时特征类型</th>
+                    <th>计算方式</th>
+                    <th>例子</th>
+                    <th>更新粒度</th>
+                    <th>技术依赖</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>滑动窗口计数</strong></td>
+                    <td>固定时间窗口内的行为累加</td>
+                    <td>过去5分钟点击次数、过去1小时浏览深度</td>
+                    <td>秒级~分钟级</td>
+                    <td>Flink窗口聚合 + Redis</td>
+                </tr>
+                <tr>
+                    <td><strong>行为衰减分数</strong></td>
+                    <td>时间加权的指数衰减聚合</td>
+                    <td>score = Σ weight × exp(-λ × Δt)</td>
+                    <td>事件驱动</td>
+                    <td>Flink + Redis（带TTL）</td>
+                </tr>
+                <tr>
+                    <td><strong>Session级特征</strong></td>
+                    <td>单次会话内的行为序列建模</td>
+                    <td>当前类目偏好、浏览深度、是否"决策模式"</td>
+                    <td>请求级</td>
+                    <td>内存缓存（Session Store）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <p><strong>真实故事："过去5分钟CTR"的威力</strong></p>
+            <p>某内容平台团队发现了一个有趣的现象：很多用户会在短时间内密集地浏览同一类内容（比如连续刷5个美食视频），然后突然切换到另一类内容。当切换发生时，用户的兴趣其实已经变了，但离线特征中的"7天类目偏好"还停留在美食上。团队决定加一个实时特征——"过去5分钟内用户对每个类目的CTR"，用Flink实时计算。这个特征上线后，在线CTR直接提升了3%。原因很简单：<strong>特征新鲜度（Feature Freshness）</strong>决定了模型能不能"跟上用户的兴趣变化"。一个计算在5分钟前的特征和一个计算在1秒前的特征，对推荐质量的影响可能是天壤之别。</p>
+        </div>
+
+        <h3>1.3 实时特征的技术栈</h3>
+
+        <p>实现实时特征需要一套完整的流式计算基础设施：</p>
+
+        <ul>
+            <li><strong>消息队列</strong>：Kafka作为用户行为事件的实时管道</li>
+            <li><strong>流式计算引擎</strong>：Flink或Spark Streaming做窗口聚合，计算滑动窗口统计量</li>
+            <li><strong>在线存储</strong>：Redis作为特征缓存，提供亚毫秒级的特征查询</li>
+        </ul>
+
+        <p>一个典型的实时特征处理流程：</p>
+
+        <pre><code>用户点击行为 → App SDK上报 → Kafka Topic
+    ↓
+Flink作业：按用户ID分桶(keyBy userId)
+    ↓ 开5分钟滚动窗口
+计算每个用户的各类目点击次数
+    ↓
+写入Redis（key: "feature:user:{userId}:ctr_5min", TTL: 10分钟）
+    ↓
+推荐服务在请求时从Redis读取最新特征，
+和离线特征拼接到一起，输入模型</code></pre>
+
+        <h2>2. Embedding作为特征</h2>
+
+        <h3>2.1 从其他任务借信号</h3>
+
+        <p>上一章我们讨论了用户和物品的显式特征（年龄、类目、价格等）。但这些特征的信息量有限——一个"价格=99元"的特征，远不如一个"这个商品在隐空间中的向量表示"包含的信息丰富。</p>
+
+        <p>Embedding是"我们不知道具体是什么、但模型就是能从中提取模式"的一种特征形式。常见的Embedding特征来源包括：</p>
+
+        <ul>
+            <li><strong>Word2Vec/Item2Vec</strong>：从用户行为序列中学习的物品Embedding。把用户的浏览序列当作"句子"，物品当作"词"，这样"经常一起出现的物品"就会有相似的Embedding。</li>
+            <li><strong>Graph Embedding（如Node2Vec、DeepWalk）</strong>：在用户-物品交互图上做随机游走，学习节点（用户和物品）的向量表示。Graph Embedding能捕获比"共现"更高阶的关系。</li>
+            <li><strong>预训练模型输出的Embedding</strong>：用BERT等模型对物品标题/描述做语义编码，得到物品的语义Embedding。这在内容类推荐（新闻、短视频）中特别有效。</li>
+            <li><strong>来自其他任务的Embedding</strong>：如果平台同时做搜索和广告，搜索query的Embedding、广告主画像的Embedding都可以迁移到推荐模型中。这种"跨任务迁移"在工业系统中非常常见。</li>
+        </ul>
+
+        <h3>2.2 如何在模型中使用Embedding特征</h3>
+
+        <p>Embedding特征作为"稠密数值特征"输入下游模型。最简单的做法是将物品的预训练Embedding（比如128维向量）作为Deep部分的输入特征，和用户侧的Embedding做concat或element-wise product。</p>
+
+        <p>需要注意的是：如果预训练Embedding是用不同数据分布训练得出的（比如用搜索数据训练的Embedding用于推荐），需要做一个<strong>适配层（Adaptation Layer）</strong>——通常是几层全连接网络，把预训练Embedding映射到适合推荐任务的表示空间。否则，直接从搜索域迁移的向量可能在推荐域没啥效果。</p>
+
+        <h2>3. Feature Store设计与选型</h2>
+
+        <p>当一个团队的特征数量从几十个增长到几百甚至上千个时，一个至关重要的问题出现了——<strong>谁来管理这些特征？</strong></p>
+
+        <h3>3.1 没有Feature Store的混乱局面</h3>
+
+        <p>没有Feature Store时，特征的管理通常是这样的：</p>
+
+        <ul>
+            <li>算法工程师A写了一段Hive SQL，计算了"用户过去7天点击TOP类目"这个特征，存在了Hive表user_features_a中</li>
+            <li>算法工程师B不知道A已经算过了，自己又写了一份几乎一样的SQL，存在了user_features_b中</li>
+            <li>线上推理时，两个特征的拼接逻辑写死在代码里，没人记得哪个特征在哪个表里</li>
+            <li>某天上游的原始数据表结构变了，十几个特征全部异常，排查花了一整周</li>
+        </ul>
+
+        <p>Feature Store就是为了解决这类问题而生的中央化特征管理系统。</p>
+
+        <h3>3.2 Feature Store的核心功能</h3>
+
+        <ul>
+            <li><strong>特征注册</strong>：每个特征在Feature Store中注册一次，有唯一的名称、描述、数据源、更新频率</li>
+            <li><strong>离线/在线双通道</strong>：离线训练时从Hive/MaxCompute读取特征；在线推理时从Redis读取同名的特征。保证离线特征和在线特征的计算逻辑完全一致</li>
+            <li><strong>特征回溯（Time Travel）</strong>：支持按"训练样本的时间戳"回溯特征的取值——如果用今天的特征去预测昨天的样本，就产生了数据泄露</li>
+            <li><strong>特征共享与复用</strong>：不同模型、不同团队可以方便地发现和使用已有的特征</li>
+        </ul>
+
+        <h3>3.3 常见的Feature Store方案</h3>
+
+        <ul>
+            <li><strong>Feast</strong>：开源的Feature Store，支持从离线存储到在线缓存的同步，支持时间点正确性（Point-in-Time Correctness）</li>
+            <li><strong>Feathr</strong>：LinkedIn开源的Feature Store，与Spark深度集成，适合大规模场景</li>
+            <li><strong>自建系统</strong>：大厂通常自建Feature Store（阿里有Flink+FTR生态，字节有ByteFeature），绑定制定的特征生成框架（FG）</li>
+        </ul>
+
+        <h3>3.4 特征生成器（FG）模式</h3>
+
+        <p>FG（Feature Generator）是推荐系统中一个非常重要的工程模式。它的核心思想是：写一次特征定义，自动生成离线训练代码和在线推理代码。如下图所示：</p>
+
+        <pre><code># FG伪代码示例 —— 定义"用户过去7天类目CTR"特征
+@feature(
+    name="user_category_ctr_7d",
+    description="用户过去7天对每个一级类目的CTR",
+    source="user_behavior_logs",
+    update_freq="daily",
+    ttl=86400 * 2  # Redis cache TTL = 2天
+)
+def user_category_ctr_7d(user_id, category_id):
+    # 离线部分（自动翻译成Spark SQL或Hive SQL）
+    clicks = count_click(user_id, category_id, window="7d")
+    impressions = count_impression(user_id, category_id, window="7d")
+    return smooth_ctr(clicks, impressions)
+
+# 在线部分（自动翻译成Redis key-value lookup）
+# Redis key: "feature:user:{user_id}:cat:{category_id}:ctr_7d"
+# 在线推理服务在请求时自动拼接所有必要的FG特征</code></pre>
+
+        <p>FG模式的价值在于：<strong>离线计算和在线计算的逻辑由同一份代码定义，不会出现"离线代码和在线代码不一致"的问题</strong>。这是离线/在线一致性问题的根本解决方案之一。</p>
+
+        <h2>4. 离线/在线一致性</h2>
+
+        <p>我们之前提到过"离线AUC涨了但在线CTR跌了"的问题。特征层面的离线/在线不一致，是造成这个问题的第一大原因。</p>
+
+        <h3>4.1 常见的不一致场景</h3>
+
+        <ul>
+            <li><strong>数据源不一致</strong>：离线训练用的行为日志经过了ETL清洗，但在线服务直接用的原始数据——两边的分布已经不同了</li>
+            <li><strong>计算逻辑不一致</strong>：离线代码中"过去7天CTR"用Python的pandas写的，在线服务中用Java实现——两边对"7天"的定义可能不同（是按自然日还是按过去168小时），对"CT率"的计算也可能有细微差异</li>
+            <li><strong>时间戳处理不一致</strong>：离线训练时可以准确知道"样本的时间"（比如点击发生在2026-06-15 10:30:00），但在线服务获取特征的时间是"当前时间"——如果特征还没更新到最新，在线特征就会"落后于"离线训练时的特征</li>
+        </ul>
+
+        <div class="warning">
+            <p><strong>最危险的问题：时间旅行（Time Travel / Data Leakage）</strong></p>
+            <p>时间旅行是指——在生成训练样本时，不小心用到了样本对应时间点"之后"的信息。比如：你预测用户是否会在"2026年6月15日上午10点"点击一个商品，但在特征中错误地包含了"2026年6月16日"的统计信息。离线训练时，模型利用"未来信息"来做预测，AUC当然很高——但这种能力在线上是完全不可复现的！</p>
+            <p>最常见的场景：离线拼接特征时，没有按"行为时间 < 样本时间"做严格过滤，导致"过去30天CTR"这个特征中包含了样本时间点之后的行为数据。我发现过一个团队：离线AUC做到0.88，非常漂亮，上线CTR却下降了。排查了三天，最后发现是一个JOIN条件写错了，把未来30天的数据也算进去了。修正之后AUC降到0.73，但这次是真的变好了——因为模型终于学会了"用过去预测未来"的真实能力，而不是"用未来预测现在"的幻觉。</p>
+            <p><strong>预防措施：</strong></p>
+            <ul>
+                <li>在拼接训练样本时，始终以"样本的时间戳"做过滤条件</li>
+                <li>对每个时间相关的特征，明确标注它是"统计到什么时候"的</li>
+                <li>使用Feature Store的时间点正确性（Point-in-Time Correctness）机制</li>
+                <li>在新特征上线前，做一个"时间验证集"测试：用第T天的样本，特征只用第T天之前的数据</li>
+            </ul>
+        </div>
+
+        <h3>4.2 FG框架作为防护网</h3>
+
+        <p>我们前面提到的FG（Feature Generator）模式，除了提高工程效率外，也是防止离线/在线不一致最有效的工具。原因很简单：FG框架强制你"一次定义，两处使用"——离线生成训练数据时，调用FG的离线模式（SQL/Hive）；在线推理时，调用FG的在线模式（Redis lookup / KV query）。同一份代码，两种执行环境，计算逻辑天然一致。</p>
+
+        <h3>4.3 一致性验证的最佳实践</h3>
+
+        <p>即使有FG框架，完全信任代码也是不够的。上线前需要做严格的一致性验证：</p>
+
+        <ul>
+            <li><strong>抽样比对</strong>：对同一批样本，分别用离线代码和在线代码计算特征值，逐字段比对，要求误差在可接受范围内</li>
+            <li><strong>上线前灰度</strong>：先让新特征在1%的流量上运行，对比离线AUC和在线AUC的一致性</li>
+            <li><strong>特征值监控</strong>：对每个在线特征监控其均值、标准差、缺失率等分布指标，发现异常及时告警</li>
+        </ul>
+
+        <pre><code># 离线/在线一致性验证伪代码
+def validate_feature_consistency(sample_ids, feature_names,
+                                  offline_feature_store, online_feature_store):
+    """
+    验证离线特征和在线特征的一致性
+    """
+    mismatches = []
+    for sid in sample_ids:
+        for fname in feature_names:
+            off_val = offline_feature_store.get(sid, fname)
+            on_val = online_feature_store.get(sid, fname)
+            if abs(off_val - on_val) > 1e-6:
+                mismatches.append((sid, fname, off_val, on_val))
+
+    mismatch_rate = len(mismatches) / (len(sample_ids) * len(feature_names))
+    print(f"不一致率: {mismatch_rate:.6f}")
+
+    if mismatch_rate > 0.001:  # 容忍0.1%的误差
+        print("WARNING: 离线/在线一致性检查未通过，请排查差异原因！")
+        for m in mismatches[:10]:
+            print(f"  sample={m[0]}, feature={m[1]}, off={m[2]:.4f}, on={m[3]:.4f}")
+    else:
+        print("一致性检查通过 ✓")
+</code></pre>
+
+        <p>好了，特征工程（下）的内容到这里就结束了。我们聊了实时特征让推荐系统"跟得上用户的变化"，Embedding特征让模型能"借用其他任务的知识"，Feature Store让特征管理"不再是一片混乱"，以及最重要的——如何保证离线/在线一致性，避免"时间旅行"这个行业内最常见的坑。</p>
+
+        <p>从第1章到第7章，我们完成了推荐系统课程的"基础部分"——知道了推荐系统是什么、它的历史和评估方法、协同过滤和矩阵分解两大经典算法、以及特征工程这个"苦活累活"。从下一章开始，我们进入"深度学习推荐模型"的核心部分。下一章要讲的是——<strong>从LR到FM：特征交叉的进化</strong>。你会发现，前面讲的特征工程中"人工交叉"的痛点，正好是FM要解决的核心问题。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

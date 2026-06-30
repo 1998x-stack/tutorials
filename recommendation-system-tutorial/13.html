@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 召回模型（上）：双塔与向量检索</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 推荐系统概览</a></li>
+            <li><a href="02.html">第2章 推荐系统简史</a></li>
+            <li><a href="03.html">第3章 推荐系统的评估体系</a></li>
+            <li><a href="04.html">第4章 协同过滤：推荐的基石</a></li>
+            <li><a href="05.html">第5章 矩阵分解与隐语义模型</a></li>
+            <li><a href="06.html">第6章 特征工程（上）</a></li>
+            <li><a href="07.html">第7章 特征工程（下）</a></li>
+            <li><a href="08.html">第8章 从LR到FM：特征交叉的进化</a></li>
+            <li><a href="09.html">第9章 Wide&Deep与DeepFM</a></li>
+            <li><a href="10.html">第10章 DCN与xDeepFM</a></li>
+            <li><a href="11.html">第11章 DIN：深度兴趣网络</a></li>
+            <li><a href="12.html">第12章 DIEN与序列模型</a></li>
+            <li><a href="13.html" class="active">第13章 召回模型（上）：双塔与向量检索</a></li>
+            <li><a href="14.html">第14章 召回模型（下）：多兴趣与图召回</a></li>
+            <li><a href="15.html">第15章 排序模型深入</a></li>
+            <li><a href="16.html">第16章 多任务学习</a></li>
+            <li><a href="17.html">第17章 重排与业务规则</a></li>
+            <li><a href="18.html">第18章 实时推荐系统</a></li>
+            <li><a href="19.html">第19章 冷启动问题</a></li>
+            <li><a href="20.html">第20章 推荐系统消偏</a></li>
+            <li><a href="21.html">第21章 强化学习在推荐中的应用</a></li>
+            <li><a href="22.html">第22章 多模态与内容理解</a></li>
+            <li><a href="23.html">第23章 推荐系统工具链</a></li>
+            <li><a href="24.html">第24章 大模型驱动的新一代推荐</a></li>
+            <li><a href="25.html">第25章 LLM推荐的工业实践</a></li>
+            <li><a href="26.html">第26章 前沿趋势盘点</a></li>
+            <li><a href="27.html">第27章 推荐系统架构设计</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第13章 召回模型（上）：双塔与向量检索</h1>
+
+        <p>从第8章到第12章，我们用了整整五章的篇幅深入讨论了排序模型——从FM到DeepFM，从DCN到DIN再到DIEN。你可能已经形成了一个印象：推荐系统就是训练一个模型，给每个候选物品打分，然后按分数排序展示。</p>
+
+        <p>但让我们做一道简单的算术题：</p>
+
+        <p>假设一个电商平台有1亿个商品。DeepFM给每个商品的推理时间是5ms。如果在线服务要对这1亿个商品逐一打分，总耗时是——1亿 × 5ms = 500,000秒，大约5.8天。这个推荐可能到下周才能看到结果。</p>
+
+        <p>显然，我们不可能对所有物品做精排。在精排之前，需要有一个阶段从海量候选中快速筛选出"可能感兴趣"的千级候选集。这就是<strong>召回（Recall）</strong>阶段的工作。</p>
+
+        <h2>1. 召回的本质与挑战</h2>
+
+        <p>召回的任务非常明确：在严格的延迟预算内，从百万/亿级物品中找到用户可能感兴趣的千级候选。它的核心矛盾是<strong>覆盖率 vs 精确率</strong>。</p>
+
+        <p>召回阶段的关键约束：</p>
+
+        <ul>
+            <li><strong>延迟</strong>：整个召回阶段通常需要控制在 50ms 以内（包含多路并行的召回通道）</li>
+            <li><strong>吞吐</strong>：需要支撑每秒数千到数万次请求</li>
+            <li><strong>覆盖</strong>：如果某个物品在召回阶段被漏掉了，后面的精排阶段再强也找不回来</li>
+        </ul>
+
+        <p>工业推荐系统从来不会只依赖一路召回。常见的做法是<strong>多路召回</strong>——5到10条不同策略的召回通道并行执行，结果汇总去重后送给下游粗排/精排。每路召回有各自的特点和覆盖范围。</p>
+
+        <div class="highlight">
+            <p><strong>核心原则：</strong>召回阶段的目标不是"找到最好的结果"，而是"不要漏掉任何可能的好结果"。精排阶段的目标是在召回结果的基础上"选出最好的结果"。这两个阶段的职责完全不同，优化目标也完全不同。</p>
+        </div>
+
+        <h2>2. 双塔模型：分离用户与物品</h2>
+
+        <p>在所有召回模型中，<strong>双塔模型（Two-Tower Model）</strong>是最主流、最实用的方案。它的设计哲学极其简单且优雅：用两个独立的神经网络分别将用户侧特征和物品侧特征映射到同一个向量空间中，然后用向量内积（dot product）作为匹配得分。</p>
+
+        <p>双塔模型的优势在于它的推理效率：物品塔生成的embedding可以<strong>离线预计算</strong>并存入向量索引库，用户塔的embedding可以在请求时实时计算。在线推理时只需要：</p>
+
+        <ol>
+            <li>拿到用户请求，计算用户embedding（一次前向传播）</li>
+            <li>在向量索引中检索与用户embedding最相似的Top-K物品（近似最近邻搜索）</li>
+        </ol>
+
+        <p>整个过程中，不需要对每个物品做单独的模型推理——这正是双塔召回能支持亿级候选的关键。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>用户塔（User Tower）</th>
+                    <th>物品塔（Item Tower）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>输入特征</strong></td>
+                    <td>用户ID、用户画像、历史行为统计、上下文特征</td>
+                    <td>物品ID、物品属性、类别、标签、价格</td>
+                </tr>
+                <tr>
+                    <td><strong>模型架构</strong></td>
+                    <td>Embedding → DNN → 输出用户向量</td>
+                    <td>Embedding → DNN → 输出物品向量</td>
+                </tr>
+                <tr>
+                    <td><strong>输出维度</strong></td>
+                    <td>d维向量（d通常在32~128）</td>
+                    <td>d维向量（d通常在32~128）</td>
+                </tr>
+                <tr>
+                    <td><strong>计算时机</strong></td>
+                    <td>请求时实时计算（在线）</td>
+                    <td>定时预计算（离线/T+1）</td>
+                </tr>
+                <tr>
+                    <td><strong>计算频率</strong></td>
+                    <td>每次用户请求</td>
+                    <td>每几小时~每天</td>
+                </tr>
+                <tr>
+                    <td><strong>参数量</strong></td>
+                    <td>较小（用户数有限）</td>
+                    <td>较大（物品数巨大）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>训练双塔模型时，正样本通常是用户点击/购买的物品，负样本是未被用户互动的物品。负样本的选择至关重要（我们后面专门讨论"负采样"的问题）。常用的损失函数是<strong>Sampled Softmax</strong>或<strong>NCE Loss</strong>。</p>
+
+        <h2>3. 经典召回模型解析</h2>
+
+        <p>双塔模型的架构虽然简单，但它的设计经历了多代进化。以下是两个最具代表性的工作。</p>
+
+        <p><strong>DSSM（Deep Structured Semantic Model）</strong>是双塔模型的早期代表（2013年），最初是为网页搜索设计的——查询塔和文档塔。DSSM的核心贡献是将双塔结构 + 向量内积匹配引入了信息检索领域。虽然DSSM最初的激活函数（词哈希+字级别n-gram）现在看来有些过时，但它的双塔架构直接影响了后续所有召回模型。</p>
+
+        <p><strong>YouTube DNN（2016年）</strong>是推荐系统领域里程碑式的论文。YouTube的推荐团队把推荐问题转化为"分类"问题——从海量视频中预测用户下一步要看的视频。具体做法是：</p>
+
+        <ul>
+            <li>训练时不输出概率，而是输出一个d维用户向量</li>
+            <li>每个视频也对应一个d维向量</li>
+            <li>用户向量和视频向量的内积作为匹配分数</li>
+            <li>推理时直接做向量检索——"分类"变成了"检索"</li>
+        </ul>
+
+        <p>这个<strong>"分类即检索"</strong>（Classification as Retrieval）的trick是YouTube DNN最具启发性的设计。它把精排模型和召回模型统一到了同一个数学框架下——区别只是精排用复杂的交叉特征做精确打分，召回用向量内积做快速过滤。</p>
+
+        <div class="warning">
+            <p><strong>踩坑提醒：</strong>YouTube DNN的训练有一个非常容易出错的细节——负采样。YouTube的做法是"从全库中随机采样作为负样本"，而不是用"曝光未点击"的样本。为什么？因为曝光未点击的数据是有偏的——只有通过召回筛选的物品才会被曝光，这些物品本身已经是"比较相关"的。如果用它们做负样本，模型学到的决策边界会偏窄。这个问题在所有双塔召回训练中都会遇到，我们将在第20章"消偏"中深入讨论。</p>
+        </div>
+
+        <h2>4. 向量检索：Faiss、HNSW、Milvus</h2>
+
+        <p>双塔模型产出向量后，如何从几千万甚至上亿个物品向量中找到与用户向量最相似的Top-K个？暴力计算所有内积（Brute Force）在亿级规模下是不可能完成的任务。答案就是<strong>近似最近邻搜索（ANN, Approximate Nearest Neighbor）</strong>。</p>
+
+        <p>ANN的核心思想是"用精度换速度"——不保证找到精确的最近邻，但能在毫秒级给出足够好的近似结果。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>工具/算法</th>
+                    <th>核心算法</th>
+                    <th>QPS（每秒查询数）</th>
+                    <th>Recall@10</th>
+                    <th>内存占用</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Faiss IVF+PQ</strong></td>
+                    <td>倒排索引 + 乘积量化</td>
+                    <td>高（>10000）</td>
+                    <td>中等（80-90%）</td>
+                    <td>低（压缩存储）</td>
+                    <td>大规模（>1亿），内存受限</td>
+                </tr>
+                <tr>
+                    <td><strong>Faiss HNSW</strong></td>
+                    <td>分层可导航小世界图</td>
+                    <td>极高（>50000）</td>
+                    <td>高（95%+）</td>
+                    <td>高（需存完整图）</td>
+                    <td>高QPS要求，内存充足</td>
+                </tr>
+                <tr>
+                    <td><strong>HNSWlib</strong></td>
+                    <td>HNSW</td>
+                    <td>极高</td>
+                    <td>高（95%+）</td>
+                    <td>高</td>
+                    <td>单机高精度搜索</td>
+                </tr>
+                <tr>
+                    <td><strong>Milvus</strong></td>
+                    <td>支持多种（IVF/HNSW等）</td>
+                    <td>可扩展</td>
+                    <td>可配置</td>
+                    <td>分布式</td>
+                    <td>生产级向量数据库</td>
+                </tr>
+                <tr>
+                    <td><strong>SPTAG</strong></td>
+                    <td>空间分割树（微软）</td>
+                    <td>高</td>
+                    <td>高</td>
+                    <td>中</td>
+                    <td>Bing搜索场景</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>下面是一个使用Faiss进行向量检索的Python示例：</p>
+
+        <pre><code>import faiss
+import numpy as np
+
+# 1. 准备数据: 100万个128维的物品向量
+d = 128
+n_items = 1_000_000
+item_embeddings = np.random.random((n_items, d)).astype('float32')
+
+# 2. 构建索引 (IVF+PQ)
+n_centroids = int(np.sqrt(n_items))  # 聚类中心数 ≈ 1000
+m = 16  # PQ编码子维度数
+index = faiss.index_factory(d, f"IVF{n_centroids},PQ{m}")
+
+# 3. 训练索引（在数据子集上聚类）
+print("Training index...")
+index.train(item_embeddings[:100000])
+
+# 4. 添加所有物品向量到索引
+index.add(item_embeddings)
+index.nprobe = 16  # 搜索时探测的聚类数
+
+# 5. 查询: 用户向量
+user_embedding = np.random.random((1, d)).astype('float32')
+k = 100  # 召回Top-100
+distances, indices = index.search(user_embedding, k)
+
+print(f"召回Top-{k}的物品ID: {indices[0]}")
+print(f"对应的距离: {distances[0]}")</code></pre>
+
+        <p>这段代码看起来很简单，但实际上每一行都值得深入理解。IVF（Inverted File）先对向量空间做聚类，搜索时只探测最近的几个聚类——这相当于在"粗粒度"上做了第一次筛选。PQ（Product Quantization）对向量做压缩编码，用更少的比特表示每个向量——这极大降低了内存占用和距离计算成本。IVF+PQ的组合是目前大规模向量检索最经典、最实用的配置。</p>
+
+        <div class="warning">
+            <p><strong>关键认知——ANN的"召回天花板"：</strong>ANN索引不是完美精确的。假设你的Faiss配置能实现90%的Recall@100——这意味着每100个向量检索中，有10个真正的最近邻被漏掉了。这些被漏掉的物品，无论在后面的精排模型多么精准，都永远不可能被推荐给用户。这就是ANN引入的<strong>召回天花板</strong>。如果你的推荐系统整体指标上不去，先别忙着优化精排模型——检查一下召回阶段是不是已经成为瓶颈了。</p>
+        </div>
+
+        <p>让我分享一个真实的踩坑故事。有一个团队的推荐系统AUC一直上不去。他们花了两个月的时间优化精排模型——从DeepFM迁移到DCN，再到多任务学习，AUC只涨了不到0.5%。后来一个资深工程师偶然检查了Faiss配置，发现 nprobe 被设成了4（默认值），而数据集分布非常分散。把 nprobe 调到32之后，召回 recall@100 直接从82%跳到了94%，整体推荐CTR提升了7%。团队主管苦笑："我们优化了两个月的模型，不如调一个参数。"</p>
+
+        <p>双塔模型和向量检索是召回阶段最主流的技术方案，但并不是唯一的方案。双塔模型有一个天然的缺陷——每个用户只对应一个embedding向量。但正如我们在DIN中讨论过的，用户的兴趣其实是多面的。一个用户向量无法同时准确地表示"他今天想买手机壳"和"他下周想买办公椅"这两个完全不同的兴趣。下一章，我们将介绍多兴趣召回（MIND）和图召回（PinSAGE），它们从不同的角度解决了"一个用户向量不够用"的问题。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

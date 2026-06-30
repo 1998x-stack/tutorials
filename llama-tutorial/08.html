@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 GQA分组查询注意力 — LLaMA 完全拆解教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦙 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLaMA系列概述</a></li>
+            <li><a href="02.html">第2章 Transformer回顾与LLaMA总览</a></li>
+            <li><a href="03.html">第3章 RoPE旋转位置编码</a></li>
+            <li><a href="04.html">第4章 RMSNorm归一化</a></li>
+            <li><a href="05.html">第5章 SwiGLU激活函数</a></li>
+            <li><a href="06.html">第6章 分词器与词表设计</a></li>
+            <li><a href="07.html">第7章 缩放定律与训练策略</a></li>
+            <li><a href="08.html" class="active">第8章 GQA分组查询注意力</a></li>
+            <li><a href="09.html">第9章 预训练数据工程</a></li>
+            <li><a href="10.html">第10章 训练稳定性与优化器</a></li>
+            <li><a href="11.html">第11章 LLaMA 1完整预训练流程</a></li>
+            <li><a href="12.html">第12章 LLaMA 2对话模型与SFT</a></li>
+            <li><a href="13.html">第13章 RLHF全流程</a></li>
+            <li><a href="14.html">第14章 安全对齐与幻觉抑制</a></li>
+            <li><a href="15.html">第15章 模型量化与推理加速</a></li>
+            <li><a href="16.html">第16章 分布式训练策略</a></li>
+            <li><a href="17.html">第17章 上下文窗口扩展</a></li>
+            <li><a href="18.html">第18章 评估体系与基准测试</a></li>
+            <li><a href="19.html">第19章 LLaMA 3大规模训练系统</a></li>
+            <li><a href="20.html">第20章 多模态融合</a></li>
+            <li><a href="21.html">第21章 工具调用与代码能力</a></li>
+            <li><a href="22.html">第22章 多语言扩展策略</a></li>
+            <li><a href="23.html">第23章 HuggingFace生态与模型加载</a></li>
+            <li><a href="24.html">第24章 LoRA微调实战</a></li>
+            <li><a href="25.html">第25章 推理部署方案</a></li>
+            <li><a href="26.html">第26章 LLaMA 3.2边缘部署与小模型</a></li>
+            <li><a href="27.html">第27章 LLaMA 4展望与MoE架构</a></li>
+            <li><a href="28.html">第28章 开源LLM生态与未来趋势</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第8章 GQA分组查询注意力</h2>
+
+        <p>上一章我们聊了缩放定律——知道了"给大模型更多数据"比"把模型做大"更划算。但模型一旦大起来，推理阶段就有一个绕不过去的资源黑洞：<strong>KV Cache</strong>。你可能已经体验过这种情况：一个70B模型跑推理，batch size稍微开大一点，显存就直接爆了。问题出在哪？大部分显存都被注意力机制的KV Cache吃掉了。</p>
+
+        <p>这一章的主角——<strong>GQA（Grouped-Query Attention，分组查询注意力）</strong>——就是直接针对这个痛点设计的。它是从标准多头注意力（MHA）到多查询注意力（MQA）的演进过程中的一个"黄金中点"。理解了GQA，你就理解了LLaMA 2和LLaMA 3在推理效率上大幅领先同规模竞品的一个核心原因。</p>
+
+        <div class="highlight">
+            <strong>为什么GQA值得花一整章来讲？</strong> 因为它不是那种"锦上添花"的优化——对于70B以上的大模型，GQA能直接让推理吞吐量提升30%-50%，同时几乎不损失模型质量。在LLaMA全线采用GQA之后，Mistral、Qwen、DeepSeek等主流开源模型也纷纷跟进。可以说，GQA已经成为现代大模型的标配组件。
+        </div>
+
+        <h3>8.1 MHA回顾：每个头都要自己的KV</h3>
+
+        <p>在复习GQA之前，让我们先快速回顾一下标准多头注意力（MHA）中KV Cache是怎么产生的。如果你对这部分很熟悉，可以跳过直接看8.2节，但我建议你还是扫一眼——因为理解GQA的关键在于搞清楚"KV Cache到底怎么吃掉显存的"。</p>
+
+        <p>标准Transformer的自回归生成过程是这样工作的：每生成一个新token，模型需要计算当前token与之前所有token之间的注意力分数。但每次重新计算之前的注意力权重是非常浪费的——之前的Key和Value向量其实在上一轮已经算好了。所以实践中我们把这些Key和Value缓存下来，下一轮直接复用。这个缓存就是KV Cache。</p>
+
+        <p>在MHA中，每个注意力头都有自己的Query、Key和Value投影矩阵。假设我们有H个注意力头，隐藏层维度为D，每个头的维度为d = D/H。对于序列长度为L的生成过程，KV Cache的大小是：</p>
+
+        <pre><code>KV Cache 内存 = 2 × L × H × d × sizeof(dtype)
+                 = 2 × L × D × sizeof(dtype)
+
+# 以 LLaMA 2 70B 为例：
+# D = 8192, H = 64, 那么 d = 128
+# 序列长度 L = 4096, dtype = float16 (2字节)
+# 单条序列的 KV Cache = 2 × 4096 × 8192 × 2 = 134 MB
+# 如果 batch size = 64，那就需要 134 × 64 = 8.5 GB！
+
+# 这仅仅是一层的 KV Cache。70B模型有80层，
+# 总 KV Cache = 8.5 GB × 80 = 685 GB！
+
+# 是的，你没看错：70B模型用64的batch size推理，
+# 光 KV Cache 就需要近700GB显存。
+# 相比之下，模型权重本身只占约140GB（FP16）。</code></pre>
+
+        <p>这个计算揭示了MHA的一个严重问题：<strong>随着序列长度和batch size的增长，KV Cache的显存消耗呈线性增长，很快超过模型权重本身。</strong>在长上下文场景（比如128K tokens）下，KV Cache更是天文数字。</p>
+
+        <p>MHA的另一个问题是"计算冗余"。直观上想：每个注意力头学到的Key和Value模式真的需要完全独立吗？在很多情况下，不同的注意力头可能会关注相似的语义模式——比如多个头都会学习到"主语-动词"的依赖关系，只是细节侧重不同。让每个头都各自维护一套KV投影，其实做了很多重复工作。</p>
+
+        <div class="tip">
+            <strong>直觉类比：</strong> 想象一个大型图书馆有多个阅览室。在MHA中，每个阅览室（注意力头）都有自己独立的档案室（KV投影），每个档案室存一套完整的图书副本。这样当然查询效率高，但占地太大了。GQA的做法是：相邻的几个阅览室共享同一个档案室——找书的时候，不同的阅览室可以借阅同一套资料，但各自做不同的笔记（Query单独投影）。
+        </div>
+
+        <h3>8.2 MQA：一个极端的方案</h3>
+
+        <p>在GQA出现之前，一个更激进的方案已经被提出了——<strong>MQA（Multi-Query Attention）</strong>。MQA的思路非常暴力：所有注意力头共享同一个Key投影和同一个Value投影，每个头只保留自己的Query投影。也就是说，无论有多少个头，KV只有一份。</p>
+
+        <p>MQA的效果如何？从显存角度看，它把KV Cache的大小降到了MHA的1/H——对于64头的模型，直接减少了98.4%的KV Cache。这是一个极其诱人的数字。但代价是模型质量的下滑：实验表明，MQA在多个benchmark上都会有可感知的质量损失，尤其是在需要精细语义理解的推理任务上。</p>
+
+        <p>为什么MQA会损失质量？原因不难理解：所有的查询头共享同一套Key-Value表示，意味着不同注意力头"看到"的信息是一样的，它们只能在Query侧做差异化的聚焦。这大大限制了注意力头的多样性表达能力。就好比一个团队做调研——所有人都去查同一份资料（共享KV），虽然效率高了，但观点和见解的同质化也严重了。</p>
+
+        <div class="warning">
+            <strong>一点历史冷知识：</strong> MQA最早是2019年由Google在《Fast Transformer Decoding: One Write-Head Is All You Need》论文中提出的。这篇论文的影响力在当时很有限，因为2019年大家还在用小模型，KV Cache不是瓶颈。但到了LLaMA 2时代，随着模型规模膨胀到70B、上下文长度扩展到4K以上，MQA的这个"古老"思想突然变得极具价值。为什么MQA没有直接流行起来？原因很简单——质量损失太大。工业界需要的是一个"既要又要"的方案，而这正是GQA的舞台。
+        </div>
+
+        <h3>8.3 GQA：两全其美的中间方案</h3>
+
+        <p>GQA由Google在2023年的论文《GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints》中提出，核心思想可以用一句话概括：<strong>把查询头分成G组，每组共享一对KV头。</strong></p>
+
+        <p>当G=1时，GQA退化为MQA（所有头共享一组KV）。当G=H时，GQA等价于MHA（每个头有自己的KV）。所以GQA实际上是MHA和MQA的一个可调节的中间方案。通过调整组数G，我们可以在"推理效率"和"模型质量"之间找到最佳平衡点。</p>
+
+        <p>那么对于LLaMA系列来说，G取多少最合适呢？我们来看看各代模型的选择：</p>
+
+        <table>
+            <tr>
+                <th>模型</th>
+                <th>隐藏维度 D</th>
+                <th>注意力头数 H</th>
+                <th>KV头数</th>
+                <th>组数 G</th>
+                <th>每组头数</th>
+            </tr>
+            <tr>
+                <td>LLaMA 1 7B</td>
+                <td>4096</td>
+                <td>32</td>
+                <td>32 (MHA)</td>
+                <td>32</td>
+                <td>1</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 7B</td>
+                <td>4096</td>
+                <td>32</td>
+                <td>32 (MHA)</td>
+                <td>32</td>
+                <td>1</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 13B</td>
+                <td>5120</td>
+                <td>40</td>
+                <td>40 (MHA)</td>
+                <td>40</td>
+                <td>1</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 70B</td>
+                <td>8192</td>
+                <td>64</td>
+                <td>8 (GQA)</td>
+                <td>8</td>
+                <td>8</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3 8B</td>
+                <td>4096</td>
+                <td>32</td>
+                <td>8 (GQA)</td>
+                <td>8</td>
+                <td>4</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3 70B</td>
+                <td>8192</td>
+                <td>64</td>
+                <td>8 (GQA)</td>
+                <td>8</td>
+                <td>8</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3 405B</td>
+                <td>16384</td>
+                <td>128</td>
+                <td>8 (GQA)</td>
+                <td>8</td>
+                <td>16</td>
+            </tr>
+        </table>
+
+        <p>从这张表里可以读出几个重要信息：</p>
+
+        <ul>
+            <li><strong>LLaMA 1 全部采用MHA。</strong> 因为LLaMA 1主要面向学术研究，推理效率不是首要目标。</li>
+            <li><strong>LLaMA 2 只在70B上使用了GQA。</strong> 7B和13B仍然是MHA——因为小模型的KV Cache压力没那么大，不需要引入GQA的额外复杂度。</li>
+            <li><strong>LLaMA 3 全系列使用GQA，且统一为8个KV头。</strong> 从8B到405B，KV头数都是8。这个设计选择很有意思——即使是8B这样的小模型，Meta也换上了GQA，说明GQA带来的质量损失在LLaMA 3的规模和数据量下已经可以忽略不计了。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>一个关键观察：</strong> KV头数固定为8，而查询头数从32（8B）增长到128（405B），也就意味着每组包含的查询头数从4个增长到16个。这说明GQA的"共享密度"在更大模型中反而更高——大模型有更多的参数冗余，对KV共享的容忍度更大。这也符合我们的直觉：模型越大，各注意力头的冗余度越高，共享KV的代价越小。
+        </div>
+
+        <h3>8.4 GQA的数学实现</h3>
+
+        <p>下面让我们来看GQA的数学形式。假设我们有H个查询头，G个KV组（即G个KV头），每组的查询头数量为H/G。对于第g组：</p>
+
+        <pre><code># GQA 前向传播 (PyTorch伪代码)
+
+import torch
+import torch.nn.functional as F
+
+def gqa_forward(query, key, value, num_heads, num_kv_heads):
+    """
+    Args:
+        query: (batch_size, seq_len, hidden_dim)
+        key:   (batch_size, seq_len, hidden_dim)
+        value: (batch_size, seq_len, hidden_dim)
+        num_heads: H (总查询头数)
+        num_kv_heads: G (KV头数，= 组数)
+    """
+    B, L, D = query.shape
+    head_dim = D // num_heads
+
+    # 1. 投影到Q, K, V
+    # Q: (B, L, H * head_dim)
+    # K: (B, L, G * head_dim)
+    # V: (B, L, G * head_dim)
+    Q = q_proj(query).view(B, L, num_heads, head_dim)
+    K = k_proj(key).view(B, L, num_kv_heads, head_dim)
+    V = v_proj(value).view(B, L, num_kv_heads, head_dim)
+
+    # 2. 关键步骤：将KV扩展到与Q相同的头数
+    # repeats = num_heads // num_kv_heads = H/G
+    # 每组内的所有查询头共享同一个KV
+    K = K.repeat_interleave(num_heads // num_kv_heads, dim=2)
+    V = V.repeat_interleave(num_heads // num_kv_heads, dim=2)
+    # 现在 K, V: (B, L, H, head_dim)
+
+    # 3. 转置为 (B, H, L, head_dim) 用于注意力计算
+    Q = Q.transpose(1, 2)
+    K = K.transpose(1, 2)
+    V = V.transpose(1, 2)
+
+    # 4. 标准缩放点积注意力
+    scale = head_dim ** -0.5
+    attn = (Q @ K.transpose(-2, -1)) * scale
+    attn = F.softmax(attn, dim=-1)
+    out = attn @ V  # (B, H, L, head_dim)
+
+    # 5. 融合所有头
+    out = out.transpose(1, 2).contiguous().view(B, L, D)
+    return out</code></pre>
+
+        <p>上面的代码中，最核心的是第2步的<code>repeat_interleave</code>操作。它的作用是把KV头"复制"到和查询头一样的数量。比如num_heads=64，num_kv_heads=8，那么每个KV头会被复制7份（repeats=8），最终得到64个KV头——与64个查询头一一对应。</p>
+
+        <div class="tip">
+            <strong>实现细节：</strong> 在实际工程中，我们不会真的用<code>repeat_interleave</code>把KV显式扩展成H份——这样会浪费显存。更好的做法是在注意力分数计算时做"广播"（broadcasting）：Q的形状是(B, H, L, d)，K的形状是(B, G, L, d)，在计算Q×K^T时自动将K广播到H个查询头上。但在PyTorch中，更常见的实现是使用<code>repeat_kv</code>函数（如HuggingFace的实现），因为它更简洁且对编译器更友好。
+        </div>
+
+        <h3>8.5 GQA的实际收益：KV Cache与推理吞吐</h3>
+
+        <p>GQA带来的好处是实实在在的，而且在大模型上效果更明显。我们用一个实际的对比来展示：</p>
+
+        <table>
+            <tr>
+                <th>指标</th>
+                <th>MHA（LLaMA 2 70B）</th>
+                <th>GQA（LLaMA 3 70B）</th>
+                <th>节省比例</th>
+            </tr>
+            <tr>
+                <td>KV头数</td>
+                <td>64</td>
+                <td>8</td>
+                <td>87.5%</td>
+            </tr>
+            <tr>
+                <td>每层KV Cache（单序列4K长度）</td>
+                <td>134 MB</td>
+                <td>16.8 MB</td>
+                <td>87.5%</td>
+            </tr>
+            <tr>
+                <td>全部80层KV Cache（单序列）</td>
+                <td>10.5 GB</td>
+                <td>1.3 GB</td>
+                <td>87.5%</td>
+            </tr>
+            <tr>
+                <td>batch size 64时总KV Cache</td>
+                <td>672 GB</td>
+                <td>84 GB</td>
+                <td>87.5%</td>
+            </tr>
+            <tr>
+                <td>MMLU基准分数</td>
+                <td>68.9</td>
+                <td>~70.0</td>
+                <td>不降反升</td>
+            </tr>
+        </table>
+
+        <p>KV Cache从672GB降到84GB是什么概念？这意味着同样用8张A100 80G（总共640GB显存），MHA模式下KV Cache就占满了全部显存，根本放不下模型权重。而GQA模式下，84GB的KV Cache加上140GB的模型权重，总共只需要224GB，还有大量富余空间来加大batch size或延长上下文。</p>
+
+        <div class="warning">
+            <strong>真实踩坑：</strong> 我自己在做LLaMA 2 70B的推理优化时，曾经遇到过这样一个问题。我们使用了HuggingFace默认的实现，但发现即使我们只用batch size=1，显存占用也高达160GB（模型权重140GB + KV Cache 20GB）。后来排查发现，HF的某些版本实现中，即使我们传入的模型没有GQA（LLaMA 2 70B是有GQA的），它也默认在MHA模式下运行。解决方案是检查<code>config.num_key_value_heads</code>是否正确设置为8。如果你的实现中这个参数等于<code>num_attention_heads</code>（64），那就相当于退回到了MHA。这种配置错误非常隐蔽——模型推理不会报错，只是显存占用比预期高8倍，推理速度慢3-4倍。<strong>检查num_key_value_headers配置</strong>应该成为LLaMA推理优化清单的第一条。
+        </div>
+
+        <h3>8.6 GQA在训练和推理中的差异</h3>
+
+        <p>理解GQA对训练和推理的不同影响，对于工程优化至关重要：</p>
+
+        <p><strong>训练阶段：</strong> GQA对训练速度的影响不大。因为训练是并行处理整个序列的，不需要KV Cache。GQA在训练中主要影响的是模型参数数量——KV投影矩阵的参数变少了（从H×d减少到G×d），但这在大模型的总参数量中占比很小（通常不到0.5%），所以训练效率几乎没有变化。</p>
+
+        <p><strong>推理阶段：</strong> GQA对推理的影响可以说是"脱胎换骨"的。Prefill阶段（并行处理prompt中的tokens）因为KV投影更少，计算量略微减少。Decode阶段（逐token生成）的改进则非常巨大——KV Cache内存占用降低到MHA的G/H，内存带宽需求也同步降低。在LLaMA 3 70B上，GQA使得decode吞吐量比同等规模的MHA模型提高了约2.5倍。</p>
+
+        <p>这种"训练几乎无差别，推理天差地别"的特性，使得GQA成为一个性价比极高的优化。你花在GQA上的设计成本是一次性的，而推理效率的提升是永久性的。</p>
+
+        <h3>8.7 LLaMA的GQA配置演变</h3>
+
+        <p>从LLaMA 1到LLaMA 3，GQA的配置变化反映了Meta对"质量-效率平衡"的持续探索：</p>
+
+        <ul>
+            <li><strong>LLaMA 1（2023.02）：</strong> 全部MHA。LLaMA 1的定位是研究基准模型，只关注质量，不考虑部署效率。</li>
+            <li><strong>LLaMA 2（2023.07）：</strong> 70B模型引入GQA（8 KV heads），7B和13B保持MHA。这是一个务实的折中——小模型KV Cache压力小，不值得引入GQA；大模型必须用GQA才能实际部署。</li>
+            <li><strong>LLaMA 3（2024.04）：</strong> 全线GQA，统一8 KV heads。原因有二：一是训练数据量达到15.6T，模型在充分训练后对GQA的质量损失容忍度更高；二是128K上下文长度下，即使8B小模型的KV Cache也大到不容忽视。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>更深一层：</strong> LLaMA 3为什么选择8个KV头而不是4个或16个？从论文中的消融实验来看，KV头数从64（MHA）降到8，质量损失几乎可以忽略；但再降到4或2时，质量就会出现明显下降。而在部署侧，8个KV头已经把KV Cache减少了87.5%，再减少到4个虽然能再省一半，但边际收益已经不大。所以8是一个工程上的"甜点"——在质量和效率之间找到了最优平衡点。
+        </div>
+
+        <p>这一趋势也深刻影响了开源社区。Mistral 7B使用了8个KV头，Qwen 2系列也全面采用了GQA，DeepSeek V2甚至更进一步提出了Multi-head Latent Attention（MLA）——一种比GQA更激进的KV压缩方案。可以说，GQA已经成为大模型注意力机制的事实标准。</p>
+
+        <p>说到KV压缩，其实还有更前沿的方向值得关注。比如我们刚才提到的MLA，它通过低秩分解把KV Cache压缩到更小的维度。还有正在探索中的"无KV Cache注意力"——通过线性注意力机制完全消除KV Cache。但这些都还是研究阶段，而GQA是经过大规模验证、可以在生产环境中放心使用的成熟技术。</p>
+
+        <p>好了，这一章我们深入剖析了GQA的原理、实现和收益。从MHA到MQA再到GQA，这条演进路径告诉我们：在大模型设计中，"恰到好处的共享"往往比"完全的独立"和"完全的共享"都更好。下一章，我们要聊的是另一个决定大模型质量的关键因素——<strong>预训练数据工程</strong>。LLaMA 1只用1T tokens就训练出了超越GPT-3 175B的模型，数据上的功夫功不可没。让我们一起看看Meta到底是怎么选数据的。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

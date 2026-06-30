@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 RLHF全流程 — LLaMA 完全拆解教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦙 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLaMA系列概述</a></li>
+            <li><a href="02.html">第2章 Transformer回顾与LLaMA总览</a></li>
+            <li><a href="03.html">第3章 RoPE旋转位置编码</a></li>
+            <li><a href="04.html">第4章 RMSNorm归一化</a></li>
+            <li><a href="05.html">第5章 SwiGLU激活函数</a></li>
+            <li><a href="06.html">第6章 分词器与词表设计</a></li>
+            <li><a href="07.html">第7章 缩放定律与训练策略</a></li>
+            <li><a href="08.html">第8章 GQA分组查询注意力</a></li>
+            <li><a href="09.html">第9章 预训练数据工程</a></li>
+            <li><a href="10.html">第10章 训练稳定性与优化器</a></li>
+            <li><a href="11.html">第11章 LLaMA 1完整预训练流程</a></li>
+            <li><a href="12.html">第12章 LLaMA 2对话模型与SFT</a></li>
+            <li><a href="13.html" class="active">第13章 RLHF全流程</a></li>
+            <li><a href="14.html">第14章 安全对齐与幻觉抑制</a></li>
+            <li><a href="15.html">第15章 模型量化与推理加速</a></li>
+            <li><a href="16.html">第16章 分布式训练策略</a></li>
+            <li><a href="17.html">第17章 上下文窗口扩展</a></li>
+            <li><a href="18.html">第18章 评估体系与基准测试</a></li>
+            <li><a href="19.html">第19章 LLaMA 3大规模训练系统</a></li>
+            <li><a href="20.html">第20章 多模态融合</a></li>
+            <li><a href="21.html">第21章 工具调用与代码能力</a></li>
+            <li><a href="22.html">第22章 多语言扩展策略</a></li>
+            <li><a href="23.html">第23章 HuggingFace生态与模型加载</a></li>
+            <li><a href="24.html">第24章 LoRA微调实战</a></li>
+            <li><a href="25.html">第25章 推理部署方案</a></li>
+            <li><a href="26.html">第26章 LLaMA 3.2边缘部署与小模型</a></li>
+            <li><a href="27.html">第27章 LLaMA 4展望与MoE架构</a></li>
+            <li><a href="28.html">第28章 开源LLM生态与未来趋势</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第13章 RLHF全流程</h2>
+
+        <p>上一章我们讲了SFT——通过监督学习让基座模型学会了对话的格式和风格。但SFT有一个根本性的局限：它只能学习"标注员认为正确的回答"，而标注员的判断并不总能反映真实的用户偏好。你可能有过这样的体验：一个模型给出的回答在语法上完全正确、格式上无可挑剔，但就是"差点意思"——不够深入、不够体贴、不够符合你的实际需求。</p>
+
+        <p>这就是<strong>RLHF（Reinforcement Learning from Human Feedback，基于人类反馈的强化学习）</strong>要解决的问题。RLHF的想法很直白：既然我们很难定义"什么是好的回答"的确切标准，那就让人类来比较两个回答、指出哪个更好——然后让模型通过强化学习去追求"更受人类偏好"的回答。</p>
+
+        <p>LLaMA 2的RLHF系统是迄今为止开源最完整的RLHF实现之一。这一章，我们就来完整拆解这个系统的每一个环节。</p>
+
+        <div class="highlight">
+            <strong>RLHF的核心哲学：</strong> SFT是在"模仿老师"（标注员写的标准答案），而RLHF是在"理解用户"（通过偏好信号学习用户的真实需求）。前者学的是"形式"，后者学的是"实质"。
+        </div>
+
+        <h3>13.1 RLHF整体框架</h3>
+
+        <p>LLaMA 2的RLHF流程分为三个步骤：</p>
+
+        <p><strong>步骤一：SFT（上一章已讲）</strong> —— 得到一个具备基础对话能力的模型。</p>
+
+        <p><strong>步骤二：奖励模型（Reward Model）训练</strong> —— 训练一个专门用来评估"回答好坏"的模型。</p>
+
+        <p><strong>步骤三：PPO强化学习</strong> —— 使用奖励模型给出的分数，通过PPO算法优化策略模型（即主模型）的参数。</p>
+
+        <p>下面我们用一张流程图来展示这个架构：</p>
+
+        <pre><code># LLaMA 2 RLHF 全流程架构
+
+# ┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+# │  SFT模型     │    │  Reward Model │    │  PPO Loop    │
+# │ (初始化)     │    │  (训练好的)   │    │              │
+# └──────┬──────┘    └──────┬───────┘    └──────┬──────┘
+#        │                  │                   │
+#        ▼                  ▼                   ▼
+# ┌───────────────────────────────────────────────────────┐
+# │                    PPO 训练循环                        │
+# │                                                       │
+# │  1. 策略模型 π_θ 对 prompt 生成回答 y                 │
+# │  2. 奖励模型 RM 对回答 y 打分 r(y)                    │
+# │  3. 参考模型 π_ref 对回答 y 计算 KL散度               │
+# │  4. 总奖励 = r(y) - β × KL(π_θ || π_ref)             │
+# │  5. PPO更新策略模型 π_θ的参数                          │
+# │  6. 价值模型 V_ψ 学习预测奖励                          │
+# │                                                       │
+# │  策略模型 π_θ 和价值模型 V_ψ 共同训练                  │
+# │  参考模型 π_ref 固定不变                              │
+# └───────────────────────────────────────────────────────┘</code></pre>
+
+        <p>这里有一个需要重点理解的概念：PPO训练中同时涉及<strong>四个模型</strong>——策略模型（主模型，正在被训练）、参考模型（固定参数的策略模型副本，用于KL散度约束）、奖励模型（提供反馈信号）、价值模型（用于PPO的advantage估计）。四个模型同时加载到内存中，这使得RLHF训练的显存开销很大——大约是SFT训练的2-3倍。</p>
+
+        <h3>13.2 奖励模型（Reward Model）</h3>
+
+        <p>奖励模型是由<strong>SFT模型初始化</strong>而来，但做了一个关键修改：将最后一层（lm_head，用于预测下一个token）替换为一个<strong>标量输出头</strong>，输出一个实数作为"回答质量评分"。</p>
+
+        <p>奖励模型不生成文本——它只<strong>打分</strong>。输入是(prompt, response)对，输出是一个标量分数，分数越高表示回答质量越好。值得注意的是，奖励模型是<strong>序列级别的评分</strong>，而不是token级别的——整段回答只有一个分数。</p>
+
+        <p>为什么奖励模型要从SFT模型初始化而不是从随机初始化？原因有两方面：第一，SFT模型已经具备了理解文本质量的能力——它知道什么样的文本是流畅的、合理的；第二，复用SFT模型的参数可以大幅缩短奖励模型的训练时间。Meta的实验表明，从SFT模型初始化的奖励模型，只需要在偏好数据上训练1-2个epoch就能收敛，而随机初始化可能需要10倍以上的数据。</p>
+
+        <p><strong>奖励模型的训练数据：</strong></p>
+
+        <p>LLaMA 2的奖励模型训练使用了约<strong>100万对人工标注的偏好比较数据</strong>。每个样本包含同一个prompt的两个回答——一个是"chosen"（被选中的，更好的回答），一个是"rejected"（被拒绝的，较差的回答）。标注员的判断标准包括：整体质量、准确性、安全性、有用性等多个维度。</p>
+
+        <div class="tip">
+            <strong>数据收集的一个细节：</strong> LLaMA 2在收集偏好数据时采取了一种特殊策略——他们不是让标注员"从几个回答中选出最好的"，而是让标注员"逐一评分，然后比较分值"。具体来说，每个回答在1-7分之间打分，然后在这组回答中选择chosen和rejected。这样做的好处是：当两个回答质量接近时（比如4分和5分），虽然"5分"被选为chosen，但它们之间的差异并不大，反映在损失函数中就是一个较小的梯度更新。如果直接让标注员"二选一"，差别的粒度会更粗。
+        </div>
+
+        <h3>13.3 奖励模型训练细节</h3>
+
+        <p>奖励模型使用<strong>Bradley-Terry模型</strong>来定义损失函数。Bradley-Terry模型最初用于成对比较（比如体育比赛中的排名），它假设每个选项有一个隐含的"强度"参数，两个选项被选中的概率之比由它们的强度差决定。</p>
+
+        <p>在LLaMA的场景中，Bradley-Terry损失函数的数学形式是：</p>
+
+        <pre><code># 奖励模型训练的损失函数
+
+# 给定一个prompt x，两个回答 y_c (chosen) 和 y_r (rejected)
+# 奖励模型 RM_φ 为每个回答打分 r_φ(x, y)
+
+# Bradley-Terry 偏好模型:
+# P(y_c 优于 y_r | x) = σ(r_φ(x, y_c) - r_φ(x, y_r))
+# 其中σ是sigmoid函数
+
+# 损失函数: 最大化被选中的概率
+# L_RM(φ) = -E[log σ(r_φ(x, y_c) - r_φ(x, y_r))]
+
+# 等价于二分类交叉熵损失
+import torch.nn.functional as F
+
+def reward_model_loss(reward_chosen, reward_rejected):
+    """
+    Args:
+        reward_chosen:   (batch,) 被选中回答的奖励分数
+        reward_rejected: (batch,) 被拒绝回答的奖励分数
+    """
+    # 偏好差值越大，损失越小
+    diff = reward_chosen - reward_rejected
+    loss = -F.logsigmoid(diff).mean()
+    return loss
+
+# 训练超参数
+# - 学习率: 1e-5 (余弦衰减，无warmup)
+# - Batch size: 512 pairs
+# - Epochs: 1-2 (防止过度拟合偏好数据)
+# - 优化器: AdamW (β₁=0.9, β₂=0.95, ε=1e-5)
+# - 训练精度: bfloat16</code></pre>
+
+        <p>这个损失函数直观地理解：如果奖励模型给chosen回答的分数明显高于rejected回答，损失就小；如果分数倒挂，损失就大。当chosen和rejected的分数相等时，损失约为log(2)=0.69。</p>
+
+        <p>LLaMA 2训练了<strong>两个独立的奖励模型</strong>——一个用于优化"有用性"（Helpfulness），另一个用于优化"安全性"（Safety）。在PPO训练时，这两个奖励模型的分数通过加权求和合并。这样做的好处是：避免单个奖励模型在"有用"和"安全"这两个有时互相矛盾的目标之间产生混淆。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong> 我们在自己的项目中尝试训练奖励模型时，遇到了一个典型的"奖励作弊"问题。奖励模型学会了利用数据中的<strong>虚假关联</strong>来预测偏好——比如，模型发现更长的回答往往被标注为chosen，于是它开始给长回答打高分，而不论内容质量如何。还有一个更隐蔽的问题：奖励模型学会了通过回答中的特定词汇（"当然"、"很高兴为您"等礼貌用语）来判断质量，因为这些词汇在人工撰写的回答中出现频率更高。这些虚假关联导致奖励模型给出的分数严重偏离真实质量。解决方案是：<strong>在训练数据中注意控制这些混淆变量的分布</strong>——确保chosen和rejected回答在长度、风格等方面的分布是匹配的，消除这些非质量因素的干扰。
+        </div>
+
+        <h3>13.4 PPO训练流程</h3>
+
+        <p>PPO（Proximal Policy Optimization）是RLHF中使用的强化学习算法。LLaMA 2的PPO实现是标准PPO的变体，有几个关键的设计选择。</p>
+
+        <p><strong>核心组件：</strong></p>
+
+        <ul>
+            <li><strong>策略模型 π_θ：</strong> 正在被训练的SFT模型，我们想要优化的主模型。</li>
+            <li><strong>参考模型 π_ref：</strong> π_θ的固定副本（在PPO开始前复制，训练中不更新）。</li>
+            <li><strong>奖励模型 RM_φ：</strong> 训练好的奖励模型，提供奖励信号。</li>
+            <li><strong>价值模型 V_ψ：</strong> 一个新的模型（通常是策略模型的浅层副本），用于估计状态价值函数。</li>
+        </ul>
+
+        <p><strong>总奖励函数：</strong></p>
+
+        <pre><code># LLaMA 2 PPO 总奖励函数
+
+# 对于每个生成的回答 y（给定prompt x）:
+# 1. 奖励模型打分
+R_score = RM_φ(x, y)
+
+# 2. KL散度惩罚（防止策略偏离太远）
+# 计算策略模型和参考模型输出分布的KL散度
+kl_div = KL(π_θ(y|x) || π_ref(y|x))
+
+# 3. 总奖励 = 奖励分数 - β × KL散度
+R_total = R_score - β * kl_div
+
+# 其中β是KL惩罚系数，控制两个目标的平衡
+# 较大的β → 更保守的更新（不容易偏离SFT）
+# 较小的β → 更激进的优化（更容易学习新行为）
+
+# LLaMA 2 中的β值:
+# - 有用性奖励: β_help = 0.01 (相对较小，允许模型优化有用性)
+# - 安全性奖励: β_safe = 0.1  (相对较大，保守优化安全性)</code></pre>
+
+        <p>KL散度惩罚解决了RLHF中一个核心矛盾：我们希望模型优化回答质量，但不希望它为了获得更高奖励而大幅改变语言行为——比如使用不自然的句式或编造内容来迎合奖励模型。KL惩罚让策略模型在"优化奖励"和"保持与SFT相似"之间寻找平衡。</p>
+
+        <p>值得注意的是，LLaMA 2对有用性和安全性使用了不同的KL惩罚系数——安全性优化的KL系数大了10倍。这意味着在安全性优化上，Meta采取了更加保守的策略：宁可少优化一些安全性，也不要让模型的自然语言行为发生剧烈变化。安全性的"激进优化"可能带来意想不到的副作用——比如模型变得过度谨慎，拒绝回答很多本应正常回答的问题。</p>
+
+        <h3>13.5 Ghost Attention（GAtt）</h3>
+
+        <p>Ghost Attention（GAtt）是LLaMA 2论文中提出的一个创新技术，专门解决多轮对话中的<strong>指令保持</strong>问题。</p>
+
+        <p>问题场景是这样的：你在第一轮对话中给了模型一个system prompt——"用中文回答，每次回答控制在100字以内"。模型在第一轮遵守了，但到了第三轮、第五轮，它逐渐忘记了这个约束，回答变得越来越长，甚至开始混用英文。这种现象在LLaMA 2的早期实验中被反复观察到——多轮对话中，模型对初始指令的记忆随着对话轮次增加而衰减。</p>
+
+        <p>GAtt的解决方案非常巧妙：在SFT数据中，人为地将system prompt的信息注入到后面每一轮的用户问题中。但在计算损失时，这些注入的内容被"遮蔽"掉（就像"ghost"一样，模型看到了但不计算损失）。这样模型就学会了"每一轮都要记住system prompt的要求"。</p>
+
+        <pre><code># Ghost Attention (GAtt) 数据增强的示例
+
+# 原始的对话（无GAtt）:
+# 用户: 用英文回答，保持简洁。
+# 助手: Sure, I'll keep it brief.
+# 用户: 什么是注意力机制？
+# 助手: Attention is a mechanism that...
+# 用户: 它为什么重要？       ← 模型可能已经忘记了"保持简洁"
+# 助手: Attention is important because it allows the model to...
+
+# 经过GAtt增强的对话:
+# 用户: 用英文回答，保持简洁。
+# 助手: Sure, I'll keep it brief.
+# 用户: 什么是注意力机制？(Remember: keep it brief)
+# 助手: Attention is a mechanism that...
+# 用户: 它为什么重要？(Remember: keep it brief)
+# 助手: It allows the model to focus on relevant parts.
+
+# 在训练中，"(Remember: ...)"这部分虽然有token，但不参与loss计算。
+# 这就是"Ghost"的含义——它在输入中出现，但在loss中"隐身"。</code></pre>
+
+        <p>这个技术看起来简单，但效果非常显著。LLaMA 2论文报告，在应用GAtt后，模型在5轮以上的对话中对初始system prompt的遵从度从约30%提升到了80%以上。</p>
+
+        <div class="highlight">
+            <strong>关于GAtt的更深远思考：</strong> GAtt的成功揭示了一个重要的洞见——<strong>LLM的"记忆"问题可以通过训练阶段的注入来解决，而非依赖推理阶段的prompt工程。</strong>很多人遇到"模型忘记指令"的问题时，第一反应是"加长system prompt"或"在每一轮重复指令"。但GAtt告诉我们：在训练中让模型习惯在每一轮都看到指令信息，效果远好于在推理时临时添加。这实际上是"训练时模拟推理场景"的一个典型案例。
+        </div>
+
+        <h3>13.6 边际奖励与多轮策略</h3>
+
+        <p>LLaMA 2还使用了一个叫做<strong>边际奖励（Margin Reward）</strong>的技术。在标准的PPO中，奖励模型只对最终的完整回答打分。但LLaMA 2在训练中同时引入了<strong>每轮对话的边际奖励</strong>——即单独对多轮对话中的每一轮回答分别打分。</p>
+
+        <p>这样做的好处是：奖励模型可以更细粒度地指出"哪一轮的回答质量下降了"。假设一个对话有5轮，第1-2轮回答很好，第3轮开始质量下降，第4-5轮变差。如果只用整体奖励，模型不知道问题出在哪几轮。而边际奖励让优化器能针对性地改进模型在对话中后期的表现。</p>
+
+        <p>为了实现边际奖励，LLaMA 2的标注员在收集偏好数据时，不仅对整体回答打分，还对多轮对话的每一轮进行单独的偏好标注。这个标注成本显然更高——但对于多轮对话质量的提升非常关键。</p>
+
+        <h3>13.7 RLHF各阶段效果对比</h3>
+
+        <p>LLaMA 2论文报告了从基座模型到完整Chat模型的不同版本在人工评估中的表现：</p>
+
+        <table>
+            <tr>
+                <th>模型版本</th>
+                <th>有用性评分</th>
+                <th>安全性评分</th>
+                <th>总体评分</th>
+                <th>与ChatGPT对比</th>
+            </tr>
+            <tr>
+                <td>LLaMA 2 7B Base</td>
+                <td>3.2/7</td>
+                <td>3.8/7</td>
+                <td>3.5/7</td>
+                <td>远低于</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 7B SFT</td>
+                <td>4.8/7</td>
+                <td>4.9/7</td>
+                <td>4.9/7</td>
+                <td>略低于</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 7B RLHF (v1)</td>
+                <td>5.5/7</td>
+                <td>5.6/7</td>
+                <td>5.5/7</td>
+                <td>接近</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 7B RLHF (v5)</td>
+                <td>6.0/7</td>
+                <td>6.2/7</td>
+                <td>6.1/7</td>
+                <td>持平或略优</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 70B RLHF (v5)</td>
+                <td>6.5/7</td>
+                <td>6.6/7</td>
+                <td>6.5/7</td>
+                <td>优于ChatGPT</td>
+            </tr>
+        </table>
+
+        <p>注意，这里LLaMA 2采用了<strong>多轮RLHF迭代</strong>策略（v1到v5）。他们并不是只做一轮PPO训练就结束了——而是反复进行"数据收集 → 奖励模型更新 → PPO训练"的循环。每一轮迭代中，新的模型版本生成的回答被送到标注团队做新的偏好标注，然后用这些新数据更新奖励模型，再基于新奖励模型做PPO训练。这有点像"炼丹"——每次迭代后，模型的质量都上升一个台阶。</p>
+
+        <p>5轮迭代下来，LLaMA 2 7B的总体评分从4.9提升到了6.1——相对提升了约24%。70B版本甚至达到了6.5分，超过了ChatGPT的基线。这个数据说明：<strong>RLHF的迭代次数对最终效果有直接影响。</strong></p>
+
+        <div class="tip">
+            <strong>实用启示：</strong> 对于资源有限的团队，不需要一开始就追求5轮迭代。先做1轮RLHF，效果通常已经比纯SFT好很多。然后可以根据预算决定是否继续迭代。关键是：<strong>每轮迭代的数据应该是当前模型容易出错、且能带来最大改善的case</strong>——"最难啃的骨头先啃"是一个很好的策略。
+        </div>
+
+        <h3>13.8 多轮RLHF迭代的工程挑战</h3>
+
+        <p>多轮RLHF迭代虽然效果好，但工程成本很高。每一轮迭代包含以下工作：</p>
+
+        <ul>
+            <li>用当前模型生成大量回答样本（需要GPU推理）</li>
+            <li>将生成样本发送给标注团队进行偏好标注（需要人力成本）</li>
+            <li>用新标注数据重新训练奖励模型（需要GPU训练）</li>
+            <li>基于新奖励模型重新做PPO训练（需要GPU训练，且是4个模型同时加载）</li>
+        </ul>
+
+        <p>在LLaMA 2 70B上，一轮完整的RLHF迭代大约需要：5万条新标注数据、一周的标注时间、约3000 GPU-hours的计算量。5轮迭代就是15万条标注、5周时间和1.5万 GPU-hours。这个成本对于大多数团队来说是不小的投入。</p>
+
+        <p>但好消息是：<strong>基准模型的质量决定了RLHF的天花板。</strong>如果你有一个非常好的SFT基座，可能2-3轮RLHF迭代就能达到不错的效果。而且受益于开源社区的努力，现在有很多"即开即用"的RLHF框架（如TRL、Deepspeed-Chat）可以大幅降低实施成本。</p>
+
+        <p>好了，这一章我们完整拆解了LLaMA 2 RLHF的每个环节——从奖励模型到PPO、从Ghost Attention到边际奖励、从单轮迭代到多轮策略。RLHF是让LLaMA 2-Chat真正"智能"的关键技术——它把模型从"会说话的机器"变成了"理解用户需求的助手"。</p>
+
+        <p>但有了智能还不够——大模型的安全问题同样重要。下一章，我们将聊一个每个大模型使用者和开发者都必须关注的话题：<strong>安全对齐与幻觉抑制</strong>。LLaMA 2和LLaMA 3在这一领域做了哪些工作？安全性和有用性如何平衡？我们第14章见。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

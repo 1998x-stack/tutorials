@@ -35,6 +35,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `aigc-tutorial/` | AIGC生成模型 | 28 | `https://1998x-stack.github.io/aigc-tutorial/` |
 | `pretraining-dataset-tutorial/` | LLM预训练数据集 | 28 | `https://1998x-stack.github.io/pretraining-dataset-tutorial/` |
 | `dataset-analysis-tutorial/` | 数据集分析与实战 | 28 | `https://1998x-stack.github.io/dataset-analysis-tutorial/` |
+| `post-training-dataset-tutorial/` | 后训练数据集分析与构建流程 | 28 | `https://1998x-stack.github.io/post-training-dataset-tutorial/` |
 
 ### 数学基础 (9)
 | Directory | Topic | Chapters | URL |

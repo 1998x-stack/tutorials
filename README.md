@@ -30,6 +30,7 @@ A collection of 54 free, comprehensive technical tutorials in Chinese — from f
 | 🤖 | AIGC生成模型 · 从入门到精通 | 28 | [aigc-tutorial](https://1998x-stack.github.io/aigc-tutorial/) |
 | 📊 | LLM预训练数据集 · 从入门到精通 | 28 | [pretraining-dataset-tutorial](https://1998x-stack.github.io/pretraining-dataset-tutorial/) |
 | 📊 | AI神经网络数据集分析与实战 · 从入门到精通 | 28 | [dataset-analysis-tutorial](https://1998x-stack.github.io/dataset-analysis-tutorial/) |
+| 📊 | 后训练数据集分析与构建流程 | 28 | [post-training-dataset-tutorial](https://1998x-stack.github.io/post-training-dataset-tutorial/) |
 
 ### 数学基础 (9 courses)
 

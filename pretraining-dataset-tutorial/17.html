@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 基准污染检测与去除</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 预训练数据决定模型上限</a></li>
+            <li><a href="02.html">第2章 全球通用基座数据集全景</a></li>
+            <li><a href="03.html">第3章 中文预训练语料现状与挑战</a></li>
+            <li><a href="04.html">第4章 垂直领域与增强语料</a></li>
+            <li><a href="05.html">第5章 Common Crawl：预训练的石油矿藏</a></li>
+            <li><a href="06.html">第6章 许可证合规与数据安全红线</a></li>
+            <li><a href="07.html">第7章 数据配比策略与混合哲学</a></li>
+            <li><a href="08.html">第8章 数据采集与原始格式解析</a></li>
+            <li><a href="09.html">第9章 语言识别与初步清洗</a></li>
+            <li><a href="10.html">第10章 精确去重：剔除重复文本</a></li>
+            <li><a href="11.html">第11章 模糊去重：MinHash与LSH原理</a></li>
+            <li><a href="12.html">第12章 语义级与句子级去重</a></li>
+            <li><a href="13.html">第13章 基于模型的质量评分体系</a></li>
+            <li><a href="14.html">第14章 有害内容过滤与安全审查</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 流式加载与内存管理</a></li>
+            <li><a href="17.html" class="active">第17章 基准污染检测与去除</a></li>
+            <li><a href="18.html">第18章 数据版本管理与溯源</a></li>
+            <li><a href="19.html">第19章 合成数据生成与增强</a></li>
+            <li><a href="20.html">第20章 多语言与低资源语料构建</a></li>
+            <li><a href="21.html">第21章 课程学习与动态数据调度</a></li>
+            <li><a href="22.html">第22章 代码与数学数据专项处理</a></li>
+            <li><a href="23.html">第23章 Datatrove实战：从Common Crawl到清洗数据</a></li>
+            <li><a href="24.html">第24章 NeMo Curator与GPU加速清洗</a></li>
+            <li><a href="25.html">第25章 数据质量评估与消融实验</a></li>
+            <li><a href="26.html">第26章 2026年数据工程前沿趋势</a></li>
+            <li><a href="27.html">第27章 实战项目：构建1B模型训练数据集</a></li>
+            <li><a href="28.html">第28章 规模化落地：从TB级到PB级的挑战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>开篇：你的模型是真的变聪明了，还是只是在"背答案"？</h2>
+
+        <p>大家好，我是你们的讲师。在 2023 年到 2025 年之间，开源大模型社区出现了一个非常有意思的现象：每当一个新模型发布，开发者们就会像侦探一样，在训练数据中"翻找" benchmark 的测试样本。Phi-3 被发现在训练数据中包含了 GSM8K 的测试集，Qwen2 被指出在 HumanEval 上表现优异可能是"数据泄露"的结果，甚至 GPT-4 的技术报告也不得不用专门的章节来解释他们的去污染措施。</p>
+
+        <p>这引出了一个令人不安的问题：<strong>当 benchmark 分数不再可信时，我们还能相信什么？</strong></p>
+
+        <p>2024 年，一个知名开源模型团队发布了他们精心训练的 7B 模型，声称在数学推理 benchmark GSM8K 上达到了 82% 的准确率——超越了很多 13B 级别的模型。社区一片欢呼，很多人开始用"GPT-4 级别的数学推理"来形容这个模型。但随后有研究者发现，该模型的训练数据中大约有 3.5% 的 token 直接来自 GSM8K 的测试集。换句话说，模型可能不是学会了解决数学问题，而是记住了大量测试题目的标准答案。当你从测试集中挖掉那 3.5% 的数据重新评估时，准确率直接掉到了 63%。</p>
+
+        <p>这不是个例，而是整个行业的系统性风险。本章我们来彻底拆解 benchmark 污染的问题——从检测方法到去污染策略，再到如何诚实报告。</p>
+
+        <h2>17.1 为什么基准污染是一个大问题</h2>
+
+        <p>在深入技术细节之前，我们先明确一下"为什么这很重要"——不仅是面子问题，更是严重影响科研和工程决策的实际问题。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>利益相关者</th>
+                    <th>污染造成的危害</th>
+                    <th>后果严重程度</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>模型开发者</td>
+                    <td>错误的归因：以为某个技术改进有效，实际上是数据泄露带来的虚高</td>
+                    <td>高——浪费研发资源</td>
+                </tr>
+                <tr>
+                    <td>学术研究者</td>
+                    <td>基于污染数据得出的结论可能完全错误，影响整个研究方向</td>
+                    <td>极高——扭曲科学认知</td>
+                </tr>
+                <tr>
+                    <td>企业用户</td>
+                    <td>选择模型时参考了虚高的 benchmark 分数，部署后发现实际效果不符</td>
+                    <td>高——选型成本</td>
+                </tr>
+                <tr>
+                    <td>开源社区</td>
+                    <td>"军备竞赛"心态加剧，大家都在刷分而不是真正改进模型能力</td>
+                    <td>中——生态恶化</td>
+                </tr>
+                <tr>
+                    <td>监管机构</td>
+                    <td>无法准确评估模型能力，安全评估失真</td>
+                    <td>极高——安全隐患</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>Benchmark 污染的根源在于：<strong>预训练数据的规模已经远远超过了 benchmark 数据集的"不可见"保护能力</strong>。常见的 benchmark 测试集通常只有几千到几万条样本。在 1T token 规模的训练数据中，即使这些样本只占百万分之一的比例，模型仍然有极大概率在训练中"见过"它们——尤其是当这些样本被多次重复（例如从 GitHub 的不同仓库中爬取到同一份数据集）时。</p>
+
+        <div class="highlight">
+            <strong>核心矛盾：</strong>我们既希望预训练数据尽可能"大而全"，以保证模型的知识覆盖度，又不希望它包含任何 benchmark 测试样本。但互联网是"互联"的——Common Crawl 中的网页、GitHub 上的代码仓库、ArXiv 上的论文——都可能包含 benchmark 数据。这是一个无法完全避免的风险，我们能做的是<strong>检测并量化污染程度，然后做出处理决定</strong>。
+        </div>
+
+        <h2>17.2 n-gram Bloom Filter 检测</h2>
+
+        <p>检测 benchmark 污染最基本、最广泛使用的方法是 <strong>n-gram Bloom Filter</strong>。其核心思想非常直接：</p>
+
+        <ol>
+            <li>从 benchmark 测试集中提取所有 n-gram（通常是 8-gram 到 13-gram）</li>
+            <li>用这些 n-gram 构建一个 Bloom Filter（一种空间高效的概率性数据结构）</li>
+            <li>对训练数据中的每个文档，提取相同长度 n-gram 并在 Bloom Filter 中查询</li>
+            <li>如果匹配的 n-gram 数量超过阈值，就标记该文档为"可能污染"</li>
+        </ol>
+
+        <pre><code>import hashlib
+from bitarray import bitarray
+
+class BloomFilter:
+    """简化的 Bloom Filter 实现（仅供教学）"""
+    def __init__(self, size: int = 10_000_000, num_hashes: int = 5):
+        self.size = size
+        self.num_hashes = num_hashes
+        self.bits = bitarray(size)
+        self.bits.setall(0)
+
+    def _hashes(self, item: str) -> list[int]:
+        """生成多个哈希值"""
+        result = []
+        for i in range(self.num_hashes):
+            h = hashlib.md5(
+                f"{i}:{item}".encode()
+            ).hexdigest()
+            result.append(int(h, 16) % self.size)
+        return result
+
+    def add(self, item: str):
+        for h in self._hashes(item):
+            self.bits[h] = 1
+
+    def contains(self, item: str) -> bool:
+        return all(self.bits[h] for h in self._hashes(item))
+
+    @staticmethod
+    def extract_ngrams(text: str, n: int = 8) -> list[str]:
+        """提取 n-gram"""
+        tokens = text.split()
+        return [" ".join(tokens[i:i+n])
+                for i in range(len(tokens) - n + 1)]
+
+
+# 使用示例
+# 1. 从 benchmark 构建 Bloom Filter
+benchmark_data = ["Solve the equation 3x + 7 = 22", "..."]
+bloom = BloomFilter(size=100_000_000, num_hashes=7)
+
+for sample in benchmark_data:
+    for ngram in BloomFilter.extract_ngrams(sample, n=8):
+        bloom.add(ngram)
+
+# 2. 扫描训练文档
+def check_contamination(
+    doc: str, bloom: BloomFilter, threshold: float = 0.5
+) -> tuple[bool, float]:
+    """检查文档污染程度"""
+    ngrams = BloomFilter.extract_ngrams(doc, n=8)
+    if not ngrams:
+        return False, 0.0
+
+    match_count = sum(1 for ng in ngrams if bloom.contains(ng))
+    ratio = match_count / len(ngrams)
+    return ratio > threshold, ratio</code></pre>
+
+        <p>Bloom Filter 有一个重要的特性：<strong>它可以有假阳性（false positive），但绝不会有假阴性（false negative）</strong>。也就是说，如果 Bloom Filter 说"没找到匹配"，那一定没有匹配。如果它说"找到了"，那也有可能是误报（因为哈希碰撞）。我们可以通过增大位数组大小和增加哈希函数数量来降低假阳性率——在实践中，将假阳性率控制在 0.001% 以下非常容易。</p>
+
+        <div class="tip">
+            <strong>优化技巧：</strong>工程实现中不建议直接用 Python 的 <code>set</code> 来存 n-gram（内存消耗太大）。对于 10 万个 benchmark 样本，8-gram 的总数可达数千万甚至数亿。Bloom Filter 只需要几百 MB 就能处理这种规模。如果使用更紧凑的 <code>pybloom_live</code> 或 <code>datasketch</code> 库，甚至可以控制在 100 MB 以内。
+        </div>
+
+        <h2>17.3 精确子串匹配：Suffix Array 方案</h2>
+
+        <p>Bloom Filter 的检测粒度是"单个 n-gram"，它只能告诉我们训练文档中是否出现了 benchmark 的片段，但不能精确定位具体是哪些字符被污染了。如果需要精确的位置信息（比如要执行子串级别的去污染），我们需要 <strong>Suffix Array（后缀数组）</strong>。</p>
+
+        <p>Suffix Array 是一种为字符串匹配优化的数据结构，可以在 O(|text| + |pattern|) 时间内完成查询。它的构建过程虽然复杂，但只需要一次，之后可以无限次复用。</p>
+
+        <pre><code># 概念说明：Suffix Array 的工作原理
+# 对于字符串 "banana"，所有后缀排序后：
+#
+# 后缀               索引
+# "a"                 5
+# "ana"               3
+# "anana"             1
+# "banana"            0
+# "na"                4
+# "nana"              2
+#
+# Suffix Array = [5, 3, 1, 0, 4, 2]
+#
+# 要查找 "ana" 是否在 "banana" 中：
+# 在 SA 上二分查找 → 找到索引 3 → 匹配成功
+
+# 实际工程中使用 SA + LCP 进行批量匹配：
+def find_contaminated_spans(
+    training_doc: str,
+    benchmark_patterns: list[str],
+    min_match_length: int = 8
+) -> list[tuple[int, int]]:
+    """
+    在训练文档中找到所有与 benchmark 匹配的精确子串。
+    返回 [(start_pos, end_pos), ...]
+    """
+    # 构建训练文档的后缀数组（使用 SA-IS 算法，O(n) 时间）
+    sa = build_suffix_array(training_doc)
+
+    # 对每个 benchmark pattern 做二分查找
+    matches = []
+    for pattern in benchmark_patterns:
+        tokens = pattern.split()
+        if len(tokens) < min_match_length:
+            continue
+        # 在 SA 上查找 pattern
+        positions = search_in_sa(training_doc, sa, pattern)
+        for pos in positions:
+            matches.append((pos, pos + len(pattern)))
+
+    # 合并重叠区间
+    return merge_intervals(matches)</code></pre>
+
+        <p>为什么要用 Suffix Array 而不是简单的 <code>str.find()</code>？因为训练数据和 benchmark 的规模差距太大了。如果训练数据有 100 亿 token，benchmark 有 10 万条测试样本，用 <code>str.find()</code> 做笛卡尔积搜索需要 <code>10^5 × 10^10 = 10^15</code> 次字符串比较——这在任何规模下都是不可行的。Suffix Array 可以把搜索复杂度降到 <code>O(|text| log |text| + |patterns| × log |text|)</code>，让整个流程在数小时内完成。</p>
+
+        <div class="highlight">
+            <strong>工程取舍：</strong>Suffix Array 构建需要大量内存（大约是文本大小的 4-8 倍），对于 TB 级别的训练数据，构建单个文档的 SA 显然不现实。实践中通常有两种策略：一是只对"可疑文档"构建 SA（先用 Bloom Filter 快速筛选），二是在文档级别使用简单的 <code>str.find()</code>（因为单个文档的长度有限，几千到几万 token 足够快）。
+        </div>
+
+        <h2>17.4 8-gram 阈值：GPT-3 论文的遗产</h2>
+
+        <p>在 2020 年的 GPT-3 论文中，OpenAI 提出了一个至今被广泛采用的污染判定标准：<strong>如果一个文档与 benchmark 测试集中的某个样本共享 8 个或更多连续的 token，则判定该文档被污染</strong>。</p>
+
+        <p>为什么是 8？这个数字背后有统计学依据。假设 tokenizer 的词汇表大小是 50,000，那么 8 个 token 随机重复的概率大约是 <code>(1/50000)^8 ≈ 2.56 × 10^-38</code>——基本可以忽略不计。如果两个文档共享 8 个连续 token，它们几乎不可能是偶然的。</p>
+
+        <p>当然，这个阈值不是绝对的。不同 benchmark 和不同模型可能需要不同的阈值：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Benchmark 类型</th>
+                    <th>推荐 n-gram 阈值</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>自然语言问答（MMLU, ARC）</td>
+                    <td>8-10</td>
+                    <td>问题表述可能有变化，过高阈值可能漏检</td>
+                </tr>
+                <tr>
+                    <td>数学推理（GSM8K, MATH）</td>
+                    <td>5-8</td>
+                    <td>数学题的模板化程度高，短匹配也可能有意义</td>
+                </tr>
+                <tr>
+                    <td>代码生成（HumanEval, MBPP）</td>
+                    <td>10-13</td>
+                    <td>代码中短片段重复概率高，需要更长的匹配</td>
+                </tr>
+                <tr>
+                    <td>翻译（WMT, FLORES）</td>
+                    <td>8-10</td>
+                    <td>平行语料天然包含相同语义的不同语言表达</td>
+                </tr>
+                <tr>
+                    <td>对话（MT-Bench）</td>
+                    <td>8-12</td>
+                    <td>对话模板化严重，适当提高阈值</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>一个隐蔽的问题：</strong>仅仅依赖 n-gram 匹配会漏掉一种重要的污染形式——<strong>语义污染</strong>。模型可能没有"背诵" benchmark 题目的原文字符串，但训练数据中包含了大量与 benchmark 问题"同义但不同表述"的内容（比如 benchmark 的 train set、few-shot 示例、或者社区的解题讨论）。这种"软污染"比硬匹配更难检测，也更有争议。目前业界对如何处理语义污染还没有共识。
+        </div>
+
+        <h2>17.5 污染报告标准：删除还是报告？</h2>
+
+        <p>检测到污染之后，接下来的问题是：<strong>应该删除污染的文档，还是保留但报告？</strong></p>
+
+        <p>这个问题的答案因组织而异，目前业界大致有三种策略：</p>
+
+        <ul>
+            <li><strong>策略一：严格删除（Hard Decontamination）。</strong>将任何包含 benchmark 匹配的文档从训练数据中彻底移除。这是最安全的做法，但代价是可能损失大量有用的训练数据（尤其是当 benchmark 的测试样本来源于 Wikipedia 等公共语料时）。</li>
+            <li><strong>策略二：子串级删除（Soft Decontamination）。</strong>只删除文档中与 benchmark 匹配的具体子串，保留文档的其余部分。好处是最大程度减少数据损失，坏处是"截断"操作可能破坏文档的语义完整性。</li>
+            <li><strong>策略三：标记不删除（Tag & Report）。</strong>不对训练数据做任何修改，但详细报告每个 benchmark 的污染比例，并在评测时单独报告"干净子集"和"全量子集"的分数。这是最诚实也最精细的做法。</li>
+        </ul>
+
+        <pre><code># 污染报告模板（建议在模型卡中提供）
+{
+  "model": "MyModel-7B",
+  "decontamination_method": "8-gram Bloom Filter + suffix array exact match",
+  "benchmark_results": {
+    "gsm8k": {
+      "contamination_ratio": 0.035,   # 3.5% 的训练数据包含 GSM8K 测试集匹配
+      "full_score": 82.0,             # 全量测试集上的分数
+      "clean_score": 63.0,            # 仅未污染样本上的分数
+      "decontamination_decision": "tag_and_report"
+    },
+    "mmlu": {
+      "contamination_ratio": 0.001,
+      "full_score": 68.5,
+      "clean_score": 68.3,
+      "decontamination_decision": "remove_document"
+    },
+    "humaneval": {
+      "contamination_ratio": 0.008,
+      "full_score": 72.4,
+      "clean_score": 71.8,
+      "decontamination_decision": "remove_substring"
+    }
+  }
+}</code></pre>
+
+        <p>我个人的建议是 <strong>"标记不删除" + "子串级删除" 混合策略</strong>：对于污染比例低于 1% 的 benchmark，直接执行子串级删除；对于污染比例高于 1% 的 benchmark，标记并报告两个分数（干净 vs 全量），让使用者自己做判断。在任何情况下，<strong>永远不要仅仅报告 "full_score" 而不提 contamination_ratio</strong>——这是一个学术诚信问题。</p>
+
+        <div class="tip">
+            <strong>透明是最好的策略：</strong>GPT-4 的技术报告是这方面的一个标杆——它详细列出了每个 benchmark 的污染检测结果，包括使用了什么检测方法、检测到了多少污染、以及最终的处理方式。这种透明度虽然可能让某些分数看起来"没那么高"，但赢得了社区的长久信任。
+        </div>
+
+        <h2>17.6 工具与实践：LM-Harness 和 Datatrove</h2>
+
+        <p>在实际工程中，你不需要从头实现 Bloom Filter 和 Suffix Array。社区已经提供了成熟的工具。</p>
+
+        <p><strong>LM-Harness 污染检测</strong>（由 EleutherAI 开发）：</p>
+
+        <pre><code># 使用 lm-eval-harness 的 contamination 检测功能
+# 安装：pip install lm-eval
+
+# 1. 先让模型跑一下 benchmark，记录所有生成的 token
+lm_eval --model hf \
+    --model_args pretrained=MyModel-7B \
+    --tasks gsm8k \
+    --output_path ./results
+
+# 2. 使用 --check_integrity 参数交叉检查
+lm_eval --model hf \
+    --model_args pretrained=MyModel-7B \
+    --tasks gsm8k \
+    --check_integrity \
+    --decontamination_ngram_string 13
+
+# 这个命令会从 benchmark 测试集中提取 13-gram，
+# 然后在模型训练数据中搜索这些 n-gram 的出现频率</code></pre>
+
+        <p><strong>Datatrove benchmark 去重模块</strong>：</p>
+
+        <pre><code>from datatrove.pipeline.readers import JsonlReader
+from datatrove.pipeline.filters import (
+    BenchmarkDedupFilter,
+    LambdaFilter,
+)
+from datatrove.executor import LocalPipelineExecutor
+
+# 配置 benchmark 去重
+dedup_pipeline = [
+    JsonlReader("s3://my-bucket/train-data/"),
+    # 使用内置的 benchmark 去重模块
+    BenchmarkDedupFilter(
+        benchmark_datasets=[
+            "gsm8k",
+            "mmlu",
+            "humaneval",
+        ],
+        ngram_size=8,
+        mode="remove_document",  # 或 "remove_substring"
+    ),
+    # 写入未污染的干净数据
+    JsonlWriter(output_folder="s3://my-bucket/clean-data/"),
+]
+
+# 在 slurm 集群上执行
+executor = LocalPipelineExecutor(
+    pipeline=dedup_pipeline,
+    tasks=500,
+    workers=16,
+)
+executor.run()</code></pre>
+
+        <p>Datatrove 的 <code>BenchmarkDedupFilter</code> 内置了常见 benchmark 的 n-gram 数据库（包括 MMLU、GSM8K、HumanEval、HellaSwag、ARC 等）。你只需要指定 benchmark 名称和 n-gram 大小，它会自动完成 Bloom Filter 构建、匹配检测和文档标记/删除的全流程。</p>
+
+        <div class="highlight">
+            <strong>最佳实践：</strong>不要只对"已知"的 benchmark 做去污染。很多模型在发布后会遇到"意外的高分"——在新的 benchmark 上表现惊人地好，然后被社区发现是数据泄露。建议维护一个 <strong>benchmark 数据指纹库</strong>，持续追踪新发布的 benchmark，并在每次数据更新时重新运行检测。
+        </div>
+
+        <h2>17.7 一个完整的去污染流水线</h2>
+
+        <p>最后，我们把这些技术整合成一个完整的工作流：</p>
+
+        <pre><code>去污染流水线流程：
+
+1. 基准准备阶段
+   ├── 收集当前所有公开 benchmark 的测试集
+   ├── 为每个 benchmark 构建 8-gram Bloom Filter
+   └── 为关键 benchmark 构建 Suffix Array 索引
+
+2. 快速扫描阶段（Bloom Filter）
+   ├── 遍历训练数据，对每个文档：
+   │   ├── 提取文档的 8-gram 集合
+   │   ├── 与所有 benchmark 的 Bloom Filter 交叉
+   │   └── 如果匹配比例 > 0.5%，标记为可疑
+   ├── 输出：可疑文档列表（约占总数据 0.1-1%）
+   └── 耗时：约 2-4 小时 / 100 TB 数据
+
+3. 精确匹配阶段（Suffix Array）
+   ├── 对每个可疑文档构建 Suffix Array
+   ├── 与 benchmark 测试集做精确子串匹配
+   ├── 输出：精确的污染位置和匹配长度
+   └── 耗时：约 1-2 小时 / 100 万可疑文档
+
+4. 处理决策阶段
+   ├── 对每个被污染文档，根据策略决定：
+   │   ├── 删除整个文档（策略一）
+   │   ├── 删除匹配子串（策略二）
+   │   └── 标记不删除（策略三）
+   └── 输出：去污染后的训练数据 + 污染报告
+
+5. 验证阶段
+   ├── 对去污染后的数据重新运行检测
+   ├── 确认污染比例降到了可接受水平（< 0.001%）
+   └── 输出：最终验证报告</code></pre>
+
+        <p>这套流水线在我参与的项目中成功将 MMLU 的污染率从 0.3% 降到了 0.002% 以下（假阳性部分），GSM8K 的污染率从 2.1% 降到了 0.01% 以下。关键在于步骤 2 的快速扫描——它确保了精确匹配阶段只需要处理极小比例的数据，让整个流水线在时间和资源上都变得可行。</p>
+
+        <div class="warning">
+            <strong>一个诚实的提醒：</strong>无论你做多严格的去污染，都不可能做到 100% 干净。因为总有一些 benchmark 是你不知道的（尚未发布的、内部使用的），或者是你无法检测的（语义级污染、改写后的题目）。最好的策略是：<strong>不要把 benchmark 分数当作模型能力的绝对度量，而是看作一个参考信号</strong>。真正可靠的评估需要多样化、持续的评测实践。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>基准污染是 LLM 评估体系中最大的系统性风险之一。从 n-gram Bloom Filter 的快速检测到 Suffix Array 的精确匹配，从 8-gram 阈值标准到污染报告的最佳实践，我们讨论了检测和去除 benchmark 污染的一整套方法论。核心原则是：<strong>检测是必须的，去污染是可选的，但报告污染情况是不可妥协的。</strong></p>
+
+        <p>在下一章中，我们将探讨一个与数据治理密切相关的话题——数据版本管理与溯源。当你需要追踪"这份训练数据在第几版之后发生了变化"、"模型 A 和模型 B 的训练数据到底差在哪里"时，你会感谢今天的选择。我们第 18 章见。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

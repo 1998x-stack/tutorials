@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 分布式数据处理架构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 预训练数据决定模型上限</a></li>
+            <li><a href="02.html">第2章 全球通用基座数据集全景</a></li>
+            <li><a href="03.html">第3章 中文预训练语料现状与挑战</a></li>
+            <li><a href="04.html">第4章 垂直领域与增强语料</a></li>
+            <li><a href="05.html">第5章 Common Crawl：预训练的石油矿藏</a></li>
+            <li><a href="06.html">第6章 许可证合规与数据安全红线</a></li>
+            <li><a href="07.html">第7章 数据配比策略与混合哲学</a></li>
+            <li><a href="08.html">第8章 数据采集与原始格式解析</a></li>
+            <li><a href="09.html">第9章 语言识别与初步清洗</a></li>
+            <li><a href="10.html">第10章 精确去重：剔除重复文本</a></li>
+            <li><a href="11.html">第11章 模糊去重：MinHash与LSH原理</a></li>
+            <li><a href="12.html">第12章 语义级与句子级去重</a></li>
+            <li><a href="13.html">第13章 基于模型的质量评分体系</a></li>
+            <li><a href="14.html">第14章 有害内容过滤与安全审查</a></li>
+            <li><a href="15.html" class="active">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 流式加载与内存管理</a></li>
+            <li><a href="17.html">第17章 基准污染检测与去除</a></li>
+            <li><a href="18.html">第18章 数据版本管理与溯源</a></li>
+            <li><a href="19.html">第19章 合成数据生成与增强</a></li>
+            <li><a href="20.html">第20章 多语言与低资源语料构建</a></li>
+            <li><a href="21.html">第21章 课程学习与动态数据调度</a></li>
+            <li><a href="22.html">第22章 代码与数学数据专项处理</a></li>
+            <li><a href="23.html">第23章 Datatrove实战：从Common Crawl到清洗数据</a></li>
+            <li><a href="24.html">第24章 NeMo Curator与GPU加速清洗</a></li>
+            <li><a href="25.html">第25章 数据质量评估与消融实验</a></li>
+            <li><a href="26.html">第26章 2026年数据工程前沿趋势</a></li>
+            <li><a href="27.html">第27章 实战项目：构建1B模型训练数据集</a></li>
+            <li><a href="28.html">第28章 规模化落地：从TB级到PB级的挑战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>开篇：单机已死，分布式当立</h2>
+
+        <p>大家好，我是你们的讲师。前面十四章我们聊了数据采集、清洗、去重、质量评分、内容过滤等各个环节的技术细节。你可能会有一种错觉——这些流程看起来并不复杂，在自己的笔记本电脑上跑一跑脚本不就搞定了吗？</p>
+
+        <p>让我给你一组数字：Common Crawl 每个月一次的网页抓取，单次生成的数据量约为 <strong>300-400 TB</strong>（未压缩）。如果去掉 WARC 格式的开销只保留文本内容，也还有 50-80 TB。你在笔记本电脑上跑一个 Python 脚本读取 80 TB 的数据——这需要多久？假设你的 SSD 读取速度是 3 GB/s，读完一遍也需要 <strong>7.4 个小时</strong>，而且这还只是读取，更别提在上面运行去重、质量评分、语言识别这些计算密集型操作了。</p>
+
+        <p>这就是为什么分布式数据处理架构不是"可选项"，而是"必选项"。没有分布式系统，你连数据都搬不动，更别提处理了。这一章，我们来拆解支撑 TB 级预训练数据流水线的分布式架构。</p>
+
+        <h2>15.1 MapReduce：数据处理的经典模式</h2>
+
+        <p>在开始讨论具体工具之前，我们先建立一个统一的思维框架——<strong>MapReduce</strong>。虽然这个编程模型最早由 Google 在 2004 年提出，但它的"分而治之"思想至今仍然是几乎所有大规模数据处理的底层逻辑。</p>
+
+        <p>把 MapReduce 映射到数据清洗流水线上，核心操作分为三步：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>阶段</th>
+                    <th>操作</th>
+                    <th>数据清洗示例</th>
+                    <th>并行度</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Split（分片）</td>
+                    <td>将输入数据切割为独立的小块</td>
+                    <td>把 100 TB 的 WARC 文件拆成 10,000 个 10 GB 的分片</td>
+                    <td>高（可任意扩展）</td>
+                </tr>
+                <tr>
+                    <td>Map（映射）</td>
+                    <td>对每个分片独立执行相同的处理函数</td>
+                    <td>对每个分片运行语言识别 + 去重 + 质量评分</td>
+                    <td>高（分片间无依赖）</td>
+                </tr>
+                <tr>
+                    <td>Reduce（归并）</td>
+                    <td>汇总所有 Map 输出，做全局聚合</td>
+                    <td>合并全局 MinHash 签名表，全局去重</td>
+                    <td>中（需要 Shuffle）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>MapReduce 之所以长寿，是因为它完美地适配了数据清洗流水线的两大特点：<strong>高度并行化</strong>（绝大多数清洗步骤是逐文档的）和 <strong>无状态独立性</strong>（每个文档的处理不依赖其他文档）。当然，全局去重这类需要跨文档通信的操作会复杂一些，但整体流程仍然是 MapReduce 的变体。</p>
+
+        <div class="highlight">
+            <strong>设计原则：</strong>数据流水线的理想状态是 90% 以上的操作都是"embarrassingly parallel"（易并行）的。全局聚合类操作越少，系统扩展性越好。如果你发现自己的流水线需要大量跨分片通信，那很可能架构设计出了问题。
+        </div>
+
+        <h2>15.2 Slurm 集群调度：传统的 HPC 路线</h2>
+
+        <p>如果你在高校或大型企业工作，大概率接触过 <strong>Slurm</strong>（Simple Linux Utility for Resource Management）。它是学术和高性能计算领域最主流的集群调度系统。对于数据清洗来说，Slurm 最常用的模式是 <strong>Job Array</strong>（作业数组）。</p>
+
+        <p>假设你有一个清洗脚本 <code>clean.sh</code>，需要处理 1,000 个数据分片：</p>
+
+        <pre><code>#!/bin/bash
+#SBATCH --array=1-1000          # 1000 个并行任务
+#SBATCH --cpus-per-task=8       # 每个任务 8 个 CPU
+#SBATCH --mem-per-cpu=4G        # 每个 CPU 4GB 内存
+#SBATCH --time=24:00:00         # 最长运行 24 小时
+#SBATCH --output=logs/slurm-%A_%a.out
+
+# 获取当前任务对应的分片编号
+SHARD_ID=${SLURM_ARRAY_TASK_ID}
+INPUT_FILE="/data/shard_$(printf '%04d' ${SHARD_ID}).jsonl"
+OUTPUT_FILE="/output/clean_$(printf '%04d' ${SHARD_ID}).jsonl"
+
+# 执行清洗
+python clean_pipeline.py --input ${INPUT_FILE} --output ${OUTPUT_FILE}</code></pre>
+
+        <p>这段脚本做了一件很巧妙的事情：Slurm 会自动为 <code>SLURM_ARRAY_TASK_ID</code> 从 1 到 1000 分配任务，每个任务在自己的计算节点上独立运行。如果你的集群有 100 个节点、每个节点 32 核，那么理论上可以同时运行 3,200 个任务——1,000 个分片会在几分钟内全部启动。</p>
+
+        <p>Slurm 路线的优缺点非常鲜明：</p>
+
+        <ul>
+            <li><strong>优点：</strong>高度成熟稳定，几乎不需要额外的基础设施；资源隔离性好，一个任务 OOM 不会影响其他任务；日志聚合机制完善，通过 <code>sacct</code> 可以追溯每个任务的资源使用情况。</li>
+            <li><strong>缺点：</strong>作业排队时间长（尤其在学校共享集群上）；缺乏 Python 原生 API，所有交互通过 Shell 脚本完成；动态资源扩缩容困难，启动和关闭任务都需要排队等待调度。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>实战建议：</strong>Slurm 最适合"批处理型"清洗任务——一次性提交所有分片，等全部完成后合并。如果你需要交互式调试或动态调整流水线参数，请考虑 Ray 或直接使用 datatrove 的本地多进程模式。
+        </div>
+
+        <h2>15.3 Ray：云原生时代的分布式引擎</h2>
+
+        <p>如果说 Slurm 是"上一代"的分布式方案，那么 <strong>Ray</strong> 就是面向 AI 工作负载的"新一代"选择。Ray 由 UC Berkeley RISELab 开发，已经成为 LLM 训练和数据处理领域的事实标准之一。</p>
+
+        <p>在数据清洗场景中，Ray Data API 是最常用的入口：</p>
+
+        <pre><code>import ray
+
+# 初始化 Ray 集群（自动检测可用资源）
+ray.init(address="auto")
+
+# 从 S3 读取 JSONL 格式的原始数据
+ds = ray.data.read_json(
+    "s3://my-bucket/raw-data/",
+    parallelism=1000  # 拆分为 1000 个分片
+)
+
+# 定义清洗流水线：链式调用风格
+ds = (
+    ds.map_batches(clean_html, batch_size=1024)
+      .map_batches(language_detect, batch_size=512)
+      .map_batches(quality_score, batch_size=256)
+      .map_batches(deduplicate_within_batch, batch_size=128)
+)
+
+# 触发计算并写入结果
+ds.write_json("s3://my-bucket/clean-data/")</code></pre>
+
+        <p>这段代码看起来就像是在本地操作 pandas DataFrame，但实际上 Ray 在背后做了大量工作：</p>
+
+        <ul>
+            <li><strong>任务自动分发：</strong>每个 <code>map_batches</code> 调用会生成一批并行任务，自动分配到集群中的可用节点上。</li>
+            <li><strong>对象存储（Object Store）：</strong>Ray 在内存中维护一个共享的分布式对象存储，中间结果直接在内存中传递，不需要落盘。</li>
+            <li><strong>流式执行：</strong>不同的流水线阶段可以重叠执行——第一阶段输出一个 batch 就立即送给第二阶段处理，不需要等全部第一阶段完成。</li>
+            <li><strong>容错重试：</strong>如果某个节点宕机或任务执行失败，Ray 会自动在其他节点上重新调度失败的任务。</li>
+        </ul>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th>Slurm</th>
+                    <th>Ray</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>调度粒度</td>
+                    <td>作业级别（Job）</td>
+                    <td>任务级别（Task）</td>
+                    <td>任务级更适合细粒度流水线</td>
+                </tr>
+                <tr>
+                    <td>Python 集成</td>
+                    <td>Shell 脚本</td>
+                    <td>原生 Python API</td>
+                    <td>Ray 对 ML 工程师更友好</td>
+                </tr>
+                <tr>
+                    <td>资源弹性</td>
+                    <td>静态（固定分区）</td>
+                    <td>动态（自动扩缩容）</td>
+                    <td>云环境 Ray 优势明显</td>
+                </tr>
+                <tr>
+                    <td>容错机制</td>
+                    <td>手动重提交</td>
+                    <td>自动重试</td>
+                    <td>长时间流水线 Ray 更可靠</td>
+                </tr>
+                <tr>
+                    <td>对象存储</td>
+                    <td>无（依赖共享文件系统）</td>
+                    <td>内置分布式内存存储</td>
+                    <td>Ray 减少磁盘 I/O 开销</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>15.4 数据分片策略：拆分是架构的第一步</h2>
+
+        <p>无论是 Slurm 还是 Ray，第一步都是把数据拆分成可独立处理的分片（shard）。分片策略的好坏直接影响流水线的平衡性和效率。</p>
+
+        <h3>按 URL 哈希分片</h3>
+        <p>这是最常用的策略。对每个文档的 URL 计算 hash，然后对分片数量取模：</p>
+
+        <pre><code>def get_shard_id(url: str, num_shards: int) -> int:
+    return hash(url) % num_shards</code></pre>
+
+        <p>优点：同一 URL 的文档总是进入同一个分片，天然支持"按文档去重"。缺点：如果 URL 分布不均匀（比如某个网站占了数据的 30%），会导致分片大小差异巨大。</p>
+
+        <h3>按文件大小范围分片</h3>
+        <p>对 WARC 或 JSONL 文件进行等大小拆分——每个分片的目标大小设为 1 GB 或 10 GB。优点是分片大小均匀，适合对内存有严格要求的任务。缺点是跨分片去重困难，同一个文档可能被切分到两个分片中。</p>
+
+        <h3>自适应分片</h3>
+        <p>结合以上两种策略：先用 URL 哈希做粗粒度分片，再对每个哈希桶内部按大小做二次切分。这是 datatrove 等现代工具采用的方案，兼顾了去重便利性和负载均衡。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我经历过一次惨痛教训：团队使用的分片策略是"每 10 万行一个文件"，结果有一个分片里全是 Reddit 的对话（单行极短，只有几十个 token），另一个分片里全是 arXiv 论文（单行极长，可达数万 token）。模型训练时，短的 batch 飞快跑完，长的 batch 拖慢整个流水线。最终我们改用了"按 token 数分片"——保证每个分片的总 token 数大致相等，而不是总行数相等。
+        </div>
+
+        <h2>15.5 Worker 分配与资源管理</h2>
+
+        <p>数据清洗流水线中的不同阶段对资源的需求差异巨大。合理的 worker 分配方案可以显著提升吞吐量。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>流水线阶段</th>
+                    <th>计算特征</th>
+                    <th>瓶颈类型</th>
+                    <th>推荐配置</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>语言检测（fastText）</td>
+                    <td>轻量模型推理</td>
+                    <td>CPU 密集型</td>
+                    <td>高 CPU 核数，低内存</td>
+                </tr>
+                <tr>
+                    <td>MinHash 计算</td>
+                    <td>哈希运算</td>
+                    <td>CPU 密集型</td>
+                    <td>高 CPU 核数，中等内存</td>
+                </tr>
+                <tr>
+                    <td>质量评分（BERT 分类器）</td>
+                    <td>Transformer 推理</td>
+                    <td>GPU 密集型</td>
+                    <td>GPU + 大显存</td>
+                </tr>
+                <tr>
+                    <td>HTML 解析</td>
+                    <td>字符串处理</td>
+                    <td>I/O + CPU 混合</td>
+                    <td>中等 CPU + SSD</td>
+                </tr>
+                <tr>
+                    <td>全局去重（LSH 合并）</td>
+                    <td>大规模比较</td>
+                    <td>内存 + 网络</td>
+                    <td>大内存节点</td>
+                </tr>
+                <tr>
+                    <td>数据格式转换</td>
+                    <td>序列化/反序列化</td>
+                    <td>I/O 密集型</td>
+                    <td>高网络带宽 + SSD</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>在实际的 datatrove 流水线中，<strong>task/worker 模型</strong>提供了一种简洁的资源抽象：一个 task 对应一个数据分片，一个 worker 对应一个计算进程。通过 <code>--tasks</code> 和 <code>--workers</code> 参数可以灵活控制并行度：</p>
+
+        <pre><code># CPU 密集型阶段：更多 worker，更少 task 并行
+datatrove run \
+  --tasks 50 \
+  --workers 8 \
+  --executor slurm \
+  --config configs/language_filter.yaml
+
+# GPU 密集型阶段：更少 worker，确保 GPU 不空闲
+datatrove run \
+  --tasks 10 \
+  --workers 1 \
+  --executor local \
+  --gpus 1 \
+  --config configs/quality_scorer.yaml</code></pre>
+
+        <p>这里的关键经验是：worker 数量不等于 task 数量。如果每个 task 只需要 1 个 CPU，那么一台 128 核的机器可以同时运行 128 个 task。但如果每个 task 需要 8 个 CPU，那最多只能同时运行 16 个。我们需要根据流水线各阶段的资源画像来合理设置 task 和 worker 的配比。</p>
+
+        <div class="highlight">
+            <strong>经验法则：</strong>在你第一次部署流水线时，先用少量测试数据（比如 10 GB）运行一遍，通过监控面板观察 CPU 利用率、内存使用和 I/O 等待时间，找出真正的瓶颈。然后针对瓶颈资源做扩展，而不是盲目增加所有资源。大多数时候，I/O 才是真正的瓶颈，而不是 CPU 或 GPU。
+        </div>
+
+        <h2>15.6 成本分析：CPU vs GPU，云上 vs 本地</h2>
+
+        <p>选择分布式架构时，成本是绕不开的话题。我们来做一个大致的成本对比：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>方案</th>
+                    <th>处理 100 TB 的预估时间</th>
+                    <th>硬件成本（典型配置）</th>
+                    <th>运行成本</th>
+                    <th>运维复杂度</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>纯 CPU 集群（Slurm）</td>
+                    <td>3-5 天</td>
+                    <td>10 台 × 128 核服务器</td>
+                    <td>约 $2,000-4,000（云上）</td>
+                    <td>低</td>
+                </tr>
+                <tr>
+                    <td>GPU 加速集群（Ray）</td>
+                    <td>1-2 天</td>
+                    <td>4 台 × 8 GPU 节点</td>
+                    <td>约 $5,000-10,000（云上）</td>
+                    <td>中</td>
+                </tr>
+                <tr>
+                    <td>混合架构（CPU + GPU）</td>
+                    <td>2-3 天</td>
+                    <td>10 台 CPU + 2 台 GPU</td>
+                    <td>约 $3,000-6,000（云上）</td>
+                    <td>高</td>
+                </tr>
+                <tr>
+                    <td>本地集群</td>
+                    <td>3-5 天</td>
+                    <td>一次性购置约 $100K-200K</td>
+                    <td>约 $500-1,000/月（电费运维）</td>
+                    <td>高</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>大多数团队的最佳实践是 <strong>本地 + 云端混合</strong>：日常小规模调试和增量清洗在本地完成，全量刷新 Common Crawl 等大规模任务时上云。具体选型可以参考以下决策树：</p>
+
+        <ul>
+            <li><strong>数据量 &lt; 10 TB：</strong>单机就够了。用 datatrove 的 <code>--executor local</code> 模式配合多进程即可。</li>
+            <li><strong>10-100 TB：</strong>需要分布式。如果已有 Slurm 集群优先用 Slurm，否则用 Ray 在云上搭建临时集群。</li>
+            <li><strong>100 TB+：</strong>必须做架构优化。考虑混合方案，GPU 加速质量评分，CPU 做去重和清洗。</li>
+            <li><strong>需要频繁更新：</strong>Ray 的动态扩缩容比 Slurm 更经济，按需付费模式更适合增量流水线。</li>
+        </ul>
+
+        <p>我还想提醒一个重要但容易被忽视的成本——<strong>数据传输费用</strong>。在不同云之间搬运数据、或从云上下载数据到本地，费用可能远超计算本身。尽可能把计算靠近数据存放的位置，这是成本优化的第一原则。</p>
+
+        <div class="tip">
+            <strong>省钱技巧：</strong>如果你使用 AWS，把数据放在 us-east-1 并在这个区域运行 Ray 集群。us-east-1 是 AWS 流量最便宜的区域，而且大多数云服务的最低费用也是在这个区域。另外，使用 Spot Instance 可以节省 60-80% 的计算成本，前提是你的流水线支持容错重试。
+        </div>
+
+        <h2>15.7 业界案例：一个分布式数据流水线的完整架构</h2>
+
+        <p>讲了这么多理论，我们来看一个实际的架构设计。这是一个 Medium 规模的团队（约 10 人）为训练 7B 模型搭建的数据流水线：</p>
+
+        <pre><code>数据流水线架构概览（基于 Ray + AWS）:
+┌─────────────────────────────────────────────────┐
+│  数据源层                                         │
+│  Common Crawl (S3) + 中文爬虫 (S3) + 代码(GitHub) │
+└──────────────────┬──────────────────────────────┘
+                   ▼
+┌─────────────────────────────────────────────────┐
+│  第一层：粗清洗 (CPU 集群, 40 节点 × 64 核)       │
+│  WARC 解析 → 语言检测 → HTML 剥离 → URL 去重      │
+│  → 清洗后 JSONL 写回 S3                          │
+└──────────────────┬──────────────────────────────┘
+                   ▼
+┌─────────────────────────────────────────────────┐
+│  第二层：精清洗 (GPU 集群, 8 节点 × 8 A100)        │
+│  Quality Score (BERT) → PII 检测 → 毒性过滤       │
+│  → 评分后 JSONL 写回 S3                           │
+└──────────────────┬──────────────────────────────┘
+                   ▼
+┌─────────────────────────────────────────────────┐
+│  第三层：去重 (CPU + 大内存, 4 节点 × 512 GB)      │
+│  MinHash 计算 → LSH Bucketing → 全局去重          │
+│  → 去重后 JSONL 写回 S3                           │
+└──────────────────┬──────────────────────────────┘
+                   ▼
+┌─────────────────────────────────────────────────┐
+│  第四层：打包 (CPU 集群, 10 节点 × 32 核)          │
+│  Tokenize → Sequence Packing → Arrow 格式输出    │
+│  → 最终训练数据写回 S3                             │
+└─────────────────────────────────────────────────┘</code></pre>
+
+        <p>这个架构的核心思想是<strong>分层处理、异构计算</strong>——让每一类任务都用最适合的硬件来跑。CPU 适合解析、去重、I/O 密集型操作；GPU 适合模型推理类操作；大内存节点适合需要全局聚合的操作。层与层之间通过 S3 解耦，每一层可以独立扩展而不影响其他层。</p>
+
+        <div class="warning">
+            <strong>一个重要的反直觉结论：</strong>很多人以为分布式就是"用更多机器跑同一份代码"。实际上，数据清洗流水线经常是 <strong>I/O bound</strong> 的，而不是 CPU bound。在 S3 和计算节点之间每多一次数据拷贝，都可能把流水线整体吞吐量拉低一个数量级。有时候，优化网络带宽比增加 GPU 数量更有效。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>分布式数据处理是 TB 级预训练数据流水线的基石。我们介绍了三种主流方案——MapReduce 思维框架、Slurm 集群调度和 Ray 分布式引擎——并深入讨论了分片策略、worker 分配和成本分析。核心要点是：<strong>没有放之四海而皆准的架构选择</strong>，你需要根据数据规模、预算、团队技术栈和流水线特征来设计最适合的方案。</p>
+
+        <p>在下一章中，我们把注意力从"怎么处理数据"转向"怎么高效加载数据"。你会发现，当数据量大到一定程度时，<strong>内存管理</strong> 和 <strong>I/O 策略</strong> 会取代清洗逻辑本身，成为最大的性能瓶颈。我们第 16 章见。</p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

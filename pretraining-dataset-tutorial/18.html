@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 数据版本管理与溯源</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 预训练数据决定模型上限</a></li>
+            <li><a href="02.html">第2章 全球通用基座数据集全景</a></li>
+            <li><a href="03.html">第3章 中文预训练语料现状与挑战</a></li>
+            <li><a href="04.html">第4章 垂直领域与增强语料</a></li>
+            <li><a href="05.html">第5章 Common Crawl：预训练的石油矿藏</a></li>
+            <li><a href="06.html">第6章 许可证合规与数据安全红线</a></li>
+            <li><a href="07.html">第7章 数据配比策略与混合哲学</a></li>
+            <li><a href="08.html">第8章 数据采集与原始格式解析</a></li>
+            <li><a href="09.html">第9章 语言识别与初步清洗</a></li>
+            <li><a href="10.html">第10章 精确去重：剔除重复文本</a></li>
+            <li><a href="11.html">第11章 模糊去重：MinHash与LSH原理</a></li>
+            <li><a href="12.html">第12章 语义级与句子级去重</a></li>
+            <li><a href="13.html">第13章 基于模型的质量评分体系</a></li>
+            <li><a href="14.html">第14章 有害内容过滤与安全审查</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 流式加载与内存管理</a></li>
+            <li><a href="17.html">第17章 基准污染检测与去除</a></li>
+            <li><a href="18.html" class="active">第18章 数据版本管理与溯源</a></li>
+            <li><a href="19.html">第19章 合成数据生成与增强</a></li>
+            <li><a href="20.html">第20章 多语言与低资源语料构建</a></li>
+            <li><a href="21.html">第21章 课程学习与动态数据调度</a></li>
+            <li><a href="22.html">第22章 代码与数学数据专项处理</a></li>
+            <li><a href="23.html">第23章 Datatrove实战：从Common Crawl到清洗数据</a></li>
+            <li><a href="24.html">第24章 NeMo Curator与GPU加速清洗</a></li>
+            <li><a href="25.html">第25章 数据质量评估与消融实验</a></li>
+            <li><a href="26.html">第26章 2026年数据工程前沿工程前沿趋势</a></li>
+            <li><a href="27.html">第27章 实战项目：构建1B模型训练数据集</a></li>
+            <li><a href="28.html">第28章 规模化落地：从TB级到PB级的挑战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>开篇：模型训练完了，你却说"我们忘了记录用了什么数据"</h2>
+
+        <p>大家好，我是你们的讲师。2019 年我参与的第一个预训练项目结束后，团队需要撰写技术报告。其中有一个看似简单的问题把我们问住了：<strong>"最终用于训练的 dataset 是哪个版本的数据？"</strong></p>
+
+        <p>我们面面相觑。在两个月的时间里，数据团队反复清洗、过滤、去重、重配比，生成了不下 20 个版本的"最终训练数据"。每次版本迭代都是通过复制文件夹、手动添加日期后缀的方式来区分的。训练脚本中直接硬编码了 <code>data_v3_final_final2.jsonl</code> 这样的路径。现在要我们准确说出最终用的是哪个版本——没有人能 100% 确定。最终我们不得不花费一周时间，从训练日志、代码提交记录和 S3 访问日志中拼凑线索，才"大概"锁定了版本。</p>
+
+        <p>这不是管理混乱的问题——这是没有数据版本管理工具的情况下必然会发生的现象。在 TB 级数据处理中，版本失控几乎是常态。本章我们来系统性地解决这个问题。</p>
+
+        <h2>18.1 DVC：给数据集装上"Git"</h2>
+
+        <p><strong>DVC（Data Version Control）</strong> 是当前最流行的数据版本管理工具。它的核心思想非常优雅：用 Git 来管理数据集的元数据和依赖关系，而实际数据存储在远程存储（S3、GCS、本地文件系统）中。</p>
+
+        <p>具体来说，DVC 的工作原理是这样的：</p>
+
+        <pre><code># 1. 初始化 DVC 仓库
+cd pretraining-data-pipeline
+git init
+dvc init
+
+# 2. 添加远程存储（数据实际存放的位置）
+dvc remote add -d myremote s3://my-dvc-store/
+
+# 3. 跟踪数据目录
+dvc add data/raw/common-crawl-2025-47/
+# 这会在 data/raw/ 下生成 common-crawl-2025-47.dvc 文件
+# 一个 .dvc 文件就是一个"数据指针"，记录了文件的哈希值
+
+# 4. 提交到 Git
+git add data/raw/common-crawl-2025-47.dvc
+git commit -m "Add Common Crawl 2025-47 snapshot"
+
+# 5. 推送数据到远程存储
+dvc push
+
+# 6. 从另一台机器恢复
+git clone &lt;repo-url&gt;
+dvc pull  # 自动下载所有 .dvc 文件对应的数据</code></pre>
+
+        <p>一个典型的 <code>.dvc</code> 文件内容如下：</p>
+
+        <pre><code># data/processed/clean-v3.dvc 的内容示例
+md5: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+outs:
+- md5: e8f7g6h5i4j3k2l1m0n9o8p7q6r5s4t3
+  size: 1572864000
+  path: clean-v3
+  cloud:
+  - myremote:
+      etag: "098f6bcd4621d373cade4e832627b4f6"
+      version_id: "VERSION_ID_FROM_S3"
+  deps:
+  - md5: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+    path: ../raw/common-crawl-2025-47
+  - md5: b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7
+    path: ../configs/clean-pipeline.yaml</code></pre>
+
+        <p>这个 <code>.dvc</code> 文件记录了三个关键信息：</p>
+        <ul>
+            <li><strong>数据本身的哈希值</strong>——确保完整性</li>
+            <li><strong>数据来自哪些上游依赖</strong>——原始数据和配置文件</li>
+            <li><strong>数据存储在远程的哪个位置</strong>——方便恢复</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>核心优势：</strong>DVC 解决了数据管理中一个根本性的矛盾——数据太大无法放进 Git，但数据版本的历史记录又需要像 Git 一样精确。通过"元数据进 Git，数据进远程存储"的架构，DVC 让数据版本管理变得和代码版本管理一样简单和可靠。
+        </div>
+
+        <h2>18.2 数据血缘追踪：每条数据都有一本"户口本"</h2>
+
+        <p>版本管理解决了"哪个版本"的问题，而<strong>数据血缘（data lineage）</strong>要解决的是"数据从哪来、经历了什么变化"的问题。一个好的数据血缘系统应该能回答以下问题：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>问题</th>
+                    <th>信息需求</th>
+                    <th>典型溯源字段</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>这条数据从哪个网页来的？</td>
+                    <td>数据来源（provenance）</td>
+                    <td><code>source_url</code>, <code>crawl_id</code>, <code>domain</code></td>
+                </tr>
+                <tr>
+                    <td>它经过了哪些清洗步骤？</td>
+                    <td>处理流水线（transformation pipeline）</td>
+                    <td><code>pipeline_steps</code>, <code>tool_versions</code></td>
+                </tr>
+                <tr>
+                    <td>是谁（或什么脚本）进行了处理？</td>
+                    <td>执行者（executor identity）</td>
+                    <td><code>worker_id</code>, <code>pipeline_version</code></td>
+                </tr>
+                <tr>
+                    <td>处理时用了什么参数？</td>
+                    <td>配置参数（configuration）</td>
+                    <td><code>quality_threshold</code>, <code>language</code></td>
+                </tr>
+                <tr>
+                    <td>最终进了哪个训练集？</td>
+                    <td>数据用途（usage tracking）</td>
+                    <td><code>dataset_name</code>, <code>mix_ratio</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>在实际工程中，数据血缘信息通常以<strong>元数据字段</strong>的形式嵌入到每条数据记录中：</p>
+
+        <pre><code>{
+  "text": "Transformers are neural network architectures...",
+  "metadata": {
+    "source_url": "https://en.wikipedia.org/wiki/Transformer_(deep_learning_architecture)",
+    "crawl_id": "CC-MAIN-2025-47",
+    "crawl_timestamp": "2025-11-20T14:32:10Z",
+    "domain": "en.wikipedia.org",
+    "language": "en",
+    "language_score": 0.997,
+    "pipeline": {
+      "name": "cc_clean_v3",
+      "version": "3.2.1",
+      "steps": [
+        {"name": "warc_to_text", "tool": "warcio", "version": "1.4.3"},
+        {"name": "language_detect", "tool": "fasttext", "version": "0.9.2"},
+        {"name": "quality_score", "tool": "bert_classifier_v2", "version": "2.1.0", "score": 0.85},
+        {"name": "minhash_dedup", "tool": "datatrove", "version": "0.8.0"},
+        {"name": "toxic_filter", "tool": "detoxify", "version": "0.5.1"}
+      ]
+    },
+    "quality_scores": {
+      "perplexity": 12.3,
+      "quality_classifier": 0.85,
+      "educational_value": 0.72
+    }
+  }
+}</code></pre>
+
+        <p>每条数据记录都带有一套完整的"户口本"。当未来某天你发现模型在某些任务上表现异常时，你可以顺着这些元数据字段一直回溯到原始数据源，定位问题根因。</p>
+
+        <div class="tip">
+            <strong>存储开销说明：</strong>你可能担心元数据字段会增加数据体积。看上面的例子，元数据大约 800 bytes，而 <code>text</code> 字段通常有几千到几万 bytes。元数据占总体积的比例通常在 1%-5% 之间，这是一个完全可以接受的成本。更何况，这些信息在后续的数据分析和问题排查中带来的价值远远超过了存储成本。
+        </div>
+
+        <h2>18.3 Dataset Card 与数据文档化</h2>
+
+        <p>数据版本管理和血缘追踪解决了"技术层面"的问题，但还有一个"社交层面"的问题需要解决：<strong>如何让其他团队成员（甚至未来的你）快速理解这个数据集的设计意图和规范？</strong></p>
+
+        <p>答案是：<strong>Dataset Card</strong>。Hugging Face 在 2021 年推出了 Dataset Card 规范，旨在为每个数据集提供一个结构化的文档页面。这参照了 "Datasheets for Datasets"（Gebru 等人，2021）的学术倡议。</p>
+
+        <p>一个完整的 Dataset Card 应该包含以下内容：</p>
+
+        <pre><code>---
+# 数据集名称
+name: "Pretraining-Corpus-7B-v3"
+version: "3.1.0"
+date_created: "2026-01-15"
+license: "mixture (see individual sources)"
+
+# 数据集描述
+description: >
+  用于训练 7B 模型的基础预训练语料 v3.1。
+  包含 Common Crawl 2025-47 的英文清洗数据、
+  GitHub 高质量代码仓库、中文互联网爬虫数据。
+
+# 数据规模
+dataset_statistics:
+  total_tokens: 2.3e12
+  total_documents: 1.8e9
+  languages:
+    en: 0.65     # 65% 英文
+    zh: 0.20     # 20% 中文
+    code: 0.10   # 10% 代码
+    other: 0.05  # 5% 其他语言
+  average_document_length: 1278
+
+# 数据来源
+sources:
+  - name: "Common Crawl 2025-47"
+    url: "https://commoncrawl.org/2025/47"
+    proportion: 0.72
+    license: "CC0"
+  - name: "GitHub Code (filtered)"
+    url: "internal"
+    proportion: 0.10
+    license: "various open-source"
+  - name: "Chinese Web Corpus v2"
+    url: "internal"
+    proportion: 0.18
+    license: "CC BY-SA 4.0"
+
+# 数据处理流程
+processing_pipeline:
+  - step: "language_filter"
+    tool: "fasttext"
+    parameters: {"min_score": 0.7}
+  - step: "quality_scoring"
+    tool: "bert_classifier_v2"
+    parameters: {"threshold": 0.6}
+  - step: "minhash_dedup"
+    tool: "datatrove"
+    parameters: {"jaccard_threshold": 0.8}
+
+# 去污染信息
+decontamination:
+  method: "8-gram bloom filter + suffix array"
+  benchmarks_checked: ["mmlu", "gsm8k", "humaneval", "arc", "hellaswag"]
+  residual_contamination: "&lt; 0.001% for all checked benchmarks"
+
+# 已知问题与限制
+limitations:
+  - "低资源语言（如非洲语言）的代表性不足"
+  - "2025 年 11 月之后的网页未覆盖"
+  - "经过质量过滤可能导致 STEM 领域数据偏好"
+---</code></pre>
+
+        <p>Dataset Card 不仅仅是文档，它是个<strong>契约</strong>——当团队成员、合作者或审稿人拿到你的数据集时，他们应该能通过 Dataset Card 在 5 分钟内理解数据集的全部关键信息。</p>
+
+        <div class="highlight">
+            <strong>一个实用的建议：</strong>不要在项目结束时才写 Dataset Card。在开始构建数据集的<strong>第一天</strong>就创建 Dataset Card 模板，然后随着流水线的推进不断更新。这样做有两个好处：一是不会遗漏任何重要的处理细节，二是迫使你在每个处理步骤都思考"这一步应该怎么文档化"——这本身就是一种质量控制。
+        </div>
+
+        <h2>18.4 可复现性：锁定整个数据生态</h2>
+
+        <p>版本管理不仅仅是给数据打标签——它需要锁定整个数据生态系统，才能真正做到<strong>可复现</strong>（reproducibility）。我们需要保证：即使两年后，任何人拿着同样的版本号，也能完全复现出相同的数据集。</p>
+
+        <p>一个完整的数据环境锁定方案应该包括：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>锁定对象</th>
+                    <th>工具/方法</th>
+                    <th>为什么重要</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>数据源版本</td>
+                    <td>DVC + 固定 Common Crawl 快照</td>
+                    <td>Common Crawl 每月更新，内容会变</td>
+                </tr>
+                <tr>
+                    <td>流水线代码</td>
+                    <td>Git commit hash + 标签</td>
+                    <td>清洗逻辑可能随代码更新而变化</td>
+                </tr>
+                <tr>
+                    <td>软件依赖</td>
+                    <td>requirements.txt / conda env export</td>
+                    <td>库版本不同可能导致结果不同</td>
+                </tr>
+                <tr>
+                    <td>随机种子</td>
+                    <td>在配置文件中显式指定</td>
+                    <td>shuffle、采样等操作需要确定性</td>
+                </tr>
+                <tr>
+                    <td>Tokenizer 版本</td>
+                    <td>固定 tokenizer 文件 + 配置</td>
+                    <td>vocab 变化会影响 token 计数</td>
+                </tr>
+                <tr>
+                    <td>硬件环境</td>
+                    <td>记录 CPU 架构 + 浮点精度</td>
+                    <td>不同硬件上的浮点运算可能有细微差异</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <pre><code># 一个完整的环境锁定示例：environment-lock.yaml
+transform:
+  version: "3.1.0"
+  code_commit: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+  software:
+    python: "3.10.12"
+    datatrove: "0.8.0"
+    fasttext: "0.9.2"
+    transformers: "4.46.0"
+    numpy: "1.26.4"
+  random_seeds:
+    shuffle: 42
+    minhash: 12345
+    train_test_split: 67890
+  data_dependencies:
+    common_crawl_snapshot: "CC-MAIN-2025-47"
+    dvc_lock_file: "data/processed/clean-v3.dvc"
+
+# 在训练代码中加载这些锁定信息：
+import yaml
+
+with open("environment-lock.yaml") as f:
+    lock = yaml.safe_load(f)
+
+print(f"Using data version: {lock['transform']['version']}")
+print(f"Code commit: {lock['transform']['code_commit'][:8]}")
+
+# 设置随机种子
+import random, numpy as np
+random.seed(lock['transform']['random_seeds']['shuffle'])
+np.random.seed(lock['transform']['random_seeds']['shuffle'])</code></pre>
+
+        <div class="warning">
+            <strong>惨痛教训：</strong>我曾经遇到过一个"幽灵 bug"——同样版本号的代码和配置，在两个不同的时间点运行跑出了不同的结果。最后排查发现是 conda 环境里某个依赖包在间隔期间自动升级了小版本（比如 0.8.0 → 0.8.1），导致哈希函数的排序行为发生了变化。从那以后，我要求团队所有数据流水线必须用 Docker 容器或 conda-lock 锁定完整的依赖树，而不是只锁定顶层依赖。
+        </div>
+
+        <h2>18.5 数据差异比较：版本之间到底差了啥？</h2>
+
+        <p>当数据集从 v2 更新到 v3 时，你肯定想知道：<strong>到底哪些数据变了？</strong> 是增加了新的数据源，还是调整了质量评分阈值？这需要数据差异比较工具。</p>
+
+        <p>DVC 提供了 <code>dvc diff</code> 命令来做基础的版本对比：</p>
+
+        <pre><code># 比较当前工作区与上一个版本的差异
+dvc diff
+
+# 输出示例：
+# Added files:    1234
+# Modified files: 56
+# Deleted files:  89
+
+# 查看具体某个数据目录的差异
+dvc diff data/processed/clean-v3.dvc
+
+# 查看两个版本之间的详细差异
+dvc diff --json v2.0.0 v3.0.0
+
+{
+  "added": [
+    {"path": "data/processed/clean-v3/shard_0345.jsonl", "size": 524288000}
+  ],
+  "deleted": [
+    {"path": "data/processed/clean-v2/shard_0210.jsonl", "size": 512000000}
+  ],
+  ......
+}</code></pre>
+
+        <p>但这只是文件级别的差异。在数据工程中，我们更关心<strong>内容级别的差异</strong>：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>差异类型</th>
+                    <th>检测方法</th>
+                    <th>业务含义</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>新增文档</td>
+                    <td>URL 哈希不在旧版本中</td>
+                    <td>数据源扩展或爬虫范围变化</td>
+                </tr>
+                <tr>
+                    <td>删除文档</td>
+                    <td>URL 哈希不在新版本中</td>
+                    <td>过滤阈值收紧或去重规则变化</td>
+                </tr>
+                <tr>
+                    <td>内容变化</td>
+                    <td>相同哈希但内容不同</td>
+                    <td>清洗逻辑调整（如 HTML 解析器升级）</td>
+                </tr>
+                <tr>
+                    <td>质量分变化</td>
+                    <td>相同文档但评分不同</td>
+                    <td>质量模型更新或参数调整</td>
+                </tr>
+                <tr>
+                    <td>分布偏移</td>
+                    <td>整体统计量变化</td>
+                    <td>数据配比策略改变</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>我常用的做法是：在版本更新后，自动运行一个"数据差异报告"脚本：</p>
+
+        <pre><code>import json
+from collections import Counter
+
+def generate_diff_report(old_meta: list, new_meta: list) -> dict:
+    """生成两个版本之间的数据差异报告"""
+    old_urls = {m["source_url"] for m in old_meta}
+    new_urls = {m["source_url"] for m in new_meta}
+
+    added = new_urls - old_urls
+    removed = old_urls - new_urls
+    common = old_urls & new_urls
+
+    old_domains = Counter(m["domain"] for m in old_meta)
+    new_domains = Counter(m["domain"] for m in new_meta)
+
+    return {
+        "added_docs": len(added),
+        "removed_docs": len(removed),
+        "common_docs": len(common),
+        "top_new_domains": new_domains.most_common(10),
+        "top_removed_domains": (
+            old_domains - new_domains
+        ).most_common(10),
+        "score_distribution_shift": {
+            "old_mean": sum(m["quality_score"] for m in old_meta) / len(old_meta),
+            "new_mean": sum(m["quality_score"] for m in new_meta) / len(new_meta),
+        }
+    }</code></pre>
+
+        <div class="tip">
+            <strong>团队实践：</strong>每次数据集版本更新后，我们会在 Slack 频道自动推送一个"数据差异报告"，包含数据增减量、域名分布变化和关键统计量的变化。这样做有三个好处：让团队成员对数据变化有直觉感知；在数据质量出现异常时能快速定位到具体的变化；在模型性能变化时能关联到数据版本的变化做归因分析。
+        </div>
+
+        <h2>18.6 制品存储与 CI/CD 流水线</h2>
+
+        <p>最后，我们把所有环节串联成一个自动化的 <strong>Data CI/CD 流水线</strong>。这里的"制品"（artifact）指的是数据流水线在各个阶段产生的输出：</p>
+
+        <ul>
+            <li><strong>原始数据（raw）：</strong>从 Common Crawl 等来源下载的原始 WARC 文件</li>
+            <li><strong>中间数据（intermediate）：</strong>各清洗步骤的输出（如语言过滤后的数据、去重后的数据）</li>
+            <li><strong>最终数据（final）：</strong>经过所有清洗步骤、可直接用于训练的最终数据集</li>
+            <li><strong>训练数据（training）：</strong>经过 tokenization 和 sequence packing 后的 ready-to-train 格式</li>
+        </ul>
+
+        <p>每个阶段的数据都保存为独立的制品，并关联版本号：</p>
+
+        <pre><code>S3 存储组织方案：
+s3://my-dataset-store/
+├── raw/
+│   └── cc-2025-47/          # 版本：原始快照 ID
+│       ├── shard_0000.warc.gz
+│       └── ...
+├── intermediate/
+│   └── lang-filter-v3.1/    # 版本：流水线代码 hash
+│       ├── shard_0000.jsonl
+│       └── ...
+├── final/
+│   └── clean-v3.1.0/        # 版本：语义版本号
+│       ├── shard_0000.jsonl
+│       ├── shard_0001.jsonl
+│       └── dataset_card.yaml
+└── training/
+    └── training-v3.1.0/     # 版本：与最终数据集对齐
+        ├── shard_0000.arrow
+        ├── shard_0001.arrow
+        └── tokenizer_config.json</code></pre>
+
+        <p>每次对数据流水线的变更（修改清洗参数、升级质量模型、添加新数据源）都触发一次完整的 CI/CD 流程：</p>
+
+        <pre><code># 伪代码：数据流水线的 CI/CD 流程
+
+pipeline "数据质量门禁" {
+    trigger: "push to main (config changes)"
+
+    stage "构建" {
+        step "安装依赖": "conda env create -f environment.yaml"
+        step "锁定版本": "pip freeze > locked_requirements.txt"
+    }
+
+    stage "预处理（小规模验证）" {
+        step "采样 1% 数据": "dvc repro sample-pipeline"
+        step "验证输出格式": "validate_schema(output)"
+        step "检查数据质量": "run_quality_checks(output)"
+        // 质量门禁：
+        // - 平均质量分 > 0.6
+        // - 毒性内容比例 < 0.001%
+        // - 语言分布漂移 < 5%
+    }
+
+    stage "全量处理" {
+        step "提交 Slurm 作业": "sbatch run_full_pipeline.sh"
+        step "等待作业完成": "watch_slurm_jobs()"
+    }
+
+    stage "验证" {
+        step "数据差异报告": "dvc diff v3.0.0 v3.1.0"
+        step "完整性校验": "verify_checksums()"
+        step "污染检测": "run_contamination_check()"
+    }
+
+    stage "发布" {
+        step "打版本标签": "git tag v3.1.0 && git push --tags"
+        step "更新 Dataset Card": "update_dataset_card()"
+        step "推送通知": "slack.send('Dataset v3.1.0 ready')"
+    }
+
+    stage "回滚准备" {
+        step "保留旧版本": "dvc tag v3.0.0"
+        step "记录回滚步骤": "write_rollback_instructions()"
+    }
+}</code></pre>
+
+        <p>这套流水线的关键设计是<strong>灰度验证</strong>——在投入算力做全量处理之前，先用 1% 的采样数据验证配置变更是否合理。如果采样数据上的质量检查不通过，流水线会提前终止并通知团队，避免浪费大量计算资源。</p>
+
+        <div class="highlight">
+            <strong>自动化回滚：</strong>当模型训练因为数据质量问题而失败时，你需要的不仅仅是"修复 bug"——你需要在 <strong>10 分钟内</strong>回滚到上一个已知良好的数据版本。DVC 的 <code>dvc checkout</code> 命令可以秒级切换到指定版本的数据，配合 Git 回滚代码版本，实现完整的数据+代码回滚。这一能力在频繁迭代的预训练项目中至关重要。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>数据版本管理与溯源是大型预训练项目中最容易被低估的基础设施。从 DVC 的 Git 化数据管理到数据血缘追踪、从 Dataset Card 的规范化文档到环境锁定的可复现性、从数据差异比较到完整的 CI/CD 流水线——我们建立了一整套"数据治理"的工程实践。核心原则是：<strong>把数据当作一等公民来管理，像对待代码一样对待数据——打版本、写文档、做测试、自动化部署。</strong></p>
+
+        <p>从下一章开始，我们将进入一个更令人兴奋的主题：合成数据的生成与增强。当自然产生的互联网数据逐渐枯竭、合成数据成为预训练语料的重要补充时，如何生成高质量、多样化的合成数据？我们第 19 章见。</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 事件循环（下）：时间事件</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html" class="active">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第14章：事件循环（下）：时间事件</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们深入了文件事件——epoll 如何监视 FD、就绪事件如何分发、主循环如何运转。但 Redis 作为一个长时间运行的服务，除了响应客户端命令之外，还需要做很多"家务活"：每隔一段时间清理过期键，检查是否需要触发 AOF 重写，向从库发送心跳，更新统计信息……这些没法通过文件事件驱动的工作，就由<strong>时间事件</strong>来承担。</p>
+
+        <p>如果说文件事件是 Redis 的"交感神经"——对外部刺激做出即时反应，那么时间事件就是 Redis 的"副交感神经"——维持内部环境的稳定运行。两者配合，构成了 Redis 完整的事件驱动模型。</p>
+
+        <h2>时间事件结构</h2>
+
+        <p>时间事件用 <code>aeTimeEvent</code> 结构体表示，所有时间事件以<strong>无序链表</strong>的形式组织在 <code>aeEventLoop->timeEventHead</code> 上。</p>
+
+        <pre><code>/* ae.h */
+typedef struct aeTimeEvent {
+    long long id;                  /* 事件 ID，-1 表示已删除 */
+    monotime when_sec;             /* 到期时间（秒，单调时钟） */
+    monotime when_ms;              /* 到期时间（毫秒，单调时钟） */
+    aeTimeProc *timeProc;          /* 事件处理函数 */
+    aeEventFinalizerProc *finalizerProc; /* 删除事件时的清理函数 */
+    void *clientData;              /* 客户端数据 */
+    struct aeTimeEvent *prev;      /* 链表前驱 */
+    struct aeTimeEvent *next;      /* 链表后继 */
+    int refcount;                  /* 引用计数，防止回调中释放 */
+} aeTimeEvent;</code></pre>
+
+        <p>创建时间事件的函数非常简洁：</p>
+
+        <pre><code>/* ae.c */
+long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
+        aeTimeProc *proc, void *clientData,
+        aeEventFinalizerProc *finalizerProc) {
+    aeTimeEvent *te = zmalloc(sizeof(*te));
+    te-&gt;id = eventLoop-&gt;timeEventNextId++;
+    te-&gt;when_ms = getMonotonicUs() / 1000 + milliseconds;
+    te-&gt;when_sec = te-&gt;when_ms / 1000;
+    te-&gt;timeProc = proc;
+    te-&gt;finalizerProc = finalizerProc;
+    te-&gt;clientData = clientData;
+    te-&gt;prev = NULL;
+    te-&gt;next = eventLoop-&gt;timeEventHead;
+    te-&gt;refcount = 0;
+    if (te-&gt;next) te-&gt;next-&gt;prev = te;
+    eventLoop-&gt;timeEventHead = te;
+    return te-&gt;id;
+}</code></pre>
+
+        <div class="tip">
+            <strong>为什么用无序链表？</strong>时间事件的数量通常很少（Redis 核心只有 serverCron 等少数几个），所以无序链表的插入 O(1) 和遍历 O(N) 的组合是合理的。如果时间事件数量很大（比如数万个定时器），就应该用最小堆或时间轮来管理了——但 Redis 不需要。
+        </div>
+
+        <p>时间事件的处理在 <code>processTimeEvents</code> 中：遍历链表，对每个到期的事件调用 <code>timeProc</code>。处理函数可以返回 <code>AE_NOMORE</code>（表示该事件是一次性的、不再需要调度）或一个新的延迟毫秒数（表示周期性事件，据此更新 when 字段）。</p>
+
+        <h2>serverCron 周期任务</h2>
+
+        <p><code>serverCron</code> 是 Redis 最核心的时间事件，每 100ms（默认 <code>hz = 10</code>）执行一次。它在服务器初始化时通过 <code>aeCreateTimeEvent</code> 注册，然后在每次事件循环中周期性执行。</p>
+
+        <pre><code>/* server.c */
+int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
+    int j;
+    UNUSED(eventLoop); UNUSED(id); UNUSED(clientData);
+
+    /* 1. 更新服务器统计信息 */
+    server.stat_numcommands = ...;   /* 命令计数 */
+    server.stat_numconnections = ...;/* 连接计数 */
+    run_with_period(100) {
+        serverCronUpdateMemoryStats(); /* 内存统计 */
+    }
+
+    /* 2. 处理过期键（主动采样删除） */
+    if (server.active_expire_enabled &amp;&amp; server.masterhost == NULL)
+        activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
+
+    /* 3. 渐进式 rehash 步进 */
+    if (server.rdb_child_pid == -1 &amp;&amp; server.aof_child_pid == -1)
+        incrementallyRehash();
+
+    /* 4. 调整 AOF 写入缓冲区 */
+    if (server.aof_state == AOF_ON)
+        flushAppendOnlyFile(0);
+
+    /* 5. 检查是否需要触发 AOF 重写或 RDB 生成 */
+    if (server.aof_rewrite_perc &amp;&amp; server.aof_current_size)
+        checkAofRewrite();
+    if (server.rdb_bgsave_scheduled)
+        rdbSaveBackground(SLAVE_REQ_NONE, server.rdb_key_save_time);
+
+    /* 6. 复制心跳（向从库发送 PING） */
+    if (server.repl_state == REPL_STATE_CONNECTED)
+        replicationCron();
+
+    /* 7. 集群状态检查 */
+    if (server.cluster_enabled)
+        clusterCron();
+
+    /* 8. Sentinel 检查 */
+    if (server.sentinel_mode)
+        sentinelTimer();
+
+    /* 9. 客户端超时检查（kill 空闲过久的连接） */
+    clientsCron();
+
+    /* 10. 延迟监控采样 */
+    if (server.latency_monitor_threshold)
+        latencyMonitor();
+
+    /* 11. 更新 LRU 时钟 */
+    server.lruclock = getLRUClock();
+
+    /* 返回 100ms 让事件循环在 100ms 后再次调度 */
+    return 100; /* 单位：毫秒 */
+}</code></pre>
+
+        <p>下面是 serverCron 中所有任务的汇总清单：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>子任务</th>
+                    <th>函数</th>
+                    <th>执行频率</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>内存统计更新</td>
+                    <td>serverCronUpdateMemoryStats</td>
+                    <td>每 100ms</td>
+                    <td>更新 RSS、内存碎片率等</td>
+                </tr>
+                <tr>
+                    <td>过期键清理</td>
+                    <td>activeExpireCycle</td>
+                    <td>每 100ms</td>
+                    <td>采样删除过期键，控制 CPU 占比</td>
+                </tr>
+                <tr>
+                    <td>渐进式 rehash</td>
+                    <td>incrementallyRehash</td>
+                    <td>每 100ms</td>
+                    <td>每步移动少量 bucket</td>
+                </tr>
+                <tr>
+                    <td>AOF 缓冲区写入</td>
+                    <td>flushAppendOnlyFile</td>
+                    <td>每 100ms</td>
+                    <td>将 AOF 缓冲区写入内核缓冲区</td>
+                </tr>
+                <tr>
+                    <td>AOF 重写检查</td>
+                    <td>rewriteAppendOnlyFileBackground</td>
+                    <td>按增长率触发</td>
+                    <td>AOF 文件增长超过指定百分比</td>
+                </tr>
+                <tr>
+                    <td>RDB 定时保存</td>
+                    <td>rdbSaveBackground</td>
+                    <td>按 save 配置触发</td>
+                    <td>满足 save 条件时触发</td>
+                </tr>
+                <tr>
+                    <td>复制心跳</td>
+                    <td>replicationCron</td>
+                    <td>每 100ms</td>
+                    <td>向从库发送 PING，重连断开的从库</td>
+                </tr>
+                <tr>
+                    <td>集群检查</td>
+                    <td>clusterCron</td>
+                    <td>每 100ms</td>
+                    <td>Gossip 协议消息、故障检测</td>
+                </tr>
+                <tr>
+                    <td>客户端超时</td>
+                    <td>clientsCron</td>
+                    <td>每 100ms</td>
+                    <td>关闭空闲超时的客户端连接</td>
+                </tr>
+                <tr>
+                    <td>LRU 时钟更新</td>
+                    <td>getLRUClock</td>
+                    <td>每 100ms</td>
+                    <td>更新 server.lruclock</td>
+                </tr>
+                <tr>
+                    <td>延迟监控</td>
+                    <td>latencyMonitor</td>
+                    <td>有阈值时</td>
+                    <td>采样事件循环延迟峰值</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>serverCron 中最"重"的任务是 <code>activeExpireCycle</code> ——清理过期键。当大量键在同一秒过期时（例如缓存雪崩场景），<code>activeExpireCycle</code> 需要扫描多个数据库的过期字典，每次扫描一定数量的 bucket，如果发现过期比例偏高，会继续扫描更多 bucket。有一个线上案例是：业务方在整点缓存了一批有效期为 1 小时的键，每小时整点都有约 100 万个键同时过期，导致 <code>activeExpireCycle</code> 在 serverCron 中占用大量 CPU，造成事件循环延迟毛刺持续数秒。解决方案是：在客户端为缓存过期时间加一个随机偏移（<code>TTL = 3600 + random(0, 600)</code>），将过期时间均匀分布在 10 分钟窗口内。
+        </div>
+
+        <h2>beforeSleep 与 afterSleep</h2>
+
+        <p>上一章我们提到 <code>beforesleep</code> 和 <code>aftersleep</code> 两个钩子函数，分别在 <code>aeApiPoll</code> 之前和之后执行。它们的作用非常关键：</p>
+
+        <pre><code>/* server.c —— beforeSleep 的核心逻辑 */
+void beforeSleep(struct aeEventLoop *eventLoop) {
+    UNUSED(eventLoop);
+
+    /* 1. 处理就绪键（解除阻塞客户端） */
+    handleClientsBlockedOnKeys();
+
+    /* 2. 将待发送的响应数据写出到客户端 */
+    handleClientsWithPendingWrites();
+
+    /* 3. 将 AOF 缓冲区写入磁盘 */
+    if (server.aof_state == AOF_ON)
+        flushAppendOnlyFile(0);
+
+    /* 4. 如果请求了延迟关闭，执行关闭 */
+    if (server.clients_to_close)
+        freeClientsInAsyncFreeQueue();
+
+    /* 5. 模块系统待办事件 */
+    if (moduleEventLoopPending())
+        moduleFireServerEvent();
+
+    /* 6. 如果在 cluster 模式下，发送 Gossip 消息 */
+    if (server.cluster_enabled)
+        clusterBeforeSleep();
+}</code></pre>
+
+        <p><code>beforeSleep</code> 的最重要职责是 <strong>handleClientsBlockedOnKeys</strong>——检查上一轮周期中有哪些 key 被写入（触发了解除阻塞的条件），然后找到等待这些 key 的被阻塞客户端并唤醒它们。这个延迟处理的设计很关键：如果在命令执行（如 LPUSH）中直接解锁阻塞客户端，会导致事件循环的嵌套处理，复杂度剧增。通过 <code>beforeSleep</code> 统一在下一轮迭代开始时处理，保证了事件循环的简洁性和可预测性。</p>
+
+        <p><code>aftersleep</code> 的逻辑相对简单，主要负责记录延迟信息和模块事件：</p>
+
+        <pre><code>/* server.c */
+void afterSleep(struct aeEventLoop *eventLoop) {
+    if (server.module_api)
+        moduleAcquireGIL(); /* 模块线程安全 API */
+}</code></pre>
+
+        <h2>hz 参数调优</h2>
+
+        <p>配置参数 <code>hz</code>（默认 10）决定了 serverCron 每秒执行次数。<code>hz = 10</code> 意味着每 100ms 执行一次。调整 hz 的影响：</p>
+
+        <ul>
+            <li><strong>hz 调大</strong>：serverCron 执行更频繁，过期键清理更及时，rehash 进度更快，复制心跳更密集。但 CPU 开销增加。</li>
+            <li><strong>hz 调小</strong>：CPU 占用降低，但过期键可能堆积，rehash 进度缓慢，复制心跳间隔变大可能触发超时。</li>
+        </ul>
+
+        <p>Redis 8.x 引入了<strong>动态 hz</strong>：当服务器空闲时（无客户端连接），自动降低 hz 以减少 CPU 开销；当有大量客户端活跃时，提高 hz 以保证及时响应。</p>
+
+        <div class="highlight">
+            <strong>hz 的调优建议：</strong>对于大多数场景，默认 hz=10 是合理的选择。如果你发现 Redis 的过期键清理不及时（表现为内存占用持续偏高），可以尝试调到 hz=100。但要注意，hz=100 意味着 serverCron 每 10ms 执行一次，每次都要扫描过期字典、做 rehash 步进等。如果每个 serverCron 执行耗时 1ms，那么 CPU 的 10% 就花在了周期性任务上。使用 <code>INFO stats</code> 查看 <code>expired_keys</code> 和 <code>evicted_keys</code> 的增速来判断是否需要调整。
+        </div>
+
+        <h2>阻塞操作的事件循环配合</h2>
+
+        <p>有一些操作会阻塞事件循环的正常流转，Redis 对每种情况都有特殊的处理：</p>
+
+        <ul>
+            <li><strong>BLPOP 超时检测</strong>：阻塞客户端在 <code>clientsCron</code> 中检查超时。虽然 <code>clientsCron</code> 是 serverCron 的一部分（每 100ms 一次），但 BLPOP 的超时精度是足够的——因为超时触发不需要精确到毫秒级。</li>
+            <li><strong>Lua 脚本超时中断</strong>：当 Lua 脚本执行时间超过 <code>lua-time-limit</code>（默认 5000ms）时，<code>serverCron</code> 会设置脚本超时标志，但不会强制终止——因为 Redis 无法在单线程中抢占式中断一个正在执行的 Lua 脚本。此时客户端可以用 <code>SCRIPT KILL</code> 来终止脚本，但如果脚本执行了写操作，只能用 <code>SHUTDOWN NOSAVE</code>。</li>
+            <li><strong>模块阻塞命令</strong>：模块 API 提供了 <code>RM_BlockClient</code> 函数，允许模块实现自己的阻塞语义。模块阻塞的客户端在解除阻塞后，其处理流程与 BLPOP 类似——通过 <code>beforeSleep</code> 中的模块回调唤醒。</li>
+        </ul>
+
+        <h2>事件循环调试</h2>
+
+        <p>Redis 内置了 <strong>latency monitor</strong>（延迟监控）功能，用于检测事件循环中的延迟峰值。通过 <code>LATENCY LATEST</code> 和 <code>LATENCY HISTORY</code> 命令可以查看。延迟监控采样的关键事件类型包括：</p>
+
+        <ul>
+            <li><code>command</code> —— 命令执行耗时</li>
+            <li><code>fast-command</code> —— 快速命令执行耗时</li>
+            <li><code>fork</code> —— fork 系统调用耗时</li>
+            <li><code>aof-write</code> —— AOF 写入磁盘耗时</li>
+            <li><code>rdb-unlink-temp-file</code> —— RDB 临时文件删除耗时</li>
+        </ul>
+
+        <pre><code>/* latency.c —— 延迟采样 */
+void latencyAddSample(const char *event, mstime_t latency) {
+    /* 如果延迟超过阈值（latency-monitor-threshold），记录采样 */
+    if (latency &gt;= server.latency_monitor_threshold) {
+        /* 在延迟事件字典中查找或创建事件条目 */
+        /* 每个事件最多保留 160 个采样点（last_runtime 数组）*/
+        /* 同时记录最近延迟峰值 */
+    }
+}</code></pre>
+
+        <div class="tip">
+            <strong>定位慢事件的技巧：</strong>如果发现 Redis 有周期性延迟毛刺，先打开 <code>LATENCY DOCTOR</code> 获取诊断报告。如果报告中提到 <code>active-expire-cycle</code> 占比较高，就是过期键清理的问题。如果提到 <code>aof-write</code>，就要检查磁盘 IO。如果报告显示延迟来源不确定，可以开启 <code>SLOWLOG</code> 来查看是否有慢查询。对于更深入的调查，用 <code>perf top -p $(pidof redis-server)</code> 在内核层面看 CPU 花在哪里。
+        </div>
+
+        <p>事件循环搭好了骨架——文件事件负责与外部的 IO 交互，时间事件负责维持内部的健康运转。两者在 <code>aeMain</code> 的循环中交替执行，共同支撑起 Redis 的单线程高性能神话。下一章，我们将把目光放到事件循环之上的网络 IO 架构上：Redis 如何处理 accept 新连接、如何读取完整的命令、如何优雅地关闭连接，以及 Redis 6.0 引入的多线程 IO 是怎么工作的。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

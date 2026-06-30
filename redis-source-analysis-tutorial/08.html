@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 redisObject与编码转换</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html" class="active">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第8章：redisObject 与编码转换</h2>
+
+        <p>大家好，我是你们的讲师。前几章我们逐个拆解了 Redis 的底层数据结构：SDS、链表、压缩列表、listpack、字典、跳表、整数集合。这些数据结构各自有各自的擅长领域——有的节省内存、有的支持快速查找、有的擅长顺序访问。但 Redis 对外暴露的只有五种类型（String、List、Hash、Set、ZSet），底层却用了十多种编码。用户存一个数字"1"和一个长文本，背后可能用了完全不同的内存布局。</p>
+
+        <p>这个"多种编码对用户透明"的魔法，就藏在 <code>redisObject</code> 这个看似普通的包装结构里。它是 Redis 对象系统的基石，也是理解命令实现和内存优化的前提。这一章我们就把它彻底拆解明白。</p>
+
+        <h2>统一对象模型</h2>
+
+        <p>为什么 Redis 需要一个 <code>redisObject</code> 包装层？想象一下，如果没有这个统一对象，每个命令函数都得用 <code>void*</code> 加 <code>type</code> 标签来手动判断类型，代码会变成一锅粥。antirez 用了一个非常经典的 C 面向对象手法——用一个结构体作为所有类型的"基类"：</p>
+
+        <pre><code>/* server.h */
+typedef struct redisObject {
+    unsigned type:4;       /* 对象类型：OBJ_STRING/OBJ_LIST/OBJ_SET/OBJ_ZSET/OBJ_HASH */
+    unsigned encoding:4;   /* 编码方式，见下方 OBJ_ENCODING_* */
+    unsigned lru:LRU_BITS; /* LRU 时间戳或 LFU 计数，LRU_BITS = 24 */
+    int refcount;          /* 引用计数 */
+    void *ptr;             /* 指向底层数据结构的指针 */
+} robj;</code></pre>
+
+        <p>这个结构体只有 16 字节（在 64 位系统上，4+4+24 位 + 4 字节 int + 8 字节指针，对齐后刚好 16 字节）。它实现了三个核心设计目标：<strong>多态</strong>（统一操作接口）、<strong>内存优化</strong>（灵活的编码切换）、<strong>资源管理</strong>（引用计数共享）。</p>
+
+        <h2>redisObject 结构体逐字段分析</h2>
+
+        <h3>type —— 5 种类型</h3>
+        <p><code>type</code> 字段占用 4 位，取值在 <code>server.h</code> 中定义：<code>OBJ_STRING</code> (0)、<code>OBJ_LIST</code> (1)、<code>OBJ_SET</code> (2)、<code>OBJ_ZSET</code> (3)、<code>OBJ_HASH</code> (4)。当你执行 <code>TYPE key</code> 时，Redis 返回的就是这个字段的字符串映射。</p>
+
+        <h3>encoding —— 10+ 种编码</h3>
+        <p><code>encoding</code> 同样占 4 位，但它的取值在不断扩充。到 Redis 7.2 为止，有以下编码：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>常量名</th>
+                    <th>值</th>
+                    <th>对应数据结构</th>
+                    <th>使用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>OBJ_ENCODING_RAW</code></td>
+                    <td>0</td>
+                    <td>SDS</td>
+                    <td>长度超出阈值的 String</td>
+                </tr>
+                <tr>
+                    <td><code>OBJ_ENCODING_INT</code></td>
+                    <td>1</td>
+                    <td>long 整型</td>
+                    <td>可解析为整数的 String</td>
+                </tr>
+                <tr>
+                    <td><code>OBJ_ENCODING_HT</code></td>
+                    <td>2</td>
+                    <td>dict（字典）</td>
+                    <td>大 Hash / 大 Set</td>
+                </tr>
+                <tr>
+                    <td><code>OBJ_ENCODING_ZIPLIST</code></td>
+                    <td>5</td>
+                    <td>ziplist</td>
+                    <td>小 Hash / 小 ZSet（旧）</td>
+                </tr>
+                <tr>
+                    <td><code>OBJ_ENCODING_INTSET</code></td>
+                    <td>6</td>
+                    <td>intset</td>
+                    <td>整数小 Set</td>
+                </tr>
+                <tr>
+                    <td><code>OBJ_ENCODING_SKIPLIST</code></td>
+                    <td>7</td>
+                    <td>zskiplist + dict</td>
+                    <td>大 ZSet</td>
+                </tr>
+                <tr>
+                    <td><code>OBJ_ENCODING_EMBSTR</code></td>
+                    <td>8</td>
+                    <td>嵌入式 SDS</td>
+                    <td>短 String（&le; 44 字节）</td>
+                </tr>
+                <tr>
+                    <td><code>OBJ_ENCODING_QUICKLIST</code></td>
+                    <td>9</td>
+                    <td>quicklist</td>
+                    <td>List 始终使用</td>
+                </tr>
+                <tr>
+                    <td><code>OBJ_ENCODING_STREAM</code></td>
+                    <td>10</td>
+                    <td>rax + listpack</td>
+                    <td>Stream 始终使用</td>
+                </tr>
+                <tr>
+                    <td><code>OBJ_ENCODING_LISTPACK</code></td>
+                    <td>11</td>
+                    <td>listpack</td>
+                    <td>小 Hash / 小 ZSet（新版）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>refcount —— 引用计数</h3>
+        <p><code>refcount</code> 是一个 4 字节的 int，记录当前对象被引用的次数。当一个对象的 refcount 降为 0 时，Redis 调用 <code>freeObject()</code> 释放其内存。引用计数机制让 Redis 可以在多个地方共享同一个对象，而无需深拷贝。</p>
+
+        <h3>lru —— 24 位 LRU 时钟</h3>
+        <p><code>lru</code> 字段在不同的淘汰策略下有不同的含义：在 LRU 模式下，它存储的是服务器时钟的低 24 位（以秒为精度）；在 LFU 模式下，高 16 位存储上次递减时间，低 8 位存储访问频次（对数计数器）。<code>OBJECT IDLETIME</code> 命令就是通过计算当前时间与 lru 字段的差值来估算键的空闲时间的。</p>
+
+        <div class="tip">
+            <strong>设计细节点：</strong>LRU 时钟使用 24 位意味着大约 194 天会回绕一次（2^24 秒）。<code>estimateObjectIdleTime()</code> 函数中考虑了回绕情况，通过取差值 <code>(unsigned long)</code> 强制转无符号来正确处理溢出。
+        </div>
+
+        <h2>编码转换规则</h2>
+
+        <p>编码转换是 Redis 内存优化的核心策略。每种类型都遵循"小数据用紧凑编码，大数据用高效编码"的原则。</p>
+
+        <h3>String：int → embstr → raw</h3>
+        <p>当 <code>SET key 100</code> 时，Redis 检查字符串能否被 <code>string2ll()</code> 解析为 long long。如果可以，就用 <code>OBJ_ENCODING_INT</code> 编码，直接将值存储在 <code>ptr</code> 字段中（强制类型转换为 <code>void*</code>），不额外分配内存。当字符串长度不超过 44 字节时，使用 <code>OBJ_ENCODING_EMBSTR</code>——一个一次性分配的连续内存块，同时包含 <code>redisObject</code> 和 <code>sdshdr</code>，减少内存碎片。超过 44 字节则使用 <code>OBJ_ENCODING_RAW</code>，单独分配 SDS。</p>
+
+        <h3>Hash：listpack → dict（旧版 ziplist → dict）</h3>
+        <p>当 Hash 中字段数量少于 <code>hash-max-listpack-entries</code>（默认 512）且每个字段名称和值的长度都小于 <code>hash-max-listpack-value</code>（默认 64）时，底层使用 listpack。超出任一阈值则自动转换为 dict 编码。</p>
+
+        <h3>List：始终使用 quicklist</h3>
+        <p>Redis 3.2 之后 List 底层统一使用 quicklist（双向链表 + listpack 节点）。<code>list-max-listpack-size</code> 控制每个节点的 listpack 最大大小，<code>list-compress-depth</code> 控制两端不压缩的节点数。</p>
+
+        <h3>Set：intset → dict</h3>
+        <p>当 Set 中的所有元素都是整数且数量不超过 <code>set-max-intset-entries</code>（默认 512）时，使用 intset 编码。否则转为 dict 编码，元素作为 dict 的 key，value 统一为 NULL。</p>
+
+        <h3>ZSet：listpack → skiplist + dict</h3>
+        <p>当 ZSet 元素数量少于 <code>zset-max-listpack-entries</code>（默认 128）且每个元素长度小于 <code>zset-max-listpack-value</code>（默认 64）时，使用 listpack。超过任一阈值则转换为 skiplist + dict 的双重结构。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>有一次线上业务使用 Hash 存储用户画像数据，每个 Hash 约 300 个字段，每个字段值大约 80 字节。看起来 300 &lt; 512（entries 阈值），但 80 &gt; 64（value 阈值），所以编码是 dict 而非 listpack。DBA 尝试调大 <code>hash-max-listpack-value</code> 到 128 后，内存立刻下降了 40%。后来排查发现，ziplist/listpack 对中等长度字符串的存储密度远高于 dict——dict 每个 entry 需要两个 dictEntry（field 和 value 各一个）+ 两套 SDS 头，而 listpack 只需紧凑的连续存储。调参前一定要先 <code>DEBUG OBJECT key</code> 查看当前的编码类型。
+        </div>
+
+        <h2>引用计数与共享对象</h2>
+
+        <p>Redis 在启动时预创建了 0 到 9999 的整数字符串对象（<code>shared.integers[10000]</code>），这些对象的 <code>refcount</code> 初始值极高且永远不会被释放。当你执行 <code>SET key1 100</code> 时，<code>createObject()</code> 会发现值可以解析为 100，于是直接返回 <code>shared.integers[100]</code>，refcount 加 1。这意味着所有值为 0-9999 的字符串键，在内存中共享同一份对象。</p>
+
+        <pre><code>/* object.c */
+robj *createObject(int type, void *ptr) {
+    robj *o = zmalloc(sizeof(*o));
+    o->type = type;
+    o->encoding = OBJ_ENCODING_RAW;
+    o->ptr = ptr;
+    o->refcount = 1;
+    o->lru = 0; /* 将在后续被设置 */
+    return o;
+}
+
+robj *createStringObject(const char *s, size_t len) {
+    if (len &lt;= 44)
+        return createEmbeddedStringObject(s, len);
+    else
+        return createRawStringObject(s, len);
+}
+
+/* tryObjectEncoding 中检查整型共享对象 */
+if (o->encoding == OBJ_ENCODING_RAW &amp;&amp;
+    sdsEncodedObject(o)) {
+    /* 如果 sds 可以解析为 long long，尝试转 INT 编码 */
+    if (string2ll(s, len, &amp;value)) {
+        /* 如果值在 0-9999 之间，直接返回共享对象 */
+        if (value &gt;= 0 &amp;&amp; value &lt; OBJ_SHARED_INTEGERS) {
+            decrRefCount(o);
+            return shared.integers[value];
+        }
+        /* 否则用 INT 编码 */
+        o->encoding = OBJ_ENCODING_INT;
+        o->ptr = (void*)((long)value);
+    }
+}</code></pre>
+
+        <p>refcount 的增减操作在 <code>incrRefCount()</code> 和 <code>decrRefCount()</code> 中处理。特别地，对于共享对象（refcount 初始值极大），<code>decrRefCount()</code> 会特殊处理——只有 <code>refcount == 1</code> 时才真正释放。</p>
+
+        <pre><code>/* object.c */
+void decrRefCount(robj *o) {
+    if (o->refcount == 1) {
+        /* 唯一引用，可以释放 */
+        freeObject(o);
+    } else {
+        if (o->refcount &lt;= 0) return; /* 共享对象，永不释放 */
+        o->refcount--;
+    }
+}
+
+void incrRefCount(robj *o) {
+    if (o->refcount &lt; OBJ_SHARED_REFCOUNT) /* 大于 1 的非共享对象 */
+        o->refcount++;
+}</code></pre>
+
+        <div class="highlight">
+            <strong>注意：</strong><code>OBJ_SHARED_REFCOUNT</code> 定义为一个极大值（<code>INT_MAX / 2</code>），共享对象的 refcount 初始设为这个值。因此 <code>incrRefCount</code> 不会对共享对象做自增，<code>decrRefCount</code> 也不会自减——它们永远"活着"。
+        </div>
+
+        <h2>OBJECT 命令实现</h2>
+
+        <p><code>OBJECT</code> 命令是 Redis 源码调试的利器。它让你能直接查看一个键对应 redisObject 的内部状态。其实现集中在 <code>object.c</code> 的 <code>objectCommand()</code> 函数中：</p>
+
+        <pre><code>/* object.c */
+void objectCommand(client *c) {
+    robj *o;
+
+    if (!strcasecmp(c->argv[2]-&gt;ptr, "refcount")) {
+        /* OBJECT REFCOUNT key */
+        o = lookupKeyReadOrReply(c, c->argv[1], shared.null[c->resp]);
+        if (o == NULL) return;
+        addReplyLongLong(c, o->refcount);
+
+    } else if (!strcasecmp(c->argv[2]-&gt;ptr, "encoding")) {
+        /* OBJECT ENCODING key */
+        o = lookupKeyReadOrReply(c, c->argv[1], shared.null[c->resp]);
+        if (o == NULL) return;
+        addReplyBulkCString(c, strEncoding(o->encoding));
+
+    } else if (!strcasecmp(c->argv[2]-&gt;ptr, "idletime")) {
+        /* OBJECT IDLETIME key */
+        o = lookupKeyReadOrReply(c, c->argv[1], shared.null[c->resp]);
+        if (o == NULL) return;
+        addReplyLongLong(c, estimateObjectIdleTime(o) / 1000);
+
+    } else if (!strcasecmp(c->argv[2]-&gt;ptr, "freq")) {
+        /* OBJECT FREQ key — 仅在 LFU 策略下可用 */
+        o = lookupKeyReadOrReply(c, c->argv[1], shared.null[c->resp]);
+        if (o == NULL) return;
+        addReplyLongLong(c, LFUDecrAndReturn(o));
+    }
+}</code></pre>
+
+        <p>各子命令的作用：</p>
+        <ul>
+            <li><strong>OBJECT REFCOUNT</strong> —— 查看对象的引用计数，检查是否为共享整数对象。返回共享对象时通常为 <code>INT_MAX</code> 级别的值。</li>
+            <li><strong>OBJECT ENCODING</strong> —— 查看底层编码类型，这是判断是否需要调优配置参数的关键依据。</li>
+            <li><strong>OBJECT IDLETIME</strong> —— 估算空闲秒数，结合 <code>maxmemory-policy volatile-lru</code> 验证淘汰效果。</li>
+            <li><strong>OBJECT FREQ</strong> —— 仅在使用 LFU 淘汰策略时可用，返回对象的访问频率估算值。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>调试技巧：</strong><code>DEBUG OBJECT key</code> 是 OBJECT 命令的"增强版"，它直接输出 redisObject 的原始字段值，包括 type、encoding、refcount、lru（原始时钟值）、lru_seconds_idle 等。在分析内存问题时，先用 <code>DEBUG OBJECT</code> 快速确认编码类型，再决定是否需要调整配置参数。
+        </div>
+
+        <h2>编码转换的触发时机</h2>
+
+        <p>编码转换的检测并不是每次命令执行都触发——那样太浪费 CPU。Redis 采用<strong>按需转换</strong>策略：在创建新对象时选择初始编码，在操作过程中如果发现当前编码不再适合，才触发转换。例如 <code>hsetCommand</code> 调用 <code>hashTypeSet()</code> 时，如果发现 listpack 中的元素数量或值长度超过了配置阈值，就调用 <code>hashTypeConvert()</code> 转换为 dict。</p>
+
+        <pre><code>/* t_hash.c */
+void hashTypeSet(robj *o, sds field, sds value, int flags) {
+    int update = 0;
+
+    if (o->encoding == OBJ_ENCODING_LISTPACK) {
+        update = hashTypeSetListpack(o, field, value, flags);
+        /* 检查是否需要转换 */
+        if (hashTypeLength(o) &gt; server.hash_max_listpack_entries ||
+            sdslen(value) &gt; server.hash_max_listpack_value)
+        {
+            hashTypeConvert(o, OBJ_ENCODING_HT);
+        }
+    } else if (o->encoding == OBJ_ENCODING_HT) {
+        update = hashTypeSetHT(o, field, value, flags);
+    }
+}</code></pre>
+
+        <p>这种"写时转换"的机制避免了在每次读取时做类型判断的开销，同时确保了紧凑编码能持续使用到最后一刻。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>embstr 编码有一个容易被忽略的特性——它是<strong>只读的</strong>。当你对一个 embstr 字符串执行 <code>APPEND</code> 操作时，Redis 不会在原地址追加（因为 embstr 是一次性分配的连续内存块，没有预留额外空间），而是创建一个新的 raw 编码对象，将原内容复制过去，然后追加。这意味着 <code>APPEND</code> 一个很小的数据到 embstr 字符串上也会触发 <code>malloc + free + memcpy</code> 的完整开销。在循环中执行 <code>APPEND</code> 的代码，性能会比预分配好 SDS 再用 <code>SET</code> 差一个数量级。所以，如果需要频繁拼接字符串，客户端拼好再 <code>SET</code>，远比用 <code>APPEND</code> 一个个追加要高效。
+        </div>
+
+        <p>理解了对象模型，我们就清楚了每一种 Redis 类型在内存中的真实面貌。下一章，我们将从最常用的 String 和 Hash 命令开始，看看这些命令是如何在 <code>redisObject</code> 的基础上实现具体功能的。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

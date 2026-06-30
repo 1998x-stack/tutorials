@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 事件循环（上）：文件事件</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html" class="active">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第13章：事件循环（上）：文件事件</h2>
+
+        <p>大家好，我是你们的讲师。前面 12 章我们一直在讨论 Redis 的数据结构和命令实现，但有一个核心问题始终没有回答：当数千个客户端同时连接 Redis 时，Redis 是怎么管理所有这些连接的？它是怎么知道某个客户端发来了新命令？又是怎样在单线程中同时处理网络 IO 和命令执行的？</p>
+
+        <p>答案就在 Redis 的<strong>事件循环</strong>中。事件循环（Event Loop）是 Redis 的"心脏"——它驱动着整个服务器的运转。从这一章开始，我们将用两章的篇幅深入 <code>ae.c</code> 和 <code>ae_epoll.c</code>，拆解这个精巧的 Reactor 模式实现。本章聚焦文件事件（网络 IO），下一章讨论时间事件（定时任务）。</p>
+
+        <h2>Reactor 模式概述</h2>
+
+        <p>Redis 采用的是经典的 <strong>Reactor 模式</strong>：单线程 + 非阻塞 IO + IO 多路复用。所谓 Reactor，就是一个"反应堆"——它不主动发起 IO，而是把文件描述符（FD）注册到内核，告诉内核"当这个 FD 可读/可写时通知我"，然后自己阻塞在 <code>epoll_wait</code> 上等待通知。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th>Reactor（Redis）</th>
+                    <th>Proactor（如 Windows IOCP）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>IO 操作谁执行</td>
+                    <td>应用程序（用户态）</td>
+                    <td>操作系统（内核态）</td>
+                </tr>
+                <tr>
+                    <td>通知方式</td>
+                    <td>"可以读了"</td>
+                    <td>"已经读好了"</td>
+                </tr>
+                <tr>
+                    <td>编程模型</td>
+                    <td>同步非阻塞</td>
+                    <td>异步</td>
+                </tr>
+                <tr>
+                    <td>系统调用</td>
+                    <td>epoll_wait + read/write</td>
+                    <td>io_submit（AIO）</td>
+                </tr>
+                <tr>
+                    <td>Redis 是否使用</td>
+                    <td>是</td>
+                    <td>否</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>Redis 选择 Reactor 的原因很直接：单线程模型下，如果用了 Proactor，异步 IO 的回调依然要在事件循环中执行，并没有本质的区别。而 Reactor 的代码更简单、更可控、更易于调试。</p>
+
+        <h2>aeEventLoop 结构</h2>
+
+        <p>所有事件管理的核心是 <code>aeEventLoop</code> 结构体，定义在 <code>ae.h</code> 中：</p>
+
+        <pre><code>/* ae.h */
+typedef struct aeEventLoop {
+    int maxfd;                 /* 当前注册的最大 FD */
+    int setsize;               /* 事件表大小（可监视的最大 FD 数） */
+    long long timeEventNextId; /* 时间事件 ID 生成器 */
+    time_t lastTime;           /* 上次处理时间事件的时间 */
+    aeFileEvent *events;       /* 文件事件表，按 FD 索引 */
+    aeFiredEvent *fired;       /* 就绪事件表，epoll_wait 返回后填充 */
+    aeTimeEvent *timeEventHead;/* 时间事件链表头 */
+    int stop;                  /* 停止标志 */
+    void *apidata;             /* 后端多路复用特有数据（如 epoll 的 fd） */
+    aeBeforeSleepProc *beforesleep; /* 每次等待前调用的钩子 */
+    aeBeforeSleepProc *aftersleep;  /* 每次等待后调用的钩子 */
+    int flags;                 /* 事件循环标志 */
+} aeEventLoop;</code></pre>
+
+        <p>核心字段的含义：</p>
+        <ul>
+            <li><code>events</code> —— 一个数组，大小为 <code>setsize</code>，每个 FD 对应一个 <code>aeFileEvent</code>，记录了该 FD 注册的回调函数和掩码。</li>
+            <li><code>fired</code> —— 同样大小的数组，<code>aeApiPoll</code>（即 epoll_wait）返回后，把就绪的 FD 和事件掩码填入此数组。</li>
+            <li><code>apidata</code> —— 多态后端的私有数据。以 epoll 为例，它包含一个 <code>epollfd</code> 和 <code>struct epoll_event</code> 数组。</li>
+            <li><code>beforesleep</code> / <code>aftersleep</code> —— 每次事件循环迭代中，<code>aeApiPoll</code> 调用前/后执行的钩子函数。这是 Redis 实现"延迟处理"的关键机制。</li>
+        </ul>
+
+        <h2>文件事件注册与触发</h2>
+
+        <h3>aeCreateFileEvent / aeDeleteFileEvent</h3>
+
+        <pre><code>/* ae.c */
+int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
+        aeFileProc *proc, void *clientData) {
+    if (fd &gt;= eventLoop-&gt;setsize) return AE_ERR;
+
+    aeFileEvent *fe = &amp;eventLoop-&gt;events[fd];
+
+    /* 调用后端 API 注册到 epoll/kqueue */
+    if (aeApiAddEvent(eventLoop, fd, mask) == -1)
+        return AE_ERR;
+
+    fe-&gt;mask |= mask;
+    if (mask &amp; AE_READABLE) fe-&gt;rfileProc = proc;
+    if (mask &amp; AE_WRITABLE) fe-&gt;wfileProc = proc;
+    fe-&gt;clientData = clientData;
+
+    if (fd &gt; eventLoop-&gt;maxfd) eventLoop-&gt;maxfd = fd;
+    return AE_OK;
+}</code></pre>
+
+        <p>文件事件的掩码有三种：<code>AE_READABLE</code>（FD 可读时触发）、<code>AE_WRITABLE</code>（FD 可写时触发）、<code>AE_BARRIER</code>（写优先——即使可读事件也先触发写回调，用于确保响应在读取下一个请求前被写出）。</p>
+
+        <div class="tip">
+            <strong>AE_BARRIER 的作用：</strong>Redis 在 <code>postponeClientRead</code> 机制中用到 AE_BARRIER。它的作用是：在每次事件循环迭代中，先处理之前积压的写事件（把响应发出去），再去读新的请求。这避免了"读完新请求→处理→产生新响应→下次迭代才能写出"的不必要延迟。
+        </div>
+
+        <h2>epoll 后端源码</h2>
+
+        <p>Redis 的事件循环设计了多态后端：Linux 上优先使用 epoll，macOS/FreeBSD 上使用 kqueue，兜底使用 select。多态通过 <code>aeApiCreate</code> / <code>aeApiPoll</code> / <code>aeApiAddEvent</code> / <code>aeApiDelEvent</code> 四个函数实现。</p>
+
+        <h3>ae_epoll.c 源码解析</h3>
+
+        <pre><code>/* ae_epoll.c */
+typedef struct aeApiState {
+    int epfd;                           /* epoll 实例的 FD */
+    struct epoll_event *events;         /* epoll_wait 返回的事件数组 */
+} aeApiState;
+
+static int aeApiCreate(aeEventLoop *eventLoop) {
+    aeApiState *state = zmalloc(sizeof(aeApiState));
+    state-&gt;events = zmalloc(sizeof(struct epoll_event) * eventLoop-&gt;setsize);
+    state-&gt;epfd = epoll_create(1024);   /* 创建 epoll 实例 */
+    eventLoop-&gt;apidata = state;
+    return 0;
+}
+
+static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
+    aeApiState *state = eventLoop-&gt;apidata;
+    struct epoll_event ee = {0};
+
+    /* 如果 fd 已经注册了某些事件，使用 EPOLL_CTL_MOD 修改 */
+    int op = eventLoop-&gt;events[fd].mask == AE_NONE ?
+             EPOLL_CTL_ADD : EPOLL_CTL_MOD;
+
+    ee.events = 0;
+    if (mask &amp; AE_READABLE)  ee.events |= EPOLLIN;
+    if (mask &amp; AE_WRITABLE)  ee.events |= EPOLLOUT;
+    ee.data.fd = fd;
+    epoll_ctl(state-&gt;epfd, op, fd, &amp;ee);
+    return 0;
+}
+
+static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
+    aeApiState *state = eventLoop-&gt;apidata;
+    int retval, j;
+
+    /* 阻塞在 epoll_wait 上，等待事件发生 */
+    retval = epoll_wait(state-&gt;epfd, state-&gt;events, eventLoop-&gt;setsize,
+                        tvp ? (tvp-&gt;tv_sec * 1000 + tvp-&gt;tv_usec / 1000) : -1);
+
+    /* 将就绪事件转换为 aeFiredEvent */
+    for (j = 0; j &lt; retval; j++) {
+        struct epoll_event *e = &amp;state-&gt;events[j];
+        eventLoop-&gt;fired[j].fd = e-&gt;data.fd;
+        eventLoop-&gt;fired[j].mask = 0;
+        if (e-&gt;events &amp; EPOLLIN)  eventLoop-&gt;fired[j].mask |= AE_READABLE;
+        if (e-&gt;events &amp; EPOLLOUT) eventLoop-&gt;fired[j].mask |= AE_WRITABLE;
+        if (e-&gt;events &amp; EPOLLERR) eventLoop-&gt;fired[j].mask |= AE_WRITABLE | AE_READABLE;
+    }
+    return retval;
+}</code></pre>
+
+        <p>epoll 相比 select 的两大优势：第一，不传整个 FD 集给内核，避免了 O(N) 的复制；第二，就绪事件是直接返回的，无需 O(N) 遍历查找。在数千个连接但只有少量活跃连接的场景下，epoll 的性能优势是决定性的。</p>
+
+        <h2>io_uring 后端（Redis 8.4 新特性）</h2>
+
+        <p>Redis 8.4 引入了对 <code>io_uring</code> 的支持，这是 Linux 5.1 引入的异步 IO 框架。与 epoll 不同，io_uring 通过 <strong>SQ（Submission Queue）</strong> 和 <strong>CQ（Completion Queue）</strong> 两个环形缓冲区实现内核与用户态的通信，减少了系统调用的次数。</p>
+
+        <pre><code>/* ae_uring.c —— 简化示意 */
+static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
+    struct io_uring_cqe *cqe;
+    unsigned head;
+    unsigned count = 0;
+
+    /* 等待 CQ 中的完成事件 */
+    io_uring_submit_and_wait(&amp;state-&gt;ring, 1);
+
+    /* 遍历 CQ 获取就绪的 IO */
+    io_uring_for_each_cqe(&amp;state-&gt;ring, head, cqe) {
+        eventLoop-&gt;fired[count].fd = cqe-&gt;user_data;
+        eventLoop-&gt;fired[count].mask = /* 转换 cqe-&gt;res 为 AE 掩码 */;
+        count++;
+    }
+    io_uring_cq_advance(&amp;state-&gt;ring, count);
+    return count;
+}</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>epoll_wait 的超时参数是事件循环中一个容易被忽略的细节。超时设置太长，会导致时间事件（如清理过期键）无法及时执行；超时设置太短（比如 0），又会导致 CPU 空转——空转时每秒数十万次 epoll_wait 立即返回。Redis 的 <code>aeProcessEvents</code> 会根据最近一个时间事件的触发时间来计算 epoll_wait 的超时：如果有即将到期的时间事件，超时设为到那个时间点的间隔；如果没有，使用默认的常超时。但如果时间事件处理本身有延迟，这个计算就变得关键了。曾经有团队把 <code>hz</code> 调到 1000（每秒 1000 次 serverCron），结果 epoll_wait 每次只等 1ms，CPU 使用率从 10% 飙到了 60%。
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th>select</th>
+                    <th>epoll</th>
+                    <th>io_uring</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>平台</td>
+                    <td>所有 Unix</td>
+                    <td>Linux 2.6+</td>
+                    <td>Linux 5.1+</td>
+                </tr>
+                <tr>
+                    <td>FD 上限</td>
+                    <td>FD_SETSIZE (1024)</td>
+                    <td>无限制</td>
+                    <td>无限制</td>
+                </tr>
+                <tr>
+                    <td>就绪事件获取</td>
+                    <td>遍历所有 FD O(N)</td>
+                    <td>直接返回 O(K)</td>
+                    <td>CQ 遍历 O(K)</td>
+                </tr>
+                <tr>
+                    <td>系统调用</td>
+                    <td>每次传 FD 集</td>
+                    <td>epoll_ctl + epoll_wait</td>
+                    <td>io_uring_enter</td>
+                </tr>
+                <tr>
+                    <td>Redis 支持</td>
+                    <td>兜底</td>
+                    <td>默认（Linux）</td>
+                    <td>8.4+ 可选</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>事件处理主循环</h2>
+
+        <p>所有事件处理逻辑的顶层入口是 <code>aeMain</code>：</p>
+
+        <pre><code>/* ae.c */
+void aeMain(aeEventLoop *eventLoop) {
+    eventLoop-&gt;stop = 0;
+    while (!eventLoop-&gt;stop) {
+        /* 每次迭代前调用钩子 */
+        if (eventLoop-&gt;beforesleep != NULL)
+            eventLoop-&gt;beforesleep(eventLoop);
+
+        /* 处理所有待办事件 */
+        aeProcessEvents(eventLoop, AE_ALL_EVENTS | AE_CALL_BEFORE_SLEEP | AE_CALL_AFTER_SLEEP);
+
+        /* 每次迭代后调用钩子 */
+        if (eventLoop-&gt;aftersleep != NULL)
+            eventLoop-&gt;aftersleep(eventLoop);
+    }
+}
+
+int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
+    int processed = 0;
+
+    /* 1. 计算 epoll_wait 的超时时间 */
+    if (eventLoop-&gt;maxfd != -1 ||
+        ((flags &amp; AE_TIME_EVENTS) &amp;&amp; !(flags &amp; AE_DONT_WAIT))) {
+        struct timeval tv, *tvp;
+        int64_t usUntilTimer = -1;
+
+        /* 获取最近一个时间事件的到期时间 */
+        if (flags &amp; AE_TIME_EVENTS &amp;&amp; !(flags &amp; AE_DONT_WAIT))
+            usUntilTimer = usUntilEarliestTimer(eventLoop);
+
+        if (usUntilTimer &gt;= 0) {
+            tv.tv_sec = usUntilTimer / 1000000;
+            tv.tv_usec = usUntilTimer % 1000000;
+            tvp = &amp;tv;
+        } else {
+            if (flags &amp; AE_DONT_WAIT) { tvp = NULL; } /* 不等待 */
+            else { tvp = NULL; } /* 无限等待 */
+        }
+
+        /* 2. 调用 epoll_wait 等待文件事件 */
+        numevents = aeApiPoll(eventLoop, tvp);
+    }
+
+    /* 3. 处理所有就绪的文件事件 */
+    for (j = 0; j &lt; numevents; j++) {
+        aeFileEvent *fe = &amp;eventLoop-&gt;events[fired-&gt;fd];
+
+        /* 写优先：如果有 AE_BARRIER，先处理写事件 */
+        if (fired-&gt;mask &amp; AE_WRITABLE &amp;&amp; (!(fired-&gt;mask &amp; AE_READABLE) ||
+            (fe-&gt;mask &amp; AE_BARRIER))) {
+            fe-&gt;wfileProc(eventLoop, fired-&gt;fd, fe-&gt;clientData, fired-&gt;mask);
+            processed++;
+        }
+
+        /* 然后处理读事件 */
+        if (fired-&gt;mask &amp; AE_READABLE) {
+            fe-&gt;rfileProc(eventLoop, fired-&gt;fd, fe-&gt;clientData, fired-&gt;mask);
+            processed++;
+        }
+
+        /* 如果没设 AE_BARRIER，再写 */
+        if (fired-&gt;mask &amp; AE_WRITABLE &amp;&amp; !(fe-&gt;mask &amp; AE_BARRIER)) {
+            fe-&gt;wfileProc(eventLoop, fired-&gt;fd, fe-&gt;clientData, fired-&gt;mask);
+            processed++;
+        }
+    }
+
+    /* 4. 处理时间事件 */
+    if (flags &amp; AE_TIME_EVENTS)
+        processed += processTimeEvents(eventLoop);
+
+    return processed;
+}</code></pre>
+
+        <div class="highlight">
+            <strong>单线程模型的真实含义：</strong>Redis 的"单线程"指的不是整个进程只有一个线程，而是"事件循环在主线程中串行处理所有请求"。从 Redis 6.0 开始，网络 IO 的读写操作可以委托给 IO 线程池并行执行，但<strong>命令执行</strong>（即 <code>rfileProc</code> 中调用的 <code>processCommand</code> 到具体命令函数）始终在主线程中串行执行。所以 SET/GET 命令的执行仍然是线程安全的，无需加锁。
+        </div>
+
+        <p>文件事件驱动着 Redis 的网络 IO——每次有客户端发送命令，epoll 都会通知 Redis，然后 Redis 读取数据、解析命令、执行、返回结果。但除了网络 IO，Redis 还需要做定期任务：清理过期键、检查 AOF 重写、发送复制心跳……这些任务由时间事件驱动。下一章我们继续分析时间事件的实现和 serverCron 的细节。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

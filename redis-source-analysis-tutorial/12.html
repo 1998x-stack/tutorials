@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 Stream、Geo与HyperLogLog</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html" class="active">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第12章：Stream、Geo 与 HyperLogLog</h2>
+
+        <p>大家好，我是你们的讲师。前面几章我们覆盖了 Redis 的五种基础数据类型。但你打开 Redis 的命令参考会发现，还有 <code>XADD</code>、<code>GEOADD</code>、<code>PFADD</code> 这些命令不属于五种基础类型。它们是 Redis 的"进阶数据结构"——Stream、Geo 和 HyperLogLog。它们不是独立的核心类型，而是在 <code>redisObject</code> 框架下用特殊的编码实现的。</p>
+
+        <p>Stream 解决了 List 作为消息队列的不足（持久化、消费组、消息确认），Geo 用 ZSet 模拟了地理索引，HyperLogLog 则在固定 12KB 内存下实现了数十亿级别的去重计数。理解它们的实现原理，可以让你在面对各种业务场景时，知道该选什么工具，以及每个工具背后的代价。</p>
+
+        <h2>Stream 数据结构</h2>
+
+        <p>Stream 是 Redis 5.0 引入的、最复杂的数据类型。它的底层由两大部分组成：<strong>rax（基数树）</strong> 和 <strong>listpack</strong>。rax 是一个有序的、压缩前缀树，用于高效存储和查找消息 ID；listpack 则用来存储连续的消息数据。</p>
+
+        <pre><code>/* stream.h */
+typedef struct stream {
+    rax *rax;              /* 基数树，key = 消息 ID（编码后的），value = listpack */
+    uint64_t length;       /* Stream 中的消息总数 */
+    streamLastID last_id;  /* 最后生成的消息 ID */
+    rax *cgroups;          /* 消费者组字典，key = 组名，value = streamCG */
+} stream;
+
+typedef struct streamCG {
+    streamID last_id;      /* 最后交付给消费者的消息 ID */
+    rax *pel;              /* 待处理消息列表（Pending Entry List）*/
+    rax *consumers;        /* 消费者字典，key = 消费者名，value = streamConsumer */
+} streamCG;
+
+typedef struct streamConsumer {
+    mstime_t seen_time;    /* 最后活跃时间 */
+    sds name;              /* 消费者名称 */
+    rax *pel;              /* 该消费者独有的 PEL */
+} streamConsumer;</code></pre>
+
+        <p>消息 ID 的格式是 <code>毫秒时间戳-序号</code>，例如 <code>1659312000000-0</code>。ID 在 rax 树中作为 key 存储，value 是一个 listpack 块，包含多个连续的消息。</p>
+
+        <pre><code>/* t_stream.c —— XADD 核心 */
+void xaddCommand(client *c) {
+    streamID id;
+    int id_given = 0; /* 是否由客户端指定 ID */
+    int maxlen = -1;  /* MAXLEN 修剪 */
+    int approx_maxlen = 0;
+    long long entries_added = 0;
+
+    /* 1. 解析 MAXLEN 等选项 */
+    /* 2. 生成或解析消息 ID */
+    if (!id_given) {
+        /* 自动生成 ID: 当前毫秒时间戳 + 序列号自增 */
+        id.ms = mstime();
+        id.seq = 0;
+        /* 如果时间戳与最后一条消息相同，seq 从 last_id.seq 自增 */
+        if (id.ms == s-&gt;last_id.ms)
+            id.seq = s-&gt;last_id.seq + 1;
+    }
+
+    /* 3. 将消息追加到 rax 树 */
+    streamAppendItem(s, c-&gt;argv + field_start, field_count, &amp;id, entries_added);
+
+    /* 4. 如果指定了 MAXLEN，执行裁剪 */
+    if (maxlen &gt;= 0)
+        streamTrimByLength(s, maxlen, approx_maxlen);
+}</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>Stream 的 XADD 如果不指定 MAXLEN，消息会无限制地追加到 rax 树中。有次线上环境因为业务方配置的 Stream 作为日志收集器，每天产生约 5000 万条消息，3 天后这台 Redis 实例的内存暴涨了 30GB，直接触发了 OOM Killer。事后检查发现，XADD 命令没有加 MAXLEN 限制，而 rax 树的节点结构（每个节点包含指向子节点的指针数组）在大数据量场景下会有额外的内存膨胀。修复方案：对每个 Stream 设置 <code>XADD key MAXLEN ~ 1000000 ...</code>，使用近似裁剪来避免每次追加都做精确裁剪的性能开销。
+        </div>
+
+        <h2>Stream 核心命令</h2>
+
+        <h3>XREAD —— 读取消息</h3>
+        <p><code>XREAD</code> 从一个或多个 Stream 中读取消息，可以指定起始 ID 和最大消息数。它支持阻塞模式（类似 BLPOP），即 <code>XREAD BLOCK 0 STREAMS mystream $</code> 会阻塞等待新消息。</p>
+
+        <h3>XREADGROUP —— 消费者组读取</h3>
+        <p><code>XREADGROUP</code> 是 Stream 最强大的特性。它的实现比 XREAD 复杂得多：</p>
+        <ol>
+            <li>在消费者组中找到当前消费者的待处理消息（PEL），优先投递尚未确认的消息。</li>
+            <li>如果没有待处理消息，从 Stream 中读取新消息，并将其 ID 记录到消费者组的 PEL 和消费者的 PEL 中。</li>
+            <li>通过 <code>XACK</code> 确认后，从 PEL 中移除 ID。</li>
+        </ol>
+
+        <h3>XACK —— 消息确认</h3>
+        <pre><code>/* t_stream.c */
+void xackCommand(client *c) {
+    streamID id;
+    int acknowledged = 0;
+
+    /* 查找消费者组 */
+    streamCG *group = streamLookupCG(s, c-&gt;argv[2]-&gt;ptr);
+
+    /* 遍历要确认的消息 ID */
+    for (int j = 3; j &lt; c-&gt;argc; j++) {
+        if (streamParseIDOrReply(c, c-&gt;argv[j], &amp;id) != C_OK) return;
+
+        /* 从消费者组 PEL 和消费者 PEL 中删除该 ID */
+        if (raxRemove(group-&gt;pel, (unsigned char*)&amp;id, sizeof(id), NULL)) {
+            acknowledged++;
+        }
+    }
+    addReplyLongLong(c, acknowledged);
+}</code></pre>
+
+        <div class="tip">
+            <strong>XACK 的原子性：</strong>XACK 操作涉及两个 rax 树的删除（group->pel 和 consumer->pel）。如果在这两步之间服务器崩溃，会出现消费者组 PEL 已删除但消费者 PEL 未删除的不一致状态。Redis 通过 RDB 和 AOF 的持久化机制来保证——重启后从持久化文件恢复时，会重建 PEL 的一致性。
+        </div>
+
+        <h2>Geo 地理索引</h2>
+
+        <p>Redis 的 Geo 功能非常"取巧"：它底层就是一个 ZSet，把经纬度编码成一个 52 位的 GeoHash 整数作为 score，地名作为 member。</p>
+
+        <h3>GeoHash 编码原理</h3>
+
+        <p>GeoHash 的思路是把地球的经纬度范围（经度 -180~180，纬度 -85~85）不断二分，用二进制位表示每次的二分选择。经度占 26 位，纬度占 26 位，交替合并后得到一个 52 位的整数。</p>
+
+        <pre><code>/* geo.c —— GeoHash 编码核心 */
+#define GEO_STEP_MAX 26 /* 26 * 2 = 52 bits */
+
+int geohashEncode(const GeoHashRange *lat_range,
+                  const GeoHashRange *lon_range,
+                  double lat, double lon,
+                  uint8_t step, GeoHashBits *hash) {
+    /* 将经纬度映射到 [0, 1] 区间 */
+    double lat_offset = (lat - lat_range-&gt;min) / (lat_range-&gt;max - lat_range-&gt;min);
+    double lon_offset = (lon - lon_range-&gt;min) / (lon_range-&gt;max - lon_range-&gt;min);
+
+    /* 转为 2^step 的整数 */
+    lat_offset *= (1ULL &lt;&lt; step);
+    lon_offset *= (1ULL &lt;&lt; step);
+
+    hash-&gt;bits = 0;
+    hash-&gt;step = step;
+
+    /* 交替将经纬度的每一位填入 hash */
+    for (uint8_t i = 0; i &lt; step; i++) {
+        /* 先放经度位，再放纬度位 */
+        if (lon_offset &amp; (1ULL &lt;&lt; (step - i - 1)))
+            hash-&gt;bits |= (1ULL &lt;&lt; (2 * step - 2 * i - 1));
+        if (lat_offset &amp; (1ULL &lt;&lt; (step - i - 1)))
+            hash-&gt;bits |= (1ULL &lt;&lt; (2 * step - 2 * i - 2));
+    }
+    return 1;
+}</code></pre>
+
+        <p>Geo 底层使用 ZSet，因此 <code>GEOADD</code> 转化为 <code>ZADD</code>，<code>GEOPOS</code> 转化为 <code>ZSCORE</code>（解码回经纬度），<code>GEORADIUS</code> 转化为 <code>ZRANGEBYSCORE</code>（计算经纬度范围的 score 边界后执行范围查询）。</p>
+
+        <div class="highlight">
+            <strong>GeoHash 精度与距离：</strong>52 位 GeoHash 的精度大约在 0.6 米左右。如果你的业务只需要 10 米级别的精度，GeoHash 步长可以缩短，从而得到更小的 score 范围和更好的 ZSet 查询性能。但 Redis 固定使用 26 步（52 位），没有提供配置参数——这也是"取巧"方案的局限性。
+        </div>
+
+        <h2>HyperLogLog</h2>
+
+        <p>HyperLogLog（HLL）是 Redis 最令人惊叹的数据结构之一：它用固定 12KB 的内存，实现了对海量数据去重后的基数估算，标准误差 0.81%。</p>
+
+        <h3>伯努利试验原理</h3>
+        <p>HLL 的核心思想是：每个元素通过哈希函数得到一个 64 位的二进制串，统计该串中"从低位开始第一个 1 出现的位置"（即连续 0 的个数 + 1）。如果有多条记录，取所有记录中这个位置的最大值 <code>ρ_max</code>，那么基数的估计值大约是 <code>2^ρ_max</code>。</p>
+        <p>但直接取最大值误差很大。HLL 的改进在于：将哈希值的高 14 位作为桶编号（共 16384 个桶），低 50 位用于计算前导零。每个桶记录该桶内所有元素中最大的前导零数。最终对所有桶的值做<strong>调和平均数</strong>来得到更稳健的估计。</p>
+
+        <h3>稀疏编码与稠密编码</h3>
+        <p>HLL 有两种编码方式：当计数较小时，使用<strong>稀疏编码</strong>，只存储非零桶的编号和值（使用 zset 编码，实际上是一个 listpack），可以大幅节省内存。当计数增大、非零桶超过一定阈值后，转换为<strong>稠密编码</strong>，用连续 12KB 的位图存储所有桶的值。</p>
+
+        <pre><code>/* hyperloglog.c —— PFADD 核心 */
+int hllAdd(robj *o, unsigned char *ele, size_t elesize) {
+    uint64_t hash;
+    int count;
+
+    /* 1. 计算哈希值 */
+    hash = MurmurHash64A(ele, elesize, 0xadc83b19ULL);
+
+    /* 2. 提取桶索引（高 14 位）和模式值 */
+    int idx = hash &amp; HLL_P_MASK;  /* 低 14 位 = 桶编号 */
+    uint8_t count = hllCountTrailingZeros(hash &gt;&gt; HLL_P, 64 - HLL_P) + 1;
+
+    /* 3. 更新桶 */
+    if (o->encoding == OBJ_ENCODING_RAW) {
+        /* 稠密编码 */
+        if (count &gt; HLL_DENSE_GET_REGISTER(o-&gt;ptr, idx)) {
+            HLL_DENSE_SET_REGISTER(o-&gt;ptr, idx, count);
+            return 1; /* 返回 1 表示估计值可能发生了变化 */
+        }
+    } else {
+        /* 稀疏编码 */
+        return hllSparseSet(o-&gt;ptr, idx, count);
+    }
+    return 0;
+}</code></pre>
+
+        <h2>其他概率结构（Module）</h2>
+
+        <p>除了 HLL，Redis 还通过 <code>RedisBloom</code> 模块支持 Bloom Filter 和 Cuckoo Filter。虽然它们是模块提供的（不是内核内置的），但在实际生产中非常常用：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>结构</th>
+                    <th>内存/元素</th>
+                    <th>误判率</th>
+                    <th>支持删除</th>
+                    <th>典型场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>HyperLogLog</td>
+                    <td>12KB（固定）</td>
+                    <td>0.81%</td>
+                    <td>否</td>
+                    <td>UV 统计</td>
+                </tr>
+                <tr>
+                    <td>Bloom Filter</td>
+                    <td>~10 bits</td>
+                    <td>1%（可配）</td>
+                    <td>否</td>
+                    <td>缓存穿透防护</td>
+                </tr>
+                <tr>
+                    <td>Cuckoo Filter</td>
+                    <td>~7 bits</td>
+                    <td>1%（可配）</td>
+                    <td>是</td>
+                    <td>存在性检测 + 删除</td>
+                </tr>
+                <tr>
+                    <td>Count-Min Sketch</td>
+                    <td>~4 KB</td>
+                    <td>有偏估计</td>
+                    <td>否</td>
+                    <td>TopK 频率估计</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>何时用 Bloom Filter 而非 HLL：</strong>HLL 只回答"大概有多少个不同的元素"，不回答"这个元素之前出现过吗"。如果你需要判断元素是否存在（比如防止缓存穿透），应该用 Bloom Filter。如果你需要去重计数，用 HLL。两者不冲突，但场景要分清楚。
+        </div>
+
+        <p>Stream、Geo 和 HLL 展示了 Redis 数据结构的三个方向：Stream 是复杂业务逻辑的内置实现，Geo 是现有结构上的巧妙复用，HLL 是概率算法的工程化。但无论哪种结构，最终的命令执行都要经过 Redis 的"心脏"——事件循环。下一章开始，我们将全面转向 Redis 的 IO 架构和事件驱动模型。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

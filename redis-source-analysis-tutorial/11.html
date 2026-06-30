@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 Set与Sorted Set命令实现</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html" class="active">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第11章：Set 与 Sorted Set 命令实现</h2>
+
+        <p>大家好，我是你们的讲师。前几章我们看了 String、Hash 和 List 的命令实现，它们各自有各自的底层结构。而这一章的 Set 和 Sorted Set，是 Redis 数据类型中最能体现"多种数据结构协同"的典范。Set 用 intset 和 dict 双编码，Sorted Set 更是同时维护了跳表和字典——一个用于快速查找分数，一个用于范围排序。<code>SINTER</code> / <code>SUNION</code> 这样的集合运算和 <code>ZINTERSTORE</code> / <code>ZUNIONSTORE</code> 这样的聚合操作，背后是巧妙的算法设计和编码切换策略。</p>
+
+        <p>如果理解了 Set 和 Sorted Set 的实现，你对 Redis 的"空间换时间"和"多结构协同"的设计哲学就有了完整的认识。</p>
+
+        <h2>Set 命令族</h2>
+
+        <h3>saddCommand 与 sremCommand</h3>
+
+        <p><code>SADD</code> 和 <code>SREM</code> 是 Set 最基础的操作。它们的核心都是对 <code>dict</code> 的增删——Set 在 dict 中把元素存为 key，value 统一为 NULL。</p>
+
+        <pre><code>/* t_set.c */
+void saddCommand(client *c) {
+    robj *set;
+    int j, added = 0;
+
+    set = lookupKeyWrite(c-&gt;db, c-&gt;argv[1]);
+    if (set == NULL) {
+        set = setTypeCreate(c-&gt;argv[2]-&gt;ptr);
+        dbAdd(c-&gt;db, c-&gt;argv[1], set);
+    } else {
+        if (checkType(c, set, OBJ_SET)) return;
+    }
+
+    for (j = 2; j &lt; c-&gt;argc; j++) {
+        c-&gt;argv[j] = tryObjectEncoding(c-&gt;argv[j]);
+        if (setTypeAdd(set, c-&gt;argv[j])) added++;
+    }
+    addReplyLongLong(c, added);
+}
+
+/* setTypeAdd —— 根据编码执行实际的添加操作 */
+int setTypeAdd(robj *subject, robj *value) {
+    long long llval;
+
+    if (subject->encoding == OBJ_ENCODING_INTSET) {
+        /* intset 编码：只接受整数 */
+        if (isObjectRepresentableAsLongLong(value, &amp;llval) == C_OK) {
+            uint8_t success = 0;
+            subject-&gt;ptr = intsetAdd(subject-&gt;ptr, llval, &amp;success);
+            if (success) {
+                /* 添加后检查是否需要转为 dict */
+                if (intsetLen(subject-&gt;ptr) &gt; server.set_max_intset_entries)
+                    setTypeConvert(subject, OBJ_ENCODING_HT);
+                return 1;
+            }
+        } else {
+            /* 非整数元素：必须转换为 dict */
+            setTypeConvert(subject, OBJ_ENCODING_HT);
+            /* 转换后通过 dictAdd 添加 */
+            dictAdd(subject-&gt;ptr, value, NULL);
+            return 1;
+        }
+    } else if (subject->encoding == OBJ_ENCODING_HT) {
+        /* dict 编码：直接调用 dictAdd */
+        if (dictAdd(subject-&gt;ptr, value, NULL) == DICT_OK) {
+            incrRefCount(value);
+            return 1;
+        }
+    }
+    return 0;
+}</code></pre>
+
+        <p>注意 <code>setTypeCreate</code> 的逻辑：当创建新 Set 时，如果第一个元素是整数则用 intset 编码，否则直接用 dict。这个"按需选择初始编码"的优化，使得大部分小整数 Set 都能享受 intset 的紧凑存储。</p>
+
+        <h3>SREM 和集合运算</h3>
+
+        <p><code>SREM</code> 调用 <code>setTypeRemove</code>，同样根据编码选择 intset 或 dict 的删除路径。特别地，intset 编码下删除一个元素后不会因为数量变少而转回 intset——转换是单向的（intset → dict）。</p>
+
+        <h2>Set 集合运算优化</h2>
+
+        <p>Redis 的 <code>SINTER</code>（交集）、<code>SUNION</code>（并集）、<code>SDIFF</code>（差集）是 Set 最强大的功能之一。这些运算的实现中有一个关键优化：<strong>从小到大遍历</strong>。</p>
+
+        <pre><code>/* t_set.c —— sinterGenericCommand 核心算法 */
+void sinterGenericCommand(client *c, robj **setkeys, unsigned long setnum) {
+    robj **sets = zmalloc(sizeof(robj*) * setnum);
+    set_type_iterator *si = NULL;
+    robj *resultobj = NULL;
+    int encoding;
+    unsigned long i;
+
+    /* 1. 查找所有集合，检查类型 */
+    for (i = 0; i &lt; setnum; i++) {
+        sets[i] = lookupKeyReadOrReply(c, setkeys[i], shared.null[c-&gt;resp]);
+        if (sets[i] == NULL || checkType(c, sets[i], OBJ_SET)) goto cleanup;
+    }
+
+    /* 2. 按集合大小从小到大排序——优化核心 */
+    qsort(sets, setnum, sizeof(robj*), qsortCompareSetsByRevCardinality);
+
+    /* 3. 以最小的集合为基准进行迭代 */
+    si = setTypeInitIterator(sets[0]);
+    robj *ele;
+    int64_t intobj;
+    while ((ele = setTypeNext(si, &amp;intobj)) != NULL) {
+        /* 检查该元素是否在所有其他集合中都存在 */
+        int found = 1;
+        for (i = 1; i &lt; setnum; i++) {
+            if (!setTypeIsMember(sets[i], ele)) {
+                found = 0;
+                break;
+            }
+        }
+        if (found) {
+            /* 加入结果集 */
+            if (resultobj == NULL)
+                resultobj = createSetObject();
+            setTypeAdd(resultobj, ele);
+        }
+    }
+    /* ... 回复结果 ... */
+}</code></pre>
+
+        <div class="highlight">
+            <strong>优化原理：</strong>交集运算的朴素做法是遍历集合 A 的每个元素，检查它在 B、C……中是否存在。如果 A 最小，那么需要检查的元素总数就是 <code>|A| * (|其他集合|)</code> 次成员检查。如果先遍历大的集合，检查次数会多很多。通过 <code>qsort</code> 排个序只需要 O(K log K) 的额外开销（K 是集合数量，通常很小），就能让总检查次数最小化。
+        </div>
+
+        <p>运算结果集的编码继承自输入集合中最小那个的编码。如果所有元素都是整数且结果集较小，结果可能仍然是 intset 编码——这让 <code>SINTER</code> 的返回值也能享受紧凑存储。</p>
+
+        <h2>ZSet 命令族</h2>
+
+        <h3>zaddGenericCommand —— ZADD 的核心</h3>
+
+        <p>Sorted Set 的内部是 skiplist + dict 的双重结构：skiplist 维护按 score 排序的元素序列，dict 提供 O(1) 的元素查找。添加一个新元素时，需要同时更新两个结构。</p>
+
+        <pre><code>/* t_zset.c */
+int zaddGenericCommand(client *c, int flags) {
+    robj *zobj;
+    double score = 0.0;
+    int j, elements = (c-&gt;argc - 2) / 2;
+    int added = 0;
+
+    /* 1. 查找或创建有序集合 */
+    zobj = lookupKeyWrite(c-&gt;db, c-&gt;argv[1]);
+    if (zobj == NULL) {
+        /* 先创建 listpack 编码 */
+        zobj = createZsetListpackObject();
+        dbAdd(c-&gt;db, c-&gt;argv[1], zobj);
+    } else {
+        if (checkType(c, zobj, OBJ_ZSET)) return 1;
+    }
+
+    /* 2. 逐个处理 (score, member) 对 */
+    for (j = 0; j &lt; elements; j++) {
+        score = zsetScore(c-&gt;argv[2+j*2]); /* 解析 score */
+        if (zsetAdd(zobj, score, c-&gt;argv[3+j*2], flags, &amp;retflags, &amp;newscore)) {
+            /* 处理 NX/XX/CH/INCR 等选项 */
+            if (retflags &amp; ZADD_ADDED) added++;
+        }
+    }
+
+    /* 3. 根据 flags 决定返回值 */
+    if (flags &amp; ZADD_INCR) {
+        addReplyDouble(c, newscore);
+    } else {
+        addReplyLongLong(c, added);
+    }
+    return 1;
+}</code></pre>
+
+        <h3>zsetAdd —— 核心插入逻辑</h3>
+
+        <pre><code>/* t_zset.c */
+int zsetAdd(robj *zobj, double score, robj *ele, int flags,
+            int *retflags, double *newscore) {
+    double curscore;
+
+    if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
+        /* 在 listpack 中查找 member */
+        unsigned char *eptr;
+        if ((eptr = zzlFind(zobj->ptr, ele, &amp;curscore)) != NULL) {
+            /* member 已存在：如果 score 不同则更新 */
+            if (score != curscore) {
+                zobj-&gt;ptr = zzlDelete(zobj-&gt;ptr, eptr);
+                zobj-&gt;ptr = zzlInsert(zobj-&gt;ptr, ele, score);
+            }
+            /* ... */
+
+            /* 检查是否需要转换为 skiplist */
+            if (hashTypeLength(zobj) &gt; server.zset_max_listpack_entries ||
+                sdslen(ele-&gt;ptr) &gt; server.zset_max_listpack_value)
+                zsetConvert(zobj, OBJ_ENCODING_SKIPLIST);
+        } else {
+            /* member 不存在：插入 listpack */
+            zobj-&gt;ptr = zzlInsert(zobj-&gt;ptr, ele, score);
+            /* ... */
+        }
+    } else if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
+        /* skiplist 编码：同时操作 dict 和 skiplist */
+        zset *zs = zobj-&gt;ptr;
+        dictEntry *de = dictFind(zs-&gt;dict, ele);
+
+        if (de != NULL) {
+            /* 更新现有元素的 score */
+            curscore = *(double*)dictGetVal(de);
+            /* 删除旧元素再插入新元素 */
+            zslDelete(zs-&gt;zsl, curscore, ele);
+            zslInsert(zs-&gt;zsl, score, ele);
+            dictSetVal(zs-&gt;dict, de, &amp;zsl-&gt;header-&gt;score);
+        } else {
+            /* 插入新元素 */
+            zslInsert(zs-&gt;zsl, score, ele);
+            dictAdd(zs-&gt;dict, ele, &amp;zsl-&gt;header-&gt;score);
+        }
+    }
+}</code></pre>
+
+        <p>注意 skiplist 编码下的更新逻辑：它不是"找到节点原地改 score"，而是"删除 + 重新插入"。这是因为 skiplist 是按照 score 排序的，修改 score 可能会改变元素在跳表中的位置。如果原地修改 score，跳表的有序性就被破坏了。</p>
+
+        <h3>zrankCommand / zrangeCommand 范围查询</h3>
+
+        <p><code>ZRANK</code> 返回元素的排名（score 升序排列下的位置），<code>ZREVRANK</code> 则是降序排名。skiplist 的 <code>zslGetRank</code> 利用跳表的"跨度"字段（span）快速计算排名——从顶层开始搜索，累加每一层跳过节点的跨度。</p>
+
+        <p><code>ZRANGE</code> 的实现更为直接：定位到起始位置后，在 skiplist 中沿着 forward 指针逐个向后遍历，直到取够指定数量的元素。在 listpack 编码下，则是从 listpack 头开始逐个扫描。</p>
+
+        <div class="tip">
+            <strong>ZRANGE 的 BYSCORE 和 BYLEX 模式：</strong>除了按索引范围查询，ZSet 还支持按 score 范围（<code>ZRANGE key min max BYSCORE</code>）和按字典序范围（<code>ZRANGE key min max BYLEX</code>）查询。这三种模式共享一个底层函数 <code>zrangeGenericCommand</code>，通过 <code>ZRANGEMODE</code> 参数区分。BYSCORE 模式下，skiplist 利用 score 排序特性直接定位到最小 score 对应的节点开始遍历；BYLEX 模式下则是在 member 字符串的字典序上做类似操作。
+        </div>
+
+        <h2>ZSet 聚合操作</h2>
+
+        <p><code>ZUNIONSTORE</code> 和 <code>ZINTERSTORE</code> 是 ZSet 最重量级的命令。它们的实现逻辑是：</p>
+
+        <ol>
+            <li>读取所有输入 ZSet 及其权重（weights）。</li>
+            <li>遍历所有元素，对每个元素计算聚合后的 score（根据聚合函数 sum/min/max，以及各 ZSet 的权重）。</li>
+            <li>将结果写入目标 key。</li>
+        </ol>
+
+        <pre><code>/* t_zset.c */
+void zunionstoreGenericCommand(client *c, int op) {
+    /* 解析参数：numkeys, key[], weights[], aggregate */
+    /* ... 参数校验与解析 ... */
+
+    /* 使用字典聚合：遍历所有元素，在字典中汇总 score */
+    dict *d = dictCreate(&amp;setAccumulatorDictType);
+    for (i = 0; i &lt; setnum; i++) {
+        zset *zs = zobj-&gt;ptr;
+        dictIterator *di = dictGetIterator(zs-&gt;dict);
+        dictEntry *de;
+        while ((de = dictNext(di)) != NULL) {
+            robj *key = dictGetKey(de);
+            double *score = dictGetVal(de);
+            /* 查找或创建累加器 */
+            /* 根据 aggregate(sum/min/max) 合并 score */
+        }
+        dictReleaseIterator(di);
+    }
+
+    /* 将聚合结果写入新 ZSet */
+    /* ... */
+}</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>某业务方需要对两个约 200 万元素的 ZSet 做 ZINTERSTORE 操作，结果 Redis 的 CPU 瞬时飙到 100%，请求超时持续了 10 多秒。原因很简单：ZINTERSTORE 需要在内存中构建一个临时的 dict 来聚合所有元素，200 万 × 2 个元素的全部遍历和 score 计算是纯 CPU 密集型的。而且 Redis 是单线程的，这个操作期间所有其他请求都无法处理。解决方案是：提前估算数据规模，将 ZUNIONSTORE/ZINTERSTORE 的负荷分摊到多个 Redis 实例，或者在低峰期执行。更根本的方案是——避免在 Redis 层面做大集合的聚合运算，把数据拉到客户端侧用本地计算。
+        </div>
+
+        <h2>ZSet 内部编码切换</h2>
+
+        <p>与 Hash 类似，ZSet 也支持编码切换。当元素数量较少且每个元素的长度较小时，使用 listpack 编码；超出阈值后转换为 skiplist + dict 编码。转换阈值由 <code>zset-max-listpack-entries</code>（默认 128）和 <code>zset-max-listpack-value</code>（默认 64）控制。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>命令</th>
+                    <th>时间复杂度</th>
+                    <th>备注</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>SADD / SREM</td>
+                    <td>O(1) 每个元素</td>
+                    <td>dictAdd / dictDelete</td>
+                </tr>
+                <tr>
+                    <td>SISMEMBER</td>
+                    <td>O(1)</td>
+                    <td>dictFind</td>
+                </tr>
+                <tr>
+                    <td>SINTER (k 个集合)</td>
+                    <td>O(N*M)</td>
+                    <td>N = 最小集合大小, M = 集合数</td>
+                </tr>
+                <tr>
+                    <td>SUNION</td>
+                    <td>O(ΣN)</td>
+                    <td>遍历所有集合元素</td>
+                </tr>
+                <tr>
+                    <td>ZADD</td>
+                    <td>O(log N)</td>
+                    <td>zslInsert 跳表插入</td>
+                </tr>
+                <tr>
+                    <td>ZRANK / ZREVRANK</td>
+                    <td>O(log N)</td>
+                    <td>zslGetRank 利用 span</td>
+                </tr>
+                <tr>
+                    <td>ZRANGE (by index)</td>
+                    <td>O(log N + M)</td>
+                    <td>log N 定位 + M 个元素遍历</td>
+                </tr>
+                <tr>
+                    <td>ZRANGEBYSCORE</td>
+                    <td>O(log N + M)</td>
+                    <td>按 score 定位后遍历</td>
+                </tr>
+                <tr>
+                    <td>ZREM</td>
+                    <td>O(log N)</td>
+                    <td>dictFind + zslDelete</td>
+                </tr>
+                <tr>
+                    <td>ZINTERSTORE (k 个集合)</td>
+                    <td>O(ΣN * log ΣN)</td>
+                    <td>遍历 + 排序聚合</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>编码选择建议：</strong>如果 ZSet 的元素数量预期在 128 以内且成员字符串较短，listpack 编码可以比 skiplist 节省约 70% 的内存。不要盲目调大 <code>zset-max-listpack-entries</code>，因为 listpack 中的插入和删除是 O(N) 的——当 N 很大时（比如几千），每次 ZADD 的性能会明显劣化。
+        </div>
+
+        <p>五种基础数据类型我们已经全部覆盖了。但 Redis 的数据结构家族远不止于此——Stream 的消费组、Geo 的地理索引、HyperLogLog 的概率计数，它们各自解决了独特的问题。下一章我们就来探索这三个"进阶类型"。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

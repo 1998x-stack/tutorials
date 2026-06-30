@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 List命令与阻塞操作</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html" class="active">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第10章：List 命令与阻塞操作</h2>
+
+        <p>大家好，我是你们的讲师。前面两章我们讨论了 String 和 Hash 的命令实现——它们有一个共同点：所有操作都是"立即完成"的，没有等待、没有阻塞。但现实世界中的很多场景要求我们"等待数据到来"：一个消息队列的消费者在队列为空时应该原地等待，而不是不停地轮询。Redis 的 List 类型通过 <code>BLPOP</code> / <code>BRPOP</code> 等阻塞命令提供了这种能力。</p>
+
+        <p>阻塞操作是 Redis 单线程模型中最精妙也最容易出问题的部分。本章我们深入 <code>t_list.c</code>，不仅要看 LPUSH/LPOP 的常规操作，更要搞清楚当一个客户端在 BLPOP 上等待时，Redis 内部到底发生了什么——客户端去哪了？谁唤醒它？超时怎么处理？</p>
+
+        <h2>quicklist 深层结构</h2>
+
+        <p>在第五章我们提到过 ziplist 和 listpack，而 quicklist 是 Redis 3.2 引入的 List 专用数据结构。它不是单一的链表或压缩列表，而是一个<strong>双向链表 + listpack 节点</strong>的混合体。</p>
+
+        <pre><code>/* quicklist.h */
+typedef struct quicklist {
+    quicklistNode *head;      /* 头节点 */
+    quicklistNode *tail;      /* 尾节点 */
+    unsigned long count;      /* 所有 listpack 中元素总数 */
+    unsigned long len;        /* quicklistNode 节点数 */
+    int fill : QL_FILL_BITS;  /* 每个节点 listpack 的最大填充大小 */
+    unsigned int compress : QL_COMP_BITS; /* 两端不压缩的节点数 */
+    unsigned int bookmark_count : QL_BM_BITS;
+    quicklistBookmark bookmarks[];
+} quicklist;
+
+typedef struct quicklistNode {
+    struct quicklistNode *prev;
+    struct quicklistNode *next;
+    unsigned char *entry;     /* 指向 listpack 的指针 */
+    size_t sz;                /* entry 的大小（字节） */
+    unsigned int count : 16;  /* 该节点中的元素数量 */
+    unsigned int encoding : 2;/* 1=RAW, 2=LZF */
+    unsigned int container : 2;/* 1=NONE, 2=LISTPACK */
+    unsigned int recompress : 1;/* 临时解压标记 */
+    unsigned int attempted_compress : 1;
+    unsigned int extra : 10;
+} quicklistNode;</code></pre>
+
+        <p>三层结构各有职责：<code>quicklist</code> 是顶层的管理结构，记录链表头和尾以及全局统计信息；<code>quicklistNode</code> 是中间层的链表节点，每个节点指向一个 listpack；最底层的 listpack 存储实际元素。</p>
+
+        <p>两个关键参数：</p>
+        <ul>
+            <li><strong>fill</strong>（对应配置 <code>list-max-listpack-size</code>）：控制每个 quicklistNode 中 listpack 的最大大小。可以使用正数表示元素个数上限，也可以使用负数表示字节数上限（-1 = 4KB，-2 = 8KB，默认 -2）。</li>
+            <li><strong>compress</strong>（对应配置 <code>list-compress-depth</code>）：控制两端有多少个节点不压缩。例如 compress=1 表示首尾各 1 个节点不压缩，中间的节点使用 LZF 算法压缩存储。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>LZF 无锁压缩：</strong>Redis 的 LZF 压缩算法不是流式的，也不涉及动态字典，因此不需要锁。它的核心思想是：找到重复的字节序列，用 <code>(偏移量, 长度)</code> 元组替换。quicklistNode 中的 <code>encoding</code> 字段标记了该节点是否经过 LZF 压缩。当要访问一个压缩节点的数据时，需要先解压再读取——这个开销可能会让 <code>LINDEX</code> 在 compress 深度大的 List 上变慢。
+        </div>
+
+        <h2>List 命令源码</h2>
+
+        <h3>pushGenericCommand —— LPUSH / RPUSH</h3>
+
+        <pre><code>/* t_list.c */
+void pushGenericCommand(client *c, int where) {
+    robj *lobj;
+    int pushed = 0;
+
+    /* 查找或创建键 */
+    lobj = lookupKeyWrite(c-&gt;db, c-&gt;argv[1]);
+    if (lobj == NULL) {
+        lobj = createQuicklistObject();
+        dbAdd(c-&gt;db, c-&gt;argv[1], lobj);
+    } else {
+        if (checkType(c, lobj, OBJ_LIST)) return;
+    }
+
+    /* 逐个将 argv[2..] 插入到列表头或尾 */
+    for (int j = 2; j &lt; c-&gt;argc; j++) {
+        c-&gt;argv[j] = tryObjectEncoding(c-&gt;argv[j]);
+        if (where == LIST_HEAD) {
+            listTypePush(lobj, c-&gt;argv[j], QUICKLIST_HEAD);
+        } else {
+            listTypePush(lobj, c-&gt;argv[j], QUICKLIST_TAIL);
+        }
+        pushed++;
+    }
+
+    addReplyLongLong(c, (lobj-&gt;ptr ? listTypeLength(lobj) : 0));
+}</code></pre>
+
+        <p>核心在 <code>listTypePush</code> 中，它调用 <code>quicklistPush</code>，根据 where 参数决定调用 <code>quicklistPushHead</code> 或 <code>quicklistPushTail</code>。这两个函数都会检查头/尾节点是否还有空间，如果没有则新建一个 quicklistNode。</p>
+
+        <h3>lpopCommand / rpopCommand</h3>
+
+        <p>弹出操作的实现同样简单——从 quicklist 头部或尾部移除并返回一个元素。Redis 7.0 后支持了 <code>LPOP count</code> 和 <code>RPOP count</code> 的批量弹出语法：</p>
+
+        <pre><code>/* t_list.c */
+void lpopCommand(client *c) {
+    long long count = -1; /* 默认弹出 1 个 */
+
+    /* 解析可选的 count 参数 */
+    if (c-&gt;argc == 3) {
+        if (getLongLongFromObjectOrReply(c, c-&gt;argv[2], &amp;count, NULL) != C_OK)
+            return;
+    }
+
+    robj *o = lookupKeyWriteOrReply(c, c-&gt;argv[1], shared.null[c-&gt;resp]);
+    if (o == NULL || checkType(c, o, OBJ_LIST)) return;
+
+    if (count == -1) {
+        /* 无 count 参数：弹出 1 个元素，返回 Bulk String */
+        robj *value = listTypePop(o, LIST_HEAD);
+        if (value == NULL) {
+            addReplyNull(c);
+            return;
+        }
+        addReplyBulk(c, value);
+        listTypeTryConvertQuicklistOrSetMaxSize(o);
+        if (listTypeLength(o) == 0) dbDelete(c-&gt;db, c-&gt;argv[1]);
+    } else {
+        /* 有 count 参数：弹出 N 个元素，返回 Array */
+        popMultipleCommand(c, o, LIST_HEAD, count);
+    }
+}</code></pre>
+
+        <h3>llenCommand —— 为什么它是 O(1)</h3>
+
+        <p><code>LLEN</code> 的实现异常简单：<code>addReplyLongLong(c, listTypeLength(o))</code>。而 <code>listTypeLength</code> 返回的是 <code>quicklist->count</code> 字段，这个字段在每次 push/pop 时都会更新，因此 <code>LLEN</code> 不需要遍历整个链表。</p>
+
+        <h3>lindexCommand / lrangeCommand</h3>
+
+        <p><code>LINDEX key index</code> 需要遍历 quicklist 找到指定位置的元素。如果 index 为正数，从头开始遍历节点并累加 count；为负数时从尾开始。由于 quicklist 的每个节点都记录了该节点中的元素数量，我们可以快速跳过整个节点，而不必逐个元素遍历。</p>
+
+        <p><code>LRANGE key start stop</code> 也是类似，它创建一个迭代器 <code>listTypeInitIterator</code>，定位到 start 位置，然后逐个读取直到 stop。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>命令</th>
+                    <th>时间复杂度</th>
+                    <th>底层实现</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>LPUSH / RPUSH</td>
+                    <td>O(1) 每个元素</td>
+                    <td>quicklistPushHead / Tail</td>
+                </tr>
+                <tr>
+                    <td>LPOP / RPOP</td>
+                    <td>O(1)</td>
+                    <td>quicklistPopHead / Tail</td>
+                </tr>
+                <tr>
+                    <td>LLEN</td>
+                    <td>O(1)</td>
+                    <td>返回 quicklist->count</td>
+                </tr>
+                <tr>
+                    <td>LINDEX</td>
+                    <td>O(N)</td>
+                    <td>遍历 quicklistNode 定位</td>
+                </tr>
+                <tr>
+                    <td>LRANGE</td>
+                    <td>O(S+N)</td>
+                    <td>迭代器遍历</td>
+                </tr>
+                <tr>
+                    <td>LINSERT</td>
+                    <td>O(N)</td>
+                    <td>遍历查找插入点</td>
+                </tr>
+                <tr>
+                    <td>LREM</td>
+                    <td>O(N)</td>
+                    <td>遍历并匹配删除</td>
+                </tr>
+                <tr>
+                    <td>LSET</td>
+                    <td>O(N)</td>
+                    <td>遍历到索引后修改</td>
+                </tr>
+                <tr>
+                    <td>LTRIM</td>
+                    <td>O(N)</td>
+                    <td>保留区间内元素</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>阻塞命令实现</h2>
+
+        <p>这是 List 模块中最复杂也最有趣的部分。当客户端执行 <code>BLPOP key timeout</code> 而 key 不存在或列表为空时，Redis 不会给客户端返回 null，而是把客户端挂起，等待另一个客户端向该 key 执行 LPUSH 或 RPUSH。</p>
+
+        <h3>blockingPopGenericCommand —— 阻塞弹出入口</h3>
+
+        <pre><code>/* t_list.c */
+void blockingPopGenericCommand(client *c, int where) {
+    robj *o;
+    mstime_t timeout;
+    int j;
+
+    /* 1. 解析超时时间 */
+    if (getLongLongFromObjectOrReply(c, c-&gt;argv[c-&gt;argc-1], &amp;timeout, NULL) != C_OK)
+        return;
+    if (timeout &lt;= 0) timeout = 0; /* 0 表示无限等待 */
+
+    /* 2. 先尝试非阻塞弹出——从列表中依次检查每个 key */
+    for (j = 1; j &lt; c-&gt;argc-1; j++) {
+        o = lookupKeyWrite(c-&gt;db, c-&gt;argv[j]);
+        if (o != NULL) {
+            if (o->type != OBJ_LIST ||
+                listTypeLength(o) == 0) continue;
+
+            robj *value = listTypePop(o, where);
+            /* ... 回复并清理空 key ... */
+            return;
+        }
+    }
+
+    /* 3. 所有 key 都为空——进入阻塞状态 */
+    if (timeout != 0) c-&gt;bpop.timeout = timeout;
+    blockForKeys(c, where, c-&gt;argv + 1, c-&gt;argc - 2, NULL, NULL);
+}</code></pre>
+
+        <h3>blockForKeys —— 注册阻塞</h3>
+
+        <pre><code>/* blocking.c */
+void blockForKeys(client *c, int where, robj **keys, int numkeys,
+                  robj **target, robj **target_sd) {
+    dictEntry *de;
+    list *l;
+    int j;
+
+    /* 1. 设置客户端阻塞状态 */
+    c-&gt;bpop.keys = zmalloc(sizeof(robj*) * numkeys);
+    c-&gt;bpop.count = numkeys;
+    c-&gt;bpop.target = target ? target[0] : NULL;
+    c-&gt;bpop.where = where;
+    c-&gt;bpop.numreplicas = 0;
+    c-&gt;bpop.reploffset = 0;
+    blockClient(c, BLOCKED_LIST);
+
+    /* 2. 在全局 blocking_keys 字典中注册 */
+    for (j = 0; j &lt; numkeys; j++) {
+        de = dictFind(c-&gt;db-&gt;blocking_keys, keys[j]);
+        if (de == NULL) {
+            /* 该 key 的阻塞链表还不存在，创建 */
+            l = listCreate();
+            dictAdd(c-&gt;db-&gt;blocking_keys, keys[j], l);
+        } else {
+            l = dictGetVal(de);
+        }
+        /* 把当前客户端追加到 key 的等待列表中 */
+        listAddNodeTail(l, c);
+    }
+}</code></pre>
+
+        <p>这个函数做了两件事：第一，把客户端标记为 <code>BLOCKED_LIST</code> 状态，此后事件循环不会再从这个客户端读取命令；第二，在 <code>db->blocking_keys</code> 字典中，以被等待的 key 为键，把客户端加入等待列表。</p>
+
+        <h3>解除阻塞的时机</h3>
+
+        <p>阻塞的解除发生在两种情况：</p>
+        <ul>
+            <li><strong>数据到达</strong>：当另一个客户端执行 <code>LPUSH key value</code> 时，<code>pushGenericCommand</code> 调用 <code>signalListAsReady</code>，在 <code>ready_keys</code> 链表中记录该 key。然后 <code>beforeSleep()</code> 在处理待办事件时，遍历 <code>ready_keys</code>，找到所有等待该 key 的客户端并唤醒它们。唤醒后，客户端立即执行非阻塞的 LPOP 获取数据。</li>
+            <li><strong>超时</strong>：每次事件循环迭代时，<code>handleClientsBlockedOnKeys</code> 会检查阻塞客户端的超时时间，超时的客户端被解除阻塞并返回 null。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>关键设计：</strong>解除阻塞的客户端不会重新执行阻塞命令——因为 <code>blockForKeys</code> 执行之前已经做过了非阻塞尝试（步骤 2 of blockingPopGenericCommand）。当数据到达时触发的是对 key 的 signal，被唤醒的客户端直接 LPOP 就能拿到数据。这个"先尝试非阻塞、再阻塞"的两阶段设计，避免了竞争条件和重复执行的开销。
+        </div>
+
+        <h2>阻塞状态管理</h2>
+
+        <p>Redis 的阻塞机制涉及三个核心数据结构：</p>
+
+        <ul>
+            <li><strong><code>blocking_keys</code></strong>（字典）：key → 等待该 key 的客户端列表。用于在有新数据写入时找到所有等待者。</li>
+            <li><strong><code>ready_keys</code></strong>（链表）：当某个 key 被写入导致其上的阻塞可能解除时，该 key 被加入就绪链表。<code>beforeSleep</code> 在处理就绪链表时，只会在必要的时候才去真正唤醒客户端——这种延迟处理避免了在命令执行中途嵌套处理阻塞逻辑。</li>
+            <li><strong><code>BLOCKED_LIST</code></strong>（客户端状态标志）：<code>client->flags</code> 中的 <code>CLIENT_BLOCKED</code> 位标记。处于阻塞状态的客户端不会被事件循环的 IO 处理，但连接依然保持。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>BLPOP 支持同时监听多个 key，例如 <code>BLPOP queue1 queue2 queue3 0</code>。这里有一个容易被忽略的行为：当多个 key 同时有数据到达时，解除阻塞的<strong>优先级</strong>不是由 key 的排列顺序决定的，而是由 <code>ready_keys</code> 链表中 key 的插入顺序决定的——哪个 key 先被触发（有 LPUSH 写入），哪个就先响应。曾经有业务方想用 BLPOP 多 key 来实现"优先级队列"，结果发现优先级取决于写入顺序而非 key 顺序，与预期完全不符。正确的做法是用单个 List 配合 ZSet 或独立优先级字段来实现优先级队列。
+        </div>
+
+        <h2>List 作为消息队列</h2>
+
+        <p>Redis List 的 <code>LPUSH + BRPOP</code> 模式是最简单的消息队列实现。它的优点是零依赖——不需要 Kafka 或 RabbitMQ，只要一个 Redis 实例就能跑通生产者-消费者模型。但和专业消息队列相比，它有几个明显的差距：</p>
+
+        <ul>
+            <li><strong>消息可靠性</strong>：BRPOP 返回消息后，如果消费者崩溃，消息就丢失了（没有类似 Kafka 的 offset 或 RabbitMQ 的 ack 机制）。</li>
+            <li><strong>消息确认</strong>：没有内置的消息确认和重投递机制。可以自己用 <code>RPOPLPUSH</code> 或 <code>BRPOPLPUSH</code> 把消息先备份到一个 "processing" 列表来模拟确认。</li>
+            <li><strong>持久化</strong>：List 的持久化依赖 RDB/AOF，但消息队列通常需要更高的持久化保证。</li>
+        </ul>
+
+        <p>对于轻度使用场景（比如内部通知、任务分发延迟不敏感），List 消息队列完全够用。但如果需要严格的消息可靠性和复杂的路由，应该选用 Stream（第 12 章会详细讲）或专业的消息队列系统。</p>
+
+        <div class="tip">
+            <strong>BRPOPLPUSH 的妙用：</strong><code>BRPOPLPUSH source dest timeout</code> 原子性地从 source 弹出元素并 push 到 dest。这可以用于实现可靠队列：BRPOPLPUSH 从主队列取出消息放入处理队列，处理完成后从处理队列删除。如果消费者崩溃，重启后可以从处理队列中找到未完成的消息。
+        </div>
+
+        <p>List 在链表结构支持下实现了灵活的双端操作和阻塞等待，但它的元素是无序的且不能重复。接下来我们要讨论的 Set 和 Sorted Set 则展示了哈希表与跳表在集合运算和排序场景中的精巧配合。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

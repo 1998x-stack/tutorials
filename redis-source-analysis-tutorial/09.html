@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 String与Hash命令实现</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html" class="active">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第9章：String 与 Hash 命令实现</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们拆解了 <code>redisObject</code>，搞清楚了 Redis 如何用统一的对象模型来包装各种底层数据结构。现在问题来了：当你输入 <code>SET key value EX 10</code> 或者 <code>HSET user:1001 name "Alice"</code> 时，这些命令背后到底走了哪些代码路径？从客户端发出命令到 Redis 返回结果，中间经历了什么样的处理链条？这一章我们就从最常用的 String 和 Hash 命令入手，深入到 <code>t_string.c</code> 和 <code>t_hash.c</code> 的源码细节中一探究竟。</p>
+
+        <h2>String 命令族</h2>
+
+        <h3>setGenericCommand —— SET 的统一入口</h3>
+
+        <p>所有与 SET 相关的功能（包括 <code>SET</code>、<code>SETEX</code>、<code>PSETEX</code>、<code>SETNX</code>）最终都汇聚到 <code>setGenericCommand</code> 这个核心函数。它的签名为：</p>
+
+        <pre><code>/* t_string.c */
+void setGenericCommand(client *c, int flags, robj *key, robj *val,
+                       robj *expire, int unit, robj *ok_reply, robj *abort_reply) {
+    long long milliseconds = 0; /* 过期时间，毫秒 */
+    int ret;
+
+    /* 1. 解析过期时间 */
+    if (expire) {
+        if (getLongFromObjectOrReply(c, expire, &amp;milliseconds, NULL) != C_OK)
+            return;
+        if (milliseconds &lt;= 0) {
+            addReplyError(c, "invalid expire time");
+            return;
+        }
+        if (unit == UNIT_SECONDS) milliseconds *= 1000;
+    }
+
+    /* 2. 检查 SET NX/XX 语义 */
+    if (flags &amp; OBJ_SET_NX) {
+        ret = lookupKeyWrite(c-&gt;db, key);
+        if (ret != NULL) {
+            addReply(c, abort_reply ? abort_reply : shared.null[c-&gt;resp]);
+            return;
+        }
+    }
+    if (flags &amp; OBJ_SET_XX) {
+        ret = lookupKeyWrite(c-&gt;db, key);
+        if (ret == NULL) {
+            addReply(c, abort_reply ? abort_reply : shared.null[c-&gt;resp]);
+            return;
+        }
+    }
+
+    /* 3. 执行实际的键值写入 */
+    setKey(c-&gt;db, key, val, LOOKUP_NOEXPIRE);
+
+    /* 4. 设置过期 */
+    if (expire) setExpire(c, c-&gt;db, key, milliseconds);
+
+    /* 5. 通知 watch 客户端、发布键空间通知 */
+    signalModifiedKey(c-&gt;db, key);
+    notifyKeyspaceEvent(NOTIFY_STRING, "set", key, c-&gt;db-&gt;id);
+
+    /* 6. 当使用 SET ... GET 时返回旧值 */
+    if (flags &amp; OBJ_SET_GET) {
+        addReplyBulk(c, ret ? ret : shared.null[c-&gt;resp]);
+    } else {
+        addReply(c, ok_reply ? ok_reply : shared.ok);
+    }
+}</code></pre>
+
+        <div class="tip">
+            <strong>源码阅读技巧：</strong><code>setGenericCommand</code> 是典型的"所有分支汇聚到一个主干"模式。不管是 SET 还是 SETEX，最终都调用 <code>setKey()</code> 写入数据库，然后用 <code>setExpire()</code> 设置过期时间。区别只在于参数解析层。
+        </div>
+
+        <p>而 <code>setCommand</code> 作为命令入口，主要职责是解析 <code>SET key value [NX | XX] [EX seconds | PX milliseconds] [GET]</code> 这一串复杂的可选参数：</p>
+
+        <pre><code>/* t_string.c */
+void setCommand(client *c) {
+    robj *expire = NULL;
+    int flags = OBJ_SET_NO_FLAGS;
+    int unit = UNIT_SECONDS;
+
+    /* 从 argv[3] 开始逐个解析可选参数 */
+    for (int j = 3; j &lt; c-&gt;argc; j++) {
+        char *opt = c-&gt;argv[j]-&gt;ptr;
+        if (!strcasecmp(opt, "nx")) {
+            flags |= OBJ_SET_NX;
+        } else if (!strcasecmp(opt, "xx")) {
+            flags |= OBJ_SET_XX;
+        } else if (!strcasecmp(opt, "ex")) {
+            flags |= OBJ_SET_EX;
+            expire = c-&gt;argv[j+1];
+            unit = UNIT_SECONDS;
+            j++;
+        } else if (!strcasecmp(opt, "px")) {
+            flags |= OBJ_SET_PX;
+            expire = c-&gt;argv[j+1];
+            unit = UNIT_MILLISECONDS;
+            j++;
+        } else if (!strcasecmp(opt, "get")) {
+            flags |= OBJ_SET_GET;
+        }
+    }
+
+    /* 参数校验后调用通用入口 */
+    setGenericCommand(c, flags, c-&gt;argv[1], c-&gt;argv[2],
+                      expire, unit, NULL, NULL);
+}</code></pre>
+
+        <h3>编码选择逻辑</h3>
+
+        <p>在 <code>setKey()</code> 内部，Redis 最终会调用 <code>createStringObject()</code> 来创建值的 redisObject。创建时依据字符串长度选择编码：</p>
+
+        <ul>
+            <li>如果可以解析为 long long，使用 <code>OBJ_ENCODING_INT</code>，值存储在 ptr 字段中，零内存分配。</li>
+            <li>如果长度 &le; 44 字节，使用 <code>OBJ_ENCODING_EMBSTR</code>，一次 malloc 分配 robj + sdshdr + 数据。</li>
+            <li>如果长度 &gt; 44 字节，使用 <code>OBJ_ENCODING_RAW</code>，两次 malloc 分别分配 robj 和 sdshdr。</li>
+        </ul>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>编码</th>
+                    <th>条件</th>
+                    <th>内存布局</th>
+                    <th>malloc 次数</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>OBJ_ENCODING_INT</td>
+                    <td>可解析为 long long</td>
+                    <td>值直接存在 robj.ptr 中</td>
+                    <td>0 次（创建时）</td>
+                </tr>
+                <tr>
+                    <td>OBJ_ENCODING_EMBSTR</td>
+                    <td>长度 &le; 44</td>
+                    <td>robj + sdshdr + 数据 连续</td>
+                    <td>1 次</td>
+                </tr>
+                <tr>
+                    <td>OBJ_ENCODING_RAW</td>
+                    <td>长度 &gt; 44</td>
+                    <td>robj 与 sdshdr 分离</td>
+                    <td>2 次</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>INCR/DECR 原子操作</h2>
+
+        <p><code>INCR</code>/<code>DECR</code>/<code>INCRBY</code> 是 Redis 最常用的计数操作，它们的关键在于<strong>原子性</strong>——在单线程的事件循环中，这些操作的执行不会被其他客户端命令中断。</p>
+
+        <pre><code>/* t_string.c */
+void incrDecrCommand(client *c, long long value) {
+    long long incr;
+    robj *o, *new;
+
+    /* 1. 查找现有键 */
+    o = lookupKeyWrite(c-&gt;db, c-&gt;argv[1]);
+    if (o) {
+        /* 2. 检查类型必须是 String */
+        if (checkType(c, o, OBJ_STRING)) return;
+
+        /* 3. 尝试解析为 long long */
+        if (getLongLongFromObjectOrReply(c, o, &amp;incr, NULL) != C_OK)
+            return;
+
+        /* 4. 执行运算（带溢出检测） */
+        incr += value;
+        if ((value &gt; 0 &amp;&amp; incr &lt; value) ||
+            (value &lt; 0 &amp;&amp; incr &gt; value)) {
+            addReplyError(c, "increment or decrement would overflow");
+            return;
+        }
+
+        /* 5. 尝试共享整数对象 */
+        new = createStringObjectFromLongLongWithOptions(incr);
+        setKey(c-&gt;db, c-&gt;argv[1], new, LOOKUP_NOEXPIRE);
+    } else {
+        /* 键不存在，使用 value 作为初始值 */
+        new = createStringObjectFromLongLongWithOptions(value);
+        setKey(c-&gt;db, c-&gt;argv[1], new, LOOKUP_NOEXPIRE);
+    }
+}</code></pre>
+
+        <div class="highlight">
+            <strong>溢出保护：</strong>Redis 7.2 的 INCR 会检测溢出。当 incr + value 结果回绕时（即 <code>incr &lt; 0 &amp;&amp; value &lt; 0 &amp;&amp; incr + value &gt; incr</code> 这种场景），Redis 不会静默回绕，而是返回溢出错误。这个保护在 Redis 6.2 后才引入，早期版本使用 C 语言的带符号整数溢出（undefined behavior），实际行为依赖于编译器和平台。
+        </div>
+
+        <p>溢出保护的检测逻辑利用了带符号整数溢出的特点：当两个正数相加为负数，或两个负数相加为正数时，说明发生了溢出。这是 C 语言中检测带符号溢出的标准手法。</p>
+
+        <h2>Hash 命令族</h2>
+
+        <h3>hsetCommand 与 hashTypeSet</h3>
+
+        <p>Hash 命令的核心抽象层在 <code>hashTypeSet</code> / <code>hashTypeGet</code> / <code>hashTypeDelete</code> 等函数中。无论底层是 listpack 还是 dict，上层命令都通过这一组接口操作。</p>
+
+        <pre><code>/* t_hash.c */
+void hsetCommand(client *c) {
+    robj *o;
+    int updated = 0;
+
+    /* 1. 查找或创建键 */
+    o = lookupKeyWrite(c-&gt;db, c-&gt;argv[1]);
+    if (o == NULL) {
+        /* 创建空的 listpack 编码的 Hash */
+        o = createHashObject();
+        dbAdd(c-&gt;db, c-&gt;argv[1], o);
+    } else {
+        if (checkType(c, o, OBJ_HASH)) return;
+    }
+
+    /* 2. 支持 HSET field value [field value ...] 多字段模式 */
+    for (int j = 2; j &lt; c-&gt;argc; j += 2) {
+        updated += hashTypeSet(o, c-&gt;argv[j]-&gt;ptr, c-&gt;argv[j+1]-&gt;ptr, HASH_SET_TAKE_FIELD | HASH_SET_TAKE_VALUE);
+    }
+
+    /* 3. 返回新增字段数量（非更新数量） */
+    addReplyLongLong(c, updated);
+}
+
+int hashTypeSet(robj *o, sds field, sds value, int flags) {
+    int update = 0;
+
+    if (o->encoding == OBJ_ENCODING_LISTPACK) {
+        /* listpack 编码下的插入 */
+        update = hashTypeSetListpack(o, field, value, flags);
+
+        /* 检查是否需要转换为 dict */
+        if (hashTypeLength(o) &gt; server.hash_max_listpack_entries ||
+            sdslen(field) &gt; server.hash_max_listpack_value ||
+            sdslen(value) &gt; server.hash_max_listpack_value)
+        {
+            hashTypeConvert(o, OBJ_ENCODING_HT);
+        }
+    } else if (o->encoding == OBJ_ENCODING_HT) {
+        /* dict 编码下的插入 */
+        update = hashTypeSetHT(o, field, value, flags);
+    }
+
+    return update;
+}</code></pre>
+
+        <p><code>hashTypeSetListpack</code> 在 listpack 中线性查找字段名（因为 listpack 是无序的紧凑存储），如果找到则替换值，否则追加。线性查找在 512 个字段以内的 Hash 中性能是可以接受的，因为 listpack 的字段长度通常很小，内存局部性好。</p>
+
+        <p><code>hashTypeSetHT</code> 则是直接调用 <code>dictAddOrFind</code> + <code>dictSetVal</code>，时间复杂度 O(1)。</p>
+
+        <h3>hgetCommand 与 hashTypeGet</h3>
+
+        <pre><code>/* t_hash.c */
+void hgetCommand(client *c) {
+    robj *o;
+
+    /* 查找键 */
+    if ((o = lookupKeyReadOrReply(c, c-&gt;argv[1], shared.null[c-&gt;resp])) == NULL
+        || checkType(c, o, OBJ_HASH)) return;
+
+    /* 调用抽象层获取字段值 */
+    hashTypeGetValue(o, c-&gt;argv[2]-&gt;ptr, &amp;value, NULL);
+    if (value)
+        addReplyBulk(c, value);
+    else
+        addReplyNull(c);
+}</code></pre>
+
+        <p><code>hashTypeGetValue</code> 根据编码类型自动选择 listpack 或 dict 的查询路径。listpack 下线性扫描，dict 下 O(1) 哈希查找——调用者无需关心底层实现。</p>
+
+        <h3>hgetallCommand —— 小心 bigkey</h3>
+
+        <p><code>HGETALL</code> 返回 Hash 的所有字段和值。它的实现很简单：遍历整个底层存储，逐个字段添加到回复缓冲区。</p>
+
+        <pre><code>/* t_hash.c */
+void hgetallCommand(client *c) {
+    robj *o;
+    if ((o = lookupKeyReadOrReply(c, c-&gt;argv[1], shared.emptyarray))
+        == NULL || checkType(c, o, OBJ_HASH)) return;
+
+    hashTypeIterator *hi = hashTypeInitIterator(o);
+    robj *field, *value;
+    unsigned long count = 0;
+    addReplyArrayLen(c, 2 * hashTypeLength(o));
+
+    while (hashTypeNext(hi) != C_ERR) {
+        hashTypeCurrentFromHash(hi, &amp;field, &amp;value);
+        addReplyBulk(c, field);
+        addReplyBulk(c, value);
+        count++;
+    }
+    hashTypeReleaseIterator(hi);
+}</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>有一个线上案例，某业务方把用户的所有行为标签存入一个 Hash，Hash 中字段数超过 10 万。每次查询时使用 HGETALL 获取全量数据，导致 Redis 单线程阻塞 5 秒以上，所有其他请求排队等待。我们建议改用 HSCAN 分批迭代（每次返回 100 个字段），同时推动业务方拆分 Redis 键——每个用户按标签类别拆成多个小的 Hash。改造后 P99 延迟从 3.2 秒降到了 8 毫秒。HGETALL 本身是一个 O(N) 操作，当 N 很大时，它阻塞的不只是自己，而是整个 Redis 事件循环中的所有客户端。
+        </div>
+
+        <h2>Hash Field Expiration (HFE) —— Redis 8.x 新特性</h2>
+
+        <p>传统上 Redis 的过期只支持到 key 级别。从 Redis 8.0 开始，Hash 支持每个字段独立的 TTL（<code>HEXPIRE</code> / <code>HPEXPIRE</code> / <code>HTTL</code> 等命令）。这个特性在源码层面涉及较大的改动：</p>
+
+        <ul>
+            <li>每个 Hash 内部新增一个 <code>dict *metadata</code>，用于存储字段级别的过期时间。</li>
+            <li><code>HEXPIRE key field seconds</code> 在元数据字典中记录该字段的绝对过期时间戳。</li>
+            <li><code>HGET</code> / <code>HSCAN</code> 等读取命令在返回前会检查字段是否已过期，过期则视为不存在。</li>
+            <li>过期字段的清理策略与 key 级过期类似，采用惰性删除 + 定期采样删除。</li>
+        </ul>
+
+        <p>HFE 的实现难度在于<strong>兼容性</strong>——已有的 RDB/AOF 格式、主从复制协议、Cluster 迁移都需要为字段级过期增加新的序列化格式。这也是为什么这个特性从 Redis 7.x 就开始规划，直到 8.x 才正式落地。</p>
+
+        <h2>批量操作优化</h2>
+
+        <p><code>MGET</code> 和 <code>MSET</code> 是批量读写多个 String 键的命令。它们的实现非常直接——遍历 key 数组，对每个 key 执行 <code>lookupKeyRead</code> / <code>setKey</code>，然后一次性回复结果。</p>
+
+        <pre><code>/* t_string.c */
+void mgetCommand(client *c) {
+    int j;
+    addReplyArrayLen(c, c-&gt;argc - 1);
+    for (j = 1; j &lt; c-&gt;argc; j++) {
+        robj *o = lookupKeyRead(c-&gt;db, c-&gt;argv[j]);
+        if (o == NULL) {
+            addReplyNull(c);
+        } else {
+            if (o->type != OBJ_STRING) {
+                addReplyNull(c);
+            } else {
+                addReplyBulk(c, o);
+            }
+        }
+    }
+}</code></pre>
+
+        <div class="tip">
+            <strong>Pipeline 与 MGET 的区别：</strong>Pipeline 是将多个命令打包一次性发送，但服务器仍然逐个执行每个命令。MGET/MSET 是一个命令内部对多个 key 进行循环操作，省去了命令解析和协议交互的开销。在批量读取 1000 个 key 时，MGET 比 Pipeline 的 1000 个独立 GET 快大约 3-5 倍。对于 Hash 的多字段操作，HMSET 和 HSET 在 Redis 4.0+ 中已经合并——HSET 支持多字段语法，内部循环调用 hashTypeSet 即可。
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>操作模式</th>
+                    <th>网络往返</th>
+                    <th>命令解析次数</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>N 次独立 SET</td>
+                    <td>N 次 RTT</td>
+                    <td>N 次</td>
+                    <td>少量随机写入</td>
+                </tr>
+                <tr>
+                    <td>Pipeline N 次 SET</td>
+                    <td>1 次 RTT</td>
+                    <td>N 次</td>
+                    <td>批量写入，但不同命令</td>
+                </tr>
+                <tr>
+                    <td>MSET</td>
+                    <td>1 次 RTT</td>
+                    <td>1 次</td>
+                    <td>批量写入相同命令</td>
+                </tr>
+                <tr>
+                    <td>HSET f1 v1 f2 v2 ...</td>
+                    <td>1 次 RTT</td>
+                    <td>1 次</td>
+                    <td>Hash 批量字段写入</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>String 和 Hash 是"静态"的数据类型，它们的操作要么读写，要么原子增减，不涉及等待。但下一章我们要讨论的 List 则完全不同——BLPOP/BRPOP 引入了一个全新的维度：<strong>阻塞等待</strong>。当一个列表为空时，Redis 可以让客户端挂起等待，直到有数据到来。这是事件循环与命令实现之间最精妙的配合之一。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

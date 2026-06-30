@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 38 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 39 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
@@ -56,13 +56,14 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `CAN-bus-tutorial/` | CAN总线通信 | 30 | `https://1998x-stack.github.io/CAN-bus-tutorial/` |
 | `ethernet-tutorial/` | 以太网通信 | 28 | `https://1998x-stack.github.io/ethernet-tutorial/` |
 
-### 经济 / 金融 (5)
+### 经济 / 金融 (6)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `economics-principles-tutorial/` | 经济学原理 | 28 | `https://1998x-stack.github.io/economics-principles-tutorial/` |
 | `macroeconomics-tutorial/` | 宏观经济学 | 28 | `https://1998x-stack.github.io/macroeconomics-tutorial/` |
 | `microeconomics-tutorial/` | 微观经济学 | 28 | `https://1998x-stack.github.io/microeconomics-tutorial/` |
 | `financial-analysis-tutorial/` | 金融分析 | 28 | `https://1998x-stack.github.io/financial-analysis-tutorial/` |
+| `financial-statement-analysis-tutorial/` | 财报实战分析 | 28 | `https://1998x-stack.github.io/financial-statement-analysis-tutorial/` |
 | `cryptocurrency-tutorial/` | 加密货币 | 28 | `https://1998x-stack.github.io/cryptocurrency-tutorial/` |
 
 ### 机器人 / 控制 (1)

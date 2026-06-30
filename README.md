@@ -56,7 +56,7 @@ A collection of 39 free, comprehensive technical tutorials in Chinese — from f
 | 🚌 | CAN总线 · 从入门到精通 | 30 | [CAN-bus-tutorial](https://1998x-stack.github.io/CAN-bus-tutorial/) |
 | 🌐 | 以太网通信 | 28 | [ethernet-tutorial](https://1998x-stack.github.io/ethernet-tutorial/) |
 
-### 经济 / 金融 (5 courses)
+### 经济 / 金融 (6 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -64,6 +64,7 @@ A collection of 39 free, comprehensive technical tutorials in Chinese — from f
 | 📊 | 宏观经济学 | 28 | [macroeconomics-tutorial](https://1998x-stack.github.io/macroeconomics-tutorial/) |
 | 📊 | 微观经济学：从稀缺到均衡 | 28 | [microeconomics-tutorial](https://1998x-stack.github.io/microeconomics-tutorial/) |
 | 💹 | 金融分析实战体系 | 28 | [financial-analysis-tutorial](https://1998x-stack.github.io/financial-analysis-tutorial/) |
+| 📊 | 财报实战分析 | 28 | [financial-statement-analysis-tutorial](https://1998x-stack.github.io/financial-statement-analysis-tutorial/) |
 | 🪙 | 比特币与加密货币 | 28 | [cryptocurrency-tutorial](https://1998x-stack.github.io/cryptocurrency-tutorial/) |
 
 ### 机器人 / 控制 (1 course)

@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 多模态融合 — LLaMA 完全拆解教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦙 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLaMA系列概述</a></li>
+            <li><a href="02.html">第2章 Transformer回顾与LLaMA总览</a></li>
+            <li><a href="03.html">第3章 RoPE旋转位置编码</a></li>
+            <li><a href="04.html">第4章 RMSNorm归一化</a></li>
+            <li><a href="05.html">第5章 SwiGLU激活函数</a></li>
+            <li><a href="06.html">第6章 分词器与词表设计</a></li>
+            <li><a href="07.html">第7章 缩放定律与训练策略</a></li>
+            <li><a href="08.html">第8章 GQA分组查询注意力</a></li>
+            <li><a href="09.html">第9章 预训练数据工程</a></li>
+            <li><a href="10.html">第10章 训练稳定性与优化器</a></li>
+            <li><a href="11.html">第11章 LLaMA 1完整预训练流程</a></li>
+            <li><a href="12.html">第12章 LLaMA 2对话模型与SFT</a></li>
+            <li><a href="13.html">第13章 RLHF全流程</a></li>
+            <li><a href="14.html">第14章 安全对齐与幻觉抑制</a></li>
+            <li><a href="15.html">第15章 模型量化与推理加速</a></li>
+            <li><a href="16.html">第16章 分布式训练策略</a></li>
+            <li><a href="17.html">第17章 上下文窗口扩展</a></li>
+            <li><a href="18.html">第18章 评估体系与基准测试</a></li>
+            <li><a href="19.html">第19章 LLaMA 3大规模训练系统</a></li>
+            <li><a href="20.html" class="active">第20章 多模态融合</a></li>
+            <li><a href="21.html">第21章 工具调用与代码能力</a></li>
+            <li><a href="22.html">第22章 多语言扩展策略</a></li>
+            <li><a href="23.html">第23章 HuggingFace生态与模型加载</a></li>
+            <li><a href="24.html">第24章 LoRA微调实战</a></li>
+            <li><a href="25.html">第25章 推理部署方案</a></li>
+            <li><a href="26.html">第26章 LLaMA 3.2边缘部署与小模型</a></li>
+            <li><a href="27.html">第27章 LLaMA 4展望与MoE架构</a></li>
+            <li><a href="28.html">第28章 开源LLM生态与未来趋势</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第20章 多模态融合</h2>
+
+        <p>同学们好，欢迎来到第20章。这一章我们要讲一个非常"性感"的话题——多模态。上一章我们看完了LLaMA 3 405B那个庞然大物是怎么从数据到训练一步步诞生的。但405B再大也只是"文本模型"——它只能处理文字。而在真实世界中，信息以各种形态存在：图片、图表、公式截图、产品照片……如果LLaMA只能理解文字，那很多应用场景就做不了。</p>
+
+        <p>LLaMA 3.2 Vision的发布标志着LLaMA家族正式进入多模态时代。从纯文本到文本+图像的跨越，不仅仅是新增一个"视觉模块"那么简单——它涉及到架构设计、训练策略、数据配比、评估方法等全方位的变化。这一章我会带你一一拆解。</p>
+
+        <p>在开始之前，我想先聊一个切身体会。2023年底，我参与了一个"发票OCR+信息抽取"的项目，想用LLaMA来处理扫描版发票的结构化信息提取。最初的方案是：先用OCR引擎把发票图片转成文字，然后把文字喂给LLaMA 2去抽取关键字段。结果错漏百出的——OCR漏掉了表格线框内的金额，LLaMA基于不完整的文字信息给出了错误的抽取结果。如果当时有LLaMA 3.2 Vision这样的多模态模型，直接将发票图片作为输入，让模型"看图说话"，很多问题就迎刃而解了。这个案例告诉我们：<strong>多模态不是技术炫技，而是在很多场景下解决问题的必要能力。</strong></p>
+
+        <h3>20.1 LLaMA 3.2 Vision多模态架构</h3>
+
+        <p>LLaMA 3.2 Vision的多模态架构可以总结为一条清晰的公式：<strong>视觉编码器 + 连接器 + 语言模型</strong>。这个三段式结构几乎是目前所有多模态大模型的标配方案。让我们逐一解剖。</p>
+
+        <p>先来看一张整体架构图：</p>
+
+        <pre><code>用户输入:
+  ┌─────────────┐   ┌──────────────┐
+  │  文本输入    │   │   图像输入    │
+  │ "这张图里   │   │   ┌──────┐   │
+  │  有什么?"   │   │   │ .jpg │   │
+  └──────┬──────┘   └───┬──┬───┘   │
+         │              │  └───────┘
+         ▼              ▼
+  ┌──────────────────────────────┐
+  │       分词器 (Tokenizer)      │
+  └───────────┬──────────────────┘
+              │
+  ┌───────────▼──────────────────┐
+  │    视觉编码器 (Pre-trained ViT) │
+  │    将图像 → 图像特征序列       │
+  └───────────┬──────────────────┘
+              │
+  ┌───────────▼──────────────────┐
+  │   连接器 (MLP Projector)      │
+  │    图像特征 → LLaMA输入空间    │
+  └───────────┬──────────────────┘
+              │
+  ┌───────────▼──────────────────┐
+  │    LLaMA语言模型 (冻住)        │
+  │    文本tokens + 图像tokens    │
+  │    联合自回归生成              │
+  └──────────────────────────────┘</code></pre>
+
+        <p>当用户同时输入文本和图像时，文本走分词器变成token序列，图像走视觉编码器变成"视觉token序列"，然后通过一个投影连接器将视觉token映射到LLaMA的embedding空间。最终，文本token和视觉token在LLaMA语言模型中拼接为一个完整的序列，进行标准的自回归生成。这个方案的精妙之处在于：<strong>语言模型本身不需要做任何架构改动</strong>——它只是把视觉token当作一种"特殊语言"来处理。</p>
+
+        <h3>20.2 视觉编码器设计</h3>
+
+        <p>LLaMA 3.2 Vision的核心视觉编码器基于预训练的Vision Transformer（ViT）。ViT将图片分割成固定大小的patch（例如16×16像素），每个patch通过线性投影映射成一个embedding，然后输入标准的Transformer编码器进行处理。</p>
+
+        <table>
+            <tr>
+                <th>参数</th>
+                <th>LLaMA 3.2 Vision</th>
+                <th>典型ViT-L</th>
+                <th>说明</th>
+            </tr>
+            <tr>
+                <td>图像分辨率</td>
+                <td>448×448</td>
+                <td>224×224</td>
+                <td>更高分辨率捕捉更多细节</td>
+            </tr>
+            <tr>
+                <td>Patch大小</td>
+                <td>14×14</td>
+                <td>16×16</td>
+                <td>更细粒度的图像分割</td>
+            </tr>
+            <tr>
+                <td>Patch数量</td>
+                <td>1,024</td>
+                <td>196</td>
+                <td>448/14 = 32, 32²=1024</td>
+            </tr>
+            <tr>
+                <td>视觉token数/图</td>
+                <td>~1,024</td>
+                <td>196</td>
+                <td>每个patch对应一个token</td>
+            </tr>
+            <tr>
+                <td>编码器层数</td>
+                <td>32</td>
+                <td>24</td>
+                <td>更深的视觉特征提取</td>
+            </tr>
+            <tr>
+                <td>编码器维度</td>
+                <td>1,280</td>
+                <td>1,024</td>
+                <td>更大的隐空间</td>
+            </tr>
+        </table>
+
+        <p>一个值得注意的细节是，LLaMA 3.2 Vision并没有在图像分辨率上追求极致——448×448相对于一些竞品（如GPT-4V的高分辨率模式可以达到1024×1024以上）其实算中等。Meta的考量很务实：更高的分辨率意味着更多的patch、更多的视觉token、更长的序列长度，进而导致推理延迟和显存消耗的线性增长。在"够用"和"高效"之间，Meta选择了平衡。</p>
+
+        <div class="tip">
+            <strong>工程决策：</strong> 1,024个视觉token对于一个LLM来说已经不算少了。如果每张图产生1,024个token，那么在对话上下文（比如Chat场景）中，每轮对话的视觉token可能会迅速累积。LLaMA 3.2通过设置<strong>最大图像数限制</strong>（通常每轮对话不超过5张图）来防止上下文膨胀。这也是为什么你很少看到多模态LLM在单次推理中处理大量图片的原因——不是模型不支持，而是token预算经不起折腾。
+        </div>
+
+        <h3>20.3 跨模态连接器：MLP Projector vs Q-Former</h3>
+
+        <p>视觉编码器输出的是一组"视觉特征向量"，但这些向量的维度、语义空间和分布特性与LLaMA的文本embedding空间完全不同。这就是连接器（connector）需要解决的问题——它充当"翻译官"，将视觉特征映射到语言模型能够理解的语义空间中。</p>
+
+        <p>在多模态LLM领域，主要有两种连接器设计方案：</p>
+
+        <table>
+            <tr>
+                <th>特性</th>
+                <th>MLP Projector (LLaMA 3.2)</th>
+                <th>Q-Former (BLIP-2, LLaVA)</th>
+            </tr>
+            <tr>
+                <td>核心思想</td>
+                <td>多层感知机做空间映射</td>
+                <td>可学习的query + cross-attention</td>
+            </tr>
+            <tr>
+                <td>参数量</td>
+                <td>小 (~10M)</td>
+                <td>较大 (~200M+)</td>
+            </tr>
+            <tr>
+                <td>视觉token压缩</td>
+                <td>无压缩 (1:1)</td>
+                <td>可压缩 (N:1)</td>
+            </tr>
+            <tr>
+                <td>可解释性</td>
+                <td>高 (简单直观)</td>
+                <td>低 (query交互复杂)</td>
+            </tr>
+            <tr>
+                <td>训练难度</td>
+                <td>低 (容易收敛)</td>
+                <td>高 (需要两阶段训练)</td>
+            </tr>
+            <tr>
+                <td>代表性模型</td>
+                <td>LLaMA 3.2, Fuyu</td>
+                <td>BLIP-2, InstructBLIP</td>
+            </tr>
+        </table>
+
+        <p>LLaMA 3.2选择了MLP Projector方案，具体来说是三层MLP，每层之间使用SwiGLU激活函数。每一层MLP将视觉特征的维度逐步映射到LLaMA的embedding维度。为什么Meta选择MLP而不是Q-Former？我理解有几个原因：</p>
+
+        <ul>
+            <li><strong>简洁性：</strong> MLP结构简单，没有引入新的注意力机制，减少了训练过程中的不稳定性。</li>
+            <li><strong>无损信息传递：</strong> Q-Former的query机制本质上是信息压缩——用N个query向量从视觉特征中"摘要"出关键信息。但这种压缩可能会丢失一些细节。对于文档理解和OCR任务来说，细节就是一切。</li>
+            <li><strong>工程效率：</strong> MLP的前向和反向传播都非常高效，在多模态训练中不会成为计算瓶颈。</li>
+        </ul>
+
+        <h3>20.4 训练策略：冻住LLaMA，只训视觉组件</h3>
+
+        <p>多模态模型的训练策略是整个系统的关键。LLaMA 3.2采用了<strong>冻住LLaMA权重，只训练视觉组件</strong>的策略——这是一种"最小侵入式"的微调方案。具体来说：</p>
+
+        <ul>
+            <li><strong>冻结部分：</strong> LLaMA 3语言模型的所有参数（包括attention、FFN、embedding等全部冻结）。</li>
+            <li><strong>训练部分：</strong> 视觉编码器 + MLP连接器（约500M-1B参数，取决于视觉编码器的大小）。</li>
+        </ul>
+
+        <p>冻结语言模型的理念非常简单：LLaMA 3本身已经是一个非常强大的语言模型，具备出色的世界知识和推理能力。多模态训练的目的是教会它"看懂图片"，而不是重新教它语言。如果同时训练语言模型，不仅计算成本高（405B的反向传播极其昂贵），而且可能导致语言能力的灾难性遗忘。</p>
+
+        <p>训练过程分为两个阶段：</p>
+
+        <p><strong>第一阶段：图文对齐。</strong>在这个阶段，模型学习如何将视觉特征与对应的文本描述对齐。使用的数据主要是简单的图文对（image-caption pairs），比如"一张蓝天白云的照片"对应图片本身。这个阶段的目标是让MLP连接器学会从视觉特征中提取能被语言模型理解的信息。</p>
+
+        <p><strong>第二阶段：指令微调。</strong>在图文对齐的基础上，使用复杂的图文指令数据（visual instruction tuning data）进行微调。这些数据包括：图像问答、多轮对话、文档理解等。这个阶段的目标是让模型学会在各种任务中灵活运用视觉信息。</p>
+
+        <pre><code># 多模态训练流程示意（伪代码）
+
+def train_multimodal():
+    # 加载预训练组件
+    llm = load_llama3("llama3_8b.pt")
+    visual_encoder = load_pretrained_vit("vit_large.pt")
+    connector = MLPProjector(
+        input_dim=1280,    # ViT输出维度
+        hidden_dim=4096,    # MLP中间维度
+        output_dim=4096,   # LLaMA 8B的embedding维度
+        activation="swiglu"
+    )
+
+    # 冻结LLaMA
+    for param in llm.parameters():
+        param.requires_grad = False
+
+    # 第一阶段：图文对齐
+    optimizer = AdamW(
+        list(visual_encoder.parameters()) +
+        list(connector.parameters()),
+        lr=1e-4
+    )
+
+    for batch in caption_data_loader:
+        images, captions = batch
+        # 视觉特征提取
+        visual_features = visual_encoder(images)  # [B, 1024, 1280]
+        # MLP映射
+        visual_tokens = connector(visual_features)  # [B, 1024, 4096]
+        # 拼接并输入LLM（冻结，只算前向）
+        loss = llm(visual_tokens, captions)
+        loss.backward()
+        optimizer.step()
+
+    # 第二阶段：指令微调
+    for batch in visual_instruction_loader:
+        images, instructions, answers = batch
+        # 同上，但使用更复杂的指令格式</code></pre>
+
+        <h3>20.5 多模态能力全景</h3>
+
+        <p>训练完成后，LLaMA 3.2 Vision获得了哪些具体的多模态能力？我们来看看几个核心场景：</p>
+
+        <p><strong>图像描述（Image Captioning）：</strong> 给定一张图片，模型能用自然语言描述图片的内容，包括场景、物体、颜色、空间关系、人物动作等。这是最基础的多模态能力。</p>
+
+        <p><strong>视觉问答（Visual QA）：</strong> 给定一张图片和一个关于图片的问题，模型能给出准确的答案。比如出示一张天气图表，问"下周三是晴天还是雨天？"，模型需要理解图表中的图例、坐标轴和数据点来给出答案。这是多模态模型最实用的能力之一。</p>
+
+        <p><strong>文档理解（Document Understanding）：</strong> 给定扫描版PDF、发票、表格等文档图片，模型能提取其中的结构化信息。这是LLaMA 3.2 Vision在商业场景中最具价值的应用，因为很多企业数据仍然以扫描件的形式存在。</p>
+
+        <p><strong>图表推理（Chart Reasoning）：</strong> 给定折线图、柱状图、饼图等数据可视化图表，模型能分析趋势、比较数值、回答数据相关的推理问题。这种能力在数据分析场景中非常有用。</p>
+
+        <div class="highlight">
+            <strong>一个实际案例：</strong> 想象你在开产品经理会议，白板上画了一个流程图。你用手机拍照，然后把照片发给LLaMA 3.2 Vision，并提问："根据这个流程图，如果用户注册失败，应该回到哪一步？"模型需要看懂白板上的潦草字迹、箭头指向和方框之间的逻辑关系来回答。这不是简单的OCR——需要理解流程图的语义结构。LLaMA 3.2 Vision在类似任务上的表现已经接近人类水平。
+        </div>
+
+        <h3>20.6 对比其他多模态方案</h3>
+
+        <p>LLaMA 3.2 Vision并不是唯一的开源多模态大模型。在它之前和同期，还有其他几个具有代表性的多模态方案。理解它们的差异有助于我们更准确地定位LLaMA 3.2 Vision的设计选择。</p>
+
+        <table>
+            <tr>
+                <th>特性</th>
+                <th>LLaMA 3.2 Vision</th>
+                <th>LLaVA 1.5</th>
+                <th>Fuyu (Adept)</th>
+                <th>CogVLM</th>
+            </tr>
+            <tr>
+                <td>基座LLM</td>
+                <td>LLaMA 3</td>
+                <td>Vicuna / LLaMA 2</td>
+                <td>自研 (未公开基座)</td>
+                <td>基于Vicuna-7B</td>
+            </tr>
+            <tr>
+                <td>视觉编码器</td>
+                <td>ViT-L/14 32层</td>
+                <td>CLIP ViT-L/14</td>
+                <td>自研ViT</td>
+                <td>EVA ViT-g/14</td>
+            </tr>
+            <tr>
+                <td>连接器</td>
+                <td>MLP Projector</td>
+                <td>MLP Projector</td>
+                <td>线性投影</td>
+                <td>Q-Former变体</td>
+            </tr>
+            <tr>
+                <td>训练策略</td>
+                <td>冻结LLM + 训练视觉组件</td>
+                <td>两阶段 (预制对齐+指令微调)</td>
+                <td>全参数微调</td>
+                <td>全参数微调 + 视觉专家模块</td>
+            </tr>
+            <tr>
+                <td>优势</td>
+                <td>生态好, 易部署</td>
+                <td>社区活跃, 易于复现</td>
+                <td>极简设计</td>
+                <td>视觉理解能力强</td>
+            </tr>
+            <tr>
+                <td>劣势</td>
+                <td>视觉能力受限于连接器</td>
+                <td>基座较老, 能力有限</td>
+                <td>社区小, 生态弱</td>
+                <td>训练昂贵, 部署复杂</td>
+            </tr>
+        </table>
+
+        <p>LLaVA（Large Language and Vision Assistant）是加州大学伯克利分校提出的开源多模态方案，使用CLIP ViT作为视觉编码器，MLP作为连接器。LLaVA 1.5在2024年初非常流行，因为它的训练流程简单透明，代码完全开源，很多研究者基于LLaVA做实验。LLaMA 3.2 Vision与LLaVA在设计理念上有很多相似之处，但LLaMA 3.2 Vision的优势在于基座LLM更加强大（LLaMA 3 vs Vicuna），这直接带来了更好的多模态理解能力。</p>
+
+        <p>Fuyu是Adept AI提出的一个"极简主义"多模态方案。它最激进的设计选择是——把图像patch直接当作token序列，与文本token一起输入transformer，几乎没有显式的多模态连接器。这种设计虽然简单，但对于文本密集型的图片（如文档）效果不错，但在复杂场景理解上不如LLaVA等方案。</p>
+
+        <p>CogVLM是清华智谱提出的多模态方案，它引入了"视觉专家模块"（visual expert module）——在每个transformer层中增加额外的视觉专用参数。这种方法的好处是视觉信息可以在每一层与文本信息进行深度交互，坏处是模型参数量大幅增加且训练成本高。</p>
+
+        <div class="tip">
+            <strong>我的观点：</strong> 没有一种多模态架构在所有场景下都是最优的。LLaMA 3.2 Vision的"冻结LLM + MLP连接器"方案在<strong>部署效率和性能之间取得了最好的平衡</strong>。因为语言模型是冻结的，模型权重的体积没有增加，推理时的显存消耗几乎等同于纯文本模型+视觉编码器的开销。这使得LLaMA 3.2 Vision可以轻松部署在消费级GPU上（如RTX 4090）。相比之下，CogVLM的全参数微调方案虽然视觉理解更强，但部署门槛高得多。
+        </div>
+
+        <h3>20.7 训练数据</h3>
+
+        <p>多模态模型的训练数据比纯文本模型复杂得多。LLaMA 3.2 Vision使用的训练数据包括几种不同类型：</p>
+
+        <p><strong>图文对（Image-Caption Pairs）：</strong> 互联网上大规模爬取的图片及其描述文本。常见的数据源包括LAION-5B、CC12M等。这些数据主要用于第一阶段的"图文对齐"。但图文对有一个明显的局限——图片和描述之间往往是一一对应的关系，缺乏复杂的推理和信息交互。</p>
+
+        <p><strong>交错图文数据（Interleaved Image-Text Data）：</strong> 来自网页的文章，其中图片和文本混合排列。比如一篇维基百科文章中间插入了插图。这种数据的好处是能让模型学习视觉信息和文本信息的自然上下文关系——模型中穿插出现的图片和文本会更好地理解"什么时候应该引用图像"。</p>
+
+        <p><strong>OCR数据（Optical Character Recognition Data）：</strong> 包含文本内容的图片（如扫描文档、白板照片、广告牌图片等）及其OCR标注。这部分数据特别重要，因为LLaMA 3.2 Vision的很多实际应用场景都涉及文本密集的图像——文档理解、截图问答等。</p>
+
+        <p><strong>视觉指令数据（Visual Instruction Data）：</strong> 通过人工标注或大模型自动生成的多轮问答数据。例如，展示一张图表图片，然后给出问题和答案对。这种数据可以教模型如何"看图说话"。Meta使用GPT-4V来生成大量的视觉指令数据——让GPT-4V看图并生成QA对，然后用这些数据来训练LLaMA 3.2 Vision。这种方法在业界被称为"self-instruct for vision"。</p>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong> 我曾经尝试给LLaMA 3.2 Vision喂了几张"文字密集"的广告海报，结果模型在回答问题时错得离谱——它把海报上的电话号码读错了，还把地址里的街道名和城市名混淆了。后来分析发现，这是因为训练数据中的OCR数据量不足，导致模型对密集文本图片的"细粒度"阅读能力不够。这个问题给我们的教训是：<strong>多模态模型的能力上限很大程度上取决于训练数据的多样性和覆盖范围</strong>。如果你想让模型在某个特定类型的图像上表现好，必须确保训练数据中包含了足够多的同类样本。
+        </div>
+
+        <h3>20.8 多模态评估</h3>
+
+        <p>多模态模型的评估比纯文本模型更加复杂，因为评估维度增加了（不仅要评价文本质量，还要评价视觉理解的准确性）。LLaMA 3.2 Vision在一系列标准的基准测试中进行了评估：</p>
+
+        <table>
+            <tr>
+                <th>基准测试</th>
+                <th>测试内容</th>
+                <th>LLaMA 3.2 11B</th>
+                <th>LLaVA 1.5 7B</th>
+            </tr>
+            <tr>
+                <td>MMMU</td>
+                <td>大学级多学科多模态理解</td>
+                <td>58.2</td>
+                <td>44.0</td>
+            </tr>
+            <tr>
+                <td>MathVista</td>
+                <td>数学图表推理</td>
+                <td>63.5</td>
+                <td>44.5</td>
+            </tr>
+            <tr>
+                <td>DocVQA</td>
+                <td>文档视觉问答</td>
+                <td>88.4</td>
+                <td>69.2</td>
+            </tr>
+            <tr>
+                <td>ChartQA</td>
+                <td>图表理解与推理</td>
+                <td>82.3</td>
+                <td>61.6</td>
+            </tr>
+            <tr>
+                <td>TextVQA</td>
+                <td>图片中文本的问答</td>
+                <td>78.7</td>
+                <td>69.5</td>
+            </tr>
+        </table>
+
+        <p>从上表可以看出，LLaMA 3.2 Vision在几乎所有基准测试上都大幅领先LLaVA 1.5——差距最大的是DocVQA（88.4 vs 69.2，差了近20分）。这说明LLaMA 3.2 Vision在<strong>文档理解</strong>这一特定领域的优势特别明显。如果你正在构建一个文档扫描和结构化提取的应用，LLaMA 3.2 Vision会是一个比LLaVA好得多的选择。</p>
+
+        <p>MMMU（Massive Multi-discipline Multimodal Understanding）是最具挑战性的多模态基准之一，包含大学级别的多学科问题，覆盖艺术、工程、科学等6个领域。LLaMA 3.2 11B在MMMU上得到58.2分，而人类专家在同样的测试中得分约为75-80分，说明多模态模型在深度学科理解上还有差距。</p>
+
+        <p>好了，我们已经完整地走过了LLaMA 3.2 Vision从架构设计到训练评估的全流程。下一章我们将聚焦于LLaMA的另一个重要能力纬度——工具调用与代码能力。我们会深入分析LLaMA 3如何用Function Calling的格式调用外部工具，以及它在代码生成和执行方面的独特设计。</p>
+
+        <p><strong>准备好了吗？第21章：工具调用与代码能力，我们马上出发。</strong></p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

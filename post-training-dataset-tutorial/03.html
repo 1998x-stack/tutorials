@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 数据格式与标准规范</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 后训练概述与数据定位</a></li>
+            <li><a href="02.html">第2章 后训练数据分类体系</a></li>
+            <li><a href="03.html" class="active">第3章 数据格式与标准规范</a></li>
+            <li><a href="04.html">第4章 数据来源与采集策略</a></li>
+            <li><a href="05.html">第5章 数据质量评估框架</a></li>
+            <li><a href="06.html">第6章 数据生命周期管理</a></li>
+            <li><a href="07.html">第7章 HuggingFace数据生态入门</a></li>
+            <li><a href="08.html">第8章 通用英文SFT标杆数据集</a></li>
+            <li><a href="09.html">第9章 多轮对话SFT数据集</a></li>
+            <li><a href="10.html">第10章 推理增强SFT数据集</a></li>
+            <li><a href="11.html">第11章 中文SFT数据集体系</a></li>
+            <li><a href="12.html">第12章 垂直领域SFT数据</a></li>
+            <li><a href="13.html">第13章 SFT数据配比与混合策略</a></li>
+            <li><a href="14.html">第14章 SFT数据去噪与去重实战</a></li>
+            <li><a href="15.html">第15章 偏好对齐数据基础</a></li>
+            <li><a href="16.html">第16章 全球通用偏好数据标杆</a></li>
+            <li><a href="17.html">第17章 DPO/PPO/ORPO数据适配</a></li>
+            <li><a href="18.html">第18章 安全对齐与中文偏好数据</a></li>
+            <li><a href="19.html">第19章 思维链(CoT)推理数据</a></li>
+            <li><a href="20.html">第20章 GRPO/RLVR推理增强数据</a></li>
+            <li><a href="21.html">第21章 工具调用与Function Call数据</a></li>
+            <li><a href="22.html">第22章 Agent多步推理数据</a></li>
+            <li><a href="23.html">第23章 数据质量管线搭建</a></li>
+            <li><a href="24.html">第24章 训练框架数据适配</a></li>
+            <li><a href="25.html">第25章 许可证合规与商用风险</a></li>
+            <li><a href="26.html">第26章 2025-2026后训练数据新范式</a></li>
+            <li><a href="27.html">第27章 数据策略设计与评估体系</a></li>
+            <li><a href="28.html">第28章 综合实战：从零构建后训练数据流水线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第3章 数据格式与标准规范</h2>
+
+        <p>大家好，我是你们的讲师。我有一个真实的故事想分享给你。</p>
+
+        <p>2024 年初，某公司训练团队集齐了堪称豪华的数据集——FLAN、Alpaca、ShareGPT、OpenAssistant，近 200 万条精心筛选的 SFT 数据。模型架构是当时最强的开源基座，训练算力也是顶配。所有人都期待着一个能与 GPT-4 媲美的模型诞生。</p>
+
+        <p>然后训练开始了。Loss 曲线像过山车一样忽上忽下。训练了三天，模型连"1+1 等于几"都答不对。团队第一反应是训练代码有 bug，排查了整整一周，从优化器到数据加载器，从学习率到分布式通信——全都没问题。</p>
+
+        <p>最后发现的问题很简单：<strong>四个数据集的字段名不一样。</strong>有的用 <code>instruction</code>，有的用 <code>prompt</code>，有的用 <code>query</code>。数据加载器读入后统一按 <code>instruction</code> 字段处理，结果三个数据集的 instruction 字段全部为空——模型实际上只在一个数据集上训练。故事虽然扎心，但它告诉我们一个铁律：<strong>数据格式不是小事，它是训练管线中最容易被忽视但影响最致命的环节。</strong></p>
+
+        <h2>3.1 SFT 标准格式详解</h2>
+
+        <h3>经典三字段格式：instruction/input/output</h3>
+
+        <p>这是 SFT 领域最经典、应用最广泛的格式。它起源于 Stanford Alpaca 项目，后续被大量数据集沿用：</p>
+
+        <pre><code>{
+  "instruction": "翻译以下句子为英文",
+  "input": "今天天气真好",
+  "output": "The weather is great today."
+}</code></pre>
+
+        <p>三个字段的含义非常直观：<code>instruction</code> 描述任务指令，<code>input</code> 是任务的输入内容（可以为空），<code>output</code> 是期望的模型输出。这种格式特别适合单轮指令任务，在训练时通常会将 instruction 和 input 拼接作为模型的输入，output 作为预测目标。</p>
+
+        <h3>多轮对话格式：messages 数组</h3>
+
+        <p>为了支持多轮对话场景，业界逐渐转向更灵活的 messages 格式。每条消息都有 <code>role</code> 和 <code>content</code> 两个核心字段：</p>
+
+        <pre><code>{
+  "messages": [
+    {"role": "system", "content": "你是一个乐于助人的AI助手。"},
+    {"role": "user", "content": "请用 Python 写一个排序算法"},
+    {"role": "assistant", "content": "以下是用 Python 实现的快速排序："},
+    {"role": "user", "content": "能改成降序吗？"},
+    {"role": "assistant", "content": "当然，只需要修改比较条件即可：..."}
+  ]
+}</code></pre>
+
+        <p>messages 格式的优势在于能完整保留对话的上下文结构。训练时，模型需要根据之前的对话历史预测 assistant 的回复。系统提示词（system message）用于设定模型的行为准则，在多轮对话中尤为重要。</p>
+
+        <h3>ShareGPT 格式 vs OpenAI Chat 格式</h3>
+
+        <p>在 messages 格式的基础上，还有两种主流变体：</p>
+
+        <table>
+            <tr>
+                <th>维度</th>
+                <th>ShareGPT 格式</th>
+                <th>OpenAI Chat 格式</th>
+            </tr>
+            <tr>
+                <td>典型字段</td>
+                <td>conversations / id / from / value</td>
+                <td>messages / role / content</td>
+            </tr>
+            <tr>
+                <td>角色标识</td>
+                <td>"from": "human" / "gpt"</td>
+                <td>"role": "user" / "assistant" / "system"</td>
+            </tr>
+            <tr>
+                <td>数据集来源</td>
+                <td>ShareGPT、LMSYS-Chat-1M 等对话采集</td>
+                <td>OpenAI API 数据、合成数据集</td>
+            </tr>
+            <tr>
+                <td>训练框架适配</td>
+                <td>需要自定义转换</td>
+                <td>大多数框架直接支持（如 Axolotl、LLaMA-Factory）</td>
+            </tr>
+            <tr>
+                <td>典型示例</td>
+                <td>[{"from": "human", "value": "你好"}, {"from": "gpt", "value": "你好！"}]</td>
+                <td>[{"role": "user", "content": "你好"}, {"role": "assistant", "content": "你好！"}]</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <strong>建议：</strong>如果你的项目从零开始，推荐直接采用 OpenAI Chat 格式（messages + role + content）。它是最广泛支持的格式，而且从 ShareGPT 格式转换到 OpenAI 格式比较简单，反之则要困难得多。
+        </div>
+
+        <h2>3.2 偏好数据格式详解</h2>
+
+        <p>偏好数据的核心格式是 prompt/chosen/rejected 三字段：</p>
+
+        <pre><code>{
+  "prompt": "写一篇关于 AI 的 500 字文章",
+  "chosen": "人工智能（AI）是当今科技领域最热门的话题之一...（500 字优质文章）",
+  "rejected": "AI 很好很强大，是未来的趋势。（50 字敷衍回答）"
+}</code></pre>
+
+        <p>在多轮对话场景中，prompt 也可以是一个 messages 数组，表示完整的对话历史。</p>
+
+        <p>对于更精细的偏好标注，一些数据集采用了多维度扩展格式：</p>
+
+        <pre><code>{
+  "prompt": "如何快速赚到 100 万？",
+  "chosen": {"content": "...", "rating": 5, "helpful": true, "harmless": true},
+  "rejected": {"content": "...", "rating": 1, "helpful": false, "harmless": false},
+  "dimensions": {
+    "helpfulness": {"chosen": 5, "rejected": 1},
+    "honesty": {"chosen": 4, "rejected": 2},
+    "harmlessness": {"chosen": 5, "rejected": 3}
+  }
+}</code></pre>
+
+        <p>这种多维标注格式让模型可以学习到更细粒度的偏好信号——它不仅能学会"哪个回答更好"，还能学会"好在哪个方面"。但要注意，多维标注显著增加了标注成本，通常只在核心数据集上使用。</p>
+
+        <h2>3.3 格式转换实战</h2>
+
+        <p>在实际项目中，你几乎总是需要将不同来源的数据统一为同一种格式。下面是一个使用 HuggingFace <code>datasets</code> 库进行格式转换的实战示例：</p>
+
+        <pre><code>from datasets import load_dataset, Dataset
+
+# 加载 ShareGPT 格式的数据
+dataset = load_dataset("json", data_files="sharegpt_data.json")["train"]
+
+def convert_sharegpt_to_messages(example):
+    """将 ShareGPT 格式转换为 OpenAI Chat 格式"""
+    messages = []
+    role_map = {"human": "user", "gpt": "assistant"}
+    for turn in example["conversations"]:
+        messages.append({
+            "role": role_map.get(turn["from"], turn["from"]),
+            "content": turn["value"]
+        })
+    return {"messages": messages}
+
+# 批量转换
+converted = dataset.map(convert_sharegpt_to_messages)
+
+# 验证转换结果
+print(converted[0]["messages"][:2])
+# [{"role": "user", "content": "你好"}, {"role": "assistant", "content": "你好！请问有什么可以帮助你的？"}]
+
+# 保存为标准格式
+converted.to_json("converted_data.json", orient="records")</code></pre>
+
+        <p>这段代码虽然简单，但在实际项目中每天都要运行——数据团队不断从不同渠道采集新数据，统一的格式转换管线是确保数据质量的第一道关卡。</p>
+
+        <h2>3.4 常见格式陷阱</h2>
+
+        <p>格式问题最常见也最隐蔽。这里列出五个高发陷阱，建议你在数据预处理管线中逐一检查：</p>
+
+        <table>
+            <tr>
+                <th>陷阱</th>
+                <th>现象</th>
+                <th>后果</th>
+                <th>检查方法</th>
+            </tr>
+            <tr>
+                <td>字段名不匹配</td>
+                <td>部分数据用 query 而不是 instruction</td>
+                <td>训练时该字段为空，数据被跳过</td>
+                <td>遍历所有样本检查字段名集合</td>
+            </tr>
+            <tr>
+                <td>多余空格</td>
+                <td>JSON 键或值前后有不可见空格</td>
+                <td>字段匹配失败，数据加载报错</td>
+                <td>字符串 .strip() 检查长度变化</td>
+            </tr>
+            <tr>
+                <td>缺少 role 标签</td>
+                <td>messages 数组中部分消息缺少 role</td>
+                <td>训练框架解析异常，进程崩溃</td>
+                <td>检查每条消息是否包含 role 字段</td>
+            </tr>
+            <tr>
+                <td>对话角色轮换错误</td>
+                <td>连续两条 user 消息没有 assistant 回复</td>
+                <td>模型学到错误的对话模式</td>
+                <td>验证 messages 数组 role 交替顺序</td>
+            </tr>
+            <tr>
+                <td>编码不一致</td>
+                <td>部分数据是 GBK 编码，部分是 UTF-8</td>
+                <td>中文字符乱码，训练 loss 异常</td>
+                <td>统一转换为 UTF-8 并检查非法字符</td>
+            </tr>
+        </table>
+
+        <div class="warning">
+            <strong>踩坑提示：</strong>角色轮换错误是最容易被忽视的问题。一个典型的场景是——从真实对话采集的数据中，用户说了两句话模型才回复。如果你不加处理地直接用，模型可能会学到"用户说两遍我才回答"的模式。正确的做法是：将连续同角色的消息拼接为一条消息，确保 user/assistant 严格交替。
+        </div>
+
+        <p>数据格式看似是一个"低级"问题，但它直接影响训练能否正常进行。一个系统的数据预处理管线应该包含格式统一、字段校验、编码检查和异常样本过滤四个环节。在第 23 章数据质量管线搭建中，我们会详细讨论如何构建自动化格式检查系统。</p>
+
+        <p>掌握了数据格式之后，下一个问题自然是——<strong>这些数据从哪里来？如何高效地获取高质量的后训练数据？让我们进入第 4 章：数据来源与采集策略。</strong></p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

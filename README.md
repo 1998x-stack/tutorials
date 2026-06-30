@@ -1,6 +1,6 @@
 # 1998x-stack Tutorials
 
-A collection of 38 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 39 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
@@ -22,7 +22,7 @@ A collection of 38 free, comprehensive technical tutorials in Chinese — from f
 | 🎙️ | TTS模型发展史 | 28 | [tts-model-history-tutorial](https://1998x-stack.github.io/tts-model-history-tutorial/) |
 | 🤖 | 大模型训练与部署深度分析 | 28 | [llm-training-deployment-tutorial](https://1998x-stack.github.io/llm-training-deployment-tutorial/) |
 
-### 数学基础 (4 courses)
+### 数学基础 (5 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -30,6 +30,7 @@ A collection of 38 free, comprehensive technical tutorials in Chinese — from f
 | 📐 | 高级矩阵分析 | 28 | [advanced-matrix-analysis-tutorial](https://1998x-stack.github.io/advanced-matrix-analysis-tutorial/) |
 | 📐 | 微积分 · 从入门到精通 | 28 | [calculus-tutorial](https://1998x-stack.github.io/calculus-tutorial/) |
 | ⚡ | 电磁学 · 从入门到精通 | 28 | [electromagnetism-tutorial](https://1998x-stack.github.io/electromagnetism-tutorial/) |
+| 📐 | 运筹学与调度理论 · 从入门到精通 | 28 | [operations-research-scheduling-tutorial](https://1998x-stack.github.io/operations-research-scheduling-tutorial/) |
 
 ### 系统 / 基础设施 (11 courses)
 

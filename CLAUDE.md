@@ -61,11 +61,12 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `financial-analysis-tutorial/` | 金融分析 | 28 | `https://1998x-stack.github.io/financial-analysis-tutorial/` |
 | `cryptocurrency-tutorial/` | 加密货币 | 28 | `https://1998x-stack.github.io/cryptocurrency-tutorial/` |
 
-### 算法 / 数据结构 (2)
+### 算法 / 数据结构 (3)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `data-structures-tutorial/` | 数据结构与算法 | 28 | `https://1998x-stack.github.io/data-structures-tutorial/` |
 | `path-planning-algorithms-tutorial/` | 路径规划算法 | 28 | `https://1998x-stack.github.io/path-planning-algorithms-tutorial/` |
+| `combinatorial-optimization-tutorial/` | 组合优化 | 28 | `https://1998x-stack.github.io/combinatorial-optimization-tutorial/` |
 
 ## Tutorial Structure
 

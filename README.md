@@ -62,12 +62,13 @@ A collection of 33 free, comprehensive technical tutorials in Chinese — from f
 | 💹 | 金融分析实战体系 | 28 | [financial-analysis-tutorial](https://1998x-stack.github.io/financial-analysis-tutorial/) |
 | 🪙 | 比特币与加密货币 | 28 | [cryptocurrency-tutorial](https://1998x-stack.github.io/cryptocurrency-tutorial/) |
 
-### 算法 / 数据结构 (2 courses)
+### 算法 / 数据结构 (3 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
 | 🧠 | 数据结构与算法实战 | 28 | [data-structures-tutorial](https://1998x-stack.github.io/data-structures-tutorial/) |
 | 🤖 | 路径规划算法 from scratch | 28 | [path-planning-algorithms-tutorial](https://1998x-stack.github.io/path-planning-algorithms-tutorial/) |
+| 📐 | 组合优化 · 从入门到精通 | 28 | [combinatorial-optimization-tutorial](https://1998x-stack.github.io/combinatorial-optimization-tutorial/) |
 
 ## How These Tutorials Are Built
 

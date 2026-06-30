@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第24章 测试体系：t目录与测试框架</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html" class="active">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第24章 测试体系：t目录与测试框架</h1>
+
+        <p>大家好，我是你们的讲师。前23章我们一行一行地读代码，分析设计，但有一个问题可能一直盘旋在你脑海里：<strong>维护者怎么保证这些代码是正确的？</strong>一个有着20多年历史的C项目，经历了数十位贡献者的修改、数百个bug fix、以及横跨三个大版本的演进——没有一个靠谱的测试体系，这简直不可想象。</p>
+
+        <p>事实上，Memcached 的测试体系既走得"老派"又走得"扎实"：它使用 Perl 编写的 Test::More 测试框架，通过 prove 测试运行器执行超过 100 个集成测试文件，覆盖了从协议解析到内存管理的方方面面。这章我们就来深入这个测试体系，看看一个"老牌"C项目是怎么保证代码质量的。</p>
+
+        <h2>t/ 目录结构概览</h2>
+
+        <p>Memcached 的所有测试都存放在项目根目录下的 <code>t/</code> 目录中。这个目录包含 100+ 个 <code>.t</code> 后缀的文件（Perl 测试文件的约定后缀），以及一些辅助模块和工具脚本。</p>
+
+        <p>下面是 <code>t/</code> 目录按功能分类的大致结构：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>分类</th>
+                    <th>代表测试文件</th>
+                    <th>测试内容</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>基础功能</td>
+                    <td><code>t/basic.t</code></td>
+                    <td>set/get/delete 基本操作</td>
+                </tr>
+                <tr>
+                    <td>二进制协议</td>
+                    <td><code>t/binary.t</code></td>
+                    <td>二进制协议编解码、所有 opcode</td>
+                </tr>
+                <tr>
+                    <td>内存管理</td>
+                    <td><code>t/slab-reassign.t</code></td>
+                    <td>slab reassign、自动平衡</td>
+                </tr>
+                <tr>
+                    <td>过期淘汰</td>
+                    <td><code>t/expirations.t</code></td>
+                    <td>TTL 精确性、LRU 淘汰顺序</td>
+                </tr>
+                <tr>
+                    <td>元协议</td>
+                    <td><code>t/meta.t</code></td>
+                    <td>Meta Protocol 全部命令</td>
+                </tr>
+                <tr>
+                    <td>多线程</td>
+                    <td><code>t/threading.t</code></td>
+                    <td>并发安全、race condition 检测</td>
+                </tr>
+                <tr>
+                    <td>Proxy</td>
+                    <td><code>t/proxy*.t</code></td>
+                    <td>Lua 路由、健康检查、故障转移</td>
+                </tr>
+                <tr>
+                    <td>外部存储</td>
+                    <td><code>t/extstore.t</code></td>
+                    <td>Extstore 读写与 evict</td>
+                </tr>
+                <tr>
+                    <td>工具类</td>
+                    <td><code>t/lib/MemcachedTest.pm</code></td>
+                    <td>测试框架核心模块</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>值得一提的是，<code>t/</code> 目录中的测试绝大多数是<strong>集成测试</strong>（integration test）而非单元测试（unit test）。每个 <code>.t</code> 文件都会启动一个真实的 Memcached 进程，通过 TCP 连接发送协议命令，然后检查返回结果。这意味着这些测试覆盖了整个调用链——从协议解析到内存管理到网络 I/O。</p>
+
+        <div class="tip">
+            <strong>为什么用集成测试为主？</strong>Memcached 的核心逻辑是"接收命令 -> 处理数据 -> 返回结果"，这个流程天然适合端到端的测试。相比于 mock 掉内部函数的单元测试，真实进程测试更能发现协议版本不匹配、多线程竞争等集成层面的问题。而且 C 函数的单元测试需要用 C 写，编写和维护成本远高于 Perl 脚本。
+        </div>
+
+        <h2>测试框架：prove + Test::More</h2>
+
+        <p>Memcached 的测试体系建立在 Perl 生态的两件利器之上：</p>
+
+        <ul>
+            <li><strong>prove</strong>——Perl 社区标准的测试运行器。它自动发现 <code>t/</code> 目录下的 <code>.t</code> 文件，并行或串行执行，并汇总测试结果。</li>
+            <li><strong>Test::More</strong>——Perl 最流行的测试 DSL，提供 <code>ok()</code>、<code>is()</code>、<code>like()</code> 等断言函数。</li>
+        </ul>
+
+        <p>每个测试文件的基本结构如下：</p>
+
+        <pre><code>#!/usr/bin/perl
+# t/basic.t —— 基本 set/get 测试
+
+use strict;
+use warnings;
+use Test::More;
+use MemcachedTest;
+
+# 启动 Memcached 实例（自动选择空闲端口）
+my $server = new_memcached();
+my $sock = $server->sock;
+
+# plan 表示该测试计划执行 8 个断言
+plan tests => 8;
+
+# 基本的 set/get
+my $val = "A" x 200;
+ok($sock->set("key1", $val), "basic set ok");
+is($sock->get("key1"), $val, "basic get ok");
+
+# 覆盖旧值
+$val = "B" x 100;
+ok($sock->set("key1", $val), "overwrite set ok");
+is($sock->get("key1"), $val, "overwrite get ok");
+
+# 删除操作
+ok($sock->delete("key1"), "delete ok");
+is($sock->get("key1"), undef, "get after delete");
+
+# 不存在的 key
+is($sock->get("nonexistent"), undef, "miss on nonexistent");
+ok(!$sock->delete("nonexistent"), "delete nonexistent fails");</code></pre>
+
+        <p>测试流程非常直接：<code>new_memcached()</code> 在后台启动一个 memcached 进程监听在随机端口，返回的 <code>$server->sock</code> 是一个连接到该端口的 socket 对象。所有测试命令通过这个 socket 以 Memcached ASCII 协议发送，然后解析响应结果。测试完毕后，测试框架会自动 kill 掉 Memcached 进程。</p>
+
+        <h2>典型测试文件剖析</h2>
+
+        <p>让我们深入两个有代表性的测试文件，看看"老手"是如何写测试的。</p>
+
+        <h3>t/binary.t：二进制协议全覆盖</h3>
+
+        <p><code>t/binary.t</code> 是 Memcached 测试中最重要的文件之一，它覆盖了二进制协议的每一个 opcode。它的结构像一本二进制协议的手册：</p>
+
+        <pre><code># 伪代码展示 t/binary.t 的测试结构
+# 实际文件约 800 行
+
+# 1. 基本操作：Get/Set/Delete
+#   - 验证请求包结构和响应包结构
+#   - 验证 key、value、flags 的正确性
+#   - 验证 CAS (Compare-And-Swap)
+
+# 2. 批量操作：GetK/GetQ/GetKQ
+#   - GetK：带 key 返回的 get
+#   - GetQ：静默 get（出错时不返回错误包）
+#   - GetKQ：前两者的组合
+
+# 3. 增量/减量操作：Increment/Decrement
+#   - 验证 delta 值精确
+#   - 验证初始值设置
+#   - 验证溢出回绕行为
+
+# 4. 触控操作：Touch/GAT
+#   - 验证过期时间更新
+#   - 验证 Get-And-Touch 语义
+
+# 5. 统计操作：Stat
+#   - 验证各类 stat 返回值的合理性
+
+# 6. 错误场景全覆盖
+#   - key 太长（>250 字节）
+#   - value 太大（>1MB）
+#   - 无效 opcode
+#   - 包体长度校验</code></pre>
+
+        <p>这个测试文件的核心意义在于：<strong>它是二进制协议的"可执行规格说明"</strong>。任何对二进制协议处理逻辑的改动，都需要通过 <code>t/binary.t</code> 的检验，否则说明改坏了协议兼容性。</p>
+
+        <h3>t/slab-reassign.t：内存管理压力测试</h3>
+
+        <p><code>t/slab-reassign.t</code> 测试的是 slab allocator 的动态内存重新分配功能，这是 Memcached 中最容易出 bug 的模块之一。这个测试文件会构造复杂的分配模式，验证 slab 在页面（page）级别的重新分配是否正确：</p>
+
+        <pre><code># t/slab-reassign.t 部分关键测试逻辑
+
+# 1. 创建大量小对象，耗尽 slab class 1 的页面
+# 2. 创建大量大对象，触发 slab class 2 从 class 1 窃取页面
+# 3. 验证 class 1 释放页面后，数据是否被正确迁移
+# 4. 并发执行 get/set 操作，验证在 reassign 过程中数据一致性
+# 5. 极限测试：尝试 reassign 所有页面，验证不会死锁
+
+# 关键断言示例
+ok($sock->set("small_val",  "x" x 50),   "write to slab class 1");
+ok($sock->set("large_val",  "x" x 20000), "write to slab class 3");
+
+# 触发 slab reassign
+my $stats = mem_stats($sock, "slabs");
+ok($stats->{"12:total_pages"} > 0, "slab class 12 should have pages");
+
+# 验证 reassign 后的数据完整性
+is($sock->get("small_val"), "x" x 50,   "small val survives reassign");
+is($sock->get("large_val"), "x" x 20000, "large val survives reassign");</code></pre>
+
+        <div class="highlight">
+            <strong>学习点：</strong>好的集成测试应该包含"正向路径 + 边界条件 + 压力场景"三个层次。t/slab-reassign.t 不光测试 reassign 会不会报错，还验证了 reassign 过程中数据的完整性——这才是真正有意义的测试。
+        </div>
+
+        <h2>如何为 slabs.c 添加单元测试</h2>
+
+        <p>虽然 Memcached 的测试以集成测试为主，但有时你确实需要<strong>针对单个 C 函数写单元测试</strong>——比如当你修复了一个 slab allocator 的算数溢出 bug，想用最小的代价验证修复是否正确时。</p>
+
+        <p>由于 Memcached 没有使用 C 单元测试框架（没有 CTest、没有 check、没有 cmocka），添加 C 级别的测试需要一点"手艺"。以下是推荐的做法：</p>
+
+        <pre><code>// t/test_slabs.c —— 为 slabs_alloc 和 slabs_free 编写单元测试
+// 编译: gcc -I.. -o test_slabs test_slabs.c ../slabs.c ../item.c \
+//       ../memcached.c -lpthread -levent
+
+#include "memcached.h"
+#include <assert.h>
+#include <string.h>
+
+// 模拟全局 settings
+struct settings settings;
+
+void test_slab_basic_alloc_free() {
+    // 初始化 slab allocator（64MB 内存）
+    settings.factor = 1.25;
+    settings.chunk_size = 48;
+    settings.item_size_max = 1024 * 1024;
+    settings.slab_page_size = 1024 * 1024;
+    settings.maxbytes = 64 * 1024 * 1024;
+
+    slabs_init(settings.maxbytes, settings.factor, false);
+
+    // 分配一个 200 字节的 item
+    unsigned int id = 0;
+    char *ptr = slabs_alloc(200, &id, 0);
+    assert(ptr != NULL);
+    assert(id > 0);
+
+    // 写入数据并验证
+    memset(ptr, 'A', 200);
+    assert(ptr[0] == 'A');
+    assert(ptr[199] == 'A');
+
+    // 释放
+    slabs_free(ptr, 200, id);
+
+    printf("PASS: test_slab_basic_alloc_free\n");
+}
+
+int main() {
+    test_slab_basic_alloc_free();
+    printf("All tests passed!\n");
+    return 0;
+}</code></pre>
+
+        <p>这种做法的缺点是需要手动管理编译和链接，不能自动集成到 <code>make test</code> 中。不过对于调试阶段的快速验证，它非常有效。</p>
+
+        <h2>make test 执行流程</h2>
+
+        <p>当你运行 <code>make test</code> 时，实际上触发的是 <code>Makefile</code> 中定义的一套完整流程：</p>
+
+        <pre><code># make test 的执行流程
+
+# 1. 编译 Memcached（如果源码有改动）
+# 2. 调用 prove 运行所有测试
+#    prove -I t/lib/ -r t/
+
+# prove 参数说明：
+#   -I t/lib/  : 将 MemcachedTest.pm 所在目录加入 Perl 搜索路径
+#   -r         : 递归搜索子目录
+#   -v         : 详细输出（可选）
+#   --state=save : 保存测试状态，下次只运行失败的测试
+
+# 3. 输出汇总结果
+#    t/00-startup.t ......... ok
+#    t/basic.t .............. ok
+#    t/binary.t ............. ok
+#    ...
+#    All tests successful.
+#    Files=105, Tests=8420, 62 wallclock secs</code></pre>
+
+        <p>需要注意的一点是：<code>make test</code> 默认是串行执行所有 <code>.t</code> 文件，总耗时大约 60-90 秒。你可以通过设置环境变量来调整测试行为：</p>
+
+        <ul>
+            <li><code>TEST_VERBOSE=1</code> —— 输出每个测试的详细 log，适合调试单个测试失败。</li>
+            <li><code>TEST_PARALLEL=4</code> —— 并行执行 4 个测试，适合快速验证（注意并行执行的测试不能占用同一端口）。</li>
+            <li><code>TEST_SINGLE=1</code> —— 只运行一个 <code>.t</code> 文件，可以用 <code>make test TESTS=t/binary.t</code> 指定。</li>
+        </ul>
+
+        <h2>Valgrind 内存泄漏检测</h2>
+
+        <p>C 项目最头疼的问题之一就是内存泄漏。Memcached 在 <code>configure</code> 阶段提供了 <code>--enable-valgrind</code> 选项，可以集成 Valgrind 的内存检测能力：</p>
+
+        <pre><code># 配置时启用 valgrind 集成
+./configure --enable-valgrind
+make
+
+# 运行测试时自动调用 valgrind
+make test
+
+# 也可以手动运行 valgrind
+valgrind --leak-check=full \
+         --show-leak-kinds=all \
+         --track-origins=yes \
+         ./memcached -p 11211 -m 64 -vv 2>&1 | tee valgrind.log</code></pre>
+
+        <p>当启用了 <code>--enable-valgrind</code> 后，Memcached 在 <code>slabs_init()</code> 和 <code>item_init()</code> 等关键路径上会插入 Valgrind 客户端请求（<code>VALGRIND_CREATE_MEMPOOL</code>、<code>VALGRIND_MEMPOOL_ALLOC</code>），让 Valgrind 能够追踪 slab allocator 内部的内存分配和释放——否则 Valgrind 会把这些 slab 内部的管理视为"仍在使用的内存"而产生大量误报。</p>
+
+        <div class="tip">
+            <strong>核心代码：</strong>这些 Valgrind 集成代码位于 <code>slabs.c</code> 中的预处理条件块 <code>#ifdef HAVE_VALGRIND_VALGRIND_H</code> 内。如果你用 <code>grep</code> 搜索 <code>VALGRIND_MEMPOOL</code>，可以看到每个 slab 分配/释放函数都有对应的标注。这是学习"如何让 C 项目与 Valgrind 友好合作"的绝佳范例。
+        </div>
+
+        <h2>测试覆盖率和已知盲区</h2>
+
+        <p>Memcached 的测试覆盖率在关键路径上相当高，但并不是完美的。让我们诚实地说说它的盲区：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>模块</th>
+                    <th>覆盖率估算</th>
+                    <th>盲区说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>ASCII 协议解析</td>
+                    <td>~90%</td>
+                    <td>少见于?命令的异常参数组合</td>
+                </tr>
+                <tr>
+                    <td>二进制协议</td>
+                    <td>~95%</td>
+                    <td>t/binary.t 非常全面，接近全覆盖</td>
+                </tr>
+                <tr>
+                    <td>Slab Allocator</td>
+                    <td>~80%</td>
+                    <td>slab reassign 的竞态条件难以稳定复现</td>
+                </tr>
+                <tr>
+                    <td>LRU 淘汰</td>
+                    <td>~75%</td>
+                    <td>三级 LRU 的时间精度在压力测试中较难验证</td>
+                </tr>
+                <tr>
+                    <td>哈希表扩容</td>
+                    <td>~85%</td>
+                    <td>渐进式 rehash 的中间状态难以精确控制</td>
+                </tr>
+                <tr>
+                    <td>Proxy/Lua</td>
+                    <td>~70%</td>
+                    <td>Lua 脚本的无限可能组合无法穷举</td>
+                </tr>
+                <tr>
+                    <td>外部存储</td>
+                    <td>~65%</td>
+                    <td>依赖特定存储后端，测试环境不易一致</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>注意：</strong>覆盖率数据基于经验估算，不是官方数据。但我们可以肯定的是：<strong>Memcached 的 CI 不会让你在核心路径上混过一个明显的 bug</strong>。不过，如果你修改了 LRU 或 slab reassign 这类并发密集的模块，单靠现有的集成测试可能不够——建议添加针对性的压力测试场景。
+        </div>
+
+        <h2>踩坑：CI 环境与本地环境的时区之争</h2>
+
+        <p>最后分享一个真实的踩坑经历。有一次我给 Memcached 提交了一个 PR，修改了 <code>expirations.c</code> 中 TTL 计算的逻辑。所有测试在本地（Ubuntu 22.04，UTC+8）都通过了，CI 也显示绿色。但过了两周，有用户报告说他们的 Memcached 在 UTC+0 时区的机器上 TTL 快了整整 8 小时。</p>
+
+        <p>排查发现，问题出在我使用 <code>time()</code> 和 <code>gmtime()</code> 的组合方式上。我在测试中写了一个这样的断言：</p>
+
+        <pre><code># t/expirations.t 中的问题代码
+# 设置 TTL=3600，然后检查 expire_time
+my $expected = time() + 3600;
+my $actual = mem_stat($sock, "expire_time");
+is($actual, $expected, "expire time should be now+3600");
+# 问题：$expected 是本地时区的 Unix 时间戳
+#       但 Memcached 内部存储的 expire time 是 UTC 的
+#       在 UTC+8 时区，两者相差 8 小时，测试恰好通过
+#       在 UTC+0 时区，测试应该通不过……但测试也通过了
+#       因为测试环境也是 UTC+0！两边抵消了！</code></pre>
+
+        <p>根本原因是我在测试中使用了隐式的时区依赖。正确的做法是确保所有测试中涉及时间戳的断言都<strong>基于 UTC 比较</strong>，或者使用 Memcached 内部的 <code>real_time()</code> 函数来获取时间。</p>
+
+        <p>这个教训告诉我们：<strong>测试在一种环境中通过不等于在所有环境中正确</strong>。尤其当你的代码涉及时间、路径、编码等容易被环境影响的逻辑时，一定要在多种配置下验证。</p>
+
+        <h2>总结与下章预告</h2>
+
+        <p>本章我们深入研究了 Memcached 的测试体系——从 t/ 目录的结构到 prove + Test::More 框架，从典型测试文件剖析到单元测试编写，从 Valgrind 集成到测试覆盖率的盲区。Memcached 的测试哲学可以总结为：<strong>"用最实用的工具做最全面的集成测试，专注端到端的正确性验证"</strong>。这套体系支撑了 Memcached 20 年的稳定演进，值得我们学习和借鉴。</p>
+
+        <p>下一章，我们将进入实战环节的真刀真枪——性能调优与生产踩坑。当我们把 Memcached 部署到线上之后，会遇到哪些常见问题？怎么用参数调优榨干硬件性能？又有什么隐藏的"地雷"等着我们？我们第 25 章见。</p>
+
+        <div class="footer-nav">
+            <a href="23.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="25.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

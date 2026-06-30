@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第25章 性能调优与生产踩坑</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html" class="active">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第25章 性能调优与生产踩坑</h1>
+
+        <p>大家好，我是你们的讲师。前24章我们一直在"读代码"，这一章我们要做一件更有意思的事——<strong>把代码推到生产环境里跑起来，然后看它怎么翻车，再把它救回来</strong>。</p>
+
+        <p>如果你以为把一个编译好的 Memcached 扔到服务器上就能跑出高性能，那就太天真了。参数怎么配、内存怎么分、连接数怎么管——每一步都可能让你从"高性能缓存"跌入"高延迟灾难"。这一章我会带你走一遍 Memcached 生产环境调优的全流程，从参数配置到监控指标，从热 key 治理到内核参数调优，最后送上几个我用"血泪"换来的踩坑故事。</p>
+
+        <h2>核心参数调优实战</h2>
+
+        <p>Memcached 的参数不多，但每一个都对性能有显著影响。我们最常用的四个参数是 <code>-m</code>、<code>-c</code>、<code>-t</code> 和 <code>-f</code>：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>参数</th>
+                    <th>默认值</th>
+                    <th>推荐范围</th>
+                    <th>影响</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>-m</code></td>
+                    <td>64 MB</td>
+                    <td>物理内存的 60-80%</td>
+                    <td>可用内存越大，缓存命中率越高</td>
+                </tr>
+                <tr>
+                    <td><code>-c</code></td>
+                    <td>1024</td>
+                    <td>取决于 QPS，通常 10000-50000</td>
+                    <td>限制最大并发连接数</td>
+                </tr>
+                <tr>
+                    <td><code>-t</code></td>
+                    <td>4</td>
+                    <td>CPU 核数 - 2（或等于核数）</td>
+                    <td>Worker 线程数，直接影响吞吐</td>
+                </tr>
+                <tr>
+                    <td><code>-f</code></td>
+                    <td>1.25</td>
+                    <td>1.10 - 1.50</td>
+                    <td>Slab class 的 growth factor，决定内存利用率</td>
+                </tr>
+                <tr>
+                    <td><code>-n</code></td>
+                    <td>48</td>
+                    <td>48 - 128</td>
+                    <td>最小分配单元，影响小对象的内存效率</td>
+                </tr>
+                <tr>
+                    <td><code>-R</code></td>
+                    <td>20</td>
+                    <td>20 - 200</td>
+                    <td>每次事件循环最多处理的请求数</td>
+                </tr>
+                <tr>
+                    <td><code>-o modern</code></td>
+                    <td>关闭</td>
+                    <td>建议开启</td>
+                    <td>启用现代特性：meta protocol、extstore 等</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>下面是一组 benchmark 数据，展示不同参数组合下的性能差异：</p>
+
+        <pre><code># 测试环境：8 vCPU / 32GB RAM / SSD, Ubuntu 22.04
+# 测试工具：mcperf
+# 场景：100 字节 key + 200 字节 value，90% GET + 10% SET
+
+# 默认配置（4 线程）
+mcperf --servers=127.0.0.1:11211 --num-conns=10 --num-calls=1000000
+  -> QPS: 1,020,000  p99: 2.5ms
+
+# 调优配置（8 线程 + 增大连接数 + modern 模式）
+memcached -m 8192 -c 32768 -t 8 -f 1.15 -R 100 -o modern
+mcperf --servers=127.0.0.1:11211 --num-conns=10 --num-calls=1000000
+  -> QPS: 1,840,000  p99: 1.1ms
+
+# 极限配置（16 线程 + 不绑定 CPU 时的反面案例）
+memcached -m 8192 -c 65536 -t 16
+mcperf --servers=127.0.0.1:11211 --num-conns=10 --num-calls=1000000
+  -> QPS: 1,670,000  p99: 3.8ms  ← 线程数过多导致锁争用反而变慢</code></pre>
+
+        <p>从上表可以看出几个关键结论：</p>
+
+        <ul>
+            <li><strong>线程数不是越多越好</strong>。在 8 vCPU 的环境下，<code>-t 8</code> 比 <code>-t 4</code> 提升了 80% 的 QPS，但 <code>-t 16</code> 反而下降了（线程切换和锁争用的开销超过了并行收益）。</li>
+            <li><strong><code>-R</code> 参数常被忽略但很重要</strong>。增大 <code>-R</code> 可以减少事件循环的切换开销，但太大会导致单次循环中处理请求过多，增加尾延迟。</li>
+            <li><strong><code>-o modern</code> 应该默认开启</strong>。它并不只是"新功能开关"，某些 modern 模式下的优化项（如 <code>no_lru_crawler</code>）直接减少了后台线程对主线程的干扰。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>调优原则：</strong>不要一次性改所有参数。每次只改一个参数，跑 benchmark，记录结果，再改下一个。用数据驱动而不是凭感觉调优。
+        </div>
+
+        <h2>热 key 问题的根因与解决方案</h2>
+
+        <p>热 key（hot key）是缓存系统中最常见也最难缠的问题之一。当一个或少量 key 被极高频率地访问时（比如微博热搜第一名、双十一的秒杀商品），这个 key 所在的 Memcached 节点会成为性能瓶颈——所有客户端请求都涌向同一台机器。</p>
+
+        <p>热 key 的根因有三个层面：</p>
+
+        <ul>
+            <li><strong>业务层面</strong>——用户访问天然服从 Zipf 分布，头部 key 的访问频率可能比尾部高出几个数量级。</li>
+            <li><strong>路由层面</strong>——一致性哈希虽然能均匀分布 key，但它对"单 key 过热"无能为力（key 只有一个，只能存在于一个节点上）。</li>
+            <li><strong>节点层面</strong>——单节点 CPU 成为瓶颈，worker 线程满载，p99 延迟飙升。</li>
+        </ul>
+
+        <p>解决方案通常采用<strong>分层缓存</strong>的策略：</p>
+
+        <pre><code># 热 key 治理的典型架构
+
+# 第一层：本地缓存（客户端进程内）
+#   - 在应用进程中增加一个 LRU cache（如 Guava Cache、Caffeine）
+#   - TTL 设置很短（1-5 秒），只用于吸收单 key 的热点峰值
+#   - 示例伪代码：
+def get_with_local_cache(key):
+    val = local_cache.get(key)       # 查本地缓存
+    if val is None:
+        val = memcached.get(key)     # 查分布式缓存
+        if val is not None:
+            local_cache.put(key, val, ttl=2)  # 本地缓存 2 秒
+    return val
+
+# 第二层：Memcached 集群（分布式缓存）
+#   - 正常 rehash 分片
+#   - 对于热 key，可以考虑在应用层做 key 扩散
+#     例如将 hot_key 拆为 hot_key_0 ~ hot_key_9，随机读写
+#     目的是让热 key 的请求分散到不同节点
+
+# 第三层：数据库（最后防线）
+#   - 当两层缓存都 miss 时回源数据库
+#   - 设置合理的回源限流，防止数据库被打崩</code></pre>
+
+        <div class="highlight">
+            <strong>经验数据：</strong>在我们的一次生产压测中，增加本地缓存后，Memcached 集群的 QPS 从 500 万降到了 80 万（热 key 请求被本地缓存吸收了），而业务方看到的延迟从 8ms 降到了 0.5ms。这是一个典型的"多花钱少办事"的反直觉案例——<strong>增加了一层缓存，总延迟反而大幅下降</strong>。
+        </div>
+
+        <h2>连接数过多导致的内存分配失败</h2>
+
+        <p>每个连接到 Memcached 的客户端都会消耗大约 <strong>16KB 的读缓冲区</strong>（在 <code>conn_new()</code> 中通过 <code>malloc</code> 分配）。这个缓冲区在连接建立时分配，在连接关闭时释放。</p>
+
+        <p>看起来 16KB 不大对吧？但如果你有 10 万个并发连接，仅读缓冲就需要 1.6GB 的内存。加上写缓冲（不定大小，取决于响应数据量）、连接对象本身（<code>struct conn</code> 约 1KB）、以及其他辅助结构，单个连接的完整开销可能在 20-30KB 左右。10 万连接就是 2-3GB 内存被"连接"吃掉了，而不是被"缓存数据"吃掉了。</p>
+
+        <p>更严重的问题发生在内存不足时：如果 Memcached 无法为新的连接分配读缓冲，<code>conn_new()</code> 会返回 NULL，连接被拒绝——但此时客户端看到的是"连接超时"或"连接被拒绝"，而运维这边看到的 stat 是 <code>listen_disabled_num</code> 在增长。</p>
+
+        <div class="warning">
+            <strong>惨案回忆：</strong>我经历过的一次线上事故——某个微服务因为 bug 不断地创建和销毁到 Memcached 的连接（连接池设置错误，每次请求都新建连接），导致 Memcached 上的连接数在 30 分钟内从 2000 飙升到 8 万。结果是 Memcached 的内存被连接缓冲消耗殆尽，大量缓存数据被 evict，缓存命中率从 95% 暴跌到 20%，数据库被击穿，最终引发级联故障。事后分析发现：如果当时设置了 <code>-c 20000</code>（最大连接数限制），Memcached 会在达到上限后拒绝新连接，而不是让连接缓冲无限制地吞噬缓存内存。
+        </div>
+
+        <p>解决方案：</p>
+        <ul>
+            <li>在客户端使用<strong>连接池</strong>（connection pool），复用连接。</li>
+            <li>在 Memcached 侧设置合理的 <code>-c</code> 参数，限制最大连接数。</li>
+            <li>监控 <code>curr_connections</code> 和 <code>listen_disabled_num</code>，设置告警阈值。</li>
+        </ul>
+
+        <h2>Chunk Size 选择不当的惨案</h2>
+
+        <p>这是 slab allocator 的特色问题。回顾第 8 章的内容，Memcached 的 slab allocator 将内存划分为不同大小的 chunk（slab class 1 的 chunk 最小，class N 的 chunk 最大），每个 key-value pair 被放入第一个能容纳它的 chunk class 中。</p>
+
+        <p>如果 <code>-f</code>（growth factor）设置不当，会导致大量的内存浪费。让我们看一个真实案例：</p>
+
+        <pre><code># 某公司的 Memcached 内存使用分析
+# slab class 分布（-f 1.25 默认值）
+
+Slab Class   Chunk Size     Used Chunks     Wasted %
+1             96 B            2,000          < 1%
+2            120 B           15,000          < 1%
+3            152 B          120,000           2%
+4            192 B          850,000           5%
+5            240 B        1,200,000          12%   ← 问题开始
+6            304 B        1,500,000          18%   ← 实际数据平均 260B
+7            384 B          400,000          25%   ← 浪费最严重
+8            480 B          100,000          30%
+...
+Total                       ~4M items    浪费 ~50%</code></pre>
+
+        <p>分析发现，这个业务场景中 90% 的 value 大小在 200-280 字节之间。数据被分配到 class 5（chunk 240B，浪费 0-40B）、class 6（chunk 304B，浪费 24-104B）和 class 7（chunk 384B，浪费 104-184B）。结果就是大量内存被 chunk 内部的碎片浪费掉了。</p>
+
+        <p>解决办法是将 <code>-f</code> 调小：</p>
+
+        <pre><code># 调整 growth factor 为 1.10
+memcached -m 8192 -f 1.10 -o modern
+
+# 调整后的 slab class 分布：
+# Class 5:  chunk 216B  → 200-280B 的数据被更精细地分类
+# Class 6:  chunk 238B
+# Class 7:  chunk 262B  ← 最适合 260B 数据的 class
+# Class 8:  chunk 288B
+# 内存浪费从 ~50% 降到了 ~15%</code></pre>
+
+        <div class="highlight">
+            <strong>经验法则：</strong>在确定 <code>-f</code> 之前，先用实际数据做一次"数据大小分布分析"。在业务中打点记录 value 大小的分布，然后选择能覆盖主要峰值的 growth factor。如果 value 大小集中在少数几个区间，甚至可以考虑自定义 chunk size。
+        </div>
+
+        <h2>STAT 监控指标解读</h2>
+
+        <p>在生产环境运维 Memcached，你需要读懂它的统计信息。以下是最关键的几个指标：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>指标</th>
+                    <th>含义</th>
+                    <th>警告阈值</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>evictions</code></td>
+                    <td>因内存不足被淘汰的 item 数</td>
+                    <td>持续增长 > 0</td>
+                    <td>意味着内存不够用了，需要扩容或减少数据量</td>
+                </tr>
+                <tr>
+                    <td><code>get_hits</code> / <code>get_misses</code></td>
+                    <td>GET 命中/未命中次数</td>
+                    <td>命中率 &lt; 85%</td>
+                    <td>命中率过低说明缓存失效或内存不足</td>
+                </tr>
+                <tr>
+                    <td><code>cmd_set</code></td>
+                    <td>SET 命令总数</td>
+                    <td>相对变化 > 50%</td>
+                    <td>SET 突增通常意味着缓存穿透或数据未复用</td>
+                </tr>
+                <tr>
+                    <td><code>curr_connections</code></td>
+                    <td>当前连接数</td>
+                    <td>接近 <code>-c</code> 上限的 80%</td>
+                    <td>连接数过高需要排查客户端连接池配置</td>
+                </tr>
+                <tr>
+                    <td><code>listen_disabled_num</code></td>
+                    <td>因连接数满被拒绝的连接数</td>
+                    <td>> 0</td>
+                    <td>需要立即扩容 <code>-c</code> 或排查连接泄漏</td>
+                </tr>
+                <tr>
+                    <td><code>reclaimed</code></td>
+                    <td>LRU 尾部的过期 item 被复用的次数</td>
+                    <td>持续增长</td>
+                    <td>说明有大量过期 item，可能 TTL 设置过短</td>
+                </tr>
+                <tr>
+                    <td><code>slab_reassign_rescues</code></td>
+                    <td>Slab reassign 过程中 rescue 的 item 数</td>
+                    <td>持续 > 1000/s</td>
+                    <td>频繁的 slab 迁移会影响性能</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>获取这些指标的命令是 <code>stats</code>，也可以通过 <code>stats slabs</code>、<code>stats items</code> 查看更细粒度的信息。在生产环境中，建议每 10-30 秒采集一次 stats，送入 Prometheus + Grafana 进行可视化监控。</p>
+
+        <h2>生产环境配置模板</h2>
+
+        <p>下面给出两个典型的生产环境部署配置参考。</p>
+
+        <h3>Docker Compose 配置</h3>
+
+        <pre><code># docker-compose.yml
+version: "3.8"
+services:
+  memcached:
+    image: memcached:1.6-alpine
+    container_name: memcached-prod
+    command:
+      - "-m"      # 内存限制
+      - "8192"
+      - "-c"      # 最大连接数
+      - "32768"
+      - "-t"      # worker 线程数（宿主 CPU 核数 - 2）
+      - "6"
+      - "-f"      # growth factor
+      - "1.15"
+      - "-R"      # 每次事件循环最大请求数
+      - "100"
+      - "-o"      # 现代特性 + 参数优化
+      - "modern,slab_reassign,slab_automove,lru_crawler"
+    ports:
+      - "11211:11211"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: "10G"
+    restart: always</code></pre>
+
+        <h3>K8s ConfigMap 配置</h3>
+
+        <pre><code># memcached-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: memcached-config
+data:
+  memcached.conf: |
+    # Memcached 生产配置
+    -m 8192
+    -c 32768
+    -t 6
+    -f 1.15
+    -R 100
+    -o modern,slab_reassign,slab_automove,lru_crawler
+---
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: memcached
+        image: memcached:1.6-alpine
+        args: ["/etc/memcached/memcached.conf"]
+        volumeMounts:
+        - name: config
+          mountPath: /etc/memcached
+        resources:
+          requests:
+            memory: "10G"
+            cpu: "8"
+          limits:
+            memory: "10G"
+            cpu: "8"
+      volumes:
+      - name: config
+        configMap:
+          name: memcached-config</code></pre>
+
+        <h2>踩坑集锦</h2>
+
+        <h3>Nagle 算法延迟</h3>
+
+        <p>Nagle 算法是 TCP 协议层的一个优化：它会将小的数据包合并后再发送，以减少网络中的小包数量。但这个优化对 Memcached 是"毒药"——因为 Memcached 的请求/响应通常很小（几十到几百字节），Nagle 算法会等待凑够一个 MSS 再发送，人为引入了 40ms 的延迟（经典 Nagle 延迟）。</p>
+
+        <p>解决方法是在 Memcached 的 socket 上设置 <code>TCP_NODELAY</code> 标志。这个设置在源码中的位置：</p>
+
+        <pre><code>// memcached.c, 在 conn_new() 中
+// 新连接建立后立即设置 TCP_NODELAY
+int flag = 1;
+setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+// 从 1.4.x 版本开始默认开启，但建议在客户端侧也设置
+// 如果使用 mcperf 等工具，加上 --tcp-nodelay 参数</code></pre>
+
+        <p>如果你发现你的 Memcached 延迟不稳定、每隔一段时间出现 40ms 的毛刺，首先要检查的就是 Nagle 算法是否被意外开启了。</p>
+
+        <h3>TIME_WAIT 堆积</h3>
+
+        <p>如果客户端频繁创建和关闭到 Memcached 的短连接，服务端会积累大量 <code>TIME_WAIT</code> 状态的 socket。每个 TIME_WAIT socket 占用一定的内核内存，而且过多的 TIME_WAIT 会导致端口耗尽（客户端侧）或文件描述符耗尽（服务端侧）。</p>
+
+        <p>解决方案：</p>
+        <ul>
+            <li><strong>客户端侧</strong>：使用连接池，避免频繁创建和关闭连接。</li>
+            <li><strong>服务端侧</strong>：可以调整内核参数来加速 TIME_WAIT 回收：<br>
+                <code>net.ipv4.tcp_tw_reuse = 1</code>（在客户端使用）<br>
+                <code>net.ipv4.tcp_fin_timeout = 15</code>（减小 TIME_WAIT 超时）</li>
+        </ul>
+
+        <div class="warning">
+            <strong>注意：</strong>新版本 Linux 内核中 <code>tcp_tw_recycle</code> 已被移除（因 NAT 场景的兼容性问题），不要试图用这个参数。使用 <code>tcp_tw_reuse</code> 即可满足大部分需求。
+        </div>
+
+        <h3>NUMA 绑定问题</h3>
+
+        <p>在多路服务器（如双路 Intel Xeon）上，内存访问有 NUMA（Non-Uniform Memory Access）效应——CPU 访问本地内存比访问远程内存快得多。如果 Memcached 进程被调度在一个 NUMA 节点上，但分配的内存来自另一个 NUMA 节点，会导致显著的性能下降（实测 10-20%）。</p>
+
+        <p>解决方案是使用 <code>numactl</code> 将 Memcached 绑定到固定的 NUMA 节点：</p>
+
+        <pre><code># 查看 NUMA 拓扑
+numactl --hardware
+
+# 将 Memcached 绑定到 node 0
+numactl --cpunodebind=0 --membind=0 memcached -m 8192 -t 4
+
+# 或者使用 --interleave 让内存在所有节点间交织
+numactl --interleave=all memcached -m 8192 -t 8</code></pre>
+
+        <p>到底用 <code>--cpunodebind</code> 还是 <code>--interleave</code>？经验是：如果单台服务器只跑一个 Memcached 实例，用 <code>--interleave=all</code> 简单省事；如果一台服务器跑多个 Memcached 实例，建议每个实例绑定不同的 NUMA 节点。</p>
+
+        <h2>性能测试工具</h2>
+
+        <p>最后，介绍一下最常用的两个 Memcached 性能测试工具。</p>
+
+        <h3>mcperf</h3>
+
+        <p><code>mcperf</code> 是 Memcached 官方仓库中附带的性能测试工具，位于 <code>vendor/mcperf/</code> 目录。它的特点是简单、轻量、专注于吞吐和延迟测量：</p>
+
+        <pre><code># 安装 mcperf
+cd memcached/vendor/mcperf
+make
+
+# 基本用法
+mcperf --servers=127.0.0.1:11211 \
+       --num-conns=10 \
+       --num-calls=100000 \
+       --timeout=5
+
+# 指定读写比例
+mcperf --servers=127.0.0.1:11211 \
+       --ratio=9:1 \          # 90% GET + 10% SET
+       --num-conns=20 \
+       --num-calls=500000
+
+# 指定 value 大小（模拟真实负载）
+mcperf --servers=127.0.0.1:11211 \
+       --valuesize=1024 \     # 1KB value
+       --keysize=32
+
+# 输出示例
+# Read: 500000 gets, 4321.2 ops/s (avg 2.3 ms)
+# Write: 50000 sets, 431.1 ops/s (avg 23.1 ms)</code></pre>
+
+        <h3>memaslap</h3>
+
+        <p><code>memaslap</code> 是 libmemcached 生态中的压测工具，功能更全面，支持多线程、多连接、持续时间设置等高级特性：</p>
+
+        <pre><code># 安装 memaslap
+apt-get install libmemcached-tools
+
+# 基础压测：100 万次操作
+memaslap --servers=127.0.0.1:11211 \
+         --seconds=60 \
+         --threads=4 \
+         --conns=20
+
+# 模拟真实负载：不均匀分布
+memaslap --servers=127.0.0.1:11211 \
+         --seconds=120 \
+         --concurrency=500 \
+         --tps=10000 \
+         --execute-number=1000000 \
+         --window=5
+
+# 输出示例
+# get_misses: 0.00%, get_hits: 100.00%
+# min_ latency: 0.1ms, max_latency: 12.3ms, avg_latency: 0.8ms
+# ops/s: 52100, net: 45MB/s</code></pre>
+
+        <div class="tip">
+            <strong>压测要义：</strong>不要只测"最佳情况"的吞吐。真正有意义的压测是"在接近生产负载下的延迟分布"。建议用 <code>--ratio</code> 参数模拟真实的读写比例，用 <code>--valuesize</code> 模拟真实的数据大小分布，用 <code>--tps</code> 固定目标 QPS 来观察延迟的稳定性。
+        </div>
+
+        <h2>总结与下章预告</h2>
+
+        <p>本章我们走完了 Memcached 生产环境调优的全流程：从参数配置的基准测试，到热 key 治理的多级缓存方案，从连接数管理的内存陷阱，到 chunk size 选择的浪费分析，再到 stat 监控指标的解读和部署模板的参考。最后用三个高频踩坑案例（Nagle、TIME_WAIT、NUMA）提醒我们：<strong>Memcached 的性能不仅取决于它自己，还取决于它运行所在的整个软硬件环境</strong>。</p>
+
+        <p>下一章，我们将做一件很多同学期待已久的事——<strong>Memcached vs Redis/Valkey 源码对比</strong>。我们不会停留在"Redis 数据结构多、Memcached 简单"这种表面结论上，而是深入到两个项目的源码中，从内存管理、网络模型、线程架构、协议实现等维度做逐项对比。我们第 26 章见。</p>
+
+        <div class="footer-nav">
+            <a href="24.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="26.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

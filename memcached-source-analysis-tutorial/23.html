@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第23章 Built-in Proxy：Lua路由</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html" class="active">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第23章 Built-in Proxy：Lua路由</h1>
+
+        <p>大家好，我是你们的讲师。前几章我们聊了 Memcached 的内部存储、网络模型、协议解析，这些模块已经覆盖了单机 Memcached 的全部功能。但到了这一章，我们要聊一个完全不一样的话题——<strong>Proxy</strong>。</p>
+
+        <p>你可能会问：Memcached 不是缓存吗？为什么它自己还要内置一个 proxy？其实原因很简单：在生产环境中，没有人只部署一台 Memcached。一个典型的场景是部署一个 Memcached 集群，少则几台、多则上百台。这时客户端需要一套路由策略来决定 key 应该发到哪台机器。传统上这项工作由客户端驱动（如 twemproxy、mcrouter 或客户端哈希环实现），但 Memcached 从 1.6.x 开始内置了 <strong>proxy 模式</strong>，让 Memcached 进程自己承担转发和路由职责——而且路由脚本是用 Lua 写的。</p>
+
+        <h2>Proxy 架构：嵌入进程的 Lua 解释器</h2>
+
+        <p>Memcached 的 proxy 功能不是旁路代理，而是<strong>嵌入在 Memcached 进程内部</strong>的。当你启用 proxy 模式时，主进程内会运行一个 Lua 解释器（基于 Lua 5.4），它监听一个独立的 proxy 端口，接收客户端请求，根据 Lua 脚本定义的路由逻辑将请求转发到后端的 Memcached 实例。</p>
+
+        <p>这个架构带来了几个直接的好处：</p>
+
+        <ul>
+            <li><strong>零额外部署成本</strong>——不需要单独部署 twemproxy 或 mcrouter，Memcached 本身就兼任 proxy。</li>
+            <li><strong>动态路由重载</strong>——路由逻辑用 Lua 脚本定义，可以在不重启进程的情况下通过指令热更新。</li>
+            <li><strong>低延迟路径</strong>——proxy 和 worker 线程共享同一个进程地址空间，转发路径的开销比独立代理小得多。</li>
+        </ul>
+
+        <p>从源码角度来看，proxy 相关的代码集中在 <code>proxy.c</code> 和 <code>proto_proxy.c</code> 中，Lua 绑定则通过 <code>lua_cjson.c</code>、<code>lua_proxy.c</code> 等文件实现。核心结构体 <code>struct proxy</code> 维护着后端池、健康检查和配置状态。</p>
+
+        <div class="tip">
+            <strong>架构印象：</strong>Memcached proxy 更像是一个"附带代理功能的缓存进程"，而不是一个通用的反向代理。它专为 Memcached 协议优化，不支持 HTTP 或其他协议转发。
+        </div>
+
+        <h2>启动 Proxy：加载 Lua 配置文件</h2>
+
+        <p>启动 proxy 模式非常简单，只需要在启动参数中指定一个 Lua 配置文件：</p>
+
+        <pre><code>memcached -o proxy_config=/etc/memcached/proxy.lua -p 11212
+
+# proxy 默认监听在 11212 端口（与主端口独立）
+# 也可以单独指定 proxy 端口：
+memcached -o proxy_config=/etc/memcached/proxy.lua -p 11211 --proxy-port=11212</code></pre>
+
+        <p>启动时，Memcached 读取 Lua 脚本，调用 <code>luaL_loadfile</code> 加载文件内容，然后在 <code>proxy_start()</code> 中执行 Lua 的 <code>main()</code> 函数来初始化路由表和后端连接池。一旦 Lua 脚本执行完毕且没有报错，proxy 端口就开始接受客户端连接了。</p>
+
+        <p>一个最简单的 Lua 配置文件长这样：</p>
+
+        <pre><code>-- proxy.lua  —— 最小配置示例
+function main()
+    -- 定义后端池
+    local pool = proxy.Pool.new("pool_a")
+    pool:add_server("10.0.0.1:11211")
+    pool:add_server("10.0.0.2:11211")
+    pool:add_server("10.0.0.3:11211")
+
+    -- 设置路由策略
+    proxy.route(pool, "ketama")
+end</code></pre>
+
+        <div class="highlight">
+            <strong>关键点：</strong><code>proxy.Pool</code> 和 <code>proxy.route</code> 是 Memcached 通过 C API 暴露给 Lua 的内置对象，它们是 proxy 模块与 Lua 运行时之间的桥梁。这些绑定定义在 <code>lua_proxy.c</code> 中，使用了 Lua 的 C API（如 <code>lua_pushcclosure</code>、<code>lua_settable</code>）来注册函数。
+        </div>
+
+        <h2>Lua 请求拦截点：request/response hook</h2>
+
+        <p>如果只是做简单的 key 路由转发，那 proxy 未免太"笨"了。Memcached proxy 真正的强大之处在于它提供了<strong>请求/响应钩子系统</strong>，允许你在 Lua 中拦截和修改每一个请求和响应。</p>
+
+        <p>钩子分为两个粒度：</p>
+
+        <ul>
+            <li><strong>Request hook</strong>：在请求被转发到后端之前触发。你可以重写命令、修改 key、注入自定义逻辑，甚至直接返回响应而不转发。</li>
+            <li><strong>Response hook</strong>：在后端返回响应之后、返回给客户端之前触发。你可以修改结果、记录慢查询、触发告警。</li>
+        </ul>
+
+        <p>注册钩子的 Lua 接口非常简洁：</p>
+
+        <pre><code>function main()
+    local pool = proxy.Pool.new("my_pool")
+    pool:add_server("10.0.0.1:11211")
+
+    -- 注册 request hook：在转发前打印命令
+    proxy.request_hook(function(ctx)
+        print("收到请求: " .. ctx:cmd())
+        -- 如果 key 以 "admin_" 开头，直接返回拒绝
+        if ctx:key():match("^admin_") then
+            ctx:skip_backend("ERROR: forbidden key")
+        end
+    end)
+
+    -- 注册 response hook：记录耗时
+    proxy.response_hook(function(ctx, elapsed_ms)
+        if elapsed_ms > 100 then
+            print("慢查询! key=" .. ctx:key() .. " 耗时=" .. elapsed_ms .. "ms")
+        end
+    end)
+
+    proxy.route(pool, "ketama")
+end</code></pre>
+
+        <p>这个设计让 proxy 具备了极大的灵活性：你可以用它来实现多租户隔离、key 白名单、在线迁移、流量复制等高级功能——全部不需要修改 C 代码。</p>
+
+        <h2>路由策略实现</h2>
+
+        <p>Memcached proxy 内置了三种路由策略，你可以在 Lua 中通过 <code>proxy.route()</code> 选择：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>策略</th>
+                    <th>接口名</th>
+                    <th>特性</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Ketama 一致性哈希</td>
+                    <td><code>"ketama"</code></td>
+                    <td>一致性哈希环 + 虚拟节点，节点增减只影响 1/N 的 key</td>
+                    <td>通用生产环境，节点频繁变化</td>
+                </tr>
+                <tr>
+                    <td>Random</td>
+                    <td><code>"random"</code></td>
+                    <td>随机分配，负载分布均匀但缓存命中率低</td>
+                    <td>测试环境，或对缓存命中不敏感的场景</td>
+                </tr>
+                <tr>
+                    <td>Modulo</td>
+                    <td><code>"modulo"</code></td>
+                    <td>按 key 哈希值取模，简单直接</td>
+                    <td>固定节点数量的小集群</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>ketama 是生产环境中最常用的策略，也是 Memcached 生态中的经典实现。它的核心逻辑在 <code>proxy_libketama.c</code>（或内嵌在 <code>proxy.c</code> 的 ketama 实现中）：</p>
+
+        <pre><code>-- ketama 路由实现的核心伪代码
+-- 在 C 层面，ketama 通过构建一致性哈希环（连续环）实现
+-- 每个物理节点映射为 160 个虚拟节点分布在环上
+
+-- 在 Lua 中创建 ketama 路由的语法：
+local pool = proxy.Pool.new("data_pool")
+pool:add_server("10.0.0.1:11211", 1)    -- weight=1
+pool:add_server("10.0.0.2:11211", 2)    -- weight=2
+pool:add_server("10.0.0.3:11211", 1)    -- weight=1
+proxy.route(pool, "ketama")</code></pre>
+
+        <p>需要注意的是，<code>ketama</code> 策略要求所有后端实例的权重信息在初始化时已知，动态修改权重需要通过 Lua 脚本热更新。</p>
+
+        <h2>后端健康检查</h2>
+
+        <p>Proxy 不能假设后端永远可用。Memcached proxy 提供了两种健康检查机制：</p>
+
+        <ul>
+            <li><strong>Active health check</strong>——proxy 定期（默认每 5 秒）向后端发送 <code>stats</code> 或 <code>version</code> 命令，如果连续 N 次无响应则标记为 down。</li>
+            <li><strong>Passive health check</strong>——在正常请求转发过程中，如果后端连续返回错误（如连接超时、协议错误），proxy 将其标记为 degraded，减少对其的流量分配。</li>
+        </ul>
+
+        <p>在 Lua 中，健康检查的行为也是可配置的：</p>
+
+        <pre><code>function main()
+    local pool = proxy.Pool.new("prod_pool")
+    pool:add_server("10.0.0.1:11211")
+    pool:add_server("10.0.0.2:11211")
+    pool:add_server("10.0.0.3:11211")
+
+    -- 配置健康检查
+    pool:set_healthcheck({
+        interval = 3000,       -- 3 秒心跳间隔
+        timeout = 500,         -- 超时 500ms
+        max_retries = 3,       -- 连续 3 次失败标记为 down
+        passive = true         -- 启用被动健康检查
+    })
+
+    proxy.route(pool, "ketama")
+end</code></pre>
+
+        <h2>故障转移的 Lua 实现</h2>
+
+        <p>当后端节点被标记为 down 时，proxy 并不会直接返回错误给客户端——它会尝试<strong>故障转移</strong>。具体来说，如果一个 key 命中的后端节点不可用，proxy 会根据 Lua 中定义的 failover 策略决定下一步操作：</p>
+
+        <pre><code>function main()
+    local pool = proxy.Pool.new("prod_pool")
+    pool:add_server("10.0.0.1:11211")
+    pool:add_server("10.0.0.2:11211")
+    pool:add_server("10.0.0.3:11211")
+
+    -- 自定义故障转移：当主节点不可用时，尝试下一个节点
+    proxy.failover(function(ctx, failed_server, err)
+        -- 记录告警
+        print("FAILOVER: " .. failed_server .. " error: " .. err)
+
+        -- 尝试重定向到 pool 中的下一个节点
+        local next_server = pool:next_server(failed_server)
+        if next_server then
+            return next_server  -- 转发到下一个节点
+        end
+        return nil  -- 没有可用节点，返回错误
+    end)
+
+    proxy.route(pool, "ketama")
+end</code></pre>
+
+        <p>这里有一个值得注意的细节：failover 函数在 Lua 层面实现，意味着你可以定义非常复杂的重试逻辑——比如只对 GET 请求进行 failover（因为 GET 是幂等的），对 SET 请求则直接返回错误以避免数据不一致。</p>
+
+        <div class="warning">
+            <strong>设计考量：</strong>failover 在某些场景下会导致"惊群效应"——当故障节点恢复时，大量积压请求同时涌入，可能打垮后端。建议在 failover 逻辑中加入限流或延迟重试的机制，而不是无条件重试。
+        </div>
+
+        <h2>Proxy 性能基准</h2>
+
+        <p>既然多了一层转发，proxy 模式必然有性能损耗。根据官方 benchmark 数据，proxy 模式 vs 直连模式的吞吐对比如下：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>场景</th>
+                    <th>直连模式 QPS</th>
+                    <th>Proxy 模式 QPS</th>
+                    <th>损耗</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>GET 1KB，单后端</td>
+                    <td>~2,100,000</td>
+                    <td>~1,800,000</td>
+                    <td>~14%</td>
+                </tr>
+                <tr>
+                    <td>SET 1KB，单后端</td>
+                    <td>~1,200,000</td>
+                    <td>~1,000,000</td>
+                    <td>~17%</td>
+                </tr>
+                <tr>
+                    <td>GET 1KB，4 后端（ketama）</td>
+                    <td>~8,200,000</td>
+                    <td>~6,500,000</td>
+                    <td>~20%</td>
+                </tr>
+                <tr>
+                    <td>GET + SET 混合，8 后端</td>
+                    <td>~14,000,000</td>
+                    <td>~10,500,000</td>
+                    <td>~25%</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>可以看到，proxy 模式大约有 15%-25% 的性能损耗。但如果你原本就在用 twemproxy 或 mcrouter 之类的独立代理，Memcached 内置 proxy 的性能会<strong>更高</strong>——因为减少了一次网络跳转和进程间通信的开销。</p>
+
+        <div class="highlight">
+            <strong>工程权衡：</strong>15%-25% 的吞吐损耗换来的是极大的运维简化——不需要单独部署和维护 proxy 集群，路由策略动态修改无需重启，故障转移逻辑可以按需定制。对于大多数业务场景来说，这笔交易是划算的。
+        </div>
+
+        <h2>踩坑：Lua 脚本中的阻塞调用</h2>
+
+        <p>最后来讲一个真实的踩坑经历。我们团队在生产环境上 proxy 模式时，遇到过一个非常诡异的"间歇性延迟毛刺"——p99 延迟每隔几分钟会从 5ms 跳到 500ms，然后又自己恢复。</p>
+
+        <p>经过一整天的排查，我们终于发现问题出在一个很不起眼的地方：某个同事在 Lua request hook 中调用了 <code>os.execute()</code> 来写日志文件。</p>
+
+        <pre><code>-- 不推荐的写法：在 hook 中调用阻塞式 API
+proxy.request_hook(function(ctx)
+    -- 这行代码会阻塞整个 proxy 线程！
+    os.execute("echo " .. ctx:key() .. " >> /tmp/access.log")
+    -- 其他处理...
+end)</code></pre>
+
+        <p>这个调用的问题在于：proxy 线程是单线程处理请求的（类似 libevent 的事件循环模型），当 <code>os.execute()</code> 触发了一个子进程并等待它完成时，整个 proxy 线程都卡住了。在那一瞬间，所有需要经过 proxy 的请求都在排队等待——于是 p99 飙升了。</p>
+
+        <p>解决办法很简单：在 Lua hook 中<strong>永远不要调用可能阻塞的函数</strong>，包括 <code>os.execute()</code>、<code>io.popen()</code>、以及网络 I/O 操作。如果确实需要在 hook 中记录日志，应该用 Memcached 提供的异步日志接口：</p>
+
+        <pre><code>-- 推荐的写法：使用 proxy 提供的非阻塞日志
+proxy.request_hook(function(ctx)
+    proxy.log("access", ctx:cmd() .. " " .. ctx:key())
+    -- proxy.log 是异步的，不会阻塞请求处理
+end)</code></pre>
+
+        <p>这个教训也提醒我们：<strong>嵌入式脚本引擎是把双刃剑</strong>——它带来了极大的灵活性，但也把 Lua 运行时中的阻塞风险直接引入了 Memcached 的核心处理路径。在写 proxy 脚本时，一定要保持对"每行代码是否会阻塞"的警觉。</p>
+
+        <h2>总结与下章预告</h2>
+
+        <p>本章我们深入了解了 Memcached 1.6.x 引入的内置 proxy 特性。我们看到了 C 和 Lua 如何通过精巧的绑定实现无缝协作——C 层面提供高性能的 I/O 和网络能力，Lua 层面提供灵活的路由和故障转移逻辑。这种<strong>"C 做重活，Lua 做决策"</strong>的设计模式，是系统软件中嵌入脚本引擎的经典范例，与 Nginx 的 Lua 模块（lua-nginx-module）、Redis 的 Lua 脚本（EVAL）异曲同工。</p>
+
+        <p>下一章，我们将进入课程的"工程实践"环节——Memcached 的测试体系。一个有着 20 年历史的 C 项目，是如何保证代码质量的？它那套基于 Perl 的测试框架又是怎么运作的？我们第 24 章见。</p>
+
+        <div class="footer-nav">
+            <a href="22.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="24.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

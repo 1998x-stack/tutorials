@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 谱估计进阶</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🎛️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 数字信号处理导论</a></li>
+            <li><a href="02.html">第2章 离散时间信号</a></li>
+            <li><a href="03.html">第3章 离散时间系统</a></li>
+            <li><a href="04.html">第4章 采样定理</a></li>
+            <li><a href="05.html">第5章 Z变换</a></li>
+            <li><a href="06.html">第6章 频域分析</a></li>
+            <li><a href="07.html">第7章 离散傅里叶变换 (DFT)</a></li>
+            <li><a href="08.html">第8章 快速傅里叶变换 (FFT)</a></li>
+            <li><a href="09.html">第9章 FIR滤波器设计</a></li>
+            <li><a href="10.html">第10章 IIR滤波器设计</a></li>
+            <li><a href="11.html">第11章 滤波器结构</a></li>
+            <li><a href="12.html">第12章 多速率信号处理 (一)</a></li>
+            <li><a href="13.html">第13章 多速率信号处理 (二)</a></li>
+            <li><a href="14.html">第14章 统计信号处理基础</a></li>
+            <li><a href="15.html">第15章 自适应滤波器</a></li>
+            <li><a href="16.html">第16章 高级自适应算法</a></li>
+            <li><a href="17.html" class="active">第17章 谱估计进阶</a></li>
+            <li><a href="18.html">第18章 时频分析</a></li>
+            <li><a href="19.html">第19章 MATLAB/Python DSP仿真</a></li>
+            <li><a href="20.html">第20章 定点DSP实现</a></li>
+            <li><a href="21.html">第21章 嵌入式DSP芯片开发</a></li>
+            <li><a href="22.html">第22章 FPGA上的DSP</a></li>
+            <li><a href="23.html">第23章 音频信号处理</a></li>
+            <li><a href="24.html">第24章 通信数字信号处理</a></li>
+            <li><a href="25.html">第25章 图像信号处理</a></li>
+            <li><a href="26.html">第26章 AI+DSP融合</a></li>
+            <li><a href="27.html">第27章 软件无线电 (SDR)</a></li>
+            <li><a href="28.html">第28章 综合项目：实时音频处理器</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第17章 谱估计进阶</h2>
+
+        <p>从第7章开始，我们就一直在用FFT做频谱分析。你可能会觉得：求信号的功率谱不就是做FFT然后取模平方吗？还有什么好讨论的？</p>
+
+        <p>如果你真的在实际工作中尝试过用FFT分辨两个频率非常接近的正弦信号，你一定遇到过这样的窘境：明明信号里有两个频率，但频谱图上只有一个峰——它们被FFT的主瓣"吞"掉了。这就是经典谱估计方法的命门：<strong>分辨率受数据长度限制</strong>。</p>
+
+        <p>我2019年在一个雷达信号处理项目中就踩过这个坑。我们需要从一段只有256个采样点的脉冲回波中分辨两个相距约0.02倍采样率的散射中心。FFT做出来只有一个胖胖的峰。团队争论了很久到底是硬件问题还是算法问题——直到我们换用了MUSIC算法，两个峰清晰地出现在谱图上。那一刻我才深刻体会到：<strong>经典谱估计不是不够好，而是有物理极限；参数化方法和子空间方法可以突破这个极限。</strong></p>
+
+        <div class="highlight">
+            <strong>💡 核心认知：</strong>FFT周期图的频率分辨率由数据长度 \(N\) 决定——\(\Delta f = f_s / N\)，这就是著名的"Rayleigh限"。参数化谱估计和子空间方法通过引入信号的数学模型，能够突破这一极限，获得所谓的"超分辨率"（super-resolution）。
+        </div>
+
+        <h3>17.1 经典谱估计的局限性——Rayleigh限</h3>
+
+        <p>在进入高级方法之前，我们先确认一下经典方法为什么不够用。给定长度为 \(N\) 的数据序列 \(x[0], x[1], ..., x[N-1]\)，周期图法（Periodogram）计算功率谱的方式是：</p>
+
+        <p style="text-align:center;font-size:1.1em;font-weight:bold;">
+            \(P_{\text{per}}(f) = \frac{1}{N} \left|\sum_{n=0}^{N-1} x[n] e^{-j2\pi fn}\right|^2\)
+        </p>
+
+        <p>它的频率分辨率约为 \(f_s/N\)。这是为什么？因为DFT本质上是在用一组固定频率的正弦基函数去"匹配"信号——长度 \(N\) 的观测窗口决定了每个基函数的主瓣宽度。你可以用零填充（zero-padding）让频谱看起来更"平滑"，但<strong>零填充不能提高分辨率</strong>（它只是插值，没有增加信息）。</p>
+
+        <p>这就是所谓的<strong>Rayleigh限</strong>：如果两个频率分量的间距小于 \(1/N\)（归一化频率），它们在周期图中会合并成一个峰。这个极限是傅里叶分析本身固有的，不是你换窗函数（如Hamming、Blackman）就能解决的——窗函数只能降低旁瓣，但会加宽主瓣，使分辨率<strong>更差</strong>。</p>
+
+        <h3>17.2 参数化谱估计：先建模，再算谱</h3>
+
+        <p>周期图法是"非参数化"的——它对信号不做任何模型假设，直接计算傅里叶变换。参数化方法走的是另一条路：<strong>先假设信号符合某个参数模型，估计出模型参数，再由模型参数计算出频谱</strong>。</p>
+
+        <p>最常用的参数化模型是<strong>AR模型</strong>（自回归模型）。一个 \(p\) 阶AR模型将当前样本表示为前 \(p\) 个样本的线性组合加上白噪声激励：</p>
+
+        <p style="text-align:center;font-size:1.1em;font-weight:bold;">
+            \(x[n] = -\sum_{k=1}^{p} a[k] x[n-k] + u[n]\)
+        </p>
+
+        <p>其中 \(u[n]\) 是均值为零、方差为 \(\sigma^2\) 的白噪声。一旦估计出 AR 系数 \(a[1], ..., a[p]\) 和激励噪声方差 \(\sigma^2\)，信号的功率谱就由下式给出：</p>
+
+        <p style="text-align:center;font-size:1.1em;font-weight:bold;">
+            \(P_{\text{AR}}(f) = \frac{\sigma^2}{\left|1 + \sum_{k=1}^{p} a[k] e^{-j2\pi f k}\right|^2}\)
+        </p>
+
+        <p>这个公式的本质是什么？AR模型把信号看成是白噪声经过一个全极点滤波器（IIR）的输出，功率谱就是该滤波器的幅频响应。由于模型可以产生任意尖锐的谱峰（只要极点靠近单位圆），AR谱的分辨率可以远高于周期图法——<strong>前提是模型阶数 \(p\) 选对了</strong>。</p>
+
+        <div class="warning">
+            <strong>⚠️ 踩坑实录：</strong>AR模型谱虽然分辨率高，但模型阶数 \(p\) 的选择非常敏感。阶数选低了，谱峰不够尖锐，欠拟合；阶数选高了会出现"假峰"——也就是在不存在信号分量的频率上产生虚假的谱峰。常用的定阶准则包括AIC（Akaike Information Criterion）和MDL（Minimum Description Length），但我的经验是：<strong>先结合物理知识做一个合理的上界估计，再用AIC做参考</strong>，不要完全依赖准则自动定阶。
+        </div>
+
+        <h3>17.3 Yule-Walker方程与Levinson-Durbin递推</h3>
+
+        <p>AR模型的系数怎么估计？最经典的方法是<strong>Yule-Walker方程</strong>。</p>
+
+        <p>将AR模型等式两边乘以 \(x^*[n-m]\) 并取期望，利用 \(u[n]\) 与过去样本的不相关性，可以得到：</p>
+
+        <p style="text-align:center;font-size:1.1em;font-weight:bold;">
+            \(r[m] = -\sum_{k=1}^{p} a[k] r[m-k], \quad m = 1, 2, ..., p\)
+        </p>
+
+        <p>写成矩阵形式：</p>
+
+        <p style="text-align:center;font-size:1.1em;font-weight:bold;">
+            \(\begin{bmatrix} r[0] & r[1]^* & \cdots & r[p-1]^* \\ r[1] & r[0] & \cdots & r[p-2]^* \\ \vdots & \vdots & \ddots & \vdots \\ r[p-1] & r[p-2] & \cdots & r[0] \end{bmatrix} \begin{bmatrix} a[1] \\ a[2] \\ \vdots \\ a[p] \end{bmatrix} = -\begin{bmatrix} r[1] \\ r[2] \\ \vdots \\ r[p] \end{bmatrix}\)
+        </p>
+
+        <p>其中 \(r[m] = E[x[n] x^*[n-m]]\) 是自相关函数。注意这个矩阵是<strong>Toeplitz矩阵</strong>（每条对角线上的元素相等）——这个结构可以用<strong>Levinson-Durbin递推</strong>高效求解，复杂度仅为 \(O(p^2)\) 而非 \(O(p^3)\)。</p>
+
+        <p>Levinson-Durbin递推的核心思想是：从1阶AR模型开始，逐次增加阶数，每一阶的解都可以通过上一阶的解递推得到。递推过程中还会得到一个副产品——<strong>反射系数（reflection coefficient）</strong> \(k_p\)。这些反射系数在语音编码（LPC）和Burg算法中都非常重要。</p>
+
+        <pre><code>// Levinson-Durbin递推算法
+初始化:
+    a_1[1] = -r[1] / r[0]
+    σ²_1 = (1 - |a_1[1]|²) * r[0]
+
+对阶数 m = 2, 3, ..., p:
+    // 计算第m阶反射系数
+    k_m = -(r[m] + sum_{i=1}^{m-1} a_{m-1}[i] * r[m-i]) / σ²_{m-1}
+
+    // 更新系数
+    a_m[m] = k_m
+    for i = 1 to m-1:
+        a_m[i] = a_{m-1}[i] + k_m * a_{m-1}[m-i]^*  // 注意对称性!
+
+    // 更新预测误差功率
+    σ²_m = (1 - |k_m|²) * σ²_{m-1}</code></pre>
+
+        <div class="tip">
+            <strong>🔧 编程小技巧：</strong>Levinson-Durbin递推中系数更新的对称性 \(a_m[i] = a_{m-1}[i] + k_m \cdot a_{m-1}[m-i]^*\) 是一个经典的"Toeplitz矩阵的廉价求逆"的思路。当你实现这段代码时，注意系数索引的翻转——这是一个非常容易写错下标的地方。建议先用阶数 \(p=2\) 手动推导一遍再写代码。
+        </div>
+
+        <h3>17.4 Burg算法：数据驱动+稳定性保障</h3>
+
+        <p>Yule-Walker方程的一个潜在问题：它用自相关估计值代入方程，而自相关估计在短数据情况下可能有偏且方差大。此外，Yule-Walker方法不能保证AR模型的稳定性（即所有极点都在单位圆内）。</p>
+
+        <p><strong>Burg算法</strong>是解决这些问题的一个优雅方案。它的核心思想是：<strong>直接从前向预测误差和后向预测误差来估计反射系数</strong>，而不是通过自相关函数间接计算。</p>
+
+        <ul>
+            <li><strong>前向预测误差：</strong> \(f_m[n] = x[n] + \sum_{i=1}^{m} a_m[i] x[n-i]\)</li>
+            <li><strong>后向预测误差：</strong> \(b_m[n] = x[n-m] + \sum_{i=1}^{m} a_m[i]^* x[n-m+i]\)</li>
+        </ul>
+
+        <p>Burg算法选取反射系数 \(k_m\) 使前向和后向预测误差功率之和最小：</p>
+
+        <p style="text-align:center;font-size:1.1em;font-weight:bold;">
+            \(k_m = \frac{-2 \sum_{n=m}^{N-1} f_{m-1}[n] b_{m-1}[n-1]^*}{\sum_{n=m}^{N-1} (|f_{m-1}[n]|^2 + |b_{m-1}[n-1]|^2)}\)
+        </p>
+
+        <p>Burg算法有一个非常宝贵的性质：<strong>只要数据不是完全病态的，估算出的反射系数一定满足 \(|k_m| < 1\)，从而保证AR模型稳定</strong>。这使得Burg算法成为工程中最受欢迎的AR谱估计方法——在语音信号处理和雷达测速测距中几乎是标配。</p>
+
+        <h3>17.5 子空间方法：MUSIC的超分辨率能力</h3>
+
+        <p>AR模型谱虽然能提供比周期图更高的分辨率，但它仍然受模型阶数的限制，而且对含噪信号的表现并不总是完美。如果我们需要真正的"超分辨率"——在极短数据长度下分辨频率间距极小的正弦信号——那就需要更强大的工具。</p>
+
+        <p><strong>MUSIC（Multiple Signal Classification）</strong>算法由Schmidt在1979年提出，是子空间方法中最经典的代表。它的核心思想非常优雅：</p>
+
+        <p>假设信号由 \(K\) 个复正弦加白噪声组成。那么信号向量 \(\mathbf{x}(n) \in \mathbb{C}^{M \times 1}\) 的自相关矩阵 \(\mathbf{R} = E[\mathbf{x}(n) \mathbf{x}^H(n)]\) 可以分解为<strong>信号子空间</strong>和<strong>噪声子空间</strong>：</p>
+
+        <p style="text-align:center;font-size:1.1em;font-weight:bold;">
+            \(\mathbf{R} = \mathbf{U}_s \mathbf{\Lambda}_s \mathbf{U}_s^H + \mathbf{U}_n \mathbf{\Lambda}_n \mathbf{U}_n^H\)
+        </p>
+
+        <p>关键性质：<strong>信号子空间和噪声子空间相互正交</strong>。这意味着噪声子空间的特征向量与所有信号频率的导向矢量正交。反过来，在伪谱（pseudo-spectrum）中搜索使得导向矢量与噪声子空间正交性最强的频率，就得到了频率估计。</p>
+
+        <p>MUSIC伪谱的计算公式为：</p>
+
+        <p style="text-align:center;font-size:1.1em;font-weight:bold;">
+            \(P_{\text{MUSIC}}(f) = \frac{1}{\mathbf{a}^H(f) \mathbf{U}_n \mathbf{U}_n^H \mathbf{a}(f)}\)
+        </p>
+
+        <p>其中 \(\mathbf{a}(f) = [1, e^{j2\pi f}, e^{j4\pi f}, ..., e^{j2\pi (M-1)f}]^T\) 是频率 \(f\) 的导向矢量。当 \(f\) 等于信号中某个正弦分量的真实频率时，分母接近零，伪谱出现尖峰。</p>
+
+        <p>MUSIC的分辨率不再受数据长度的Rayleigh限约束——理论上，只要信噪比足够高且子空间分解正确，它可以分辨频率间距远小于 \(1/N\) 的两个信号。这正是它被称为"超分辨率"算法的原因。</p>
+
+        <h3>17.6 三种谱估计方法对比</h3>
+
+        <p>让我们把三种方法放在一起做一个全方位的对比，帮你快速决策在什么场景下使用哪种方法。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>FFT周期图</th>
+                    <th>AR (Burg)谱</th>
+                    <th>MUSIC</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>方法类别</strong></td>
+                    <td>非参数化</td>
+                    <td>参数化</td>
+                    <td>子空间</td>
+                </tr>
+                <tr>
+                    <td><strong>频率分辨率</strong></td>
+                    <td>低 ~ \(f_s/N\)</td>
+                    <td>中-高（依赖模型阶数）</td>
+                    <td>超分辨率（可远低于 \(f_s/N\)）</td>
+                </tr>
+                <tr>
+                    <td><strong>假峰风险</strong></td>
+                    <td>低（但旁瓣泄漏可能误导）</td>
+                    <td>中（阶数过高时出现假峰）</td>
+                    <td>低（但信号数估计不准时假峰）</td>
+                </tr>
+                <tr>
+                    <td><strong>计算量</strong></td>
+                    <td>最低 \(O(N \log N)\)</td>
+                    <td>中等 \(O(Np)\)</td>
+                    <td>高 \(O(M^3 + M^2 N_f)\)</td>
+                </tr>
+                <tr>
+                    <td><strong>对信噪比要求</strong></td>
+                    <td>低</td>
+                    <td>中</td>
+                    <td>高（低SNR下性能急剧下降）</td>
+                </tr>
+                <tr>
+                    <td><strong>适用场景</strong></td>
+                    <td>初步探索、要求快速、数据长</td>
+                    <td>语音LPC、中等数据长度</td>
+                    <td>雷达/声纳、DOA估计、短数据</td>
+                </tr>
+                <tr>
+                    <td><strong>幅值信息</strong></td>
+                    <td>幅值正确（无偏估计）</td>
+                    <td>幅值不准（看峰位置而非高度）</td>
+                    <td>只有峰位置（伪谱，非真功率）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>💡 工程经验：</strong>在实际项目中，我的习惯是"三步走"——第一步用FFT周期图快速看看数据里大概有哪些频率成分；第二步用Burg算法得到更锐利的谱图确认细节；如果这两个信号实在分不开，再上MUSIC。多数场景到第二步就够用了。只有像雷达测距测速这种对分辨率有极致要求的场景，才值得引入MUSIC的额外复杂度。
+        </div>
+
+        <h3>17.7 本章小结</h3>
+
+        <ul>
+            <li>FFT周期图的频率分辨率受Rayleigh限制约（\(\Delta f = f_s/N\)），无法分辨间距小于 \(1/N\) 的频率分量；</li>
+            <li>参数化谱估计先假设信号符合AR/MA/ARMA模型，从数据估计模型参数后计算功率谱，突破了周期图的分辨率限制；</li>
+            <li>AR模型的Yule-Walker方程利用Toeplitz矩阵结构，通过Levinson-Durbin递推实现 \(O(p^2)\) 高效求解；</li>
+            <li>Burg算法从前向/后向预测误差直接估计反射系数，保证AR模型稳定，是工程中最受欢迎的AR谱估计方法；</li>
+            <li>MUSIC算法利用信号子空间与噪声子空间的正交性实现超分辨率频率估计，是雷达和阵列信号处理中的重要工具。</li>
+        </ul>
+
+        <p>学完这一章，你可能会产生一个新的疑问：谱估计把信号的频率成分分析得再清楚，也只能告诉我们"信号包含哪些频率"——它丢掉了时间信息。如果一个频率成分只出现在信号的前半段而另一个只出现在后半段，谱分析完全看不出来。这就引出了下一章的主题——<strong>时频分析</strong>。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

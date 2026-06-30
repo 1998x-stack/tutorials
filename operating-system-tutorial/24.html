@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第24章 性能分析与调优</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html" class="active">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第24章 性能分析与调优</h2>
+
+        <p>大家好，我是你们的讲师。你是不是也有过这样的体验：上线的时候好好的，跑了两周服务器突然变慢了——CPU打满、磁盘I/O 99%、用户请求超时一塌糊涂。你登录上去 <code>top</code> 一看，nginx占了90%的CPU。然后呢？然后你就不知道了。nginx为什么占CPU？它在忙什么？是处理请求还是在空转？是锁竞争还是频繁系统调用？这些问题，<code>top</code> 一个也答不了。</p>
+
+        <p>性能分析的核心不是"看谁占资源多"，而是"理解资源到底消耗在哪里"。就像医生诊断不是简单说"你发烧了"——得搞清楚是病毒、细菌还是免疫系统的问题。Linux内核提供了perf、eBPF、blktrace一整套性能诊断工具链，它们能深入到CPU指令级、内存分配栈、块层I/O队列，把系统的每一个瓶颈都暴露在聚光灯下。这一章我就带你全面掌握这些武器。</p>
+
+        <p>说个我亲身经历的事。有一年我们做数据库压测，MySQL的QPS始终上不了10万，但CPU只用到了40%。加CPU核心、调大连接数——全部没用。所有人都以为是MySQL配置的问题。我抱着试试看的心态跑了一把 <code>perf top</code>，发现排名第一的热点居然是 <code>spin_lock</code>——一个内核自旋锁的等待。再追下去，是ext4文件系统的日志提交路径上有一个全局锁在压测高峰时导致了严重的争用。最后把文件系统从ext4换成XFS，QPS直接飙到25万。你看，不懂perf的话，你永远想不到瓶颈在内核文件系统层。</p>
+
+        <h2>一、perf全景</h2>
+
+        <p>perf是Linux内核官方提供的性能分析工具集，它利用CPU的PMU（Performance Monitoring Unit）硬件性能和内核的tracepoint，以极低的开销同时采集硬件事件和软件事件。perf不是单一命令，而是一族命令——下面这几个是你最常用的。</p>
+
+        <table>
+            <tr><th>命令</th><th>功能</th><th>典型用法</th></tr>
+            <tr><td>perf top</td><td>实时显示CPU热点（类似top但按函数排序）</td><td>快速定位当前CPU最热的函数</td></tr>
+            <tr><td>perf stat</td><td>统计程序运行时的硬件事件计数</td><td>检查程序的CPI、缓存命中率、分支预测错误率</td></tr>
+            <tr><td>perf record</td><td>采样并记录性能数据到perf.data</td><td>收集一段时间内的CPU调用链样本</td></tr>
+            <tr><td>perf report</td><td>展示perf record的结果</td><td>查看热点函数及其调用链占比</td></tr>
+            <tr><td>perf script</td><td>导出perf.data为可读文本或脚本格式</td><td>将采样数据导出为FlameGraph输入</td></tr>
+        </table>
+
+        <pre><code># 实时查看CPU热点（按CPU周期排序）
+$ perf top
+
+# 对运行中的 nginx 进程做30秒采样
+$ perf record -a -g -p $(pgrep nginx) -- sleep 30
+
+# 查看采样结果
+$ perf report -g graph
+
+# 统计一个程序的硬件事件
+$ perf stat -e cycles,instructions,cache-misses,cache-references ./myapp
+
+# 导出原始数据（用于生成火焰图）
+$ perf script > out.perf</code></pre>
+
+        <div class="tip">
+            <p><strong>实战要点</strong>：<code>-g</code> 表示记录调用链（callchain），这是性能分析的关键——光知道哪个函数热是不够的，你得知道是谁调了它。<code>-a</code> 表示采集所有CPU。采样频率可以通过 <code>-F 99</code> 调整（默认4000Hz，建议降到99-199Hz避免过高的采样开销）。</p>
+        </div>
+
+        <p>perf stat的几个关键指标解读：<code>instructions/cycle</code>（IPC）衡量CPU的效率，理想值在2-4之间，低于1说明有严重的停顿（比如缓存未命中或分支预测错误）；<code>cache-misses/cache-references</code> 比率超过10%通常意味着程序的数据局部性不好，需要考虑优化内存访问模式。</p>
+
+        <h2>二、火焰图的生成与解读</h2>
+
+        <p>perf report虽然强大，但它的调用链树状展示方式在面对百万级采样点时非常难看——层层叠叠的树节点，光是展开就让人头大。Brendan Gregg发明的火焰图（Flame Graph）彻底解决了这个问题：它将所有采样点的调用栈按层级堆叠成一张SVG图，x轴是采样数量（越宽的函数占用CPU越多），y轴是调用深度（底部是顶层函数，顶部是深层调用）。</p>
+
+        <h3>1. 生成火焰图</h3>
+        <pre><code># 第一步：用 perf 采集数据
+$ perf record -a -g -F 99 -- sleep 60
+
+# 第二步：导出为脚本格式
+$ perf script > out.perf
+
+# 第三步：用 FlameGraph 工具栈折叠
+$ git clone https://github.com/brendangregg/FlameGraph.git
+$ FlameGraph/stackcollapse-perf.pl out.perf > out.folded
+
+# 第四步：生成SVG火焰图
+$ FlameGraph/flamegraph.pl out.folded > flamegraph.svg
+
+# 用浏览器打开 flamegraph.svg 即可交互式查看</code></pre>
+
+        <h3>2. 解读火焰图</h3>
+        <p>拿到SVG后，三步法快速定位问题：</p>
+        <p><strong>第一步</strong>：看顶部最宽的色块——那是CPU最热的函数，它们通常是问题的直接原因。比如你看到 <code>__do_softirq</code> 很宽，说明软中断处理消耗了大量CPU。</p>
+        <p><strong>第二步</strong>：追踪这个色块的调用链——鼠标悬停上去，SVG会显示完整的调用栈。比如从 <code>start_kernel</code> → <code>net_rx_action</code> → <code>process_backlog</code> → <code>__do_softirq</code>，这就告诉你网络收包路径上CPU开销大。</p>
+        <p><strong>第三步</strong>：看"平顶山"（一个很宽很扁的色块）——这通常意味着某个函数内部做了大量重复工作，比如不加锁的循环中频繁调用 <code>kmalloc</code>。平顶山通常是优化的最佳目标。</p>
+
+        <div class="highlight">
+            <p><strong>核心洞见</strong>：火焰图的价值在于"让你在30秒内找到瓶颈"。它不追求数学上100%的精确，而是用视觉化的方式让你快速锁定那些"最烫"的路径。Brendan Gregg有一句话说得特别好："如果不能可视化，你就不能理解它；如果不能理解它，你就不能优化它。"</p>
+        </div>
+
+        <h2>三、内存泄漏排查</h2>
+
+        <p>用户态的内存泄漏有valgrind、asan，内核态呢？内核模块一旦发生内存泄漏，系统可用内存会一天天减少，直到OOM killer开始胡乱杀人。Linux内核提供了几种非常有效的内存泄漏检测手段。</p>
+
+        <h3>1. kmemleak</h3>
+        <p>kmemleak（Kernel Memory Leak Detector）的工作原理是周期性扫描内存，寻找"已分配但没有任何指针引用的内存块"。它的扫描基于一个简单的观察：如果一块内存没有引用，它就不可能被释放，这就是泄漏。</p>
+
+        <pre><code># 开启 kmemleak
+$ echo scan > /sys/kernel/debug/kmemleak
+
+# 手动触发扫描
+$ echo scan=60 > /sys/kernel/debug/kmemleak   # 每60秒扫描一次
+
+# 查看发现的泄漏
+$ cat /sys/kernel/debug/kmemleak
+unreferenced object 0xffff888123456000 (size 4096):
+  comm "my_driver", pid 1234, jiffies 4294891234
+  backtrace:
+    [<ffffffff81111234>] kmem_cache_alloc_trace+0x124/0x250
+    [<ffffffffa0000123>] my_alloc_buffer+0x33/0x80 [my_module]
+    [<ffffffffa0000456>] my_open+0x56/0xf0 [my_module]
+    # 从调用栈可以看出，my_open 调用了 my_alloc_buffer 分配了内存
+    # 但没有对应的释放路径</code></pre>
+
+        <p>kmemleak的精度不是100%——它基于引用扫描，某些结构体可能使用位图或其他非直接指针的引用方式，导致误报。但作为第一道防线绰绰有余。</p>
+
+        <h3>2. SLUB Debug</h3>
+        <p>内核的slab分配器（SLUB）有内置的调试功能：Redzone（红色警戒区）和Poisoning（毒化）。Redzone 在每个分配对象的周围放置特殊标记，释放时检查标记是否被改写——如果被改了，说明发生了缓冲区溢出。Poisoning 在释放后将对象内容填充为 <code>0xbb</code>（POISON_FREE），如果在释放后仍然读到这个值，说明有人还在使用已释放的内存。</p>
+
+        <pre><code># 在 kernel cmdline 中开启 slub debug
+slub_debug=UFPZ
+
+# U: 开启 user-tracking（记录分配/释放的调用栈）
+# F: 开启 sanity checks
+# P: 开启 poisoning
+# Z: 开启 redzoning
+
+# 或针对特定 slab 开启
+slub_debug=UFPZ,kmalloc-256</code></pre>
+
+        <div class="warning">
+            <p><strong>性能代价</strong>：slub debug的全部功能（UFPZ）会带来显著的性能开销——内存分配和释放变慢数十倍。只建议在开发调试时开启，或者针对特定怀疑的 slab cache 开启。线上环境至少打开 <code>CONFIG_SLUB_DEBUG</code> 和 <code>CONFIG_SLUB_DEBUG_ON</code>，但不需要全开。</p>
+        </div>
+
+        <h3>3. KASAN辅助定位</h3>
+        <p>上一章讲过的KASAN同样适用于内存泄漏辅助定位——它虽然不直接检测泄漏，但当你访问了已释放内存时，它给出的报告会包含 "Freed by" 信息，帮你找到释放的调用栈。配合kmemleak使用，几乎所有内存类问题都能覆盖。</p>
+
+        <h2>四、I/O延迟分析</h2>
+
+        <p>服务器变慢，很多时候不是因为CPU不够，而是I/O在等。磁盘比内存慢几个数量级，NVMe SSD延迟约10微秒，SATA SSD约100微秒，机械硬盘约10毫秒——差距上千倍。如果系统有大量I/O等待，CPU眼睁睁地闲在那。分析I/O延迟的利器是blktrace和fio。</p>
+
+        <h3>1. blktrace：块层I/O追踪</h3>
+        <p>blktrace追踪块设备层的每一个I/O请求的完整生命周期——从请求产生（Q）到分发给驱动（D）到完成（C）。每个阶段都有时间戳，你可以精确计算I/O在哪个环节卡住了。</p>
+
+        <pre><code># 追踪 /dev/sda 的 I/O 事件
+$ blktrace -d /dev/sda -o blk_out
+
+# 等待一段时间后 Ctrl+C 停止，然后分析结果
+$ blkparse blk_out
+
+# 更直观的方式：用 iowatcher 生成延迟热图
+$ iowatcher -t blk_out -o io_heatmap.svg
+
+# 关键事件类型：
+# Q — 请求加入队列
+# G — 请求合并前的get request
+# D — 请求下发到驱动
+# C — 请求完成</code></pre>
+
+        <p>从 <code>blkparse</code> 的输出中，你要重点关注 <code>D</code> 到 <code>C</code> 的时间差——这是I/O请求的真实服务时间，包括磁盘寻道、旋转延迟和传输时间。如果某个请求 <code>D→C</code> 花费了几十毫秒甚至几百毫秒，那基本可以断定磁盘硬件有问题或者磁盘压力过大。</p>
+
+        <h3>2. fio基准测试</h3>
+        <p>fio是业界标准的I/O性能基准测试工具。它可以模拟各种I/O pattern——随机读写、顺序读写、不同块大小、不同队列深度——然后报告IOPS和延迟分布。</p>
+
+        <pre><code># 随机读测试：4K随机读，队列深度32，运行60秒
+$ fio --name=randread --ioengine=libaio --direct=1 \
+      --bs=4k --rw=randread --size=1G --numjobs=1 \
+      --iodepth=32 --runtime=60 --time_based \
+      --output=randread_result.json --output-format=json
+
+# 结果解读（JSON 格式）：
+# "read" -> "iops_mean": 随机读IOPS
+# "read" -> "clat_ns" -> "percentile": 延迟分布的P50/P95/P99
+
+# 顺序写测试
+$ fio --name=seqwrite --ioengine=libaio --direct=1 \
+      --bs=1M --rw=write --size=10G --runtime=30 \
+      --output=seqwrite_result.json --output-format=json</code></pre>
+
+        <p>fio的结果判读原则：对于SSD，4K随机读的延迟P99应在几百微秒级别，超过1毫秒说明有问题。顺序读写的带宽应与硬件标称值接近（如NVMe SSD标称3.5GB/s，实测应在3GB/s以上）。如果实测值远低于标称值，先检查是否有其他进程争用I/O（用 <code>iostat -x 1</code> 看 <code>%util</code> 和 <code>avgqu-sz</code>）。</p>
+
+        <div class="tip">
+            <p><strong>实战经验</strong>：fio和blktrace经常配合使用——fio建立基线，"这个盘的正常延迟是50微秒"；blktrace在生产环境实时追踪，"有一个请求花了200毫秒"；然后你就知道磁盘出问题了。我在某云厂商排查过一个案例：blktrace显示所有I/O请求的 <code>Q→G</code> 阶段（排队时间）异常长，说明块层的I/O调度队列堵了。原因是一个坏盘的请求一直重试，占满了队列——换盘后一切正常。</p>
+        </div>
+
+        <h2>五、eBPF工具链速查</h2>
+
+        <p>eBPF是Linux内核近年最重要的可观测性技术。BCC（BPF Compiler Collection）提供了几十个开箱即用的工具，涵盖CPU、内存、文件系统、网络、I/O等各个子系统。下面这份速查表让你快速找到需要的工具：</p>
+
+        <table>
+            <tr><th>场景</th><th>工具</th><th>作用</th><th>典型用法</th></tr>
+            <tr><td>新进程创建</td><td>execsnoop</td><td>追踪短生命周期进程（瞬时进程）</td><td>排查"谁启动了那些进程"</td></tr>
+            <tr><td>文件打开</td><td>opensnoop</td><td>监控所有 <code>open()</code> 系统调用</td><td>找出频繁打开文件的进程</td></tr>
+            <tr><td>网络连接</td><td>tcplife</td><td>追踪TCP连接的生命周期</td><td>查看连接持续时间、发送/接收字节数</td></tr>
+            <tr><td>CPU调度延迟</td><td>runqlat</td><td>统计任务在运行队列中的等待时间</td><td>分析CPU过载导致的调度延迟</td></tr>
+            <tr><td>块设备I/O延迟</td><td>biolatency</td><td>统计磁盘I/O的延迟分布</td><td>快速判断磁盘是否健康</td></tr>
+            <tr><td>内存缺页</td><td>pagefaults</td><td>追踪缺页异常（硬缺页和软缺页）</td><td>分析内存访问的局部性</td></tr>
+            <tr><td>系统调用频率</td><td>syscount</td><td>统计最频繁的系统调用</td><td>找出"系统调用密集"的进程</td></tr>
+            <tr><td>文件系统读写</td><td>trace</td><td>追踪VFS层的读写操作</td><td>查看每次 <code>read()/write()</code> 的延迟</td></tr>
+            <tr><td>TCP重传</td><td>tcpretrans</td><td>监控TCP重传事件</td><td>排查网络丢包和延迟抖动</td></tr>
+            <tr><td>缓存命中</td><td>cachestat</td><td>统计文件系统缓存命中率</td><td>判断是否需要调整缓存策略</td></tr>
+        </table>
+
+        <pre><code># BCC 工具使用示例
+$ execsnoop                    # 实时监控新进程创建
+PCOMM            PID    PPID   RET ARGS
+nginx            12345  1        0 /usr/sbin/nginx
+php-fpm7.4       12346  1234     0 /usr/sbin/php-fpm7.4
+
+$ opensnoop -T                  # 追踪所有 open 系统调用及耗时
+PID    COMM               FD   ERR  LAT(us) PATH
+1234   nginx              11   0    2      /var/log/nginx/access.log
+1235   php-fpm            5    0    15     /etc/php/7.4/fpm/php.ini
+
+$ runqlat                     # 查看CPU调度延迟分布
+usecs               : count     distribution
+0 -> 1              : 0        |                                        |
+2 -> 3              : 0        |                                        |
+4 -> 7              : 28       |*************************               |
+8 -> 15             : 45       |****************************************|
+16 -> 31            : 12       |**********                              |</code></pre>
+
+        <p>这些工具的核心理念是"一个工具只做一件事，但做到极致"。你不需要记住所有参数——记住每种场景对应的工具名字就行。当服务器出问题时，按"CPU→内存→磁盘→网络"的顺序逐一排查，每个维度都有对应的eBPF工具给你答案。</p>
+
+        <div class="highlight">
+            <p><strong>关键认知</strong>：perf 和 eBPF 不是对立的——perf 擅长CPU级的硬件事件分析（PMU采样），eBPF 擅长内核协议栈和系统调用的动态追踪。两者结合使用效果最佳：先用 perf 找到CPU热点，再用 eBPF 深入热点函数的上下文，看看到底是因为什么触发了高CPU消耗。这就是Linux性能分析的"黄金搭档"。</p>
+        </div>
+
+        <p>这一章我们从perf的四大核心命令出发，到火焰图的一键可视化，再深入到内存泄漏的三种检测手段、I/O延迟的blktrace+fio方案，最后整理了eBPF BCC工具链的速查表。性能分析和内核调试一样，都是"功夫在诗外"——工具掌握得再多，不如建立一个系统化的排查方法论：CPU不够看perf、内存泄漏看kmemleak、I/O慢看blktrace、系统调用多上eBPF。下一章是这门课最硬核的一章——我们要亲手写一个微型操作系统，从BIOS引导到进入用户态，全部自己实现。当你亲手写过一个OS之后，前面学到的所有概念都会落地生根。</p>
+
+        <div class="footer-nav">
+            <a href="23.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="25.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

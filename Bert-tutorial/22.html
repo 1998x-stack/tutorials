@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 SimCSE对比学习句向量 — BERT教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 NLP预训练发展简史</a></li>
+            <li><a href="02.html">第2章 Transformer架构精讲</a></li>
+            <li><a href="03.html">第3章 BERT开山论文精读(上)</a></li>
+            <li><a href="04.html">第4章 BERT开山论文精读(下)</a></li>
+            <li><a href="05.html">第5章 BERT输入表示与分词</a></li>
+            <li><a href="06.html">第6章 MLM与NSP深度剖析</a></li>
+            <li><a href="07.html">第7章 BERT微调实战范式</a></li>
+            <li><a href="08.html">第8章 RoBERTa训练配方革命</a></li>
+            <li><a href="09.html">第9章 数据工程与动态掩码</a></li>
+            <li><a href="10.html">第10章 超参数与优化器配置</a></li>
+            <li><a href="11.html">第11章 预训练数据规模效应</a></li>
+            <li><a href="12.html">第12章 训练稳定性技术</a></li>
+            <li><a href="13.html">第13章 多语言BERT与跨语言迁移</a></li>
+            <li><a href="14.html">第14章 BERT变体生态横评</a></li>
+            <li><a href="15.html">第15章 ELECTRA判别式预训练</a></li>
+            <li><a href="16.html">第16章 XLNet排列语言模型</a></li>
+            <li><a href="17.html">第17章 MPNet掩码排列融合</a></li>
+            <li><a href="18.html">第18章 ALBERT参数高效设计</a></li>
+            <li><a href="19.html">第19章 DeBERTa解耦注意力</a></li>
+            <li><a href="20.html">第20章 中文BERT全景</a></li>
+            <li><a href="21.html">第21章 长文本BERT方案</a></li>
+            <li><a href="22.html" class="active">第22章 SimCSE对比学习句向量</a></li>
+            <li><a href="23.html">第23章 知识蒸馏轻量化</a></li>
+            <li><a href="24.html">第24章 移动端BERT部署</a></li>
+            <li><a href="25.html">第25章 高效微调实战</a></li>
+            <li><a href="26.html">第26章 ModernBERT与2025前沿</a></li>
+            <li><a href="27.html">第27章 极致压缩与端侧智能</a></li>
+            <li><a href="28.html">第28章 端到端实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第22章 SimCSE对比学习句向量</h2>
+
+        <p>大家好，我是你们的讲师。今天我们来聊一个在 NLP 实践中极其实用的话题：如何用 BERT 生成高质量的句向量。你可能会说："这有什么难的？直接把 BERT 的 [CLS] 向量取出来不就行了？" 事实上，BERT 原生生成的句向量存在一个严重问题——<strong>各向异性</strong>（Anisotropy）。简单说就是，BERT 把所有的句子都映射到了向量空间中一个狭窄的圆锥区域里，导致任意两个句子的向量都高度相似，余弦相似度失去了区分度。</p>
+
+        <p>2021 年，清华大学的 SimCSE（Simple Contrastive Learning of Sentence Embeddings）横空出世，用极简的对比学习框架彻底解决了这个问题。这篇 EMNLP 2021 论文不仅刷爆了各大句向量评测榜单，更让对比学习成为了工业界生成句向量的标配。我将带你深入理解无监督和有监督 SimCSE 的完整技术细节。</p>
+
+        <div class="highlight">
+            <strong>📌 本章重点：</strong>
+            <ul>
+                <li>理解 BERT 句向量各向异性问题的根源</li>
+                <li>掌握无监督 SimCSE 中 dropout 作为数据增强的核心机制</li>
+                <li>理解 InfoNCE 对比损失函数的计算</li>
+                <li>掌握有监督 SimCSE 用 NLI 数据构造正负样本的方法</li>
+                <li>了解 SimCSE 与 Sentence-BERT 的区别和适用场景</li>
+            </ul>
+        </div>
+
+        <h2>22.1 为什么 BERT 原生句向量不好用</h2>
+
+        <p>2019 年的一项研究揭示了一个令人不安的事实：虽然 BERT 在分类、NER 等任务上表现优异，但直接用 BERT 的 [CLS] 向量或平均池化向量作为句向量，效果远不如 GloVe 等静态词向量的平均。原因主要有两点：</p>
+
+        <ul>
+            <li><strong>各向异性（Anisotropy）：</strong> BERT 的表示空间不是均匀分布的。所有句向量都聚集在一个狭窄的圆锥里，彼此之间的余弦相似度普遍在 0.8-0.95 之间。这使得语义上相似的句子和语义上相反的句子在空间中无法有效区分。</li>
+            <li><strong>高频词占据主导：</strong> 由于 MLM 预训练目标的特性，BERT 对高频词（如"是"、"的"、"了"）的表示过于敏感。句向量的方向很大程度上被这些高频功能词"拉偏"了。</li>
+        </ul>
+
+        <p>解决各向异性的早期方法包括：后处理技巧（如 BERT-flow 用标准化流做分布变换、BERT-whitening 用白化操作拉直向量空间）。但这些方法增加了额外的模型推理步骤，不够优雅。SimCSE 的解决方案是——在微调阶段直接解决这个问题。</p>
+
+        <h2>22.2 无监督 SimCSE：Dropout 的意外之力</h2>
+
+        <p>无监督 SimCSE 的想法简直可以用"天才"来形容——不需要任何标注数据，只需要一个 batch 的句子，就能训练出高质量的句向量。</p>
+
+        <p>核心思路：<strong>让同一个句子两次通过编码器</strong>。由于 Transformer 的 Dropout 层具有随机性（每次 forward 会随机丢弃不同神经元），相同的输入会得到两个略有不同的输出。作者认为，这两个输出可以视为语义等价的"正样本对"。而 batch 内的其他句子则作为"负样本"。模型的任务就是：让正样本对的距离更近，负样本对的距离更远。</p>
+
+        <pre><code>import torch
+import torch.nn.functional as F
+
+class SimCSEUnsupervised(nn.Module):
+    def __init__(self, encoder, pooling="cls", temperature=0.05):
+        super().__init__()
+        self.encoder = encoder  # BERT/RoBERTa 编码器
+        self.pooling = pooling
+        self.temp = temperature
+
+    def forward(self, input_ids, attention_mask):
+        # 同一个句子通过两次编码器（不同的 dropout mask）
+        # 第一次前向
+        outputs_1 = self.encoder(input_ids, attention_mask)
+        h1 = self.pool(outputs_1, attention_mask)
+        # 第二次前向（dropout 自动不同）
+        outputs_2 = self.encoder(input_ids, attention_mask)
+        h2 = self.pool(outputs_2, attention_mask)
+
+        # InfoNCE 对比损失
+        # 正样本对: h1[i] 与 h2[i] 余弦相似度
+        batch_size = h1.size(0)
+
+        # 计算所有句子对的余弦相似度矩阵
+        # sim_matrix[i][j] = cos(h1[i], h2[j])
+        sim_matrix = F.cosine_similarity(
+            h1.unsqueeze(1), h2.unsqueeze(0), dim=-1
+        ) / self.temp
+
+        # 对角线上的元素是正样本对
+        labels = torch.arange(batch_size).to(h1.device)
+        loss = F.cross_entropy(sim_matrix, labels)
+        return loss
+
+    def pool(self, outputs, attention_mask):
+        if self.pooling == "cls":
+            return outputs.last_hidden_state[:, 0, :]
+        elif self.pooling == "mean":
+            # 均值池化（带 attention mask）
+            token_emb = outputs.last_hidden_state
+            mask = attention_mask.unsqueeze(-1).float()
+            return (token_emb * mask).sum(dim=1) / mask.sum(dim=1)</code></pre>
+
+        <div class="tip">
+            <strong>💡 为什么 Dropout 就够了？</strong> 直觉上，Dropout 每次随机丢弃不同的神经元，相当于对句子做了"隐藏的噪声注入"。比如"我很喜欢吃苹果"这句话，第一次 forward Dropout 可能屏蔽了"很"和"喜"的神经元，第二次屏蔽了"吃"和"果"的神经元。这两次输出虽然略有不同，但编码的核心语义（喜欢苹果）是一致的。因此它们非常适合作为正样本对。对比学习迫使模型学习对这些微小噪声鲁棒的表示，从而聚焦于句子的主要语义，而不是具体的词级细节。
+        </div>
+
+        <h2>22.3 有监督 SimCSE：利用 NLI 数据</h2>
+
+        <p>当有标注数据可用时，有监督 SimCSE 的效果更上一层楼。它使用 Natural Language Inference（NLI）数据集来构造正负样本：</p>
+
+        <ul>
+            <li><strong>正样本（Positive）：</strong> 标签为蕴含（Entailment）的 (前提, 假设) 对。例如前提是"一只狗在草地上奔跑"，假设是"一只动物在公园里"——两者语义一致，构成正对。</li>
+            <li><strong>难负样本（Hard Negative）：</strong> 标签为矛盾（Contradiction）的 (前提, 假设) 对。例如"猫在沙发上"vs"房间里没有猫"——语义相反，构成高质量负样本。</li>
+            <li><strong>batch 内负样本：</strong> batch 中其他句子的（前提或假设）也作为负样本。</li>
+        </ul>
+
+        <p>有监督 SimCSE 的关键洞察是：NLI 的蕴含关系提供了<strong>语义等价的天然标注</strong>——两个句子虽然词不同、结构不同，但表达的语义相同。这比无监督的 dropout 正样本更加"干净"和"精确"，因此学到的句向量质量也更高。</p>
+
+        <h2>22.4 InfoNCE 损失函数详解</h2>
+
+        <p>SimCSE 使用的 InfoNCE（Info Noise Contrastive Estimation）损失函数是对比学习的标准损失：</p>
+
+        <p style="text-align:center;font-size:1.1rem;background:#f5f3ff;padding:12px;border-radius:12px;margin:15px 0;">
+            L = -log( e<sup>sim(h_i, h_i⁺)/τ</sup> / Σ<sub>j=1</sub><sup>N</sup> e<sup>sim(h_i, h_j⁻)/τ</sup> )
+        </p>
+
+        <p>其中：h_i 是句子的表示，h_i⁺ 是正样本，h_j⁻ 是负样本（包括 batch 内的其他所有句子），τ（tau）是温度超参数，sim 是余弦相似度。直观理解：</p>
+
+        <ul>
+            <li><strong>分子</strong>：推高正样本对的相似度 → 语义等价的句子在空间中靠拢</li>
+            <li><strong>分母</strong>：压低所有负样本对的相似度 → 不同的句子在空间中推开</li>
+            <li><strong>温度 τ</strong>：控制对比的"软硬"程度。τ 越小，模型越关注难负样本（相似度高的负样本被更强烈地推开）；τ 越大，对比越平滑。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>⚠️ 踩坑实录：</strong> 我曾经在一批电商评论数据上用 SimCSE 做句向量训练，但发现模型训完后所有句向量几乎都缩成了一个点——余弦相似度全在 0.99 以上。排查了两天才发现是 batch size 设太小了（batch_size=4）导致了<strong>模式坍塌</strong>。InfoNCE 损失严重依赖 batch size：batch 越大，负样本越多（分母越丰富），模型学到有区分度的表示的能力越强。无监督 SimCSE 论文推荐 batch size 至少 64，有监督模式下至少 32。我把 batch size 调成 128 后，句向量的质量立刻恢复了。如果你发现 SimCSE 训完后的句向量差异很小，第一个检查点就是 batch size。
+        </div>
+
+        <h2>22.5 SimCSE vs Sentence-BERT</h2>
+
+        <p>在 SimCSE 出现之前，工业界生成句向量的标准方案是 Sentence-BERT（SBERT, 2019）。下面是两者的全面对比：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>Sentence-BERT (SBERT)</th>
+                    <th>SimCSE</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>提出年份</td>
+                    <td>2019 (EMNLP)</td>
+                    <td>2021 (EMNLP)</td>
+                </tr>
+                <tr>
+                    <td>训练数据需求</td>
+                    <td>需要 NLI 或 STS 标注数据</td>
+                    <td>无监督：无标注数据；有监督：NLI 数据</td>
+                </tr>
+                <tr>
+                    <td>训练目标</td>
+                    <td>分类/回归（拼接句对后过 FFN）</td>
+                    <td>对比学习（InfoNCE 损失）</td>
+                </tr>
+                <tr>
+                    <td>推理速度</td>
+                    <td>快（独立的句子编码）</td>
+                    <td>快（独立的句子编码）</td>
+                </tr>
+                <tr>
+                    <td>句向量质量（STS 基准）</td>
+                    <td>Spearman ≈ 75-80</td>
+                    <td>Spearman ≈ 80-86</td>
+                </tr>
+                <tr>
+                    <td>是否需要 siamese 网络</td>
+                    <td>是（共享权重双塔）</td>
+                    <td>否（单编码器，两遍 forward）</td>
+                </tr>
+                <tr>
+                    <td>各向异性矫正</td>
+                    <td>部分缓解</td>
+                    <td>显著缓解</td>
+                </tr>
+                <tr>
+                    <td>开源实现复杂度</td>
+                    <td>中等</td>
+                    <td>简单（核心代码 < 50 行）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>22.6 池化策略详解</h2>
+
+        <p>生成句向量时，我们需要将 BERT 输出的 token 级向量聚合成一个句子级向量。不同的池化策略对最终效果影响显著：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>池化策略</th>
+                    <th>计算方法</th>
+                    <th>SimCSE 效果</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>[CLS] 池化</td>
+                    <td>取 [CLS] token 的最后一层输出</td>
+                    <td>良好</td>
+                    <td>分类式编码器（BERT）</td>
+                </tr>
+                <tr>
+                    <td>均值池化</td>
+                    <td>对所有 token 的最后一层输出求平均（带 mask）</td>
+                    <td><strong>最佳</strong></td>
+                    <td>通用句向量，SimCSE 默认推荐</td>
+                </tr>
+                <tr>
+                    <td>最大池化</td>
+                    <td>对所有 token 的最后一层输出取每个维度的最大值</td>
+                    <td>略差</td>
+                    <td>关键词提取</td>
+                </tr>
+                <tr>
+                    <td>权重池化</td>
+                    <td>用各层的输出加权求和（权重可学习或基于 TF-IDF）</td>
+                    <td>接近均值池化</td>
+                    <td>复杂场景，需要调参</td>
+                </tr>
+                <tr>
+                    <td>[CLS]+均值 混合</td>
+                    <td>拼接 [CLS] 和均值池化结果</td>
+                    <td>良好</td>
+                    <td>信息诉求高的下游任务</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>SimCSE 论文的实验表明，在无监督模式下<strong>均值池化</strong>的效果最好，在有监督模式下 [CLS] 池化和均值池化效果接近。实践中我推荐以<strong>均值池化</strong>作为默认策略。</p>
+
+        <h2>22.7 SimCSE 的工业级应用</h2>
+
+        <p>SimCSE 已经成为工业界生成句向量的标配。以下是三条最典型的应用路径：</p>
+
+        <ul>
+            <li><strong>语义匹配与去重：</strong> 电商平台对海量商品标题做近似去重。先用 SimCSE 将每个标题编码为 768 维向量，再用 FAISS 建立索引。通过余弦相似度阈值（通常 0.85-0.9）判断两条标题是否语义重复。百万级标题的去重可以在毫秒级完成。</li>
+            <li><strong>文本检索召回：</strong> 搜索引擎或 RAG 系统中，用 SimCSE 将 query 和文档编码为向量，通过向量检索召回最相关的文档 Top-K。相比 BM25 关键词匹配，SimCSE 能捕捉同义替换和语义近似（如"笔记本"→"笔记本电脑"）。</li>
+            <li><strong>无监督聚类：</strong> 对客服对话记录或用户反馈做自动主题分类，可以先用 SimCSE 编码，再跑 K-Means 聚类。由于 SimCSE 消除了各向异性，聚类效果显著优于直接用 BERT 的 [CLS] 向量。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>💡 实用建议：</strong> 在实际部署 SimCSE 时，有两点值得注意：第一，<strong>推理时一定要保持 Dropout 开启</strong>（model.train() 而非 model.eval()）。因为 SimCSE 的训练依赖 Dropout 的随机性，推理时如果关闭 Dropout，句向量质量会显著下降。第二，<strong>归一化后再做相似度计算</strong>——SimCSE 的输出向量应该 L2 归一化后再用于余弦相似度计算，这样向量比较的数学性质更好。
+        </div>
+
+        <h2>22.8 总结</h2>
+
+        <p>SimCSE 用极简的思想解决了 BERT 句向量的各向异性问题：不需要复杂的后处理，不需要额外的模型结构，一个 Dropout + InfoNCE 就搞定了。无监督版本让句向量训练不再依赖标注数据，有监督版本则在语义匹配任务上将句向量质量推到了新的高度。</p>
+
+        <p>在 2025-2026 年，SimCSE 的对比学习框架已经成为 LLM 句向量训练的基础范式，最新的 BGE、E5、GTE 等向量模型都在 SimCSE 的基础上做了改进和扩展。掌握 SimCSE 的核心原理，是你深入理解现代句向量技术的起点。</p>
+
+        <p>下一章我们聊聊如何让 BERT 变小变快——知识蒸馏。从 Hinton 的蒸馏框架到 TinyBERT、DistilBERT、MiniLM，各种压缩技术让你能在手机和边缘设备上跑 BERT，我们第 23 章见！</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

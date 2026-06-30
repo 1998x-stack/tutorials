@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 长文本BERT方案 — BERT教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 NLP预训练发展简史</a></li>
+            <li><a href="02.html">第2章 Transformer架构精讲</a></li>
+            <li><a href="03.html">第3章 BERT开山论文精读(上)</a></li>
+            <li><a href="04.html">第4章 BERT开山论文精读(下)</a></li>
+            <li><a href="05.html">第5章 BERT输入表示与分词</a></li>
+            <li><a href="06.html">第6章 MLM与NSP深度剖析</a></li>
+            <li><a href="07.html">第7章 BERT微调实战范式</a></li>
+            <li><a href="08.html">第8章 RoBERTa训练配方革命</a></li>
+            <li><a href="09.html">第9章 数据工程与动态掩码</a></li>
+            <li><a href="10.html">第10章 超参数与优化器配置</a></li>
+            <li><a href="11.html">第11章 预训练数据规模效应</a></li>
+            <li><a href="12.html">第12章 训练稳定性技术</a></li>
+            <li><a href="13.html">第13章 多语言BERT与跨语言迁移</a></li>
+            <li><a href="14.html">第14章 BERT变体生态横评</a></li>
+            <li><a href="15.html">第15章 ELECTRA判别式预训练</a></li>
+            <li><a href="16.html">第16章 XLNet排列语言模型</a></li>
+            <li><a href="17.html">第17章 MPNet掩码排列融合</a></li>
+            <li><a href="18.html">第18章 ALBERT参数高效设计</a></li>
+            <li><a href="19.html">第19章 DeBERTa解耦注意力</a></li>
+            <li><a href="20.html">第20章 中文BERT全景</a></li>
+            <li><a href="21.html" class="active">第21章 长文本BERT方案</a></li>
+            <li><a href="22.html">第22章 SimCSE对比学习句向量</a></li>
+            <li><a href="23.html">第23章 知识蒸馏轻量化</a></li>
+            <li><a href="24.html">第24章 移动端BERT部署</a></li>
+            <li><a href="25.html">第25章 高效微调实战</a></li>
+            <li><a href="26.html">第26章 ModernBERT与2025前沿</a></li>
+            <li><a href="27.html">第27章 极致压缩与端侧智能</a></li>
+            <li><a href="28.html">第28章 端到端实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第21章 长文本BERT方案</h2>
+
+        <p>大家好，我是你们的讲师。不知你有没有遇到这种情况：一份法律合同 3000 字，你正打算用 BERT 做条款分类，突然想到——不对，BERT 只能处理 512 个 token！合同还没读到三分之一就被截断了。更尴尬的是，BERT 会在 512 处直接"一刀切"，切掉的可能是合同中最重要的责任条款。</p>
+
+        <p>这就是 BERT 著名的"512 诅咒"。这一章我们来破解这个诅咒。我会从原版 BERT 的 512 限制的根源讲起，然后系统介绍 Longformer、BigBird、ETC 等稀疏注意力方案，最后聊聊 2025 年的 ModernBERT 如何用 Flash Attention 把窗口推到 8192 token。</p>
+
+        <div class="highlight">
+            <strong>📌 本章重点：</strong>
+            <ul>
+                <li>理解 BERT 512 限制的算法根源</li>
+                <li>掌握 Longformer 的滑动窗口 + 全局注意力设计</li>
+                <li>理解 BigBird 的随机 + 局部 + 全局三重注意力模式</li>
+                <li>比较各种稀疏注意力方案的优劣</li>
+                <li>了解 ModernBERT 在长文本上的突破</li>
+            </ul>
+        </div>
+
+        <h2>21.1 512 诅咒的算法根源</h2>
+
+        <p>BERT 为什么只能处理 512 个 token？这背后有两个"罪魁祸首"：</p>
+
+        <ul>
+            <li><strong>Self-Attention 的 O(n²) 复杂度：</strong> 标准自注意力需要对序列中每一对 token 计算注意力权重。当 n=512 时，注意力矩阵是 512×512 ≈ 26万 个元素；当 n=4096 时，矩阵变成 4096×4096 ≈ 1677万 个元素——增加了 64 倍。显存和计算时间都扛不住。</li>
+            <li><strong>位置编码的外推问题：</strong> BERT 使用可学习的绝对位置编码，每个位置（0到511）都有一个独立的嵌入向量。如果训练时只见到 512 个位置，推理时忽然来一个第 513 个位置——模型没见过，无法处理。这就是"外推失败"。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>💡 思考题：</strong> 假如给你无限的计算资源，把 BERT 直接训练到 4096 token 会怎样？理论上可行，但实践中你会发现：位置编码从 512 增加到 4096 需要增加 8 倍的参数（嵌入层），而且自注意力的 O(n²) 会让训练时间和显存需求暴增。所以"硬扩展"不是优雅的解法。
+        </div>
+
+        <h2>21.2 Longformer：滑动窗口注意力</h2>
+
+        <p>Longformer（NeurIPS 2020, AllenAI）是目前最流行的长文本 BERT 替代方案之一。它的核心思想非常直观：并非所有 token 对都需要互相关注。</p>
+
+        <p>Longformer 提出了两种注意力模式：</p>
+
+        <ul>
+            <li><strong>滑动窗口局部注意力（Sliding Window Attention）：</strong> 每个 token 只关注它前后 w 个 token（窗口大小 w 通常设为 512）。这覆盖了局部上下文，复杂度从 O(n²) 降低到 O(n×w)。</li>
+            <li><strong>全局注意力（Global Attention）：</strong> 在序列中选一些特殊 token（例如 [CLS] 或在分类场景下用户指定的 token），让它们关注所有 token，同时也被所有 token 关注。这些全局 token 充当了"信息枢纽"。</li>
+        </ul>
+
+        <p>下面是 Longformer 滑动窗口注意力的简化实现：</p>
+
+        <pre><code>import torch
+import torch.nn.functional as F
+
+def sliding_window_attention(q, k, v, window_size=256):
+    """
+    q, k, v: [batch, heads, seq_len, head_dim]
+    返回滑动窗口注意力后的输出
+    """
+    batch, heads, seq_len, head_dim = q.shape
+    half_w = window_size // 2
+
+    # 对每个位置，只关注它前后 half_w 个 token
+    attn_weights = torch.zeros(batch, heads, seq_len, seq_len)
+
+    for i in range(seq_len):
+        start = max(0, i - half_w)
+        end = min(seq_len, i + half_w + 1)
+        # query i 只与窗口内的 keys 计算注意力
+        q_i = q[:, :, i:i+1, :]            # [b, h, 1, d]
+        k_window = k[:, :, start:end, :]    # [b, h, w, d]
+        scores = torch.matmul(q_i, k_window.transpose(-1, -2))
+        scores = scores / (head_dim ** 0.5)
+
+        attn_weights[:, :, i, start:end] = F.softmax(scores, dim=-1)
+
+    # 用稀疏注意力权重加权求和
+    output = torch.matmul(attn_weights, v)
+    return output
+
+# 当 seq_len=4096, window=512 时
+# 标准注意力: 4096² = 16.8M 个注意力计算
+# 滑动窗口:   4096 × 512 = 2.1M 个注意力计算
+# 节省了约 8 倍的计算量</code></pre>
+
+        <p>在实际的 Longformer 实现中，滑动窗口会用<strong>对角线带状矩阵</strong>（banded matrix）来高效计算，避免上面的逐位置循环。此外，Longformer 还支持<strong>膨胀滑动窗口</strong>（Dilated Sliding Window），类似空洞卷积——每隔 d 个 token 采样一个，在不增加窗口大小的情况下扩大感受野。</p>
+
+        <h2>21.3 BigBird：三重注意力模式</h2>
+
+        <p>BigBird（Google, 2020）在 Longformer 的基础上又加了一种注意力模式，提出了<strong>三种注意力</strong>的组合：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>注意力类型</th>
+                    <th>说明</th>
+                    <th>复杂度</th>
+                    <th>解决的问题</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>局部注意力</td>
+                    <td>每个 token 关注窗口内邻居，类似 Longformer</td>
+                    <td>O(n×w)</td>
+                    <td>捕捉局部上下文</td>
+                </tr>
+                <tr>
+                    <td>随机注意力</td>
+                    <td>每个 token 随机关注 r 个其他 token</td>
+                    <td>O(n×r)</td>
+                    <td>保证信息可以在任意两个 token 之间传递</td>
+                </tr>
+                <tr>
+                    <td>全局注意力</td>
+                    <td>特定 token 关注全局</td>
+                    <td>O(n×g)</td>
+                    <td>聚合全局信息</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>从图论视角看，这三种注意力的组合构成了一个<strong>扩展器图</strong>（Expander Graph）——任意两个节点之间都存在一条短路径。BigBird 的理论贡献在于证明了这种稀疏注意力机制在表达能力和完整自注意力是等效的（即 <strong>Turing 完备</strong>的）。简单说就是：虽然我们只计算了 O(n) 个注意力对，但理论上能模拟完整 O(n²) 注意力的任何功能。</p>
+
+        <div class="highlight">
+            <strong>🔬 BigBird 的稀疏模式可视化：</strong>
+            <pre style="background:#1e1035;color:#e8e8f0;padding:10px;font-size:0.75rem;">
+            Q\K | T1 T2 T3 T4 T5 T6 T7 T8 T9 T10
+            ------------------------------------
+            T1  |  G  L  L  L  R  .  .  .  .  R    G=全局, L=局部,
+            T2  |  L  G  L  L  L  .  .  .  .  .    R=随机, .=忽略
+            T3  |  L  L  G  L  L  .  .  .  R  .
+            T4  |  L  L  L  G  L  .  .  .  .  .
+            T5  |  R  L  L  L  G  L  L  L  .  .
+            T6  |  .  .  .  L  L  G  L  L  L  .
+            T7  |  .  .  R  L  L  L  G  L  L  L
+            T8  |  .  .  .  .  .  L  L  G  L  L
+            T9  |  .  .  .  .  .  L  L  L  G  L
+            T10 |  R  .  .  .  .  .  L  L  L  G
+            </pre>
+        </div>
+
+        <h2>21.4 ETC / BigBird-ETC：扩展全局 Token</h2>
+
+        <p>BigBird 的升级版 ETC（Extended Transformer Construction）对全局 token 的设计做了强化。在 ETC 中，全局 token 是<strong>显式添加</strong>到序列前面的额外 token，它们作为"记忆槽"（Memory Slots）存储文档级别的全局上下文。</p>
+
+        <p>ETC 的一个实用技巧是："结构化全局注意力"——我们可以把文档的章节标题、段落首句等关键信息对应的 token 指定为全局 token。这样模型在处理长文档时，重要内容会被全局 attention 覆盖，次要内容只做局部 attention，在计算效率和效果之间取得更好的平衡。</p>
+
+        <h2>21.5 长文本模型横向对比</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>模型</th>
+                    <th>年份</th>
+                    <th>注意力策略</th>
+                    <th>理论复杂度</th>
+                    <th>最大长度</th>
+                    <th>实现难度</th>
+                    <th>预训练版本可用</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>BERT (原版)</td>
+                    <td>2019</td>
+                    <td>全连接注意力</td>
+                    <td>O(n²)</td>
+                    <td>512</td>
+                    <td>低</td>
+                    <td>✅</td>
+                </tr>
+                <tr>
+                    <td>Longformer</td>
+                    <td>2020</td>
+                    <td>滑动窗口 + 全局</td>
+                    <td>O(n×w)</td>
+                    <td>4096</td>
+                    <td>中</td>
+                    <td>✅</td>
+                </tr>
+                <tr>
+                    <td>BigBird</td>
+                    <td>2020</td>
+                    <td>局部 + 随机 + 全局</td>
+                    <td>O(n)</td>
+                    <td>4096</td>
+                    <td>高</td>
+                    <td>✅</td>
+                </tr>
+                <tr>
+                    <td>Reformer</td>
+                    <td>2020</td>
+                    <td>LSH 哈希注意力</td>
+                    <td>O(n log n)</td>
+                    <td>可配置</td>
+                    <td>高</td>
+                    <td>有限</td>
+                </tr>
+                <tr>
+                    <td>Linformer</td>
+                    <td>2020</td>
+                    <td>低秩投影</td>
+                    <td>O(n)</td>
+                    <td>可配置</td>
+                    <td>中</td>
+                    <td>有限</td>
+                </tr>
+                <tr>
+                    <td>ETC/BigBird-ETC</td>
+                    <td>2020</td>
+                    <td>附加全局 token</td>
+                    <td>O(n)</td>
+                    <td>4096+</td>
+                    <td>高</td>
+                    <td>✅</td>
+                </tr>
+                <tr>
+                    <td><strong>ModernBERT</strong></td>
+                    <td><strong>2025</strong></td>
+                    <td>Flash + 解耦注意力</td>
+                    <td>O(n²) 但硬件加速</td>
+                    <td><strong>8192</strong></td>
+                    <td>低（库封装）</td>
+                    <td>✅</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>⚠️ 踩坑实录：</strong> 有一次我在处理一篇 5000 词的学术论文分类任务时，兴冲冲地用了 BigBird。结果训练完一评测，效果反而比用 BERT 截断前 512 token 还差了 2 个点。排查了两天才发现"元凶"：论文的摘要在开头 200 个 token 内就已经包含了分类所需的全部信息，后面的实验部分、相关工作等内容全是干扰噪音。模型看到了更多的信息，反而"学偏了"。这个教训让我明白：<strong>长文本模型的优势在于需要全局推理的场景</strong>（如法律合同的风险点需要上下文推理），而不是所有长文本场景都无脑用长文本模型。做分类前先问问自己：答案在文档中的分布是稀疏的还是密集的？如果密集（如情感分类），长文本模型反而有害。
+        </div>
+
+        <h2>21.6 ModernBERT：Flash Attention 与 8192 Token</h2>
+
+        <p>2025 年 5 月，Answer.AI 和 LightOn 联合发布了 ModernBERT——这是 BERT 生态在 2025 年最重要的更新之一。ModernBERT 能够原生支持 8192 token 的序列长度，这在两年前几乎是不可想象的。</p>
+
+        <p>ModernBERT 实现长文本处理的关键技术栈：</p>
+
+        <ul>
+            <li><strong>Flash Attention 2/3：</strong> 通过 tiling 和内核融合技术，把 O(n²) 的显存占用降低到 O(n)。现代 GPU（如 H100）上的 FP8 支持让长序列训练变得更可行。</li>
+            <li><strong>RoPE 位置编码：</strong> 使用旋转位置编码替代可学习位置编码，天然支持外推到训练时未见过的长度。</li>
+            <li><strong>解耦注意力架构选型：</strong> ModernBERT 参考了 DeBERTa 的部分设计，在注意力计算中分离了内容和位置信息。</li>
+            <li><strong>优化的 GeGLU 激活层：</strong> 每个 FFN 层内的计算更高效，减少了内存墙瓶颈。</li>
+        </ul>
+
+        <p>对于大部分实际应用场景，如果你需要处理 2048-8192 token 的序列，<strong>ModernBERT 应该是 2025-2026 年的首选</strong>——它既保持了 BERT 编码器的推理速度优势，又突破了序列长度的限制。我们会在第 26 章详细展开 ModernBERT 的技术细节。</p>
+
+        <h2>21.7 长文本 BERT 的实践场景</h2>
+
+        <p>下面列出了长文本 BERT 的几个典型应用场景，以及对应的推荐方案：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>场景</th>
+                    <th>文档长度</th>
+                    <th>推荐方案</th>
+                    <th>原因</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>法律合同条款分类</td>
+                    <td>2000-8000 token</td>
+                    <td>Longformer / ModernBERT</td>
+                    <td>条款间的远程依赖重要，滑动窗口+全局效果好</td>
+                </tr>
+                <tr>
+                    <td>学术论文摘要分类</td>
+                    <td>300-600 token</td>
+                    <td>BERT (截断) 就够用</td>
+                    <td>答案在开头，无需长文本</td>
+                </tr>
+                <tr>
+                    <td>长对话理解</td>
+                    <td>4000-10000 token</td>
+                    <td>BigBird + 结构化全局注意力</td>
+                    <td>随机注意力保证跨轮次的信息传递</td>
+                </tr>
+                <tr>
+                    <td>病历文本 NER</td>
+                    <td>1000-3000 token</td>
+                    <td>Longformer / ETC</td>
+                    <td>实体往往局部连续出现，滑动窗口友好</td>
+                </tr>
+                <tr>
+                    <td>高吞吐量在线推理</td>
+                    <td>2048-8192 token</td>
+                    <td>ModernBERT</td>
+                    <td>Flash Attention 提升推理速度，延迟可控</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>21.8 总结</h2>
+
+        <p>长文本处理是 BERT 生态中一个持续被攻克的瓶颈。从 Longformer 的滑动窗口到 BigBird 的三重注意力，再到 2025 年 ModernBERT 结合硬件加速实现的 8192 token 支持，我们经历了"算法创新驱动"到"算法+硬件协同优化"的范式转变。选择长文本模型时，关键是要理解你的任务是否真的需要全局信息——不要为了用长文本模型而用长文本模型。</p>
+
+        <p>下一章我们将切换到另一个非常实用的主题：句向量表示。SimCSE 用对比学习彻底改变了生成句向量的方式，让语义匹配和文本检索的效果提升了一个台阶。我们第 22 章见！</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

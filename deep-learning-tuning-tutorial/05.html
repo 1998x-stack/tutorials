@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第5章 批大小：梯度估计的精度博弈</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 调参之道：从炼丹到科学</a></li>
+            <li><a href="02.html">第2章 梯度下降的数学直觉</a></li>
+            <li><a href="03.html">第3章 优化器选择：Adam vs SGD的底层逻辑</a></li>
+            <li><a href="04.html">第4章 学习率：调参的第一优先级</a></li>
+            <li><a href="05.html" class="active">第5章 批大小：梯度估计的精度博弈</a></li>
+            <li><a href="06.html">第6章 初始化：训练的起跑线</a></li>
+            <li><a href="07.html">第7章 归一化层：训练稳定性的基石</a></li>
+            <li><a href="08.html">第8章 激活函数：非线性之源</a></li>
+            <li><a href="09.html">第9章 权重衰减与正则化的数学</a></li>
+            <li><a href="10.html">第10章 Dropout：隐式集成学习的数学</a></li>
+            <li><a href="11.html">第11章 学习率调度：从固定到自适应</a></li>
+            <li><a href="12.html">第12章 损失函数的设计哲学</a></li>
+            <li><a href="13.html">第13章 数据增强与泛化的信息论视角</a></li>
+            <li><a href="14.html">第14章 评估与验证的科学方法</a></li>
+            <li><a href="15.html">第15章 训练曲线全解读</a></li>
+            <li><a href="16.html">第16章 NaN与梯度爆炸的根因分析</a></li>
+            <li><a href="17.html">第17章 小数据过拟合测试：调试的银弹</a></li>
+            <li><a href="18.html">第18章 调参优先级与方法论</a></li>
+            <li><a href="19.html">第19章 CNN训练的核心法则</a></li>
+            <li><a href="20.html">第20章 NLP模型微调的原理</a></li>
+            <li><a href="21.html">第21章 推荐系统的特征与采样</a></li>
+            <li><a href="22.html">第22章 类别不平衡与长尾分布</a></li>
+            <li><a href="23.html">第23章 LoRA微调的数学本质</a></li>
+            <li><a href="24.html">第24章 SFT数据工程的科学方法</a></li>
+            <li><a href="25.html">第25章 RLHF对齐训练的底层逻辑</a></li>
+            <li><a href="26.html">第26章 Scaling Law与μP参数化</a></li>
+            <li><a href="27.html">第27章 自动化调参与前沿趋势</a></li>
+            <li><a href="28.html">第28章 综合实战：从零调优一个模型</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>批大小——不止是"调到显存装满为止"</h2>
+
+        <p>大家好，我是你们的讲师。如果你问一个深度学习工程师"batch size怎么设"，最常见的回答是："调到显存装满为止。"这是对的，但是<strong>不够</strong>。批大小不仅是显存利用率的参数，它从根本上决定了梯度估计的精度、训练的动态过程、以及模型的最终泛化能力。</p>
+
+        <p>我们先讲一个真实的故事。某实验室在做对比学习（SimCLR），按照论文复现，batch size设成了4096。但实验室只有4张卡，每张卡最多塞512张图——这样需要梯度累积2步才能到4096。跑了两周，模型就是不收敛，效果比随机还好不了多少。后来发现，问题出在batch size上——对比学习依赖大量的负样本来做正负区分，而微调阶段的"effective batch size"太小（实际上是每步只有4×512=2048），不足以提供足够的负样本。把梯度累积步数改成4步后，模型立刻就开始收敛了。</p>
+
+        <p>教训：batch size不是"显存能塞多少就设多少"——你需要弄清楚<strong>effective batch size</strong>到底是多少，以及你的任务对batch size有没有硬性要求。</p>
+
+        <h3>批大小的统计学本质</h3>
+
+        <p>从统计学的角度看，批大小的作用非常清晰。全批量梯度下降使用整个数据集计算精确梯度，但计算量太大。小批量SGD使用B个样本来估计梯度：</p>
+
+        <pre><code>∇f_B(θ) = (1/B) · Σ ∇f_i(θ)   ≈   ∇f(θ)   （全量梯度）</code></pre>
+
+        <p>小批量梯度是真实梯度的无偏估计——期望等于真实梯度，但存在方差：</p>
+
+        <pre><code>Var(∇f_B(θ)) = Var(∇f(θ)) / B</code></pre>
+
+        <p>梯度估计的方差与batch size成<strong>反比</strong>。batch扩大一倍，方差减半。这就是批大小的统计学本质：<strong>你在用计算量换取梯度估计的精度</strong>。</p>
+
+        <p>从<strong>中心极限定理</strong>的角度看，小批量梯度服从近似正态分布：</p>
+
+        <pre><code>∇f_B(θ) ~ N(∇f(θ), Σ / B)</code></pre>
+
+        <p>这意味着batch越大，梯度估计越集中在真实梯度附近，更新方向越稳定。但同时也意味着"噪声正则化"效应减弱了——因为方差的减小削弱了随机性的正则化作用。</p>
+
+        <p>在多卡训练中，理解effective batch size至关重要。很多论文里写"batch size = 1024"，但实际上是4卡 × 每卡64 × 4步梯度累积。如果你在自己的环境下复现，每张卡batch size设成1024，显存直接炸了。原因就是你没理解这个公式：</p>
+
+        <pre><code>effective_batch_size = per_device_batch × num_gpus × accumulation_steps</code></pre>
+
+        <div class="tip">
+            <strong>复现实验的关键：</strong>"batch size"不是一个数字——至少应该是三个数字的乘积。BugBuster喵在知乎上专门强调过："调参时要记录清楚——单卡batch、卡数、累积步数、总batch到底是多少。很多复现实验复现不出来，就是这里没说清。"每次做实验，请在日志里明确记录这三项。
+        </div>
+
+        <h3>大批量泛化退化之谜</h3>
+
+        <p>虽然大batch的梯度估计更准确、训练更快，但大量实验发现了一个反直觉的现象：<strong>batch size超过某个阈值后，泛化性能开始下降</strong>。</p>
+
+        <p>这是为什么？从优化景观的角度来看：</p>
+
+        <ul>
+            <li><strong>小batch的噪声起到了正则化作用</strong>：梯度噪声让参数不会精确收敛到某个极小值的谷底，而是在谷底附近"徘徊"。这种徘徊帮助模型避开尖锐的极小值（tiny bump），因为噪声会把参数从狭窄的尖坑里弹出来。最终模型收敛到更平坦、更宽的谷底——泛化更好。</li>
+            <li><strong>大batch的梯度更准确</strong>：但准确的梯度带参数直奔最近的极小值，如果有多个极小值时，大batch倾向于收敛到离起点最近的那个——往往是尖锐的极小值。</li>
+        </ul>
+
+        <p><strong>Flat Minima vs Sharp Minima</strong> 的理论我们在第三章已经介绍过了。在batch size的语境下，batch越小，梯度噪声越大，越容易逃离尖锐极小值；batch越大，梯度越稳定，越容易被尖锐极小值捕获。这就是大批量泛化退化的核心原因。</p>
+
+        <p>但是，这并不意味着大batch永远不好。如果配合合适的学习率缩放和warmup策略，大batch也能达到与标配batch相近甚至更好的泛化效果。关键是要找到正确的学习率和batch size的组合。</p>
+
+        <div class="warning">
+            <strong>注意区分：</strong>"大批量泛化退化"主要是在固定epoch数的情况下观察到的。如果给大batch模型更多epoch，让它多走几步，通常可以弥补泛化差距。在实践中，batch size翻倍时epoch也应该适当增加——也就是用更多的计算量来换取更高的精度。
+        </div>
+
+        <h3>梯度累积的工作原理</h3>
+
+        <p>梯度累积（Gradient Accumulation）是在显存不足时等效扩大batch size的核心技术。它的原理非常简单：把一次大batch的梯度计算拆成多次小batch的梯度计算，累积起来，然后用累积的梯度一次更新参数。</p>
+
+        <p>完整的PyTorch实现如下：</p>
+
+        <pre><code>accumulation_steps = 4  # 累积4次后更新一次
+        optimizer.zero_grad()
+
+        for i, (inputs, labels) in enumerate(dataloader):
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+
+            # 关键：loss必须除以累积步数
+            loss = loss / accumulation_steps
+            loss.backward()
+
+            if (i + 1) % accumulation_steps == 0:
+                # 累积够了，更新参数
+                optimizer.step()
+                optimizer.zero_grad()</code></pre>
+
+        <p>这个实现有两个关键细节：</p>
+
+        <p><strong>细节一：loss / accumulation_steps。</strong>这个除法是必须的。如果不除，在 accumulation_steps 次前向后，累积的梯度是单次梯度的 accumulation_steps 倍。等效于batch size放大了accumulation_steps倍，但梯度量级也放大了同样的倍数——相当于LR放大了accumulation_steps倍，训练不稳定。除以accumulation_steps后，每次micro-batch的梯度贡献归一化，累积梯度等效于一个batch的梯度。</p>
+
+        <p><strong>细节二：BN统计量问题。</strong>梯度累积模式下，BN的均值和方差是基于每个micro-batch（小batch）计算的，而不是基于effective batch。如果micro-batch太小（比如每卡只塞2张图），BN统计量会有较大偏差，导致训练效果不如直接使用大batch。解决方案：用<strong>SyncBN</strong>同步所有卡上BN统计量，或者换用不依赖batch维度的归一化方法（如LayerNorm、GroupNorm）。</p>
+
+        <p>梯度累积的适用场景：</p>
+        <ul>
+            <li>显存OOM，但任务需要大batch（对比学习、PPO）</li>
+            <li>设备不够，用时间换空间</li>
+            <li>想用大batch但不想改dataloader代码</li>
+        </ul>
+
+        <p>梯度累积的局限性：</p>
+        <ul>
+            <li>每个micro-batch只做前向+反向，不做参数更新——训练速度变慢（wall time增加）</li>
+            <li>BN的统计量偏差问题</li>
+            <li>梯度累积和真正的大batch不完全等价——优化轨迹不同</li>
+        </ul>
+
+        <h3>Batch Size与Learning Rate的线性缩放法则</h3>
+
+        <p>batch size和学习率之间有一个重要的耦合关系——<strong>线性缩放法则（Linear Scaling Rule）</strong>。</p>
+
+        <p>由Goyal等人在2017年的论文中系统化提出：当batch size乘以k时，学习率也乘以k，前提是配合warmup策略。公式很简单：</p>
+
+        <pre><code>lr_new = lr_old × (batch_size_new / batch_size_old)</code></pre>
+
+        <p>一个被广泛验证的经验锚点：batch size 从64扩到256（4倍）时，LR从0.1扩到0.4。</p>
+
+        <p>这个缩放规则背后的直觉：batch size扩大k倍后，每步梯度估计的方差缩小了k倍，梯度更准确。因此可以用更大的步长来利用更准确的梯度信息。如果不增大LR，每步更新幅度不变但样本效率降低——相当于"浪费"了更准确梯度带来的信息量。</p>
+
+        <p><strong>这个规则的适用条件：</strong></p>
+        <ul>
+            <li>主要适用于SGD和SGD+Momentum</li>
+            <li>对Adam不完全适用——Adam有自适应学习率机制，batch变化的影响已被部分吸收</li>
+            <li>批量差距过大时（如64→8192），线性缩放给出的LR过大，需要sub-linear缩放或更长的warmup</li>
+            <li>必须配合warmup，否则大LR在训练初期直接发散</li>
+        </ul>
+
+        <p><strong>DeepSeek的Scaling Law：</strong>在LLM预训练中，DeepSeek给出了更精确的幂律公式：</p>
+
+        <pre><code>η_opt = 0.3118 · C^(-0.1250)    # 最优LR随计算量幂律下降
+        B_opt = 0.2920 · C^(0.3271)     # 最优batch size随计算量幂律上升</code></pre>
+
+        <p>其中C是计算预算（FLOPs）。这个公式告诉我们三件事：一是计算量增大时，batch size应该变大，LR应该变小；二是LR随计算量下降得非常慢（C^(-0.125)），所以在大规模训练中LR基本稳定；三是给定计算预算后，大多数超参固定，只需要调batch size和LR——这相当于把高维调参降到了二维。</p>
+
+        <h3>不同任务的Batch Size推荐范围</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>任务类型</th>
+                    <th>推荐batch size范围</th>
+                    <th>典型值</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>CV分类（CIFAR-10/100）</td>
+                    <td>64 ~ 512</td>
+                    <td>128</td>
+                    <td>小数据集用更小batch</td>
+                </tr>
+                <tr>
+                    <td>CV分类（ImageNet）</td>
+                    <td>256 ~ 1024</td>
+                    <td>256</td>
+                    <td>多卡训练更大</td>
+                </tr>
+                <tr>
+                    <td>CV检测/分割</td>
+                    <td>8 ~ 32（每卡）</td>
+                    <td>16</td>
+                    <td>高分辨率图片限制batch</td>
+                </tr>
+                <tr>
+                    <td>NLP Bert微调</td>
+                    <td>16 ~ 64</td>
+                    <td>32</td>
+                    <td>序列长度padding影响</td>
+                </tr>
+                <tr>
+                    <td>Transformer（WMT从头训）</td>
+                    <td>4096 ~ 65536（token）</td>
+                    <td>浮点</td>
+                    <td>看token数而非句子数</td>
+                </tr>
+                <tr>
+                    <td>LLM预训练</td>
+                    <td>512 ~ 4096（序列）</td>
+                    <td>随算力增长</td>
+                    <td>满足DeepSeek幂律</td>
+                </tr>
+                <tr>
+                    <td>对比学习（SimCLR/MoCo）</td>
+                    <td>4096 ~ 16384</td>
+                    <td>4096</td>
+                    <td>越大越好，用梯度累积</td>
+                </tr>
+                <tr>
+                    <td>推荐系统</td>
+                    <td>32 ~ 512</td>
+                    <td>256</td>
+                    <td>超过512收益递减</td>
+                </tr>
+                <tr>
+                    <td>PPO/RLHF</td>
+                    <td>512 ~ 4096</td>
+                    <td>1024</td>
+                    <td>宁大勿小</td>
+                </tr>
+                <tr>
+                    <td>LoRA微调</td>
+                    <td>4 ~ 16（每卡）</td>
+                    <td>8</td>
+                    <td>小batch用梯度累积扩大</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>调参优先级：</strong>先确定LR，再确定batch size，然后根据batch size重新确认LR（线性缩放调整）。把batch size和LR当作一对耦合参数来调，不要独立调。一个系统化的做法是：在默认batch size上用LR Range Test确定LR，然后batch size改变时用线性缩放的LR作为起点，再做微调。
+        </div>
+
+        <p>这一章我们理解了批大小的本质——它是梯度估计精度的控制旋钮。batch越大，梯度越准，训练越快，但噪声的正则化效应减弱、泛化可能退化。我们学习了梯度累积的工作原理（以及那个关键的"loss除以累积步数"的细节）、Batch Size与LR的线性缩放法则、以及DeepSeek的幂律公式在不同计算预算下的指导意义。</p>
+
+        <p>下一章进入<strong>初始化</strong>——训练开始前的最后一个关键参数。你可能听过这样的故事："一次惨痛的教训是用默认初始化，acc只能到70%，改成Xavier后acc到了98%。"没错，初始化的重要性超乎你的想象。</p>
+
+        <div class="footer-nav">
+            <a href="04.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="06.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

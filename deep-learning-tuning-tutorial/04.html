@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 学习率：调参的第一优先级</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 调参之道：从炼丹到科学</a></li>
+            <li><a href="02.html">第2章 梯度下降的数学直觉</a></li>
+            <li><a href="03.html">第3章 优化器选择：Adam vs SGD的底层逻辑</a></li>
+            <li><a href="04.html" class="active">第4章 学习率：调参的第一优先级</a></li>
+            <li><a href="05.html">第5章 批大小：梯度估计的精度博弈</a></li>
+            <li><a href="06.html">第6章 初始化：训练的起跑线</a></li>
+            <li><a href="07.html">第7章 归一化层：训练稳定性的基石</a></li>
+            <li><a href="08.html">第8章 激活函数：非线性之源</a></li>
+            <li><a href="09.html">第9章 权重衰减与正则化的数学</a></li>
+            <li><a href="10.html">第10章 Dropout：隐式集成学习的数学</a></li>
+            <li><a href="11.html">第11章 学习率调度：从固定到自适应</a></li>
+            <li><a href="12.html">第12章 损失函数的设计哲学</a></li>
+            <li><a href="13.html">第13章 数据增强与泛化的信息论视角</a></li>
+            <li><a href="14.html">第14章 评估与验证的科学方法</a></li>
+            <li><a href="15.html">第15章 训练曲线全解读</a></li>
+            <li><a href="16.html">第16章 NaN与梯度爆炸的根因分析</a></li>
+            <li><a href="17.html">第17章 小数据过拟合测试：调试的银弹</a></li>
+            <li><a href="18.html">第18章 调参优先级与方法论</a></li>
+            <li><a href="19.html">第19章 CNN训练的核心法则</a></li>
+            <li><a href="20.html">第20章 NLP模型微调的原理</a></li>
+            <li><a href="21.html">第21章 推荐系统的特征与采样</a></li>
+            <li><a href="22.html">第22章 类别不平衡与长尾分布</a></li>
+            <li><a href="23.html">第23章 LoRA微调的数学本质</a></li>
+            <li><a href="24.html">第24章 SFT数据工程的科学方法</a></li>
+            <li><a href="25.html">第25章 RLHF对齐训练的底层逻辑</a></li>
+            <li><a href="26.html">第26章 Scaling Law与μP参数化</a></li>
+            <li><a href="27.html">第27章 自动化调参与前沿趋势</a></li>
+            <li><a href="28.html">第28章 综合实战：从零调优一个模型</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>学习率——深度学习最重要的超参数，没有之一</h2>
+
+        <p>大家好，我是你们的讲师。如果让我在所有超参数中只能调一个，我会毫不犹豫地选<strong>学习率（Learning Rate）</strong>。知乎上有一段广为流传的金句："优先调 learning rate！优先调 learning rate！优先调 learning rate！"——重要的话说三遍。这不是夸张，而是无数踩坑换来的经验。</p>
+
+        <p>真实的故事：一位算法工程师接手了一个推荐模型优化任务，跑了一周，AUC纹丝不动。他尝试了改网络结构、加特征、调正则化——全都没用。我过去看了一眼，发现他的学习率设成了1e-6。AdamW的默认LR是3e-4左右，他的LR小了300倍。把LR改到3e-4，AUC在6小时内涨了2个点。一周的无效工作，源头只有一个超参数没设对。这不是个例，我在不同项目里见过至少五次类似的情况。</p>
+
+        <p><strong>学习率不对，其他全白搭。</strong></p>
+
+        <h3>LR为什么是第一优先级</h3>
+
+        <p>学习率的几何意义非常直观——它是参数更新时的<strong>步长</strong>。回到第二章的"蒙眼下山"比喻：学习率就是迈出的步长。</p>
+
+        <ul>
+            <li><strong>LR太小</strong>（比如1e-6）：你小心翼翼地挪动脚步，每步只有毫米级。理论上最终也能到谷底，但需要走几百万步——训练时间会让人崩溃。更糟糕的是，如果模型很深，小LR的更新信号可能在反向传播中就被吸收了（尤其是没有归一化层的网络），导致靠近输入层的参数几乎不动。</li>
+            <li><strong>LR太大</strong>（比如10）：你以百米冲刺的步伐下山。一步可能从半山腰跨到对面山坡上，loss不降反升。更极端的，一步冲出参数空间的有效区域，loss直接炸到NaN。</li>
+            <li><strong>LR合适</strong>：每一步都稳步朝谷底前进，loss平稳快速地下降。</li>
+        </ul>
+
+        <p>在凸优化理论中，对于L-Lipschitz连续的损失函数，存在一个理论最优LR的上界：<code>lr ≤ 1/L</code>，其中L是损失函数的Lipschitz常数（梯度变化的最大速率）。超过这个上界，梯度下降就可能发散。这给了我们一个重要的直觉：<strong>LR的上限由损失曲面的"崎岖程度"决定</strong>——曲面越崎岖（L越大），LR就必须越小。</p>
+
+        <p>在实践中，调参的第一件事永远是先用<strong>LR Range Test</strong>确定合理范围，然后再调其他参数。这已经成为所有调参高手的肌肉记忆。</p>
+
+        <div class="highlight">
+            <strong>实战口诀：</strong>"LR太小：loss几乎不动，中间层特征有水波纹状噪点。LR太大：loss震荡发散，甚至直接NaN。LR合适：loss平稳下降，曲线平滑。需要降低LR：loss一路降下来后不再下降——手动减半LR继续。"——来自Captain Jack的知乎回答
+        </div>
+
+        <h3>Warmup的数学原理</h3>
+
+        <p>Warmup（预热）是指在训练初期从极小学习率逐渐上升到目标学习率的策略。它现在是训练的标准组件，尤其是在Transformer上，已经是<strong>必须加上</strong>的操作了。</p>
+
+        <p>Warmup为什么必要？有四个层面的原因：</p>
+
+        <p><strong>第一，参数初始化不理想。</strong>训练刚开始时，参数还是随机的，远离最优解。此时损失曲面极度扭曲，梯度的方向和大小都不准确。如果直接上大LR，第一步就可能把参数踢到未知区域，然后梯度爆炸或者产生NaN。小LR先走几步，等参数稍微稳定了再放大——类似刚学自行车时先慢慢骑，熟练了再加速。</p>
+
+        <p><strong>第二，Adam的二阶矩估计需要"热身"。</strong>Adam初始化时 m₀=0, v₀=0。训练的前几步，vₜ 非常小（因为累积的平方梯度还不够）。如果不加偏差修正（bias correction），√v̂ₜ 会非常小，导致 lr/√v̂ₜ 非常大，等效LR远高于设定值，让训练初期更新过大。Warmup给了vₜ足够的时间建立准确的估计。注意Adam的偏差修正项 1-β₂ᵗ 可以缓解这个问题，但对短训练（<1000步）仍然不够——这也是为什么短训练也要加warmup。</p>
+
+        <p><strong>第三，BatchNorm的统计量需要稳定。</strong>训练刚开始时，BN的running mean和running var还没有建立。如果直接上大LR，参数快速变化会导致BN的统计量和当前激活值严重不匹配，形成恶性循环。Warmup让参数缓慢变化，给BN足够的时间跟踪分布。</p>
+
+        <p><strong>第四，Attention矩阵初始不均衡。</strong>这是Transformer特有的问题。Attention机制在初始化时，Q和K的点积结果方差很大，导致softmax输出接近one-hot（非常尖锐的注意力分布）。如果直接上大LR，注意力分布会更加极端，梯度更新集中在少数token上。Warmup让注意力分布先"软"下来，再逐步训练。</p>
+
+        <p>Warmup步数的经验法则：模型越复杂warmup越长，数据越大warmup越短。BERT默认用总步数的1/10。LLM预训练通常采用固定2000步的warmup。</p>
+
+        <h3>Cosine退火为什么有效</h3>
+
+        <p><strong>Cosine Annealing（余弦退火）</strong>是当前最流行的学习率调度策略之一。它的公式很简单：</p>
+
+        <pre><code>lr(t) = lr_min + 0.5 × (lr_max - lr_min) × (1 + cos(π × t / T))</code></pre>
+
+        <p>其中 t 是当前步数，T 是总步数。LR从 lr_max 开始，沿着半个余弦曲线平滑下降到 lr_min。最通用的配置是 lr_min=0。</p>
+
+        <p>Cosine退火为什么有效？因为它完美地解决了"探索-利用"（exploration-exploitation）的平衡：</p>
+
+        <ul>
+            <li><strong>训练初期（大LR）</strong>：大LR让参数大步探索损失曲面，快速跳过不好的区域。这相当于"走出丛林"阶段——不追求精细，只求快速找到好区域。</li>
+            <li><strong>训练中期（中LR）</strong>：LR逐渐减小，参数开始在好区域周围精细化搜索。这个阶段损失下降最快。</li>
+            <li><strong>训练后期（小LR）</strong>：LR很小，参数在极小值附近精细收敛，不会因为步长太大而跳出好区域。</li>
+        </ul>
+
+        <p>Cosine退火与阶梯衰减（Step Decay）的关键区别：Cosine的LR是<strong>连续平滑下降</strong>的，而Step Decay是<strong>断崖式下跌</strong>。平滑下降的好处是每次LR变化都不大，训练始终稳定。Step Decay每次断崖式降LR后，loss会短暂上升（因为参数需要适应新的学习率），然后才继续下降。</p>
+
+        <p>Cosine退火还有一种增强版——<strong>带热重启的余弦退火（SGDR）</strong>。它在一个周期结束后突然把LR跳回初始值，模拟重新开始训练。这种周期性重启可以帮助参数跳出当前的局部极小值，寻找更好的解。而且每次重启后收敛到不同的局部极小值，可以用多个checkpoint做模型集成。</p>
+
+        <div class="tip">
+            <strong>关于warmup + cosine的组合用法：</strong>业界最通用的训练模板是"AdamW + Linear Warmup + Cosine Decay"。Warmup阶段线性增长到目标LR，之后cosine平滑下降到0。这个配置在各种任务上表现稳定，可以作为任何新任务的起点。<br><br>
+            另一点：cosine退火的初始值（lr_max）应该用LR Range Test来确定，而不是随便设一个经验值。这是很多人的盲区——调度策略再好，初始LR选错了也白搭。
+        </div>
+
+        <h3>LR Range Test的操作与原理</h3>
+
+        <p><strong>学习率范围测试（LR Range Test / Learning Rate Finder）</strong>是Leslie N. Smith在2015年提出的方法，现在已经成为确定初始LR的标准手段。核心思想简单得令人发指：让LR从一个极小值开始，在若干batch内指数增长到极大值，观察loss曲线，然后从曲线中找到loss下降最快的区间。</p>
+
+        <p>具体操作流程：</p>
+
+        <ol>
+            <li><strong>准备一小部分训练数据</strong>——通常1-2个epoch就足够了，不需要完整数据集</li>
+            <li><strong>初始化优化器</strong>——设置初始LR为极小值，比如1e-7</li>
+            <li><strong>对每个mini-batch</strong>：执行前向+反向+更新，然后按指数增长增大LR</li>
+            <li><strong>记录每个点的LR和loss值</strong></li>
+            <li><strong>绘制LR（对数坐标） vs Loss曲线</strong></li>
+        </ol>
+
+        <p>解读loss曲线的三个区间：</p>
+
+        <ul>
+            <li><strong>区间1（LR过小）</strong>：loss几乎不变或下降极慢。模型几乎学不到任何东西。</li>
+            <li><strong>区间2（LR合适）</strong>：loss以最快速度下降，曲线斜率最大。这是目标区间。</li>
+            <li><strong>区间3（LR过大）</strong>：loss震荡或开始反弹。训练已不稳定。</li>
+        </ul>
+
+        <p>推荐的初始LR在区间2内——通常是区间2中部，或者取区间2起点到终点中间更保守的值。一个常用的经验规则：取loss曲线斜率最大的点对应的LR，或者取区间2起点的LR。</p>
+
+        <p>下面是完整的PyTorch代码实现：</p>
+
+        <pre><code>import torch
+
+        def lr_range_test(model, train_loader, optimizer, loss_fn,
+                          lr_min=1e-7, lr_max=10, num_iter=100):
+            """LR范围测试：指数增长扫描LR，观察loss曲线"""
+            lrs, losses = [], []
+            lr = lr_min
+            gamma = (lr_max / lr_min) ** (1.0 / num_iter)
+
+            model.train()
+            for i, (inputs, targets) in enumerate(train_loader):
+                if i >= num_iter:
+                    break
+
+                # 设置当前LR（支持多param_group的场景）
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr
+
+                # 前向 + 反向
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = loss_fn(outputs, targets)
+                loss.backward()
+                optimizer.step()
+
+                lrs.append(lr)
+                losses.append(loss.item())
+                lr *= gamma  # 指数增长
+
+            return lrs, losses
+
+        # 使用示例
+        model = YourModel()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-7)  # 初始极小LR
+        lrs, losses = lr_range_test(model, train_loader, optimizer, nn.CrossEntropyLoss())
+
+        # 找到loss下降最快的点
+        # Simple heuristic: find the LR where loss decreases fastest
+        losses = torch.tensor(losses)
+        # 平滑处理（推荐指数移动平均）
+        smoothed = [losses[0]]
+        alpha = 0.1
+        for loss in losses[1:]:
+            smoothed.append(alpha * loss + (1 - alpha) * smoothed[-1])
+
+        # 找下降最快的区间
+        gradients = torch.tensor(smoothed).diff()
+        best_idx = gradients.argmin().item()  # 负梯度最大（下降最快）
+        print(f"建议初始LR: {lrs[best_idx]:.6f}")
+
+        # 更保守：取最快下降点1/10
+        conservative_lr = lrs[best_idx] / 10
+        print(f"保守建议LR: {conservative_lr:.6f}")</code></pre>
+
+        <div class="warning">
+            <strong>LR Range Test的常见陷阱：</strong>（1）不要在完整数据集上跑——1-2个epoch就足够了，跑多了浪费算力，而且结果没有显著改善。（2）Range Test给出的是"loss下降最快的LR"，不是训练全周期的最优起点——考虑到warmup等因素，通常取的初始LR比Range Test建议值偏小。（3）对LLM等超大规模模型，Range Test的参考价值有限——训练数据分布太广，单次扫描偏差大，更推荐使用Scaling Law的预测或业界已验证的范围。
+        </div>
+
+        <h3>不同模型的LR推荐范围</h3>
+
+        <p>下面是针对不同模型类型的LR推荐范围汇总。注意这是<strong>初始LR范围</strong>，最终使用的LR需要配合调度策略（warmup + cosine decay等）：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>模型类型</th>
+                    <th>推荐优化器</th>
+                    <th>LR范围</th>
+                    <th>典型值</th>
+                    <th>备注</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>简单CNN（CIFAR-10）</td>
+                    <td>SGD+Momentum</td>
+                    <td>1e-3 ~ 1e-1</td>
+                    <td>0.1</td>
+                    <td>需要配合cosine或step decay</td>
+                </tr>
+                <tr>
+                    <td>ResNet（ImageNet）</td>
+                    <td>SGD+Momentum</td>
+                    <td>1e-3 ~ 1e-1</td>
+                    <td>0.1</td>
+                    <td>经典的Kaiming初始化搭配</td>
+                </tr>
+                <tr>
+                    <td>ResNet（CIFAR-10）</td>
+                    <td>SGD+Momentum</td>
+                    <td>1e-2 ~ 1.0</td>
+                    <td>0.1</td>
+                    <td>数据集小LR可以更大</td>
+                </tr>
+                <tr>
+                    <td>YOLO/检测模型</td>
+                    <td>SGD+Momentum</td>
+                    <td>1e-3 ~ 1e-2</td>
+                    <td>0.01</td>
+                    <td>取决于batch size</td>
+                </tr>
+                <tr>
+                    <td>Transformer（WMT从头训）</td>
+                    <td>AdamW</td>
+                    <td>1e-4 ~ 5e-4</td>
+                    <td>3e-4</td>
+                    <td>必须配合warmup</td>
+                </tr>
+                <tr>
+                    <td>BERT微调</td>
+                    <td>AdamW</td>
+                    <td>1e-6 ~ 1e-4</td>
+                    <td>2e-5 ~ 5e-5</td>
+                    <td>预训练模型低LR</td>
+                </tr>
+                <tr>
+                    <td>ViT</td>
+                    <td>AdamW</td>
+                    <td>1e-5 ~ 1e-3</td>
+                    <td>3e-4</td>
+                    <td>遵循Transformer的配置</td>
+                </tr>
+                <tr>
+                    <td>LLM预训练</td>
+                    <td>AdamW</td>
+                    <td>1e-4 ~ 5e-4</td>
+                    <td>3e-4</td>
+                    <td>Warmup 2000步+M步调度</td>
+                </tr>
+                <tr>
+                    <td>LoRA微调</td>
+                    <td>AdamW</td>
+                    <td>1e-4 ~ 3e-4</td>
+                    <td>2e-4</td>
+                    <td>小数据更保守</td>
+                </tr>
+                <tr>
+                    <td>PPO/RLHF</td>
+                    <td>Adam</td>
+                    <td>1e-6 ~ 3e-6</td>
+                    <td>2e-6</td>
+                    <td>比SFT小一个数量级</td>
+                </tr>
+                <tr>
+                    <td>DPO</td>
+                    <td>AdamW</td>
+                    <td>1e-7 ~ 5e-6</td>
+                    <td>1e-6</td>
+                    <td>极保守，防止模式崩塌</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这个表格凝聚了大量实践经验。我的建议是：拿不到一个任务的LR范围时，先从表格中的"典型值"开始，然后用LR Range Test快速验证，再微调。</p>
+
+        <h3>Warmup + Cosine退火的完整实现</h3>
+
+        <p>下面是一个在生产环境中广泛使用的WarmupCosineScheduler实现。它支持线性warmup + cosine退火，是最通用的训练配置：</p>
+
+        <pre><code>import math
+        import torch
+        from torch.optim.lr_scheduler import _LRScheduler
+
+        class WarmupCosineScheduler(_LRScheduler):
+            """Linear warmup + cosine decay scheduler.
+
+            Args:
+                optimizer: 优化器
+                warmup_steps: warmup步数
+                total_steps: 总训练步数
+                min_lr: 最低LR（cosine退火的目标值）
+                last_epoch: 上一轮epoch
+            """
+            def __init__(self, optimizer, warmup_steps, total_steps,
+                         min_lr=0, last_epoch=-1):
+                self.warmup_steps = warmup_steps
+                self.total_steps = total_steps
+                self.min_lr = min_lr
+                super().__init__(optimizer, last_epoch)
+
+            def get_lr(self):
+                step = self.last_epoch + 1  # 当前步数
+
+                if step <= self.warmup_steps:
+                    # 阶段一：线性warmup
+                    scale = step / self.warmup_steps
+                    return [base_lr * scale for base_lr in self.base_lrs]
+                else:
+                    # 阶段二：cosine退火
+                    progress = (step - self.warmup_steps) / \
+                               (self.total_steps - self.warmup_steps)
+                    progress = min(1.0, max(0.0, progress))
+                    cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                    return [(self.min_lr + (base_lr - self.min_lr) * cosine_decay)
+                            for base_lr in self.base_lrs]
+
+        # 使用示例
+        model = YourModel()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+        total_steps = 10000
+        warmup_steps = int(total_steps * 0.1)  # 10% warmup
+
+        scheduler = WarmupCosineScheduler(
+            optimizer=optimizer,
+            warmup_steps=warmup_steps,
+            total_steps=total_steps,
+            min_lr=0
+        )
+
+        # 训练循环中
+        for step in range(total_steps):
+            # ... 正常前向 + 反向 ...
+            optimizer.step()
+            scheduler.step()  # 更新LR</code></pre>
+
+        <p>这个调度器的效果是：前 warmup_steps 步从0线性增长到目标LR，然后沿cosine曲线平滑下降到min_lr。它已经是当前绝大多数深度学习任务的默认配置。</p>
+
+        <p>这一章我们深入学习了学习率——深度学习最重要的超参数。我们理解了LR作为步长的几何意义、warmup在四个层面的数学原理（初始化不理想、Adam二阶矩估计、BN统计量、注意力的softmax）、cosine退火的探索-利用平衡机制、以及LR Range Test的完整操作流程。现在你拥有了确定任何任务初始LR的系统性工具。</p>
+
+        <p>下一章将进入<strong>批大小（Batch Size）</strong>的讨论——它不只是"调到显存装满为止"这么简单。批大小影响梯度估计的方差、泛化性能和训练速度，而且与学习率存在重要的耦合关系（线性缩放法则）。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

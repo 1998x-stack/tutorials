@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 优化器选择：Adam vs SGD的底层逻辑</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 调参之道：从炼丹到科学</a></li>
+            <li><a href="02.html">第2章 梯度下降的数学直觉</a></li>
+            <li><a href="03.html" class="active">第3章 优化器选择：Adam vs SGD的底层逻辑</a></li>
+            <li><a href="04.html">第4章 学习率：调参的第一优先级</a></li>
+            <li><a href="05.html">第5章 批大小：梯度估计的精度博弈</a></li>
+            <li><a href="06.html">第6章 初始化：训练的起跑线</a></li>
+            <li><a href="07.html">第7章 归一化层：训练稳定性的基石</a></li>
+            <li><a href="08.html">第8章 激活函数：非线性之源</a></li>
+            <li><a href="09.html">第9章 权重衰减与正则化的数学</a></li>
+            <li><a href="10.html">第10章 Dropout：隐式集成学习的数学</a></li>
+            <li><a href="11.html">第11章 学习率调度：从固定到自适应</a></li>
+            <li><a href="12.html">第12章 损失函数的设计哲学</a></li>
+            <li><a href="13.html">第13章 数据增强与泛化的信息论视角</a></li>
+            <li><a href="14.html">第14章 评估与验证的科学方法</a></li>
+            <li><a href="15.html">第15章 训练曲线全解读</a></li>
+            <li><a href="16.html">第16章 NaN与梯度爆炸的根因分析</a></li>
+            <li><a href="17.html">第17章 小数据过拟合测试：调试的银弹</a></li>
+            <li><a href="18.html">第18章 调参优先级与方法论</a></li>
+            <li><a href="19.html">第19章 CNN训练的核心法则</a></li>
+            <li><a href="20.html">第20章 NLP模型微调的原理</a></li>
+            <li><a href="21.html">第21章 推荐系统的特征与采样</a></li>
+            <li><a href="22.html">第22章 类别不平衡与长尾分布</a></li>
+            <li><a href="23.html">第23章 LoRA微调的数学本质</a></li>
+            <li><a href="24.html">第24章 SFT数据工程的科学方法</a></li>
+            <li><a href="25.html">第25章 RLHF对齐训练的底层逻辑</a></li>
+            <li><a href="26.html">第26章 Scaling Law与μP参数化</a></li>
+            <li><a href="27.html">第27章 自动化调参与前沿趋势</a></li>
+            <li><a href="28.html">第28章 综合实战：从零调优一个模型</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>Adam vs SGD——深度学习最持久的争论</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们建立了梯度下降的直觉——理解了为什么负梯度方向是最陡下降方向、动量怎么让参数"滚起来"、以及Adam如何用二阶矩来近似曲率信息。今天我们要打一场擂台赛：<strong>Adam VS SGD+Momentum</strong>。</p>
+
+        <p>这个问题在深度学习社区中已经争论了近十年。我见过有的团队坚定地使用SGD+Momentum，认为Adam是"花架子"；也见过有的团队只认Adam，觉得SGD太慢了根本等不起。两种观点都有事实依据——但更重要的是知道<strong>什么时候选哪个</strong>。</p>
+
+        <p>开讲之前，先讲一个小故事。我有个朋友在公司做视觉模型优化，用AdamW跑基线，AUC到0.678后怎么也上不去了。尝试了两周：调LR、调weight decay、换网络结构——全都没用。后来我把LR调回SGD+Momentum的范围（0.01左右），跑了一周，AUC涨到0.691。同一个模型，只是换了个优化器，涨了1.3个点。这种事情在业界已经上演了无数次。</p>
+
+        <h3>Adam的自适应机制</h3>
+
+        <p>Adam = Adaptive Moment Estimation。它把两种技术合在了一起：<strong>RMSProp的自适应学习率 + Momentum的动量累积</strong>。</p>
+
+        <p>Adam的核心更新公式如下：</p>
+
+        <pre><code>mₜ = β₁·mₜ₋₁ + (1-β₁)·gₜ             # 一阶矩（动量）
+        vₜ = β₂·vₜ₋₁ + (1-β₂)·gₜ²             # 二阶矩（自适应学习率）
+        m̂ₜ = mₜ / (1 - β₁ᵗ)                      # 偏差修正
+        v̂ₜ = vₜ / (1 - β₂ᵗ)                      # 偏差修正
+        θₜ₊₁ = θₜ - lr · m̂ₜ / (√v̂ₜ + ε)        # 参数更新</code></pre>
+
+        <p>其中两个关键超参数β₁和β₂：</p>
+
+        <ul>
+            <li><strong>β₁（默认0.9）</strong>：控制一阶矩的衰减速度。β₁=0.9 意味着动量的有效窗口大约是 1/(1-β₁)=10 步。β₁越大，动量惯性越强，更新越平滑。</li>
+            <li><strong>β₂（默认0.999）</strong>：控制二阶矩的衰减速度。β₂=0.999 意味着自适应学习率的有效窗口大约是 1000 步。β₂越大，二阶矩估计越稳定，但收敛到准确估计的速度也越慢。</li>
+        </ul>
+
+        <p>Adam最关键的设计是<strong>逐参数学习率</strong>。对每个参数θᵢ：</p>
+        <ul>
+            <li>如果该参数的梯度一直很大（损失曲面在这个方向陡峭）→ vₜ 很大 → lr/√vₜ 很小 → 这个参数走小步</li>
+            <li>如果该参数的梯度一直很小（曲面平缓或该参数不敏感）→ vₜ 很小 → lr/√vₜ 很大 → 这个参数走大步</li>
+        </ul>
+
+        <p>这种机制对<strong>稀疏特征</strong>极为有效——推荐系统中，大部分特征出现频率极低，对应的参数更新次数少。SGD对这些参数一视同仁，等于给罕见特征的学习率太小。Adam自动给这些参数更大的有效学习率。</p>
+
+        <div class="tip">
+            <strong>关键补充：</strong>2017年提出的 <strong>AdamW</strong> 修正了原版Adam的一个重大缺陷。原版Adam中权重衰减（weight decay）的实现等价于L2正则化，但因为自适应学习率的存在，大梯度参数被正则化得更多，小梯度参数被正则化得更少——这不合理。AdamW把权重衰减从梯度更新中解耦出来，确保正则化强度与参数大小直接相关，不受自适应学习率影响。这是当前所有Transformer训练的标准做法。
+        </div>
+
+        <h3>SGD+Momentum为什么泛化更好</h3>
+
+        <p>这个问题是Adam与SGD争论的核心。先说结论：<strong>SGD+Momentum倾向于收敛到平坦极小值（flat minima），而Adam倾向于停在尖锐极小值（sharp minima）</strong>。下面是几何解释。</p>
+
+        <p>在参数空间中，损失曲面有很多个局部极小值点。这些极小值可以分为两类：</p>
+
+        <ul>
+            <li><strong>平坦极小值（Flat Minima）</strong>：极小值附近的损失曲面比较平缓，参数稍微扰动，loss变化不大。泛化性能好，因为测试数据和训练数据分布不完全一致，模型对扰动不敏感。</li>
+            <li><strong>尖锐极小值（Sharp Minima）</strong>：极小值附近的损失曲面陡峭，参数稍微扰动，loss急剧上升。泛化性能差，给验证集换一批数据大概率就垮了。</li>
+        </ul>
+
+        <p>为什么SGD+Momentum倾向于找到平坦极小值？因为SGD的梯度噪声提供了"探索"能力——不需要精确走到谷底，只需要大致在一个较宽的低洼地带就行。动量让参数有惯性，不容易被卡在很窄的尖坑里。</p>
+
+        <p>而Adam为什么倾向于尖锐极小值？因为Adam的自适应机制：在陡峭方向上，Adam的vₜ很大，有效学习率很小，参数在陡峭方向被"踩刹车"停住了。在平缓方向上，vₜ很小，有效学习率很大。效果就是——Adam在陡峭方向减速快，在平缓方向加速快。这导致Adam被"拉向"陡峭方向的极小值，而陡峭方向往往对应尖锐极小值。</p>
+
+        <div class="highlight">
+            <strong>重要提示：</strong>这个结论有前提条件。当训练数据量极大（数亿样本以上）时，泛化差距会缩小。而且对于NLP/Transformer任务，AdamW的泛化能力与SGD差距并不大。所以不要把这个结论当成绝对的普适规律——它是一个有用的启发式，但不是铁律。
+        </div>
+
+        <h3>两阶段训练法为什么有效</h3>
+
+        <p>理解了上面的原理，你就会明白一个业界广泛使用的黄金策略——<strong>两阶段训练法</strong>。</p>
+
+        <p>第一阶段：先用Adam快速训练。Adam的自适应机制让你不用精细调LR，很快就能把loss降到较低水平。这个阶段相当于<strong>"直升机空降"</strong>——你不需要沿着山路一步步走，直接降落到山脚的某个区域附近。</p>
+
+        <p>第二阶段：切换到SGD+Momentum继续训练。SGD的噪声特性和动量机制帮你在已到达的区域中寻找更平坦的极小值——就像到了山脚后，你再徒步走几步，找到真正的最佳扎营地点。</p>
+
+        <p>切换策略一般是：总训练步数的前 30-50% 用Adam，后 50-70% 切到SGD+Momentum。切换时需要同时调整学习率——从Adam换到SGD时，LR需要增大10-30倍。例如Adam的LR是3e-4，切换到SGD时LR设为0.01左右。</p>
+
+        <p>这种策略在大型团队中已经被反复验证。很多大厂的标准做法就是：前几个epoch用Adam，后面换成SGD。用好了，效果提升非常明显，通常能比纯Adam高1-2个点。</p>
+
+        <div class="warning">
+            <strong>切换时的注意事项：</strong>从Adam切换到SGD时，一定要把优化器的动量状态清空，因为Adam维护的动量（mₜ）和SGD的动量（vₜ）含义不同。建议保存checkpoint后重新加载，创建新的SGD优化器，不要直接替换。另外，如果模型使用了BatchNorm，切换到SGD时BN的running statistics需要继续更新——这也是选择切换而非重启的原因之一。
+        </div>
+
+        <h3>当代优化器选择决策树</h3>
+
+        <p>在实际工程中，优化器的选择已经形成了一个比较清晰的范式。下面是我的决策建议：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>场景</th>
+                    <th>推荐优化器</th>
+                    <th>默认LR</th>
+                    <th>备注</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>NLP / Transformer（从头训）</td>
+                    <td><strong>AdamW</strong></td>
+                    <td>3e-4</td>
+                    <td>必须配合warmup + cosine decay；β₂=0.95替代0.999可加速收敛</td>
+                </tr>
+                <tr>
+                    <td>NLP微调（BERT/GPT）</td>
+                    <td><strong>AdamW</strong></td>
+                    <td>1e-5 ~ 3e-5</td>
+                    <td>低LR保护预训练权重；weight_decay=0.01</td>
+                </tr>
+                <tr>
+                    <td>LoRA/QLoRA微调</td>
+                    <td><strong>AdamW</strong> 或 <strong>Adam</strong></td>
+                    <td>1e-4 ~ 3e-4</td>
+                    <td>小数据更保守，从1e-4开始</td>
+                </tr>
+                <tr>
+                    <td>CV分类（ResNet等从头训）</td>
+                    <td><strong>SGD+Momentum</strong></td>
+                    <td>0.1</td>
+                    <td>momentum=0.9, nesterov=True；配合step/cosine decay</td>
+                </tr>
+                <tr>
+                    <td>CV检测/分割（YOLO等）</td>
+                    <td><strong>SGD+Momentum</strong></td>
+                    <td>0.01</td>
+                    <td>通常配合multistep decay</td>
+                </tr>
+                <tr>
+                    <td>ViT（视觉Transformer）</td>
+                    <td><strong>AdamW</strong></td>
+                    <td>3e-4</td>
+                    <td>ViT本质上是Transformer，遵循NLP的优化器选择</td>
+                </tr>
+                <tr>
+                    <td>推荐系统（稀疏特征）</td>
+                    <td><strong>Adam</strong> 或 <strong>Adagrad</strong></td>
+                    <td>1e-3</td>
+                    <td>稀疏特征多→Adagrad，稠密特征多→Adam</td>
+                </tr>
+                <tr>
+                    <td>GAN训练</td>
+                    <td><strong>Adam</strong></td>
+                    <td>2e-4</td>
+                    <td>β₁=0.5（减小动量防止训练不稳定）</td>
+                </tr>
+                <tr>
+                    <td>RL / PPO</td>
+                    <td><strong>Adam</strong></td>
+                    <td>1e-6 ~ 3e-6</td>
+                    <td>比SFT小一个数量级；batch宁大勿小</td>
+                </tr>
+                <tr>
+                    <td>不确定 / 起步阶段</td>
+                    <td><strong>AdamW</strong></td>
+                    <td>3e-4</td>
+                    <td>"不知道用啥优化器，无脑AdamW"——知乎共识</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这个表格不是死规则，而是一个起点。比如，CV领域也有一些团队在尝试用AdamW训练ResNet，效果也不错。但如果你刚进入一个新领域，按照上面的推荐开始，大概率不会翻车。</p>
+
+        <h3>小结：选优化器的三个原则</h3>
+
+        <p>讲完了所有理论，我们来总结三条简化原则：</p>
+
+        <p><strong>原则一：快速迭代用AdamW。</strong>如果你在探索阶段、快速跑基线、或者不确定代码有没有bug——用AdamW。它的鲁棒性最好，不需要太精细地调LR，快速给你一个baseline结果。</p>
+
+        <p><strong>原则二：追求极致泛化用SGD+Momentum。</strong>如果你已经在baseline上，需要再提升1-2个点——切到SGD+Momentum，精细调一下LR和调度策略。这是经典的"两阶段训练"，Adam负责快速进入好区域，SGD负责精调。</p>
+
+        <p><strong>原则三：Transformer系用AdamW，CV系用SGD。</strong>这不是绝对的，但经验上99%的Transformer论文用AdamW，99%的经典CV论文用SGD+Momentum。当你面对一个新架构时，先看它继承谁的血统——Attention的血统走AdamW，Conv的血统走SGD。</p>
+
+        <div class="tip">
+            <strong>调参实战建议：</strong>在确定优化器后，第一步永远是先用LR Range Test锁定学习率范围，而不是从默认值开始盲目尝试。下一章我们就要详细介绍LR Range Test的操作——这是你调参工具箱里最重要的第一件工具。
+        </div>
+
+        <p>这一章我们解剖了Adam和SGD的底层逻辑——Adam的自适应机制（β₁和β₂的数学含义）、SGD的泛化优势（平坦极小值vs尖锐极小值的几何解释）、两阶段训练法的原理（直升机空降+徒步登顶）、以及具体场景的选型决策树。现在你对优化器的理解深度，已经超过95%的调参新手了。</p>
+
+        <p>下一章我们进入调参的第一优先级——<strong>学习率</strong>。不管用什么优化器，LR都是最重要的超参数，没有之一。我们会讲到warmup的数学原理、cosine退火为什么有效、以及LR Range Test的完整操作流程。</p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

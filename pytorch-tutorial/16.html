@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 训练陷阱与调试 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html" class="active">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第16章 训练陷阱与调试</h2>
+
+<p>大家好，我是你们的讲师。这一章我们不讲新知识、不学新 API，而是来聊一个所有深度学习工程师都避不开的事情——<strong>Debug</strong>。</p>
+
+<p>如果你写过几周 PyTorch 代码，你一定经历过这样的时刻：训练 loss 怎么都不降，loss 变成 NaN 了，或者模型在训练集上 accuracy 99%、测试集上 50%。这时候你最需要的不是看新的论文，而是一份系统化的"查毒手册"。这一章就是这本手册。</p>
+
+<p>我把 PyTorch 训练中最常见的错误归纳为 <strong>"五大陷阱"</strong>，外加 NaN/Inf 调试、shape 不匹配等专题。每个问题都会有一个真实的故事——要么是我自己踩过的，要么是帮同事 debug 时看到的。</p>
+
+<h3>16.1 五大陷阱（Big Five Mistakes）</h3>
+
+<h4>陷阱一：忘记 zero_grad</h4>
+
+<p>这是 PyTorch 新手村最经典的 bug，没有之一。PyTorch 的 autograd 机制默认是<strong>累积梯度</strong>的——每次调用 <code>backward()</code>，梯度会累加到 <code>.grad</code> 属性上。如果你不在每个 batch 开始时清空梯度，梯度会一直累加下去。</p>
+
+<pre><code>model = nn.Linear(10, 1)
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+
+for epoch in range(10):
+    for batch in dataloader:
+        # ❌ 忘记 optimizer.zero_grad()
+        loss = criterion(model(batch_x), batch_y)
+        loss.backward()
+        optimizer.step()
+        # 梯度不断累积 → 最终梯度爆炸 → loss 发散</code></pre>
+
+<p><strong>真实故事：</strong>我 2018 年刚开始用 PyTorch 的时候，从 TensorFlow 转过来。TensorFlow 的 optimizer.step() 会自动清零梯度，但在 PyTorch 里不会。我跑了一个 ResNet-50 的训练，发现 loss 在正常下降了 5 个 epoch 之后突然爆炸了。排查了两天，从数据检查到学习率调整都试过了，最后在一个论坛帖子里看到"你忘了 zero_grad"。加上 <code>optimizer.zero_grad()</code> 之后一切正常。那两天浪费的 GPU 时间大概能跑 50 个实验了。</p>
+
+<h4>陷阱二：没有调用 model.eval()</h4>
+
+<p>PyTorch 中有一些层（如 <code>Dropout</code>、<code>BatchNorm</code>）在训练和推理时的行为不同。如果你在验证/测试阶段忘记调用 <code>model.eval()</code>，这些层会继续以训练模式运行：Dropout 仍然在随机丢弃神经元，BatchNorm 仍然在用 batch 的统计值而非全局 running 统计值。结果就是验证集上的指标忽高忽低，毫无参考价值。</p>
+
+<pre><code>def evaluate(model, dataloader):
+    # ❌ 没有 model.eval()
+    total_correct = 0
+    for x, y in dataloader:
+        pred = model(x)  # Dropout 还在随机丢弃！
+        total_correct += (pred.argmax(1) == y).sum()
+    return total_correct / len(dataloader.dataset)</code></pre>
+
+<p><strong>真实故事：</strong>一位同事训练图像分类模型，训练 accuracy 到了 99%，但验证 accuracy 始终在 70%~85% 之间剧烈波动。他以为是过拟合，加了正则化、数据增强，折腾了一周。我去看了一眼代码，发现 <code>evaluate()</code> 函数里没有 <code>model.eval()</code>。加上之后，验证 accuracy 稳定在了 92%。</p>
+
+<h4>陷阱三：内存泄漏 — 忘记 .item()</h4>
+
+<p>这可能是 PyTorch 最难发现的 bug 之一。当你把 Python 中的损失值直接用 <code>loss</code> 变量保存下来（不做 <code>.item()</code> 转换），它会保留整个计算图的引用。随着训练的进行，这些保留的计算图不断累积，内存占用会持续增加，最终导致 OOM。</p>
+
+<pre><code>loss_history = []
+for batch in dataloader:
+    pred = model(batch_x)
+    loss = criterion(pred, batch_y)
+    loss.backward()
+    optimizer.step()
+    # ❌ loss 是 tensor，保存它等于保存了整个计算图！
+    loss_history.append(loss)
+    # ✅ 应该用 loss_history.append(loss.item())</code></pre>
+
+<p><strong>真实故事：</strong>有个开源项目在 GitHub 上被提了 issue："训练到第 3 个 epoch 就 OOM"。我下载代码看了一下，作者把所有 batch 的 loss 以 Tensor 形式存到了一个 list 中，还用它来画 loss 曲线图。训练到第 2 个 epoch 的时候，这个 list 里已经有了几千个 Tensor，每个 Tensor 都绑着一个计算图。内存不爆才怪。</p>
+
+<h4>陷阱四：设备不匹配（Device Mismatch）</h4>
+
+<p>模型在一张卡上、数据在另一张卡上、标签在 CPU 上——这种混乱在分布式训练中尤其常见。PyTorch 会在你尝试在不同设备上的张量做计算时报错：<code>Expected all tensors to be on the same device</code>。</p>
+
+<pre><code>model = MyModel().cuda()           # 模型在 GPU
+for batch_x, batch_y in dataloader:
+    # batch_x 在 CPU，batch_y 在 CPU
+    pred = model(batch_x)           # ❌ 报错！输入在 CPU，模型在 GPU
+    loss = criterion(pred, batch_y.cuda())  # batch_y 还在 CPU!</code></pre>
+
+<p><strong>真实故事：</strong>在分布式数据并行（DDP）训练中，每个 rank 上的模型只在自己的 GPU 上。有位同学在 DDP 的训练脚本里写了 <code>labels = labels.to(device)</code>，但 <code>device</code> 变量是一个固定的字符串 <code>"cuda:0"</code>——结果 rank 3 的数据也被搬到了 GPU 0，然后他手动在 <code>backward()</code> 之后做了 all-reduce。这个故事有两个错误：一是 device 应该用 <code>f"cuda:{local_rank}"</code>，二是不应该手动 all-reduce。修复之后训练速度提升了 3 倍。</p>
+
+<h4>陷阱五：原地操作（In-place Op）切断梯度流</h4>
+
+<p>这是最隐蔽的 bug。<code>x += 1</code>、<code>x[0] = 1</code> 这样的原地操作会覆盖张量的值，而 autograd 需要在反向传播时访问张量的旧值来计算梯度。如果原地操作发生在叶子张量（leaf tensor，即 requires_grad=True 的模型参数）上，autograd 会直接报错或者——更糟糕——<strong>无声地给出错误的梯度</strong>。</p>
+
+<pre><code>weight = torch.randn(10, 10, requires_grad=True)
+# ❌ 原地操作 weight += 1 会破坏 autograd 的计算图
+# weight.add_(1)  # 这一行如果执行，backward 时会爆炸
+
+# ✅ 应该用非原地版本
+weight = weight + 1  # 创建了一个新的张量</code></pre>
+
+<p><strong>真实故事：</strong>我在实现一个自定义的激活函数时，为了节省显存，尝试对权重张量做了 in-place 操作。结果 loss 曲线异常平滑——不是好事，因为学习停止了。检查梯度后发现，梯度流在 in-place 操作的那个点完全断开了，模型的某些层根本没有更新。那次 debug 花了我三个整天。</p>
+
+<h3>16.2 NaN 与 Inf 调试全攻略</h3>
+
+<p>NaN 是训练中另一个让人头疼的问题。loss 突然变成 NaN 意味着计算过程中出现了数学上的非法操作——除零、log(0)、无穷大淘汰了有限数值等等。下面是一份排查清单：</p>
+
+<table>
+    <tr>
+        <th>症状</th>
+        <th>最可能的原因</th>
+        <th>排查步骤</th>
+    </tr>
+    <tr>
+        <td>loss 在第一个 step 就 NaN</td>
+        <td>学习率太大 / 数据包含 NaN</td>
+        <td>检查输入数据是否有 NaN，将 lr 降低 10 倍重试</td>
+    </tr>
+    <tr>
+        <td>loss 在训练中途变成 NaN</td>
+        <td>梯度爆炸 / 数值不稳定</td>
+        <td>梯度裁剪（clip_grad_norm_），检查 loss 函数</td>
+    </tr>
+    <tr>
+        <td>gradient 为 0 或 NaN</td>
+        <td>梯度下溢 / 原地操作 / 模型不收敛</td>
+        <td>打印各层梯度直方图，检查 in-place 操作</td>
+    </tr>
+    <tr>
+        <td>验证时正常，训练时 NaN</td>
+        <td>BatchNorm / Dropout 导致数值差异</td>
+        <td>检查 eval/train mode 切换</td>
+    </tr>
+    <tr>
+        <td>FP16 训练 NaN</td>
+        <td>梯度下溢，未用 GradScaler</td>
+        <td>添加 GradientScaler（详见第15章）</td>
+    </tr>
+    <tr>
+        <td>某些层 param 全为 NaN</td>
+        <td>该层的计算中出现了除零 / log(0)</td>
+        <td>在 forward 中加小 epsilon 到分母 / 输入</td>
+    </tr>
+</table>
+
+<div class="warning">
+    <strong>log(0) 是 NaN 的超级大源头：</strong>很多损失函数（如交叉熵）内部会计算 <code>log(x)</code>。如果你的 <code>x</code> 恰好为 0，结果就是 <code>-inf</code>。如果在 <code>-inf</code> 上再做乘法或加法，就会得到 NaN。解决方案通常是在 <code>log(x)</code> 之前加一个小 epsilon：<code>log(x + 1e-8)</code>。
+</div>
+
+<h3>16.3 torch.autograd.detect_anomaly()</h3>
+
+<p>当你怀疑 NaN 的来源但又不知道从何查起时，PyTorch 自带了一个调试工具：<code>torch.autograd.set_detect_anomaly(True)</code>。启用后，一旦反向传播过程中出现 NaN 或 Inf，PyTorch 会打印出生成该 NaN 的操作及其堆栈信息。</p>
+
+<pre><code>torch.autograd.set_detect_anomaly(True)
+
+for batch in dataloader:
+    pred = model(batch_x)
+    loss = criterion(pred, batch_y)
+
+    loss.backward()  # 如果出现 NaN，这里会报错并告诉你
+                      # 是哪一行代码产生的
+
+    optimizer.step()
+    optimizer.zero_grad()</code></pre>
+
+<p>或者作为上下文管理器使用：</p>
+
+<pre><code>with torch.autograd.detect_anomaly():
+    loss = model(batch_x)
+    loss.backward()</code></pre>
+
+<div class="highlight">
+    <strong>注意事项：</strong><code>detect_anomaly</code> 会显著降低训练速度（可能慢 2-5 倍），因为它需要在前向传播时保存额外的信息来追踪 NaN 的来源。<strong>仅在调试时启用</strong>，不要把它留在正式训练代码中。
+</div>
+
+<h3>16.4 Overfit-One-Batch 测试</h3>
+
+<p>这是一个非常有效的调试技巧。当你写了一个新的模型或修改了数据处理流程后，千万不要直接开始完整训练——你应该先做 <strong>overfit-one-batch 测试</strong>：</p>
+
+<pre><code># 只取一个 batch 的数据
+sample_batch_x, sample_batch_y = next(iter(dataloader))
+sample_batch_x = sample_batch_x.cuda()
+sample_batch_y = sample_batch_y.cuda()
+
+model = MyModel().cuda()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+for step in range(100):
+    pred = model(sample_batch_x)
+    loss = criterion(pred, sample_batch_y)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+    print(f"Step {step}: loss = {loss.item():.6f}")
+
+# 期望：loss 应该持续下降，最终接近 0</code></pre>
+
+<p>如果 loss 在这个单一 batch 上都不能收敛到接近 0，说明你的模型有 bug。这时候问题一定出在模型结构、损失函数、或者数据处理上——不可能是数据量不够或者过拟合之类的外部原因。这个测试帮我节省了无数的 debug 时间。</p>
+
+<h3>16.5 Shape 不匹配的调试策略</h3>
+
+<p>另一个常见的错误类别是张量形状（shape）不匹配。特别是在构建复杂的自定义模型时，每一层的输入输出形状你得心里有数。我的调试策略是"逐层打印法"：</p>
+
+<pre><code>class DebugModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 64, 3)
+        self.pool = nn.MaxPool2d(2)
+        self.fc = nn.Linear(64 * 16 * 16, 10)
+
+    def forward(self, x):
+        print(f"Input shape: {x.shape}")
+        x = self.conv1(x)
+        print(f"After conv1: {x.shape}")
+        x = self.pool(x)
+        print(f"After pool: {x.shape}")
+        x = x.view(x.size(0), -1)
+        print(f"After flatten: {x.shape}")
+        x = self.fc(x)
+        print(f"After fc: {x.shape}")
+        return x</code></pre>
+
+<p>当你发现 <code>nn.Linear</code> 的输入维度不匹配时，把 flatten 之后的形状打印出来，计算一下就知道了。</p>
+
+<div class="tip">
+    <strong>高级技巧：</strong>从 PyTorch 2.0 开始，你可以用 <code>torch.viz</code> 或者简单的 <code>torch.onnx.export</code> 配合 Netron 工具来可视化模型的计算图。更直观地看每一层的连接关系，发现问题比逐层打印更快。
+</div>
+
+<h3>16.6 总结：一份 Debug 速查表</h3>
+
+<p>最后，送上一份综合速查表。下次训练出问题的时候，按图索骥：</p>
+
+<table>
+    <tr>
+        <th>症状</th>
+        <th>最可能的深层原因</th>
+        <th>直接解决方案</th>
+    </tr>
+    <tr>
+        <td>Loss 不下降</td>
+        <td>忘了 zero_grad()</td>
+        <td>在 optimizer.step() 后加 optimizer.zero_grad()</td>
+    </tr>
+    <tr>
+        <td>验证指标波动大</td>
+        <td>没有 model.eval()</td>
+        <td>验证前加 model.eval()，验证后加 model.train()</td>
+    </tr>
+    <tr>
+        <td>内存持续增长至 OOM</td>
+        <td>Tensor 保存在 list 中保留了计算图</td>
+        <td>用 .item() 或 .detach() 后再保存</td>
+    </tr>
+    <tr>
+        <td>RuntimeError: device mismatch</td>
+        <td>模型/数据不在同一设备</td>
+        <td>统一用 .to(device) 将模型和数据放到同一设备</td>
+    </tr>
+    <tr>
+        <td>在某步之后 loss 不再变化</td>
+        <td>In-place 操作切断了梯度流</td>
+        <td>搜索代码中的 .add_()、.mul_()、[i]= 等，改为非原地版本</td>
+    </tr>
+    <tr>
+        <td>Loss 突然变为 NaN</td>
+        <td>梯度爆炸或 log(0)</td>
+        <td>梯度裁剪 / 添加 epsilon / 降低 lr</td>
+    </tr>
+    <tr>
+        <td>训练好但测试差</td>
+        <td>数据泄露或过拟合</td>
+        <td>检查数据预处理是否泄漏了标签信息 / Overfit-one-batch 检查</td>
+    </tr>
+</table>
+
+<p>这一章我们系统梳理了 PyTorch 训练中的五大陷阱、NaN 调试方法、<code>detect_anomaly</code> 工具、overfit-one-batch 测试，以及 shape 调试策略。这些技巧不会让你写出更花哨的模型，但能让你在遇到问题时<strong>不再浪费大量时间在无意义的排查上</strong>。</p>
+
+<p>下一章我们将进入<strong>性能优化</strong>的话题——如何让你的训练跑得更快、显存占用更少。这不仅仅关乎省钱，更关乎你能在相同时间内完成更多实验迭代。下一章见！</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

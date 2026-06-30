@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 可复现性与实验管理 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html" class="active">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第18章 可复现性与实验管理</h2>
+
+<p>大家好，我是你们的讲师。今天的话题可能不如模型结构或者训练技巧那么"酷"，但它的重要性绝对不容低估——<strong>可复现性（Reproducibility）与实验管理</strong>。</p>
+
+<p>在深度学习的世界里，一个实验结果如果不能被复现，那它的价值就接近于零。更现实的问题是：你三个月前跑的那个 baseline 的 accuracy 是多少？你当时用的超参数是什么？数据集是哪个版本？如果你答不上来，那你在那个 baseline 之上"改进"的所有实验结果都是不可信的——因为你没法确认改进是真的来自你的新方法，还是仅仅因为随机种子不同。</p>
+
+<p>这一章我会从最基础的随机种子设置讲起，然后讨论 deterministic 模式、实验配置管理、模型版本化和 checkpoint 命名策略。我会尽量给出可以直接用在项目中的模板代码。</p>
+
+<h3>18.1 设置所有随机种子</h3>
+
+<p>很多人以为设置种子就是跑一行 <code>torch.manual_seed(42)</code>。但实际上，"全"种子意味着你要对代码中所有可能引入随机性的环节都设置种子。下面这个函数几乎是我所有 PyTorch 项目的标准开头：</p>
+
+<pre><code>import torch
+import numpy as np
+import random
+
+def set_all_seeds(seed: int):
+    """为所有随机数生成器设置种子"""
+    torch.manual_seed(seed)                    # PyTorch CPU
+    torch.cuda.manual_seed_all(seed)           # PyTorch GPU（所有设备）
+    np.random.seed(seed)                       # NumPy
+    random.seed(seed)                          # Python 标准库
+    # 注意：如果你使用 Python 3.2+，hash 的随机化也需要固定
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+# 使用
+set_all_seeds(42)</code></pre>
+
+<div class="highlight">
+    <strong>你可能漏掉的一个：</strong><code>PYTHONHASHSEED</code>。Python 3.2+ 在进程启动时会随机化字符串的哈希种子以防范哈希碰撞攻击。如果你的代码中使用了 <code>set()</code>、<code>dict()</code> 等基于哈希的数据结构（比如数据集中的类别映射），这个随机化会导致每次运行的数据读取顺序不同。设置 <code>PYTHONHASHSEED</code> 能消除这个不确定性。
+</div>
+
+<p>注意：<code>PYTHONHASHSEED</code> 必须在进程启动时设置才生效，不能像其他种子那样在代码中间设置。通常的做法是在调用脚本前设置：<code>PYTHONHASHSEED=42 python train.py</code>，或者在脚本的最高处（在 import 任何东西之前）设置。</p>
+
+<h3>18.2 torch.use_deterministic_algorithms()</h3>
+
+<p>设置种子只能保证"随机数序列"相同，但不能保证所有的浮点运算都是确定性的。比如某些 CUDA 卷积实现使用了原子加法（atomic add），这会导致每次 forward 的微小差异——即使输入完全相同。</p>
+
+<p>要强制 PyTorch 使用确定性的算法，可以使用：</p>
+
+<pre><code>torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.deterministic = True</code></pre>
+
+<p>第一个调用告诉 PyTorch 框架层的算子优先选择确定性实现。第二个调用告诉 cuDNN 选择确定性卷积算法。这样，相同输入 + 相同种子 = 完全相同的输出。</p>
+
+<p>代价是<strong>性能下降</strong>：</p>
+<table>
+    <tr>
+        <th>配置</th>
+        <th>可复现性</th>
+        <th>训练速度</th>
+        <th>推荐场景</th>
+    </tr>
+    <tr>
+        <td>默认</td>
+        <td>不可保证</td>
+        <td>100%（baseline）</td>
+        <td>正式训练、大模型</td>
+    </tr>
+    <tr>
+        <td>+ 设置种子</td>
+        <td>大部分随机性消除</td>
+        <td>~95%</td>
+        <td>日常实验</td>
+    </tr>
+    <tr>
+        <td>+ deterministic</td>
+        <td>完全确定</td>
+        <td>~60%~80%</td>
+        <td>调试、论文复现</td>
+    </tr>
+</table>
+
+<div class="warning">
+    <strong>一个重要警告：</strong>并不是所有的 PyTorch 操作都有确定性实现。某些操作（如 <code>torch.nn.functional.interpolate</code> 的某些模式、<code>torch.scatter_reduce</code> 等）在启用 <code>use_deterministic_algorithms(True)</code> 时会抛出 <code>RuntimeError</code>。如果你的代码中包含这些操作，你可能不得不接受不确定性——或者寻找替代实现。
+</div>
+
+<h3>18.3 cudnn.deterministic vs cudnn.benchmark</h3>
+
+<p>这两个选项是有冲突的，不能同时开启：</p>
+
+<pre><code># 选项 A：追求可复现
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+# 选项 B：追求速度（默认推荐）
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False</code></pre>
+
+<p>其实这两者并不完全互斥——你可以只设置 <code>benchmark=False</code>（不使用自动调优，使用默认卷积算法）而不设置 <code>deterministic=True</code>。这样虽然每次运行的结果可能不完全一致（因为默认卷积算法也不一定是确定性的），但至少不会有 benchmark 引入的算法切换差异。</p>
+
+<p>最佳实践是：在你的训练脚本中提供一个命令行开关，让使用者可以在"可复现"和"高性能"之间自由切换：</p>
+
+<pre><code>import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--deterministic", action="store_true")
+args = parser.parse_args()
+
+if args.deterministic:
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    set_all_seeds(args.seed)
+else:
+    torch.backends.cudnn.benchmark = True
+    set_all_seeds(args.seed)</code></pre>
+
+<h3>18.4 Config Dict 模式：替代 argparse</h3>
+
+<p>随着实验数量的增加，用 <code>argparse</code> 管理超参数会变得越来越痛苦。每个实验有一套不同的参数，你完全记不住哪个实验用了什么参数。推荐使用 <strong>Config Dict</strong> 模式——用一个 Python dict 保存所有配置，序列化后随模型一起保存。</p>
+
+<pre><code># config.py
+config = {
+    "exp_name": "baseline_resnet50",
+    "seed": 42,
+    "model": "resnet50",
+    "batch_size": 256,
+    "learning_rate": 1e-3,
+    "weight_decay": 1e-4,
+    "num_epochs": 100,
+    "optimizer": "adam",
+    "scheduler": "cosine",
+    "data_augmentation": True,
+    "mixed_precision": True,
+    "compile": True,
+    "deterministic": False,
+    "dataset": "imagenet",
+    "data_dir": "/data/imagenet",
+    "num_workers": 8,
+    "pin_memory": True,
+}
+
+# train.py
+def train(config):
+    print("Config:", config)
+    set_all_seeds(config["seed"])
+    model = create_model(config["model"])
+    dataloader = create_dataloader(config)
+    optimizer = create_optimizer(model, config)
+    # ... 训练代码 ...
+
+    # 训练完成后，将配置和模型一起保存
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "config": config,                    # 保存完整配置！
+        "final_accuracy": best_acc,
+    }, f"{config['exp_name']}_final.pth")</code></pre>
+
+<div class="tip">
+    <strong>YAML 也可以：</strong>很多团队喜欢用 YAML 文件来管理配置。PyTorch 社区中常见的做法是 <code>config.yaml</code> + <code>yaml.safe_load()</code> 来读取。两种方式都可以，关键原则是：<strong>配置必须与实验结果一起保存</strong>——不能只保存模型权重而不保存配置，否则这个模型权重基本就是废的。
+</div>
+
+<h3>18.5 模型版本化与 Checkpoint 命名</h3>
+
+<p>我不建议用 <code>model_final.pth</code>、<code>model_final_v2.pth</code> 这种命名方式。当你有 20 个实验的时候，这些名字完全无法帮助你区分。一个实用的命名策略是包含以下信息：</p>
+
+<ul>
+    <li><strong>实验名称</strong> — 如 <code>resnet50_baseline</code></li>
+    <li><strong>日期和时间</strong> — 如 <code>20260630_1430</code></li>
+    <li><strong>git commit hash</strong> — 代码版本，精确到 7 位 hash</li>
+    <li><strong>关键指标</strong> — 如 <code>acc_76.3</code></li>
+</ul>
+
+<pre><code>import subprocess
+from datetime import datetime
+
+def get_git_hash():
+    return subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"]
+    ).decode().strip()
+
+def save_checkpoint(model, optimizer, config, epoch, metrics, path):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    git_hash = get_git_hash()
+    acc = metrics.get("accuracy", 0)
+
+    filename = (
+        f"{config['exp_name']}_"
+        f"{timestamp}_"
+        f"{git_hash}_"
+        f"epoch{epoch:03d}_"
+        f"acc{acc:.1f}.pth"
+    )
+
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "config": config,
+        "metrics": metrics,
+        "git_hash": git_hash,
+        "timestamp": timestamp,
+    }
+    torch.save(checkpoint, f"{path}/{filename}")
+    return filename
+
+# 生成的文件名类似：
+# resnet50_baseline_20260630_1430_a1b2c3d_epoch090_acc76.3.pth</code></pre>
+
+<p>这样的文件名看一眼就能知道是什么时候跑的、哪个代码版本、精度如何。配合 <code>config</code> 保存，你打开 checkpoint 文件就能拿到实验的完整配置。</p>
+
+<h3>18.6 可复现性检查清单</h3>
+
+<p>为了方便查阅，我整理了一份综合检查清单。每次开始一个重要的实验前，可以逐项对照：</p>
+
+<table>
+    <tr>
+        <th>项目</th>
+        <th>操作</th>
+        <th>重要性</th>
+    </tr>
+    <tr>
+        <td>PyTorch 种子</td>
+        <td><code>torch.manual_seed(seed)</code></td>
+        <td>必须</td>
+    </tr>
+    <tr>
+        <td>CUDA 种子</td>
+        <td><code>torch.cuda.manual_seed_all(seed)</code></td>
+        <td>必须</td>
+    </tr>
+    <tr>
+        <td>NumPy 种子</td>
+        <td><code>np.random.seed(seed)</code></td>
+        <td>必须</td>
+    </tr>
+    <tr>
+        <td>Python 随机种子</td>
+        <td><code>random.seed(seed)</code></td>
+        <td>必须</td>
+    </tr>
+    <tr>
+        <td>Python hash 种子</td>
+        <td>启动前设置 <code>PYTHONHASHSEED</code></td>
+        <td>推荐</td>
+    </tr>
+    <tr>
+        <td>确定性的 CUDA 卷积</td>
+        <td><code>cudnn.deterministic = True</code></td>
+        <td>按需（论文复现时开启）</td>
+    </tr>
+    <tr>
+        <td>确定性算法</td>
+        <td><code>use_deterministic_algorithms(True)</code></td>
+        <td>按需（会降低速度）</td>
+    </tr>
+    <tr>
+        <td>关闭 benchmark</td>
+        <td><code>cudnn.benchmark = False</code></td>
+        <td>按需（开启会更快但不确定）</td>
+    </tr>
+    <tr>
+        <td>DataLoader shuffle 种子</td>
+        <td><code>DataLoader(..., generator=torch.Generator().manual_seed(seed))</code></td>
+        <td>推荐（确保数据顺序固定）</td>
+    </tr>
+    <tr>
+        <td>模型初始化种子</td>
+        <td>在 <code>set_all_seeds</code> 之后初始化模型</td>
+        <td>必须</td>
+    </tr>
+    <tr>
+        <td>配置记录</td>
+        <td>config dict 随 checkpoint 一起保存</td>
+        <td>必须</td>
+    </tr>
+    <tr>
+        <td>代码版本</td>
+        <td>git commit hash 记录在 checkpoint 中</td>
+        <td>强烈推荐</td>
+    </tr>
+</table>
+
+<div class="warning">
+    <strong>关于 "随机种子改 3%" 的真实故事：</strong>
+    我有一位朋友在 NeurIPS 2023 投稿前做了一组对比实验。新方法比 baseline 高了 3% 的 accuracy，这是一个非常性感的结果。他很兴奋地写完了论文。但提交前的最后一天，他决定再跑一次确认——结果新方法的 accuracy 降了 2%，baseline 反而高了 1%。两次结果差了 3%。
+    原因是什么？他第一次跑实验的时候，机器上正好有另一个进程占用了大量 CPU，导致 DataLoader 的 worker 产生了不同的数据打乱顺序——<strong>因为 DataLoader 的 shuffle 默认使用的是全局随机状态，而 worker 子进程的随机状态是不可控的</strong>。他以为设了 <code>torch.manual_seed</code> 就万事大吉了，但其实 DataLoader 需要单独设置 <code>generator</code>。
+    好消息是，他检查了一下发现实验可以复现——只是需要用完全相同的 CPU 负载条件。这显然不叫"可复现"。
+    解决方法是给 DataLoader 传入一个专属的 <code>Generator</code>：
+    <pre><code>g = torch.Generator()
+g.manual_seed(config["seed"] + epoch)  # 每个 epoch 不同的 shuffle
+dataloader = DataLoader(dataset, shuffle=True, generator=g)</code></pre>
+    这件事告诉我们：<strong>只设一个 seed 远远不够，每个随机环节都要单独管理</strong>。
+</div>
+
+<p>好了，这一章的内容就到这里。我们学习了如何正确地设置所有随机种子、如何使用 <code>deterministic</code> 模式、如何用 config dict 管理实验配置、以及如何为 checkpoint 命名。可复现性虽然不"性感"，但它是所有可靠研究的基石。没有可复现性，你的实验结果就是"周末哄自己开心"的数字游戏。</p>
+
+<p>下一章我们来探索一个更"酷"的话题——<strong>torch.compile 深度解析</strong>。我们在第 17 章只是简单了解了它的用法，下一章会深入它的底层原理：TorchDynamo、AOTAutograd、TorchInductor 三个关键组件各自做了什么，以及如何用 <code>torch.compile</code> 的高级选项来精细控制编译行为。下一章见！</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

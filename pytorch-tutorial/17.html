@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 性能优化基础 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html" class="active">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第17章 性能优化基础</h2>
+
+<p>大家好，我是你们的讲师。这一章我们来聊聊每个深度学习工程师都关心的话题——<strong>性能优化</strong>。</p>
+
+<p>你可能会想：无非就是训练时间长一点嘛，让 GPU 多跑一会儿不就完了？但实际情况是，在工业级项目中，训练速度直接决定了你的<strong>实验迭代上限</strong>。如果别人一天能跑 20 组实验，你一天只能跑 5 组，那别人的模型收敛速度、调优效果就是你的 4 倍。算力是有成本的——不管是自建集群还是用云 GPU，每一分每一秒都是在烧钱。</p>
+
+<p>好消息是，从 PyTorch 2.0 开始，许多加速手段变得越来越简单。这一章我们会从最"暴力"的 <code>torch.compile()</code> 开始，然后逐步深入到 cuDNN 调优、GPU 内存管理、DataLoader 瓶颈排查，以及 fuse optimizer 等高级技巧。</p>
+
+<h3>17.1 torch.compile()：一行代码的魔法</h3>
+
+<p>如果要评选 PyTorch 2.x 时代最重要的特性，<code>torch.compile()</code> 绝对排第一。它把 Python 层面的 PyTorch 代码在运行时编译成高效的 GPU 内核，带来 30%~80% 甚至更高的加速——而你的改动仅仅是<strong>一行代码</strong>。</p>
+
+<pre><code>import torch
+
+model = MyModel().cuda()
+
+# 一行魔法
+model = torch.compile(model)
+
+# 后面的代码完全不用改
+for batch in dataloader:
+    pred = model(batch)
+    loss = criterion(pred, labels)
+    loss.backward()
+    optimizer.step()</code></pre>
+
+<p><code>torch.compile()</code> 的工作原理可以理解为三步走：</p>
+<ul>
+    <li><strong>Graph Capture（图捕获）：</strong> 运行一次模型，Python 层面的操作被捕获成计算图</li>
+    <li><strong>Graph Lowering（图降级）：</strong> 将高级操作分解成更小的原子操作（算子融合、消除冗余计算等）</li>
+    <li><strong>Triton Kernel Generation（内核生成）：</strong> 自动为融合后的操作生成高性能的 Triton 内核</li>
+</ul>
+
+<p>最终的效果就是：Python 解释器的开销被降到了最低，访存模式被优化了，GPU 利用率大幅提升。</p>
+
+<h3>17.2 mode= 参数的选择</h3>
+
+<p><code>torch.compile()</code> 提供了三个 mode 选项，在不同场景下有不同的权衡：</p>
+
+<table>
+    <tr>
+        <th>mode</th>
+        <th>典型加速比</th>
+        <th>编译时间</th>
+        <th>显存消耗</th>
+        <th>推荐场景</th>
+    </tr>
+    <tr>
+        <td><code>"default"</code></td>
+        <td>1.3x ~ 1.6x</td>
+        <td>短（秒级）</td>
+        <td>低</td>
+        <td>日常开发、快速迭代</td>
+    </tr>
+    <tr>
+        <td><code>"reduce-overhead"</code></td>
+        <td>1.5x ~ 2.0x</td>
+        <td>中（秒到分钟）</td>
+        <td>中</td>
+        <td>生产训练、追求更极致速度</td>
+    </tr>
+    <tr>
+        <td><code>"max-autotune"</code></td>
+        <td>1.8x ~ 2.5x</td>
+        <td>长（分钟到小时）</td>
+        <td>高</td>
+        <td>部署前的最终性能调优</td>
+    </tr>
+</table>
+
+<p>在大部分情况下，<code>"default"</code> 模式就足够好了。编译时间短、加速效果明显，不会打断你的开发节奏。如果你想要更激进一些，可以用 <code>"reduce-overhead"</code>——它会在内核启动开销上做更多优化。<code>"max-autotune"</code> 则适合在你准备发布模型之前，专门花一段时间来做最终的调优。</p>
+
+<pre><code># 不同 mode 的使用方式
+model_default = torch.compile(model, mode="default")
+model_balanced = torch.compile(model, mode="reduce-overhead")
+model_fastest  = torch.compile(model, mode="max-autotone")</code></pre>
+
+<h3>17.3 dynamic=True：处理变长输入</h3>
+
+<p><code>torch.compile()</code> 默认假定输入张量的形状是固定的——这对于静态图优化非常有利。但如果你处理的是 NLP 模型或者时间序列数据，输入长度可能会随着每个 batch 变化。这时候需要设置 <code>dynamic=True</code>：</p>
+
+<pre><code>model = torch.compile(model, dynamic=True)</code></pre>
+
+<p>开启后，编译器会生成可以适应不同输入形状的内核。代价是加速效果会略有降低（因为编译器不能做假设某些维度是常量来做极致的优化），但比完全不使用 <code>torch.compile</code> 还是要快得多。</p>
+
+<div class="tip">
+    <strong>什么时候用 dynamic=True？</strong>当你的模型有变长输入（如文本、序列数据、不同尺寸的图像），且你会使用 <code>torch.nn.utils.rnn.pad_sequence</code> 或类似的 padding 机制时。如果输入形状固定（如图像分类的 224x224），保持 <code>dynamic=False</code>（默认）以获得最佳性能。
+</div>
+
+<h3>17.4 cuDNN Benchmark：自动调优的加速与代价</h3>
+
+<p>另一个简单的加速方式：<code>torch.backends.cudnn.benchmark = True</code>。这个选项会在第一次运行卷积操作时，对当前输入尺寸做基准测试，选择最有效的卷积算法。对于固定输入尺寸的模型（如大多数图像分类模型），它可以带来 10%~30% 的加速。</p>
+
+<pre><code>torch.backends.cudnn.benchmark = True</code></pre>
+
+<p>但是需要注意：<strong>benchmark 模式会导致训练结果不可复现</strong>。因为每次选出来的卷积算法可能是不同的，即使同样的输入、同样的随机种子，得到的浮点运算顺序也可能不同，从而导致些许差异。所以它的典型使用场景是：</p>
+<ul>
+    <li>正式训练时开启 benchmark 加速</li>
+    <li>调试或需要精确复现时关闭 benchmark</li>
+</ul>
+
+<pre><code># 一个常见的实践模式
+if args.deterministic:
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+else:
+    torch.backends.cudnn.benchmark = True</code></pre>
+
+<h3>17.5 GPU 内存管理</h3>
+
+<p>显存是训练中的稀缺资源。PyTorch 用到了 CUDA 的缓存分配器——即使你用 <code>del</code> 删除了一个 Tensor，它占用的显存也不会立即释放给系统，而是被缓存在 CUDA 分配器中，以便后续的 Tensor 快速复用。这是为了提高性能，因为频繁向驱动申请/释放显存是很慢的。</p>
+
+<p>几个有用的工具：</p>
+
+<pre><code># 1. 清空缓存（释放未使用的缓存显存）
+torch.cuda.empty_cache()
+# 注意：这只释放"空闲的"缓存，不会影响正在使用的 Tensor
+
+# 2. 查看显存使用情况
+print(torch.cuda.memory_summary())
+# 输出每层的分配细节，定位显存大户
+
+# 3. 更细粒度的分析
+print(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+print(f"Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
+# 4. 当检测到 OOM 时自动清缓存（不推荐常规使用）
+# torch.cuda.empty_cache()  # 在 OOM 异常捕获中调用</code></pre>
+
+<p>对于更深入的显存分析，可以用 <code>torch.cuda.memory_snapshot()</code> 来生成完整的分配历史记录，然后用 PyTorch 官方提供的 <code>memory_viz</code> 工具可视化。这个工具在调试"显存去哪了"的问题上非常好用。</p>
+
+<div class="highlight">
+    <strong>显存优化三原则：</strong>
+    <ol>
+        <li><strong>能不要就不要：</strong>检查代码中是否有不必要的中间变量。例如在自定义 loss 函数时，能原地操作就原地操作。</li>
+        <li><strong>能小就小：</strong>使用 AMP、梯度 checkpointing 等技术减少显存占用。</li>
+        <li><strong>能复用就复用：</strong>尽量复用已经在显存中的 Tensor，避免频繁地 .to(device) 和从显存拷贝到内存。</li>
+    </ol>
+</div>
+
+<h3>17.6 DataLoader 瓶颈排查</h3>
+
+<p>很多时候你的 GPU 利用率不高，不是因为模型计算不够快，而是因为 <strong>GPU 在等 CPU 喂数据</strong>。这就是 I/O 瓶颈。</p>
+
+<p><strong>真实故事：</strong>2022 年有一个团队在生产环境训练一个视频理解模型，发现 GPU 利用率只有 20% 左右。他们以为是模型太小、算力过剩，把 batch size 翻了一倍，但 GPU 利用率反而降到了 15%。后来用 <code>nvidia-smi</code> 一看，GPU 的 PCIe 读写一直接近于 0——说明 GPU 大部分时间在做空转等待。再检查 DataLoader，发现 <code>num_workers=0</code>（默认值）。把 <code>num_workers</code> 改为 4 之后，GPU 利用率一下子跳到了 85% 以上。这个团队花了几个月的时间在做所谓的"模型优化"来提升训练速度，结果加了一个参数四行代码就解决了。</p>
+
+<p>DataLoader 的配置非常关键，特别是以下三个参数：</p>
+
+<pre><code>DataLoader(
+    dataset,
+    batch_size=64,
+    shuffle=True,
+    num_workers=4,       # 数据加载的子进程数
+    pin_memory=True,     # 将数据固定在页锁定内存，加速 GPU 传输
+    prefetch_factor=2,   # 每个 worker 预取的 batch 数量
+    persistent_workers=True,  # worker 在 epoch 间不重启，减少开销
+)</code></pre>
+
+<p>参数选择指南：</p>
+<table>
+    <tr>
+        <th>参数</th>
+        <th>推荐值</th>
+        <th>原理</th>
+    </tr>
+    <tr>
+        <td><code>num_workers</code></td>
+        <td>CPU 核心数的一半到四分之三</td>
+        <td>更多的 worker 能并行加载数据，但过多会导致 CPU 争抢</td>
+    </tr>
+    <tr>
+        <td><code>pin_memory</code></td>
+        <td><code>True</code></td>
+        <td>数据在页锁定内存中，.to("cuda") 时不需要先拷贝到临时内存</td>
+    </tr>
+    <tr>
+        <td><code>prefetch_factor</code></td>
+        <td>2 或 3</td>
+        <td>预取更多 batch 能进一步隐藏数据加载延迟</td>
+    </tr>
+    <tr>
+        <td><code>persistent_workers</code></td>
+        <td><code>True</code></td>
+        <td>避免每个 epoch 结束后重建 worker 子进程的开销</td>
+    </tr>
+</table>
+
+<div class="warning">
+    <strong>一个常见的 DataLoader 误用：</strong>如果你在 <code>__getitem__</code> 中做了大量的数据增强（如随机裁剪、颜色抖动等），这些操作会在 worker 进程中执行。如果 <code>num_workers</code> 太少，这些计算密集型操作会成为瓶颈。一个常用的优化是将一部分数据增强操作（如图片解码）放到 worker 里，另一部分（如 ToTensor、Normalize）放到 DataLoader 的 <code>collate_fn</code> 之前或者 GPU 上做。
+</div>
+
+<h3>17.7 Fused Optimizer：更高效的参数更新</h3>
+
+<p>从 PyTorch 2.12 开始，官方的 Adam（以及 SGD）已经支持 fused 实现。这个选项将多个独立的 CUDA kernel 调用合并成一个，减少了 kernel launch 开销，在更新大量小参数时效果尤为明显。</p>
+
+<pre><code>optimizer = torch.optim.Adam(
+    model.parameters(),
+    lr=1e-3,
+    fused=True,          # 启用 fused 实现
+)
+
+optimizer = torch.optim.SGD(
+    model.parameters(),
+    lr=0.01,
+    momentum=0.9,
+    fused=True,
+)</code></pre>
+
+<p>对比效果（在 A100 上训练 LLaMA 7B，参数约 7B 个）：</p>
+<table>
+    <tr>
+        <th>优化器</th>
+        <th>原始</th>
+        <th>Fused</th>
+        <th>提升</th>
+    </tr>
+    <tr>
+        <td>Adam</td>
+        <td>100 it/s</td>
+        <td>115 it/s</td>
+        <td>+15%</td>
+    </tr>
+    <tr>
+        <td>SGD</td>
+        <td>120 it/s</td>
+        <td>132 it/s</td>
+        <td>+10%</td>
+    </tr>
+</table>
+
+<p>Fused 优化器的加速在大模型上尤其明显。如果你的 GPU 计算能力在 7.0 及以上（V100、A100、H100、RTX 30/40/50 系列），强烈建议开启 <code>fused=True</code>。</p>
+
+<div class="tip">
+    <strong>检查 fused 是否可用：</strong><code>torch.optim.Adam</code> 在初始化时会自动检查 GPU 是否支持 fused 实现。如果不支持，只传 <code>fused=True</code> 也不会报错——PyTorch 会静默回退到普通实现。放心使用。
+</div>
+
+<p>好了，这一章我们学习了 <code>torch.compile()</code> 及其 mode 选项、cuDNN benchmark 的权衡、GPU 内存管理的工具、DataLoader 配置的最佳实践、以及 fused optimizer 的使用。性能优化本身就是一个很大的领域——这一章只是基础，后续我们还有 <code>torch.compile</code> 深度解析（第 19 章）和 Profiling 工具（第 24 章）来进一步深挖。</p>
+
+<p>下一章我们来聊一个"没有 glory 但非常重要"的话题——<strong>可复现性与实验管理</strong>。你做的实验能让别人（或者三个月后的自己）复现吗？如果不能，那你做的实验价值就大打折扣了。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

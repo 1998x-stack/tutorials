@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 混合精度训练 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html" class="active">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第15章 混合精度训练</h2>
+
+<p>大家好，我是你们的讲师。这一章我们来聊一个训练加速的"免费午餐"——<strong>混合精度训练（Mixed Precision Training）</strong>。</p>
+
+<p>为什么说它是"免费午餐"？因为它基本不需要改模型结构、不需要调超参数，只需要在训练代码里加几行代码，就能获得 1.5x 到 3x 的加速，同时显存占用还能降低近一半。这种好事在深度学习的世界里可不多见。</p>
+
+<p>混合精度训练的核心思想很简单：<strong>不是所有计算都需要 FP32 的精度</strong>。梯度、激活值、中间特征——这些张量中的大部分信息对精度并不敏感，用 FP16 或 BF16 存就够了。只有少数关键操作（比如损失计算、权重更新）才需要保持 FP32 的精度。我们把高精度和低精度混合起来用，这就是"混合精度"这个名字的由来。</p>
+
+<h3>15.1 FP16 与 BF16：两种低精度格式</h3>
+
+<p>在深入代码之前，我们需要先搞清楚两种主要的低精度浮点格式：<strong>FP16</strong>（半精度浮点数）和 <strong>BF16</strong>（Brain Floating Point）。</p>
+
+<p>FP16 是 IEEE 754 标准中定义的 16 位浮点数格式，有 5 位指数位和 10 位尾数位。BF16 则是由 Google 的 Brain 团队提出的格式，它牺牲了尾数位，保留了和 FP32 一样的 8 位指数位。这带来的直接影响是：<strong>BF16 的动态范围与 FP32 相同，但精度更低；FP16 的精度更高，但动态范围窄得多</strong>。</p>
+
+<p>下面这张表可以让你一目了然地看到它们的区别：</p>
+
+<table>
+    <tr>
+        <th>格式</th>
+        <th>指数位</th>
+        <th>尾数位</th>
+        <th>动态范围</th>
+        <th>精度</th>
+        <th>适用硬件</th>
+    </tr>
+    <tr>
+        <td>FP32</td>
+        <td>8</td>
+        <td>23</td>
+        <td>~3.4e38</td>
+        <td>高</td>
+        <td>所有 GPU</td>
+    </tr>
+    <tr>
+        <td>FP16</td>
+        <td>5</td>
+        <td>10</td>
+        <td>~65504</td>
+        <td>较高</td>
+        <td>V100, A100, H100, RTX 系列</td>
+    </tr>
+    <tr>
+        <td>BF16</td>
+        <td>8</td>
+        <td>7</td>
+        <td>~3.4e38</td>
+        <td>较低</td>
+        <td>A100+, H100, RTX 4090+</td>
+    </tr>
+</table>
+
+<p>注意看动态范围这一列：FP16 最大只能表示到 65504，而 BF16 和 FP32 一样可以表示到 3.4e38。这个差异在实际训练中非常关键。</p>
+
+<div class="warning">
+    <strong>FP16 的"精度陷阱"：</strong>FP16 的动态范围很窄，这意味着梯度值很容易<strong>下溢</strong>到零（underflow）。如果你的模型激活值或梯度的绝对值小于 2<sup>-24</sup>（约 6e-8），FP16 就直接把它截断成零了。这就是为什么 FP16 训练需要配合 loss scaling 的原因。
+</div>
+
+<p>BF16 的出现解决了这个问题。它的指数位跟 FP32 一样多，所以几乎不会出现下溢。代价是尾数位只有 7 位，精度比 FP16 还低一些。但在深度学习训练中——尤其是大模型训练——<strong>动态范围比精度重要得多</strong>。模型权重通常分布在零附近一个较宽的范围内，尾数精度不够导致的误差在反向传播中会被 batch 平均掉，但梯度下溢是直接丢失信息，无法恢复。</p>
+
+<p>所以一个很好的经验法则是：<strong>如果硬件支持 BF16（Ampere 架构及以上），优先用 BF16；如果只能用 FP16（V100 或更老的卡），必须配合 Gradient Scaler</strong>。</p>
+
+<h3>15.2 torch.amp.autocast：一行代码开启混合精度</h3>
+
+<p>PyTorch 从 1.6 版本开始就在 <code>torch.amp</code> 模块中提供了自动混合精度（Automatic Mixed Precision, AMP）的支持。所谓"自动"，是指 PyTorch 会自动判断每个操作应该用 FP16/BF16 还是 FP32 来执行。比如矩阵乘法（GEMM）和卷积这类计算密集型的操作会用低精度加速，而损失计算、softmax 等精度敏感的操作会自动回退到 FP32。</p>
+
+<p>使用方法非常简单——只需要用 <code>autocast</code> 上下文管理器包裹前向传播：</p>
+
+<pre><code>import torch
+from torch.amp import autocast
+
+model = MyModel().cuda()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+for batch in dataloader:
+    inputs, labels = batch
+    inputs, labels = inputs.cuda(), labels.cuda()
+
+    optimizer.zero_grad()
+
+    # autocast 上下文：自动选择精度
+    with autocast(device_type="cuda"):
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+
+    loss.backward()
+    optimizer.step()</code></pre>
+
+<p>就这么多。在 <code>autocast</code> 的上下文中，<code>torch.nn.Linear</code> 的矩阵乘法会以 FP16/BF16 执行，而 <code>torch.nn.CrossEntropyLoss</code> 的 log-softmax 计算会以 FP32 执行。你完全不需要手动控制哪个操作用什么精度。</p>
+
+<div class="tip">
+    <strong>device_type 参数：</strong>从 PyTorch 2.0 开始，<code>autocast</code> 需要显式传入 <code>device_type</code> 参数。如果使用 CUDA 设备，传 <code>"cuda"</code>；如果使用 Apple Silicon 的 MPS 后端，传 <code>"mps"</code>；如果使用 CPU，传 <code>"cpu"</code>。在 PyTorch 2.12 中，<code>device_type</code> 是必填参数。
+</div>
+
+<h3>15.3 GradientScaler：FP16 训练的守护神</h3>
+
+<p>如果你使用的是 FP16（比如在 V100 上训练），光有 <code>autocast</code> 是不够的。还记得我们前面说的 FP16 动态范围窄的问题吗？在训练过程中，梯度值的分布范围很大，很多梯度可能会小于 FP16 的最小可表示正数（约 6e-8），从而下溢到零。</p>
+
+<p>解决方案是 <strong>Gradient Scaler</strong>：在反向传播之前，先把损失值乘以一个缩放因子（比如 2<sup>16</sup> = 65536），这样计算出的梯度也等比例放大了。等梯度传回到权重之前，再把它缩小回去。这样原本会下溢的小梯度，放大之后就能被 FP16 精确表示了。</p>
+
+<p>这里有监控里听到的一个经典踩坑故事。2020 年有一位工程师在训练一个 BERT 模型时，发现 loss 完全不下降。他检查了模型结构、学习率、数据预处理，折腾了两天都没找出问题。最后他在反向传播后打印了一下梯度——发现所有层的梯度都是 <code>tensor(0.)</code>。模型训练了 48 小时，梯度从第一步开始就全部下溢到了零，模型从头到尾就没学过任何东西。原因就是他没有使用 <code>GradientScaler</code>。</p>
+
+<p>正确的用法是 <code>GradScaler</code> + <code>autocast</code> 配合使用：</p>
+
+<pre><code>from torch.amp import autocast, GradScaler
+
+model = MyModel().cuda()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+scaler = GradScaler()  # 默认 init_scale=2**16
+
+for batch in dataloader:
+    inputs, labels = batch
+    inputs, labels = inputs.cuda(), labels.cuda()
+
+    optimizer.zero_grad()
+
+    with autocast(device_type="cuda"):
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+
+    # 1. scaler.scale(loss) 放大损失
+    # 2. loss.backward() 计算放大后的梯度
+    scaler.scale(loss).backward()
+
+    # 3. scaler.step(optimizer) 内部先 unscale 梯度
+    #    如果梯度未溢出，则执行 optimizer.step()
+    #    如果梯度溢出，跳过这一步
+    scaler.step(optimizer)
+
+    # 4. 更新缩放因子
+    scaler.update()</code></pre>
+
+<p><code>GradScaler</code> 内部维护了一个动态的缩放因子。如果连续多次没有发生梯度溢出，他会逐渐增大缩放因子；如果检测到溢出，他会减小缩放因子。整个过程自动进行，你只需要按照上面的模式写代码就行。</p>
+
+<div class="highlight">
+    <strong>GradientScaler 的工作流程总结：</strong>
+    <ol>
+        <li><code>scaler.scale(loss)</code> — 对损失乘以缩放因子（默认 2<sup>16</sup>）</li>
+        <li><code>loss.backward()</code> — 计算放大后的梯度</li>
+        <li><code>scaler.step(optimizer)</code> — 将梯度 unscale 回来，检查是否溢出；如果未溢出则更新权重</li>
+        <li><code>scaler.update()</code> — 根据本轮是否发生溢出动态调整缩放因子</li>
+    </ol>
+</div>
+
+<h3>15.4 BF16：更简单的选择</h3>
+
+<p>如果你使用的是 Ampere 架构（A100）或更新的 GPU（H100、RTX 4090 等），那么你不需要 <code>GradScaler</code>。直接使用 BF16 格式配合 <code>autocast</code> 就足够了：</p>
+
+<pre><code>from torch.amp import autocast
+
+model = MyModel().cuda()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+for batch in dataloader:
+    inputs, labels = batch
+    inputs, labels = inputs.cuda(), labels.cuda()
+    optimizer.zero_grad()
+
+    with autocast(device_type="cuda", dtype=torch.bfloat16):
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+
+    loss.backward()
+    optimizer.step()</code></pre>
+
+<p>注意到区别了吗？没有 <code>GradScaler</code>，没有 <code>unscale</code>，没有 <code>update</code>——代码跟纯 FP32 训练几乎一模一样，只是因为加了一个 <code>autocast</code> 就获得了加速。这是因为 BF16 的动态范围和 FP32 一致，梯度不需要缩放过。</p>
+
+<p>当然，如果你需要在同一个脚本里同时支持 FP16（V100）和 BF16（A100），可以这样写：</p>
+
+<pre><code>dtype = torch.bfloat16 if torch.cuda.get_device_capability() >= (8, 0) else torch.float16
+
+with autocast(device_type="cuda", dtype=dtype):
+    outputs = model(inputs)
+    loss = criterion(outputs, labels)</code></pre>
+
+<p><code>torch.cuda.get_device_capability()</code> 返回 GPU 的计算能力（Compute Capability）。Ampere 架构（A100）的计算能力是 8.0，所以 <code>>= (8, 0)</code> 就能覆盖所有支持 BF16 的 GPU。</p>
+
+<h3>15.5 实际加速效果与显存收益</h3>
+
+<p>说了这么多原理，来看看实际效果。下面这组数据来自在一个 ResNet-50 + ImageNet 的实验中（batch size=256，A100 80GB）：</p>
+
+<table>
+    <tr>
+        <th>精度模式</th>
+        <th>吞吐量（img/sec）</th>
+        <th>显存占用</th>
+        <th>收敛所需 epoch</th>
+        <th>代码改动量</th>
+    </tr>
+    <tr>
+        <td>FP32</td>
+        <td>1200</td>
+        <td>28.5 GB</td>
+        <td>90</td>
+        <td>无</td>
+    </tr>
+    <tr>
+        <td>AMP (FP16 + Scaler)</td>
+        <td>2800</td>
+        <td>15.2 GB</td>
+        <td>90</td>
+        <td>+4 行</td>
+    </tr>
+    <tr>
+        <td>AMP (BF16)</td>
+        <td>2700</td>
+        <td>15.2 GB</td>
+        <td>90</td>
+        <td>+2 行</td>
+    </tr>
+</table>
+
+<p>可以看到：<strong>吞吐量提升了 2.3 倍，显存占用降低了一半</strong>，而收敛所需的 epoch 数和 FP32 完全一致。对于大模型来说收益更明显。在 Llama 7B 的 Fine-tuning 场景中，AMP（BF16）是事实上的标配——没有人会在 FP32 下微调 7B 模型，因为显存放不下，速度也慢得无法接受。</p>
+
+<h3>15.6 注意事项与常见问题</h3>
+
+<p>混合精度训练虽然简单，但也不是完全没有坑。下面几个问题值得注意：</p>
+
+<ul>
+    <li><strong>Batch size 和 learning rate 可能需要微调。</strong>低精度下梯度噪声变大，有些实验发现需要用稍大的 batch size 或者稍小的 learning rate 来补偿。</li>
+    <li><strong>某些操作不在 autocast 的白名单里。</strong>比如 <code>torch.sqrt</code>、<code>torch.sum</code> 等操作在 autocast 下会以 FP32 执行，这没有问题。但如果你的自定义操作中有一些数值不稳定的计算，可能需要手动 <code>with autocast(device_type="cuda", enabled=False):</code> 来关闭。</li>
+    <li><strong>分布式训练中每个 rank 都需要自己的 scaler。</strong>如果你用 DDP，每个进程创建自己的 <code>GradScaler</code>，不需要额外同步——scaler 的状态不跨进程传播。</li>
+    <li><strong>验证/推理时不要用 autocast。</strong>虽然用了也不会错，但推理阶段通常直接用 FP16 或 BF16 做推理，节省显存就够了，不需要 autocast 的开销。</li>
+</ul>
+
+<div class="warning">
+    <strong>一个容易被忽略的坑：</strong>如果在 FP16 训练中使用了 <code>torch.mul</code> 或 <code>torch.add</code> 等逐元素操作来计算 loss（而不是使用 PyTorch 内置的损失函数），这些操作可能会以 FP16 执行，导致 loss 精度不够，影响梯度缩放的效果。建议总是使用 <code>torch.nn</code> 模块提供的损失函数，它们已经被优化为在 autocast 下自动回退到 FP32。
+</div>
+
+<p>好了，这一章的内容就到这里。我们学习了混合精度训练的核心概念：FP16 和 BF16 的区别、<code>torch.amp.autocast</code> 的用法、<code>GradScaler</code> 在 FP16 训练中的必要性，以及 BF16 如何简化这个流程。说到底，<strong>混合精度训练是每个 PyTorch 工程师的必修课</strong>——它太容易实现了，收益又太大了，没有任何理由不用。</p>
+
+<p>下一章我们来聊一个同样重要但常常被忽视的话题：<strong>训练陷阱与调试</strong>。训练 loss 不下降、出现 NaN、模型不收敛——这些问题是每个炼丹师都会遇到的噩梦。下一章我们会总结一份"查毒手册"，让你遇到问题不再抓瞎。下一章见！</p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

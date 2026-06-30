@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第1章 为什么要读Memcached源码</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html" class="active">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第1章 为什么要读Memcached源码</h1>
+
+        <p>大家好，我是你们的讲师。在开始第一堂课之前，我想问大家一个问题：你每天都在用缓存，但你真的了解缓存底层在做什么吗？</p>
+
+        <p>如果你用过 Memcached，你大概知道它是一个"内存里放 key-value 对的东西"——get 一个 key，set 一个 value，简单得像一个巨型 HashMap。但当你深入源码之后才会发现，这台看似简单的"内存机器"背后，藏着 slab allocator 对内存碎片的精巧博弈、多线程模型下无锁设计的极致追求、以及一套在 20 年生产环境中打磨出来的容错哲学。本课程就将带你一行一行地读懂这些设计决策。</p>
+
+        <h2>缓存系统在现代架构中的角色</h2>
+
+        <p>今天的互联网应用，从社交网络到电商平台，从新闻门户到实时推荐系统，几乎没有一个大型系统能离开缓存。为什么？因为数据库太慢了。</p>
+
+        <p>现代 SSD 的随机读延迟大约在 50-100 微秒级别，而内存访问延迟是纳秒级别——两者相差三个数量级。当你的应用需要每秒处理数百万次查询时，让每一条请求都穿透到数据库是不现实的。缓存层的作用就是用廉价的 DRAM 来吸收热点流量，保护后端的数据库和微服务。</p>
+
+        <p>在一个典型的 web 架构中，缓存通常出现在两个位置：<strong>本地缓存</strong>（进程内，如 LRU Cache）和<strong>分布式缓存</strong>（独立服务，如 Memcached / Redis）。本地缓存快但容量小、数据不一致；分布式缓存慢一些但容量大、可共享。Memcached 属于后者，但它通过极简的设计做到了接近本地缓存的性能——这也是它源码中最值得学习的地方。</p>
+
+        <div class="highlight">
+            <strong>核心观点：</strong>缓存不是银弹，但它是现代分布式系统的基石。理解 Memcached 的源码，本质上是理解"如何用最少的代码和最高的效率管理内存"这门手艺。
+        </div>
+
+        <h2>Memcached vs Redis 选型思考</h2>
+
+        <p>说到分布式缓存，一定会遇到这个问题：Memcached 还是 Redis？这两个项目经常被放在一起比较，但它们的定位其实有本质区别。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>Memcached</th>
+                    <th>Redis</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>定位</td>
+                    <td>纯 KV 缓存</td>
+                    <td>数据结构服务器 + 缓存</td>
+                </tr>
+                <tr>
+                    <td>数据结构</td>
+                    <td>仅 String / Byte 数组</td>
+                    <td>String, List, Set, ZSet, Hash, Stream 等</td>
+                </tr>
+                <tr>
+                    <td>持久化</td>
+                    <td>不支持（纯内存）</td>
+                    <td>RDB / AOF 持久化</td>
+                </tr>
+                <tr>
+                    <td>多线程</td>
+                    <td>Master-Worker 多线程</td>
+                    <td>主版本 6+ 后引入多线程 I/O</td>
+                </tr>
+                <tr>
+                    <td>内存管理</td>
+                    <td>Slab Allocator（预分配，无碎片）</td>
+                    <td>jemalloc / tcmalloc + 自己封装</td>
+                </tr>
+                <tr>
+                    <td>淘汰策略</td>
+                    <td>LRU（三级队列）</td>
+                    <td>6 种策略，含 LFU、LRU、TTL 等</td>
+                </tr>
+                <tr>
+                    <td>代码量</td>
+                    <td>~2 万行 C</td>
+                    <td>~20 万行 C</td>
+                </tr>
+                <tr>
+                    <td>典型场景</td>
+                    <td>数据库查询缓存、Session 存储</td>
+                    <td>排行榜、消息队列、分布式锁</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>从这张对比表可以清晰看到：<strong>Memcached 选择了一条极简的道路</strong>——它不做持久化、不支持复杂数据结构、不提供事务。但正是这种"少即是多"的设计哲学，使得它的核心代码极度精简，几乎每一行都有明确的用途。当你打开它的源码目录，你不会像看 Redis 那样面对几十万行代码感到无从下手——你会看到一份可以一口气读完的工业级 C 代码范本。</p>
+
+        <div class="tip">
+            <strong>选型建议：</strong>如果你只需要"缓存数据库查询结果"或"存放 Session"，Memcached 在内存效率上往往优于 Redis——因为它没有解析复杂数据结构的开销，且 slab allocator 不会产生内存碎片。但如果你需要 List、Set 等数据结构的运算能力，或者需要持久化保证，Redis 是更合适的选择。
+        </div>
+
+        <h2>为什么 Memcached 源码值得读</h2>
+
+        <p>我常说一句话：<strong>"读 Redis 源码是读一个产品，读 Memcached 源码是读一本教科书。"</strong></p>
+
+        <p>Memcached 的代码量大约在 2 万行左右（核心逻辑仅 1 万行出头），这意味着一个有 C 语言基础的开发者，如果每天读 2 小时，一周之内就能通读核心代码。相比之下，Redis 的代码量超过 20 万行，Netty 的代码量也超过 10 万行——它们当然值得读，但学习曲线陡峭得多。</p>
+
+        <p>具体来说，Memcached 源码有以下几个独特的学习价值：</p>
+
+        <ul>
+            <li><strong>工业级 C 代码的审美范本</strong>——代码风格一致、命名规范、注释到位。Brad Fitzpatrick 和 Dormando 等核心维护者写出了教科书级别的 C 代码，看这样的代码本身就是一种享受。</li>
+            <li><strong>极致的性能追求</strong>——每一个分支、每一处内存分配都经过精心设计。你会看到为了减少一次系统调用而做的努力，也会看到为了 cache line 对齐而在结构体布局上做的文章。</li>
+            <li><strong>完整的内存管理系统</strong>——Slab Allocator、LRU 淘汰、渐进式 rehash，这三个主题覆盖了内存管理面试中 80% 的高频考点。而 Memcached 的实现是所有开源软件中理解门槛最低的。</li>
+            <li><strong>经典的多线程网络模型</strong>——Master-Worker 架构、libevent 事件驱动、连接状态机，这套模型在今天仍然是最主流的 C/C++ 网络编程范式。</li>
+            <li><strong>协议设计实战</strong>——从 ASCII 文本协议到二进制协议再到 Meta Protocol，你能看到协议演进的完整脉络。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>我的亲身经历：</strong>2018 年我在一家广告技术公司排查线上 Memcached 延迟毛刺问题。凌晨 2 点，p99 延迟从 1ms 跳到了 50ms，而 QPS 并没有明显变化。在花了两天分析火焰图、翻源码之后，发现问题出在 slab rebalance 触发了全局锁的竞争。那是我第一次切身感受到：<strong>不看源码，你永远不知道你的缓存中间件在背后做了什么。</strong>从那以后，我养成了一个习惯——生产环境用的每一个中间件，至少要把核心模块的源码通读一遍。
+        </div>
+
+        <h2>本课程阅读路径</h2>
+
+        <p>这个课程共 28 章，分为 6 个部分，从零开始带你系统性地阅读 Memcached 源码。下面是完整的阅读路径：</p>
+
+        <pre><code>第1-3章  入门准备 —— 环境搭建、源码获取、目录结构<br>第4-6章  启动与配置 —— main函数逐行解析、配置系统、日志与统计<br>第7-14章 内存管理核心 —— Slab Allocator、Item、LRU、哈希表<br>第15-18章 网络与并发 —— libevent事件驱动、连接状态机、多线程、锁策略<br>第19-23章 协议与扩展 —— ASCII协议、二进制协议、Meta Protocol、混合存储、Proxy<br>第24-28章 工程实践与综合 —— 测试体系、性能调优、源码对比、Mini-Memcached</code></pre>
+
+        <p>建议的学习节奏是：第 1-3 章（入门准备）+ 第 4-6 章（启动与配置）一起阅读，花大约 1-2 天；第 7-14 章（内存管理）是本课程的核心难点，建议逐步阅读，每周 2 章，约 4 周时间；第 15-18 章（网络与并发）和第 19-23 章（协议与扩展）同样按每周 2 章的节奏进行；最后 4 章是总结与综合项目，灵活安排。</p>
+
+        <p>每章都配有可以直接运行的代码示例和调试手段，你不需要离开当前页面就能跟着动手操作。</p>
+
+        <h2>Memcached 的历史与版本</h2>
+
+        <p>了解一个项目的历史，有助于理解它的设计决策。Memcached 的诞生故事在业界广为流传：</p>
+
+        <ul>
+            <li><strong>2003 年</strong>：Brad Fitzpatrick 在 LiveJournal 工作期间，为了减轻数据库压力，用 Perl 写了第一版 Memcached。当时的 LiveJournal 是最大的博客平台之一，面对急剧增长的用户量，MySQL 已经不堪重负。</li>
+            <li><strong>2004 年</strong>：Anand Rajagopalan 和 Eric Berg 用 C 重写了 Memcached，性能得到大幅提升。这也奠定了 Memcached 作为高性能缓存系统的基石。</li>
+            <li><strong>2009 年起</strong>：项目维护移交给社区，Dormando（现任主要维护者）开始主导开发，引入了二进制协议、多线程支持等关键特性。</li>
+            <li><strong>至今</strong>：Memcached 仍然在 <strong>Facebook</strong>（全球最大的 Memcached 部署之一，管理着数万个实例）、<strong>Wikipedia</strong>（页面缓存）、<strong>Twitter</strong>（时间线缓存）等顶级互联网公司大规模使用。</li>
+        </ul>
+
+        <p>当前最新版本是 <strong>1.6.41</strong>（2025 年发布），采用 <strong>BSD 许可证</strong>。20 多年来，Memcached 经历了从单线程到多线程、从纯文本协议到二进制+元协议、从纯内存到支持外部存储的演进，但其核心设计理念始终没有改变：<strong>简单、快速、可靠</strong>。</p>
+
+        <div class="tip">
+            <strong>一个冷知识：</strong>"Memcached" 名字来源于 "Memory Cache Daemon" 的合并缩写。有趣的是，"memcached" 的正确发音是 /mɛmˈkæʃt/（mem-casht），不是 "mem-cache-dee"。
+        </div>
+
+        <p>下一章，我们会一起搭建 Memcached 的开发环境、获取源码，然后打开第一行代码。在动手之前，不妨先思考一个问题：你最想在 Memcached 源码中寻找什么答案？带着这个目标开始阅读，你的收获会大得多。</p>
+
+        <p>好，第 1 章就到这里。下一章我们将进入实战环节——配环境、下源码、编译、运行。我们第 2 章见。</p>
+
+        <div class="footer-nav">
+            <a href="javascript:void(0)">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="02.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

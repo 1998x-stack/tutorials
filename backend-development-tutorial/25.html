@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第25章 Serverless 与 FaaS</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 后端开发全景图</a></li>
+            <li><a href="02.html">第2章 网络协议基础</a></li>
+            <li><a href="03.html">第3章 Linux 基础与环境</a></li>
+            <li><a href="04.html">第4章 版本控制与协作</a></li>
+            <li><a href="05.html">第5章 编程语言选型</a></li>
+            <li><a href="06.html">第6章 数据结构与算法实战</a></li>
+            <li><a href="07.html">第7章 设计模式与架构原则</a></li>
+            <li><a href="08.html">第8章 RESTful API 设计</a></li>
+            <li><a href="09.html">第9章 认证与授权体系</a></li>
+            <li><a href="10.html">第10章 关系型数据库设计</a></li>
+            <li><a href="11.html">第11章 NoSQL 与缓存策略</a></li>
+            <li><a href="12.html">第12章 消息队列与事件驱动</a></li>
+            <li><a href="13.html">第13章 gRPC 与微服务通信</a></li>
+            <li><a href="14.html">第14章 GraphQL 与 BFF 模式</a></li>
+            <li><a href="15.html">第15章 测试策略与质量保障</a></li>
+            <li><a href="16.html">第16章 安全攻防实战</a></li>
+            <li><a href="17.html">第17章 日志、指标与告警</a></li>
+            <li><a href="18.html">第18章 CI/CD 流水线设计</a></li>
+            <li><a href="19.html">第19章 Docker 深入与实践</a></li>
+            <li><a href="20.html">第20章 Kubernetes 核心概念</a></li>
+            <li><a href="21.html">第21章 K8s 网络与存储</a></li>
+            <li><a href="22.html">第22章 K8s 生产运维实战</a></li>
+            <li><a href="23.html">第23章 GitOps 与声明式运维</a></li>
+            <li><a href="24.html">第24章 可观测性进阶</a></li>
+            <li><a href="25.html" class="active">第25章 Serverless 与 FaaS</a></li>
+            <li><a href="26.html">第26章 AI 驱动的后端开发</a></li>
+            <li><a href="27.html">第27章 云原生前沿技术</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>开篇：没有服务器，并不意味着没有问题</h2>
+
+        <p>2018 年，我参与了一个创业公司的后端从零搭建。公司只有两个后端工程师，CTO 说"我们选 Serverless 吧，不用管服务器，专心写业务代码"。听起来很美好——不需要部署集群，不需要操心扩容，不需要值班处理宕机。我们选了 AWS Lambda + API Gateway + DynamoDB 作为技术栈，第一个 MVP 两周就上线了，速度确实快。</p>
+
+        <p>但问题很快来了。上线第一个月，用户量不多，AWS 账单只要几十美元，团队很满意。第二个月，一个客户的活动带来了流量小高峰，Lambda 并发数超过了账户配额（默认 1000），请求被限流——用户在活动页上看到了 502 错误。我们慌慌张张去提工单提升配额，但 AWS 的审核花了两小时。活动已经结束了。</p>
+
+        <p>之后的问题越来越"传统"：调试困难（不能 SSH 到 Lambda 容器里看日志）、冷启动导致某些请求超时、DynamoDB 的 read/write capacity 配置不当导致限流、第三方依赖打包超过 Lambda 的 250MB 限制（解压后）、VPC 内的 Lambda 没有公网 IP 无法调用外部 API……到了第 6 个月，我们花在"排查 Serverless 特有的问题"上的时间，已经超过了之前用 K8s 时维护集群的时间。</p>
+
+        <p>这个故事的教训不是"Serverless 不好"，而是：<strong>Serverless 并不是"没有服务器"——服务器依然存在，只是你不再直接管理它而已。但它带来了全新的运维挑战和成本结构</strong>。理解这些 hidden complexity，才是用好 Serverless 的前提。</p>
+
+        <div class="highlight">
+            <strong>核心认知：</strong>Serverless 是一种<strong>执行模型</strong>，而不是"没有基础设施"。它把基础设施管理的复杂性从开发者转移到了云平台，但这种转移不是免费的——它通过新的约束（冷启动、超时限制、无状态要求、打包限制）和计费模型来换取你"不用管服务器"的自由。你需要清楚地知道自己在换取什么、付出了什么。
+        </div>
+
+        <h2>Serverless 核心概念：FaaS / BaaS / Event-driven</h2>
+
+        <p>Serverless 不是单一的技术，而是一个<strong>谱系</strong>，涵盖了几个不同的服务模式：</p>
+
+        <ul>
+            <li><strong>FaaS（Function as a Service）</strong>——你编写一个函数，云平台负责运行它。典型如 AWS Lambda、Google Cloud Functions、Azure Functions、阿里云函数计算。这是最"纯粹"的 Serverless 形式——你只需要关注函数代码。</li>
+            <li><strong>BaaS（Backend as a Service）</strong>——云平台提供现成的后端服务，你直接调用 API 使用。比如 Firebase 的数据库和认证、Supabase、Auth0。你不需要部署认证系统或数据库，直接使用托管服务。</li>
+            <li><strong>Event-driven（事件驱动）</strong>——Serverless 的最佳搭档。函数的运行由事件触发——文件上传到 S3 触发一个函数处理图片、消息队列中有新消息触发一个函数处理、定时触发器执行日常任务。事件驱动让 Serverless 从"托管函数"变成了"事件响应系统"。</li>
+        </ul>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>传统 K8s 部署</th>
+                    <th>FaaS（如 Lambda）</th>
+                    <th>BaaS（如 Firebase）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>代码形态</td>
+                    <td>完整应用（Docker 镜像）</td>
+                    <td>函数（Zip 或 OCI 镜像）</td>
+                    <td>不需要写服务端代码</td>
+                </tr>
+                <tr>
+                    <td>伸缩方式</td>
+                    <td>HPA + 节点自动伸缩</td>
+                    <td>按请求数自动伸缩（从 0 到 N）</td>
+                    <td>由云平台管理</td>
+                </tr>
+                <tr>
+                    <td>计费模型</td>
+                    <td>按资源使用时长（按 Pod/节点计费）</td>
+                    <td>按调用次数 + 执行时间</td>
+                    <td>按 API 调用量 + 存储量</td>
+                </tr>
+                <tr>
+                    <td>最大执行时间</td>
+                    <td>无限制（可运行数月）</td>
+                    <td>受限（Lambda 最长 15 分钟）</td>
+                    <td>不适用</td>
+                </tr>
+                <tr>
+                    <td>状态管理</td>
+                    <td>可本地状态（但推荐无状态）</td>
+                    <td>强制无状态（/tmp 有限临时存储）</td>
+                    <td>托管有状态服务</td>
+                </tr>
+                <tr>
+                    <td>调试体验</td>
+                    <td>SSH / kubectl exec / 远程 debug</td>
+                    <td>日志 + 本地模拟 + 受限的远程调试</td>
+                    <td>日志 + API 测试</td>
+                </tr>
+                <tr>
+                    <td>启动延迟</td>
+                    <td>容器秒级（镜像预热）</td>
+                    <td>冷启动百毫秒到秒级</td>
+                    <td>无需启动</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>选型经验：</strong>FaaS 最适合<strong>事件驱动 + 轻计算 + 变负载</strong>的场景——图片处理、消息转换、定时任务、Webhook 处理。不适合长时间运行、状态密集、延迟敏感的核心 API。BaaS 则能大幅减少重复造轮子的工作——认证、数据库、存储这些通用能力用 BaaS 通常比自建更省心。
+        </div>
+
+        <h2>函数计算实战：AWS Lambda + API Gateway 搭建 REST API</h2>
+
+        <p>让我们动手搭建一个简单的 REST API——一个"短链接生成服务"的核心功能：用户提交长链接，返回短码。通过这个例子，你会看到 Serverless 架构的典型工作流。</p>
+
+        <p>先用 Node.js 写一个 Lambda 函数：</p>
+
+<pre><code>// lambda/handler.mjs
+import { randomUUID } from 'crypto';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+
+const client = new DynamoDBClient({ region: process.env.AWS_REGION });
+const TABLE_NAME = process.env.TABLE_NAME || 'links';
+
+export const handler = async (event) => {
+  console.log('Event:', JSON.stringify(event));
+
+  const route = event.requestContext.http.method + ' ' + event.requestContext.http.path;
+
+  // POST /links — 创建短链接
+  if (route === 'POST /links') {
+    const body = JSON.parse(event.body);
+    const shortCode = randomUUID().slice(0, 8);
+
+    await client.send(new PutCommand({
+      TableName: TABLE_NAME,
+      Item: {
+        shortCode,
+        longUrl: body.url,
+        createdAt: new Date().toISOString(),
+        ttl: Math.floor(Date.now() / 1000) + 86400 * 365, // 1 year TTL
+      },
+    }));
+
+    return {
+      statusCode: 201,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shortCode, url: `https://s.xyz/${shortCode}` }),
+    };
+  }
+
+  // GET /links/{shortCode} — 获取原始链接
+  if (route.startsWith('GET /links/')) {
+    const shortCode = event.pathParameters?.shortCode;
+
+    if (!shortCode) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'Missing short code' }) };
+    }
+
+    const result = await client.send(new GetCommand({
+      TableName: TABLE_NAME,
+      Key: { shortCode },
+    }));
+
+    if (!result.Item) {
+      return { statusCode: 404, body: JSON.stringify({ error: 'Not found' }) };
+    }
+
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ longUrl: result.Item.longUrl }),
+    };
+  }
+
+  return { statusCode: 404, body: JSON.stringify({ error: 'Route not found' }) };
+};</code></pre>
+
+        <p>然后用 <code>serverless.yml</code> 或者 AWS CDK 定义基础设施。这是使用 <strong>Serverless Framework</strong> 的配置文件：</p>
+
+<pre><code># serverless.yml
+service: shortlink-api
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ap-northeast-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+          Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/links
+
+functions:
+  api:
+    handler: lambda/handler.handler
+    events:
+      - httpApi:
+          method: POST
+          path: /links
+      - httpApi:
+          method: GET
+          path: /links/{shortCode}
+    environment:
+      TABLE_NAME: links
+
+resources:
+  Resources:
+    LinksTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: links
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: shortCode
+            AttributeType: S
+        KeySchema:
+          - AttributeName: shortCode
+            KeyType: HASH
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true</code></pre>
+
+        <p>部署命令就是 <code>serverless deploy</code>。几秒钟后，你的 API 就上线了。你不需要管理服务器，不需要配置 Nginx，不需要设置负载均衡——API Gateway 自动搞定这些。而且，如果这个短链接服务三个月都没有流量，你不需要为闲置的服务器付费——Lambda 只在被调用时计费。</p>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>上面的代码看起来简单，但实际上线时我们遇到了一个经典问题——<strong>Lambda 在 VPC 内的冷启动时延增加了 5-10 秒</strong>。因为函数在 VPC 中需要创建 ENI（弹性网络接口），这个过程在冷启动时是同步的。我们选的 VPC 子网没有足够的可用 IP 地址，导致部分函数的冷启动超时。解决方案：使用 AWS 的 <code>Lambda HyperPlane</code>（或配置 VPC 代理），或者干脆只在不需要 VPC 的场景下使用 Lambda。如果你确实需要在 VPC 中运行 Lambda，<strong>确保子网有充足的 IP 地址余量，并启用预留并发</strong>。
+        </div>
+
+        <h2>冷启动优化：预留并发、Lambda SnapStart、轻量化依赖</h2>
+
+        <p>冷启动是 Serverless 逃不开的话题。当一个函数在空闲一段时间后被调用，云平台需要：① 分配一个新的执行环境（容器或 MicroVM），② 下载代码和依赖，③ 初始化运行时环境，④ 执行函数的初始化代码（全局变量、数据库连接池、依赖注入框架的启动），⑤ 最后才执行你的 handler。这个过程在 Java 和 .NET 等重运行时上可能长达 5-10 秒。</p>
+
+        <p>截至 2026 年，最有效的冷启动优化手段有以下几种：</p>
+
+        <h3>预留并发（Provisioned Concurrency / Reserved Concurrency）</h3>
+        <p>预留一定数量的并发实例始终处于"预热"状态，冷启动时间为零。代价是这些实例即使不被调用也要计费。适合对延迟敏感的关键路径。但注意：预留配额的配置变化也需要时间生效，不能应对突发流量。</p>
+
+        <h3>Lambda SnapStart（AWS）</h3>
+        <p>SnapStart 是 AWS 2023 年推出的功能，已经在 2026 年成为成熟的冷启动解决方案。它会在函数初始化完成后对执行环境做一次快照（Snapshot），包括已经加载的类、已经建立的连接池等。后续的冷启动直接恢复快照，而不是重新初始化。对于 Java 函数，SnapStart 可以将冷启动时间从 5-8 秒降低到 200-500ms。</p>
+
+        <h3>轻量化依赖</h3>
+        <p>减少依赖的体积和数量对冷启动的改善超乎想象。我见过一个 Java Lambda 函数打包后 180MB（因为引入了完整的 Spring Boot），冷启动时间 12 秒。后来改用 Java 17 的 Lambda 运行时 + 手动编写轻量级路由 + GraalVM Native Image，打包体积降到 30MB，冷启动降到 800ms。<strong>在 Serverless 世界，依赖即延迟</strong>。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>优化手段</th>
+                    <th>效果</th>
+                    <th>成本影响</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>预留并发（Provisioned Concurrency）</td>
+                    <td>消除冷启动</td>
+                    <td>显著增加——按预留实例计费</td>
+                    <td>低延迟要求的核心 API</td>
+                </tr>
+                <tr>
+                    <td>Lambda SnapStart</td>
+                    <td>冷启动降低 80-90%</td>
+                    <td>几乎无额外成本</td>
+                    <td>Java / .NET 重运行时函数</td>
+                </tr>
+                <tr>
+                    <td>GraalVM Native Image</td>
+                    <td>启动速度提升 10x+</td>
+                    <td>构建时间增加，运行时成本降低</td>
+                    <td>Java / Kotlin 函数</td>
+                </tr>
+                <tr>
+                    <td>轻量级运行时（Node / Go / Rust）</td>
+                    <td>天然低冷启动</td>
+                    <td>无额外成本</td>
+                    <td>新服务选型优先考虑</td>
+                </tr>
+                <tr>
+                    <td>Keep Warm（定时 Ping）</td>
+                    <td>减少空闲期冷启动</td>
+                    <td>少量额外调用费用</td>
+                    <td>非关键路径，临时缓解</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>关键认知：</strong>冷启动不是一定要解决的"问题"——它是一个需要管理的"特性"。很多场景下，函数偶尔一次 1-2 秒的冷启动对用户体验没有实质影响（比如后台异步处理、定时任务、非关键 API）。不要为了消除冷启动而引入比冷启动本身更大的复杂性。衡量、容忍、按需优化。
+        </div>
+
+        <h2>Knative：在 K8s 上运行 Serverless 工作负载</h2>
+
+        <p>如果你已经深度绑定 K8s，但还想享受 Serverless 的"从零自动伸缩"的便利，怎么办？这就是 <strong>Knative</strong> 解决的问题。Knative 是 Google 发起的开源项目，在 K8s 之上提供 Serverless 能力。它的核心理念是：<strong>用 K8s 的 API 表达 Serverless 的语义</strong>。</p>
+
+        <p>Knative 有两大核心组件：<strong>Serving</strong>（管理无状态服务的自动伸缩和流量路由）和 <strong>Eventing</strong>（管理事件驱动的工作流）。</p>
+
+        <p>看一个 Knative Service 的 YAML 定义——它和标准 K8s Deployment 很像，但多了自动伸缩到零的语义：</p>
+
+<pre><code>apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: shortlink-service
+  namespace: default
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "20"
+        autoscaling.knative.dev/target: "100"
+    spec:
+      containers:
+        - image: registry.example.com/shortlink:v1.0.0
+          env:
+            - name: TABLE_NAME
+              value: links
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              memory: 512Mi
+              cpu: 1000m</code></pre>
+
+        <p>关键配置：<code>min-scale: "0"</code> 意味着没有流量时副本数可以降到 0——这是 Serverless 的核心特征。有流量到达时，Knative 会在几秒内自动创建一个 Pod 来处理请求。流量平稳后，Pod 再自动缩回到 0。这个伸缩策略的配置非常灵活——<code>target: "100"</code> 表示每个 Pod 的目标并发请求数为 100，超过这个值就自动扩容。</p>
+
+        <p>Knative 还提供了<strong>流量拆分</strong>的能力，用于灰度发布：</p>
+
+<pre><code>apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: shortlink-service
+spec:
+  template:
+    metadata:
+      name: shortlink-service-v2
+    spec:
+      containers:
+        - image: registry.example.com/shortlink:v2.0.0
+  traffic:
+    - tag: current
+      revisionName: shortlink-service-v1
+      percent: 90
+    - tag: canary
+      revisionName: shortlink-service-v2
+      percent: 10
+    - tag: latest
+      latestRevision: true
+      percent: 0</code></pre>
+
+        <p>这个配置将 90% 流量路由到 v1，10% 路由到 v2（canary），同时保留 <code>latest</code> 标签用于内部测试。确认 v2 没有问题后，逐步将流量切到 100%。</p>
+
+        <div class="tip">
+            <strong>选型建议：</strong>Knative 适合已经在用 K8s、希望渐进式引入 Serverless 能力的团队。相比 AWS Lambda，Knative 的好处是<strong>避免厂商锁定</strong>——同一套配置可以在 AWS EKS、GCP GKE、阿里云 ACK 甚至本地数据中心运行。但代价是你仍然需要管理 K8s 集群本身。如果你的团队没有 K8s 运维能力，使用云厂商的托管 FaaS 产品（Lambda / Cloud Functions）会更省心。
+        </div>
+
+        <h2>Serverless 的隐藏成本：不只是函数执行时间</h2>
+
+        <p>很多团队选择 Serverless 时只看"每次调用几毛钱"的单价，却忽略了围绕 Serverless 带来的隐性成本。让我用 2026 年的实际数据来拆解一下：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>成本维度</th>
+                    <th>显性 / 隐性</th>
+                    <th>说明</th>
+                    <th>典型月费（中等规模）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>函数执行费用</td>
+                    <td>显性</td>
+                    <td>按调用次数 × 执行时间 × 内存配置计费</td>
+                    <td>$200-800</td>
+                </tr>
+                <tr>
+                    <td>API Gateway 费用</td>
+                    <td>显性</td>
+                    <td>按 API 调用次数 + 出站流量计费，通常比 Lambda 本身还贵</td>
+                    <td>$150-600</td>
+                </tr>
+                <tr>
+                    <td>数据传输费用</td>
+                    <td>显性</td>
+                    <td>跨 AZ / 跨 Region / 出站到公网的流量费</td>
+                    <td>$100-500</td>
+                </tr>
+                <tr>
+                    <td>VPC 资源费用</td>
+                    <td>隐性</td>
+                    <td>Lambda 在 VPC 中需要 NAT Gateway 访问公网，每个 NAT Gateway $30+/月</td>
+                    <td>$90-300</td>
+                </tr>
+                <tr>
+                    <td>日志存储与查询</td>
+                    <td>隐性</td>
+                    <td>CloudWatch Logs 成本随调用量线性增长，日志量容易失控</td>
+                    <td>$50-300</td>
+                </tr>
+                <tr>
+                    <td>开发调试成本</td>
+                    <td>隐性</td>
+                    <td>本地模拟 vs 真实环境的差异、缺乏远程调试工具、排错效率下降</td>
+                    <td>不可量化但显著</td>
+                </tr>
+                <tr>
+                    <td>冷启动性能损失</td>
+                    <td>隐性</td>
+                    <td>用户感知的延迟、预留并发的额外费用</td>
+                    <td>取决于优化程度</td>
+                </tr>
+                <tr>
+                    <td>架构复杂度成本</td>
+                    <td>隐性</td>
+                    <td>无状态约束、15 分钟超时、250MB 部署包限制、依赖管理规则改变</td>
+                    <td>难以量化，影响迭代速度</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>一个真实的参考数据：2024 年我们迁移了一个中等规模的图片处理微服务（每秒约 200 次请求）从 K8s 到 Lambda。K8s 模式下每月成本约 $1500（3 台 c5.xlarge EC2），迁移到 Lambda 后函数执行费用只有 $400——但加上 API Gateway、数据传输、CloudWatch Logs、NAT Gateway 后，总成本成了 $2100。而且团队花了两周时间适配 Lambda 的约束（处理超时、调整临时存储、优化部署包体积）。</p>
+
+        <div class="warning">
+            <strong>真正踩坑的地方：</strong>最容易被低估的是<strong>"调试困难"带来的隐性成本</strong>。在传统架构中，一个请求出问题了，你可以 SSH 到服务器上、查看实时日志、甚至用 Arthas 或 BTrace 动态追踪。在 Lambda 中，你只能等函数执行完毕，然后去翻 CloudWatch 日志。如果你的函数每 5 分钟执行一次，修改代码后的调试周期至少 5 分钟。我们有一个 Java 函数因为依赖冲突在本地模拟环境无法复现，最终花了一周时间在生产和模拟器之间来回迭代——而这在传统环境中半天就能解决。
+        </div>
+
+        <p>Serverless 并不是"万能银弹"。它的适用范围很明确：<strong>事件驱动、间歇性、变负载、对冷启动不敏感的场景是天堂；持续高负载、延迟敏感、状态密集的场景是陷阱</strong>。关键在于——理解它隐藏的成本，并在正确的场景中使用它。</p>
+
+        <p>到这里，Part 5"运维与进阶"的三章内容——GitOps、可观测性进阶、Serverless——全部结束了。你学会了如何用声明式的方式管理环境、如何让系统的内部状态变得透明可探索、以及如何在"无服务器"的新范式下做出理性的架构决策。接下来，我们将进入课程的最后一个 Part——<strong>前沿与实战</strong>。下一章，我们来聊一个 2025-2026 年最火的话题：<strong>AI 驱动的后端开发</strong>——不是"用后端调 AI API"，而是"AI 正在如何改变后端开发本身"。</p>
+
+        <div class="footer-nav">
+            <a href="24.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="26.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

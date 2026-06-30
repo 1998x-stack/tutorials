@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 厂商原生SDK - LLM Agent 工程实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Agent技术概述</a></li>
+            <li><a href="02.html">第2章 感知-思考-行动循环</a></li>
+            <li><a href="03.html">第3章 开发环境搭建</a></li>
+            <li><a href="04.html">第4章 Prompt工程与指令设计</a></li>
+            <li><a href="05.html">第5章 工具调用与Function Calling</a></li>
+            <li><a href="06.html">第6章 记忆系统设计</a></li>
+            <li><a href="07.html">第7章 多Agent协作模式</a></li>
+            <li><a href="08.html">第8章 LangChain 1.x 统一API</a></li>
+            <li><a href="09.html">第9章 中间件系统</a></li>
+            <li><a href="10.html">第10章 LangGraph状态图</a></li>
+            <li><a href="11.html">第11章 条件分支与循环</a></li>
+            <li><a href="12.html">第12章 RAG Agent实战</a></li>
+            <li><a href="13.html">第13章 多Agent编排</a></li>
+            <li><a href="14.html">第14章 生产化部署与监控</a></li>
+            <li><a href="15.html">第15章 AutoGen核心架构</a></li>
+            <li><a href="16.html">第16章 GroupChat与协作模式</a></li>
+            <li><a href="17.html">第17章 代码执行与安全沙箱</a></li>
+            <li><a href="18.html">第18章 从AutoGen到MAF</a></li>
+            <li><a href="19.html">第19章 OpenManus分层架构</a></li>
+            <li><a href="20.html">第20章 工具生态与MCP协议</a></li>
+            <li><a href="21.html">第21章 CrewAI角色化开发</a></li>
+            <li><a href="22.html" class="active">第22章 厂商原生SDK</a></li>
+            <li><a href="23.html">第23章 测试策略与质量保障</a></li>
+            <li><a href="24.html">第24章 成本优化与性能调优</a></li>
+            <li><a href="25.html">第25章 安全治理与合规</a></li>
+            <li><a href="26.html">第26章 项目：智能客服系统</a></li>
+            <li><a href="27.html">第27章 项目：自动化研究助手</a></li>
+            <li><a href="28.html">第28章 框架选型与趋势展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第22章 厂商原生 SDK</h2>
+
+<p>2026 年初的一个下午，我在重构一个跨平台的 Agent 系统时遇到了一个让人头疼的问题：系统同时接入了 OpenAI、Anthropic 和 Google 的模型，但每个厂商都有自己的 Agent SDK——OpenAI 有 Agents SDK，Anthropic 有 Claude Agent SDK，Google 有 ADK。三个 SDK 各有各的抽象方式、各有各的术语体系、各有各的最佳实践。项目代码中充斥着适配层和兼容代码，维护成本直线上升。</p>
+
+<p>这引出了一个核心问题：<strong>我们是应该用一个第三方框架（如 LangChain 或 OpenManus）来统一封装，还是直接使用厂商原生 SDK？</strong> 两种方案各有利弊。这章我们就来深入剖析三大厂商的官方 Agent SDK，看看它们各自的设计哲学和适用场景。</p>
+
+<div class="highlight">
+    <strong>核心观点：</strong> 厂商原生 SDK 的优势在于"深度绑定"——它们能充分利用自家模型的独特能力（如 OpenAI 的 Structured Output、Anthropic 的 Tool Use、Google 的超长上下文）。代价是"锁定效应"——换模型基本等于重写代码。理解这些 SDK 的设计，不是为了"选一个最好的"，而是为了在不同的场景下做出理性的技术决策。
+</div>
+
+<h2>22.1 OpenAI Agents SDK：Runner / Handoff / Guardrails</h2>
+
+<p>OpenAI 在 2025 年 3 月发布了 <strong>Agents SDK</strong>（最初称为 Swarm 的官方版本），到 2026 年已经迭代到了 2.x 版本。它的设计围绕三个核心概念展开。</p>
+
+<h3>Agent：最基本的执行单元</h3>
+<p>OpenAI 的 Agent 概念非常简洁——一个 Agent = 一份 instructions + 一组 tools + 一个 model 选择：</p>
+
+<pre><code>from agents import Agent, Runner
+
+# 定义一个客服 Agent
+support_agent = Agent(
+    name="Support Agent",
+    instructions=(
+        "你是一家电商平台的客服代表。\n"
+        "规则：\n"
+        "1. 对于订单查询，使用 order_tool\n"
+        "2. 对于退款请求，金额低于 100 元可自主处理\n"
+        "3. 金额超过 100 元的退款需要转接给主管\n"
+        "4. 对于技术问题，转接给技术团队\n"
+        "始终保持友好专业的语气。"
+    ),
+    tools=[order_tool, refund_tool, return_tool]
+)
+
+# 运行 Agent
+result = Runner.run_sync(
+    support_agent,
+    "你好，我想查一下我的订单 #ORD-2026-03821 的状态"
+)
+print(result.final_output)
+</code></pre>
+
+<h3>Handoff：Agent 之间的"转接"</h3>
+<p>Handoff 是 OpenAI Agents SDK 最独特的设计。它允许一个 Agent 在遇到自己无法处理的任务时，将对话"转接"给另一个更合适的 Agent——就像客服电话中的"转接专员"：</p>
+
+<pre><code>from agents import Agent, Handoff
+
+# 定义专家 Agent
+billing_agent = Agent(
+    name="Billing Specialist",
+    instructions="你负责处理账单和支付相关问题。"
+)
+
+tech_agent = Agent(
+    name="Tech Support",
+    instructions="你负责处理技术问题。"
+)
+
+# 定义主管 Agent，配置转接规则
+triage_agent = Agent(
+    name="Triage Agent",
+    instructions="你是一线客服，负责判断问题类型并转接",
+    handoffs=[
+        Handoff(
+            agent=billing_agent,
+            description="转接账单相关的问题"
+        ),
+        Handoff(
+            agent=tech_agent,
+            description="转接技术相关的问题"
+        ),
+    ]
+)
+
+# 自动转接：如果用户问的是账单问题，triage_agent 会自动转给 billing_agent
+result = Runner.run_sync(
+    triage_agent,
+    "我上个月被多收了 50 美元，请帮我查一下"
+)
+print(result.final_output)  # 由 billing_agent 生成
+</code></pre>
+
+<h3>Guardrails：安全护栏</h3>
+<p>Guardrails 是 Agents SDK 内置的安全机制，允许你在 Agent 的输入和输出阶段设置检查规则：</p>
+
+<pre><code>from agents import Guardrail, InputGuardrail, OutputGuardrail
+
+# 输入护栏：检查用户的意图
+safety_guardrail = InputGuardrail(
+    check=lambda msg: "harmful" not in msg.lower(),
+    error_message="我不处理有害内容。"
+)
+
+# 输出护栏：检查输出不含敏感信息
+pii_guardrail = OutputGuardrail(
+    check=lambda output: not contains_pii(output),
+    error_message="输出中不能包含个人身份信息。"
+)
+
+safe_agent = Agent(
+    name="Safe Agent",
+    instructions="...",
+    input_guardrails=[safety_guardrail],
+    output_guardrails=[pii_guardrail]
+)
+</code></pre>
+
+<div class="tip">
+    <strong>Handoff 的巧妙之处：</strong> Handoff 不是简单的函数调用，它携带了整个对话上下文。转接后，新 Agent 能完整了解之前的对话内容，用户不需要重复描述。这种设计非常符合真实的客服场景——"您好，我刚刚和另一位同事说过了"。
+</div>
+
+<h2>22.2 Google ADK：层级 Agent 树编排</h2>
+
+<p>Google 的 <strong>ADK（Agent Development Kit）</strong> 在 2025 年 4 月发布，它的设计思路与 OpenAI 截然不同。ADK 的核心思想是"层级编排"——Agent 可以包含子 Agent，形成一棵 Agent 树。</p>
+
+<pre><code>from google.adk import Agent, Runner
+
+# 定义底层工具 Agent
+search_agent = Agent(
+    name="search_agent",
+    model="gemini-2.5-pro",
+    tools=[web_search_tool]
+)
+
+code_agent = Agent(
+    name="code_agent",
+    model="gemini-2.5-pro",
+    tools=[python_tool, bash_tool]
+)
+
+# 定义中层协调 Agent
+research_agent = Agent(
+    name="research_agent",
+    model="gemini-2.5-pro",
+    sub_agents=[search_agent, code_agent],
+    instruction="""
+    你是一个研究协调员。对于研究课题：
+    1. 如果只需要搜索信息，直接分配给 search_agent
+    2. 如果需要处理数据或编写代码，分配给 code_agent
+    3. 如果任务复杂，将任务分解后分别分配
+    """
+)
+
+# 定义顶层管理 Agent
+manager_agent = Agent(
+    name="manager_agent",
+    model="gemini-2.5-flash",  # 快速模型做决策
+    sub_agents=[research_agent],
+    instruction="接收用户需求，分派给合适的子 Agent 处理。"
+)
+
+async def main():
+    result = await Runner.run_async(
+        manager_agent,
+        "帮我分析一下过去五年全球新能源汽车的销量数据，"
+        "生成一份分析报告"
+    )
+    print(result)
+</code></pre>
+
+<p>ADK 的层级树结构有几个显著的优势：</p>
+<ul>
+    <li><strong>上下文隔离：</strong> 每个子 Agent 只看到与自己任务相关的上下文，减少了 LLM 的认知负担</li>
+    <li><strong>粒度控制：</strong> 可以在每一层设置独立的模型、工具和安全策略</li>
+    <li><strong>动态路由：</strong> 父 Agent 根据当前需求动态决定调用哪个子 Agent</li>
+    <li><strong>原生 Gemini 集成：</strong> 充分利用 Gemini 的超长上下文（1M+ tokens）和原生工具调用能力</li>
+</ul>
+
+<table>
+    <thead>
+        <tr>
+            <th>特性</th>
+            <th>OpenAI Agents SDK</th>
+            <th>Google ADK</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>编排模型</strong></td>
+            <td>扁平 + Handoff 转接</td>
+            <td>层级树状结构</td>
+        </tr>
+        <tr>
+            <td><strong>Agent 间通信</strong></td>
+            <td>Handoff（带上下文转移）</td>
+            <td>父子消息传递</td>
+        </tr>
+        <tr>
+            <td><strong>安全机制</strong></td>
+            <td>Guardrails 护栏</td>
+            <td>层级安全策略</td>
+        </tr>
+        <tr>
+            <td><strong>上下文长度</strong></td>
+            <td>取决于模型（GPT-4o 128K）</td>
+            <td>Gemini 原生 1M+ 上下文</td>
+        </tr>
+        <tr>
+            <td><strong>模型选择</strong></td>
+            <td>Agent 级别指定</td>
+            <td>每层可指定不同模型</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="highlight">
+    <strong>Google ADK 的独特优势：</strong> 超长上下文让 ADK Agent 在处理大型文档、长对话历史、大规模代码库时表现尤为出色。我们曾经测试过——ADK Agent 可以在一次上下文中加载整个 Python 项目的所有源文件（约 50K 行代码）并进行分析，这在其他框架中几乎不可能做到。
+</div>
+
+<h2>22.3 Claude Agent SDK：Safety-first 设计</h2>
+
+<p>Anthropic 的 <strong>Claude Agent SDK</strong> 在 2025 年底发布，到 2026 年中已经迭代到了 beta 3 版本。它的设计最突出的特点就是"安全优先"——这与 Anthropic 一贯的企业文化一脉相承。</p>
+
+<pre><code>from claude_agent_sdk import Agent, Tool, Permission
+
+# Claude Agent SDK 的安全权限模型
+class FileReadTool(Tool):
+    name = "file_read"
+    description = "读取文件内容"
+
+    # 显式声明权限——Agent 自主决定时需要授权
+    permissions = [Permission.FILE_READ]
+
+    async def execute(self, path: str) -> str:
+        # 实际的文件读取逻辑
+        ...
+
+class FileWriteTool(Tool):
+    name = "file_write"
+    description = "写入文件"
+    permissions = [Permission.FILE_WRITE]
+
+# 创建 Agent，配置权限策略
+agent = Agent(
+    model="claude-sonnet-4-20250601",
+    tools=[FileReadTool(), FileWriteTool(), WebSearchTool()],
+    # 权限策略：哪些操作需要人类确认
+    permission_policy="auto"  # 自动允许低风险操作
+    # 或者:
+    # permission_policy="interactive"  # 所有敏感操作需要人类确认
+)
+</code></pre>
+
+<p>Claude Agent SDK 的几个关键设计：</p>
+<ul>
+    <li><strong>权限声明：</strong> 每个工具必须显式声明需要的权限级别，Agent 不能自行"越权"</li>
+    <li><strong>安全边界：</strong> 默认限制文件系统访问范围、网络访问目标、代码执行环境</li>
+    <li><strong>审计日志：</strong> 每个 Agent 动作都会写入不可篡改的审计日志</li>
+    <li><strong>Human-in-the-loop：</strong> 支持多种粒度的"人类确认"模式——从完全自动到每步确认</li>
+</ul>
+
+<div class="warning">
+    <strong>安全不是可有可无：</strong> 2025 年的一份行业报告显示，超过 60% 的 Agent 安全事故源于"工具权限过于宽松"。一个典型的案例是：Agent 被赋予了文件写入权限后，在一次清理任务中误删了生产环境的配置文件。Claude Agent SDK 的权限声明机制正是为了防止这类问题——虽然增加了开发时的"麻烦"，但能避免生产环境中的"灾难"。
+</div>
+
+<h2>22.4 厂商 SDK vs 第三方框架对比</h2>
+
+<p>经过前面三章的框架学习（OpenManus、CrewAI）和本章的厂商 SDK，你已经对"选择什么"有了自己的判断。下面这张表从更全面的视角做了对比：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>维度</th>
+            <th>厂商原生 SDK</th>
+            <th>第三方框架</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>模型绑定</strong></td>
+            <td>深度绑定，发挥模型极致性能</td>
+            <td>多模型支持，但可能有"最小公分母"问题</td>
+        </tr>
+        <tr>
+            <td><strong>新特性获取</strong></td>
+            <td>第一时间支持（甚至独占）</td>
+            <td>需要等待适配，通常有 1-3 个月滞后</td>
+        </tr>
+        <tr>
+            <td><strong>生态丰富度</strong></td>
+            <td>仅限厂商生态</td>
+            <td>集成大量第三方工具和服务</td>
+        </tr>
+        <tr>
+            <td><strong>API 稳定性</strong></td>
+            <td>相对稳定，但重大版本可能不兼容</td>
+            <td>取决于维护团队，LangChain 早期以频繁变更"闻名"</td>
+        </tr>
+        <tr>
+            <td><strong>学习成本</strong></td>
+            <td>每个厂商学一套，切换成本高</td>
+            <td>学一次，覆盖多个模型</td>
+        </tr>
+        <tr>
+            <td><strong>适用场景</strong></td>
+            <td>单一模型生态、追求极致性能</td>
+            <td>多模型策略、需要丰富工具集成</td>
+        </tr>
+    </tbody>
+</table>
+
+<h2>22.5 多 SDK 兼容策略</h2>
+
+<p>如果你像我一样，需要在项目中同时使用多个厂商的 SDK（比如主模型用 Claude，搜索用 Gemini 的长上下文，部分功能调用 GPT-4o 的 Structured Output），就需要一套兼容策略。</p>
+
+<p>这里分享我们团队的实践经验——"适配器模式 + 抽象层"：</p>
+
+<pre><code># 定义一个统一的 Agent 抽象接口
+from abc import ABC, abstractmethod
+
+class AgentBackend(ABC):
+    """统一 Agent 接口，屏蔽不同 SDK 的差异。"""
+
+    @abstractmethod
+    async def run(self, prompt: str,
+                  tools: list[dict],
+                  context: dict | None = None) -> str:
+        pass
+
+    @abstractmethod
+    async def run_with_handoff(self, prompt: str,
+                                fallback_backend: str) -> str:
+        pass
+
+# OpenAI 适配器
+class OpenAIBackend(AgentBackend):
+    async def run(self, prompt, tools, context=None):
+        agent = Agent(
+            name="agent",
+            instructions=context.get("instructions", ""),
+            tools=[self._convert_tool(t) for t in tools]
+        )
+        result = Runner.run_sync(agent, prompt)
+        return result.final_output
+
+    async def run_with_handoff(self, prompt, fallback_backend):
+        # OpenAI 使用 Handoff 机制
+        ...
+
+# Anthropic 适配器
+class ClaudeBackend(AgentBackend):
+    async def run(self, prompt, tools, context=None):
+        agent = Agent(
+            model="claude-sonnet-4-20250601",
+            tools=[self._convert_tool(t) for t in tools],
+            permission_policy="auto"
+        )
+        result = await agent.run(prompt)
+        return result.text
+
+    async def run_with_handoff(self, prompt, fallback_backend):
+        # Claude 使用 Tool Use 链
+        ...
+
+# 运行时可选择后端
+backend: AgentBackend = OpenAIBackend()  # 或 ClaudeBackend()
+result = await backend.run(prompt, tools)
+</code></pre>
+
+<div class="tip">
+    <strong>策略建议：</strong> 不要试图在所有场景下都做完美抽象。我们团队的做法是"80/20 法则"——定义统一接口覆盖 80% 的通用场景，剩下的 20% 特殊能力（如 Handoff、权限声明、层级编排）通过条件判断或类型检查暴露出来。这样可以避免过度抽象带来的"最小公分母"问题。
+</div>
+
+<h2>22.6 实战：用 OpenAI SDK 构建客服 Agent</h2>
+
+<p>最后，让我们用 OpenAI Agents SDK 构建一个完整的客服系统。这个系统包含三个层级的 Agent：</p>
+
+<pre><code>from agents import Agent, Runner, Handoff, Guardrail
+from agents.guardrails import InputGuardrail
+from pydantic import BaseModel
+
+# === 第 1 层：工具 ===
+
+async def lookup_order(order_id: str) -> str:
+    """查询订单状态"""
+    # 模拟数据库查询
+    db = {
+        "ORD-001": {"status": "已发货", "eta": "2026-07-02"},
+        "ORD-002": {"status": "处理中", "eta": "2026-07-05"},
+    }
+    order = db.get(order_id, {"status": "未找到", "eta": "N/A"})
+    return f"订单 {order_id}: {order['status']}, 预计送达: {order['eta']}"
+
+async def process_refund(order_id: str, amount: float) -> str:
+    """处理退款"""
+    return f"退款 {order_id}: 金额 ${amount} 已启动处理"
+
+async def escalate_to_human(order_id: str, reason: str) -> str:
+    """升级到人工客服"""
+    return f"已升级到人工客服。工单: {order_id}, 原因: {reason}"
+
+# === 第 2 层：专家 Agent ===
+
+order_agent = Agent(
+    name="Order Agent",
+    instructions="你负责处理订单查询和状态跟踪。",
+    tools=[lookup_order]
+)
+
+refund_agent = Agent(
+    name="Refund Agent",
+    instructions=(
+        "你负责处理退款请求。\n规则：\n"
+        "- 金额 ≤ 100 美元：直接处理\n"
+        "- 金额 > 100 美元：升级到人工客服\n"
+        "- 已发货超过 30 天的订单：升级到人工客服"
+    ),
+    tools=[process_refund, escalate_to_human]
+)
+
+# === 第 3 层：客服主管（转接中心） ===
+
+triage_instructions = """
+你是客服系统的"智能路由"。判断用户的问题类型：
+- 查询订单 → 转给 Order Agent
+- 退款、退货 → 转给 Refund Agent
+- 其他问题 → 直接处理或转给人
+
+始终先确认用户意图，再执行转接。
+"""
+
+triage_agent = Agent(
+    name="Triage Agent",
+    instructions=triage_instructions,
+    handoffs=[
+        Handoff(agent=order_agent,
+                description="订单查询和状态跟踪"),
+        Handoff(agent=refund_agent,
+                description="退款和退货处理"),
+    ],
+    input_guardrails=[
+        InputGuardrail(
+            check=lambda msg: not contains_harmful_content(msg),
+            error_message="抱歉，我无法处理此类请求。"
+        )
+    ]
+)
+
+# === 启动客服系统 ===
+
+async def main():
+    queries = [
+        "查一下 ORD-001 到哪里了",
+        "我要退款，订单 ORD-002，金额 50 美元",
+        "我要退款，订单 ORD-002，金额 500 美元",
+    ]
+
+    for query in queries:
+        print(f"\n用户: {query}")
+        result = await Runner.run(triage_agent, query)
+        print(f"客服: {result.final_output}")
+
+# 运行结果预计：
+# 用户: 查一下 ORD-001 到哪里了
+# 客服: 订单 ORD-001: 已发货, 预计送达: 2026-07-02
+#
+# 用户: 我要退款，订单 ORD-002，金额 50 美元
+# 客服: 退款 ORD-002: 金额 $50 已启动处理
+#
+# 用户: 我要退款，订单 ORD-002，金额 500 美元
+# 客服: 已升级到人工客服。工单: ORD-002, 原因: 金额超过 100 美元
+</code></pre>
+
+<div class="highlight">
+    <strong>生产级补充：</strong> 在实际部署时，你还需要加上：可观测性（Trace 每个请求的完整路径）、限流保护（防止 Agent 被恶意高频调用）、人机协作接口（当 Agent 升级到人工时，无缝对接客服平台）。我们会在第 26 章搭建一个完整的智能客服项目，把所有这些组件整合在一起。
+</div>
+
+<h2>本章小结</h2>
+
+<p>这一章我们完整地学习了三大厂商的原生 Agent SDK。OpenAI Agents SDK 以 Handoff 转接机制为特色，适合构建"智能路由"式的客服系统。Google ADK 以层级 Agent 树为核心，适合需要精细控制的大型复杂系统。Claude Agent SDK 以安全优先为设计理念，适合对安全合规有高要求的企业场景。同时，我们也通过适配器模式展示了一套多 SDK 兼容策略，并通过一个客服 Agent 实战串联了所有概念。</p>
+
+<p>至此，我们完成了本教程第五部分"其他主流框架"的全部四章内容——从 OpenManus 的分层架构、到 MCP 工具生态、到 CrewAI 的角色协作、再到厂商原生 SDK。你已经掌握了 2026 年主流 Agent 框架的核心设计思想和实战用法。</p>
+
+<p>下一章，我们将进入教程的第六部分——<strong>工程实践与项目</strong>。首先面对的是一个非常现实的问题：如何为 Agent 系统制定测试策略和质量保障方案？毕竟，传统软件测试方法对"每次输出都不一样"的 Agent 来说，可能并不完全适用。</p>
+
+<div class="footer-nav">
+    <a href="21.html">← 上一章</a>
+    <a href="index.html">📖 返回目录</a>
+    <a href="23.html">下一章 →</a>
+</div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

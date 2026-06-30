@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 OS实验环境搭建</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html" class="active">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第7章 OS实验环境搭建</h2>
+
+        <p>大家好，我是你们的讲师。前面的六章我们一起完成了从硬件到内核的理论学习。但操作系统学习有一条铁律：光看不练等于白学。从本章开始，我们正式进入"动手做"阶段。</p>
+
+        <p>操作系统实验有一个天然的困难：你研究的是最底层的系统软件，如果代码写崩了，不只是程序崩溃——是整个系统崩溃。你不能像调试普通程序一样，在IDE里点个断点就完事。你需要一套专门的环境：一个模拟出来的"虚拟电脑"让你为所欲为，一个源码级的调试器让你在内核代码里设断点，一个教学用的迷你操作系统让你快速上手。这就是本章要搭建的东西。</p>
+
+        <p>讲一个我教学生时的亲身经历。有个学生在自己的主力开发机上直接编译和加载了一个有bug的调度器模块，结果系统直接冻结。他没办法，只能按电源键强制重启——然后发现硬盘上的文件系统元数据损坏了，因为关机前还有大量page cache没来得及写回磁盘。那次教训之后，我要求所有学生必须在虚拟机里做OS实验，没有例外。QEMU + 虚拟机镜像 = 无限次犯错而无需承担后果——这是你学习OS的"安全气囊"。</p>
+
+        <div class="highlight">
+            <p><strong>整体规划</strong>：本章将搭建四个实验环境组件——QEMU虚拟硬件平台、GDB+QEMU远程调试工具链、xv6教学内核、以及性能分析工具链（perf/bpftrace/ftrace）。这四个组件将贯穿后续所有章节的学习。</p>
+        </div>
+
+        <h2>一、QEMU搭建虚拟硬件平台</h2>
+
+        <p>QEMU（Quick EMUlator）是一个开源的机器模拟器，能在你的宿主机上模拟出完整的计算机——包括CPU、内存、磁盘、网卡、显示控制器、中断控制器等。更重要的是，QEMU支持GDB远程调试协议，让你能在模拟的"裸机"上调试操作系统内核。</p>
+
+        <h3>1. 安装QEMU</h3>
+
+        <pre><code># Ubuntu/Debian
+$ sudo apt install qemu-system-x86 qemu-system-arm qemu-utils
+
+# Fedora/RHEL
+$ sudo dnf install qemu-system-x86 qemu-system-arm qemu-img
+
+# 验证安装
+$ qemu-system-x86_64 --version
+QEMU emulator version 8.2.0 (Debian 1:8.2.0+ds-1)
+Copyright (c) 2003-2023 Fabrice Bellard and the QEMU Project developers
+
+# 列出QEMU支持的目标机器
+$ qemu-system-x86_64 -machine help</code></pre>
+
+        <h3>2. 用QEMU启动一个虚拟机</h3>
+
+        <pre><code># 最简启动：用QEMU直接启动一个Linux内核（不需要硬盘）
+$ qemu-system-x86_64 -kernel /boot/vmlinuz-$(uname -r) \
+                     -initrd /boot/initrd.img-$(uname -r) \
+                     -append "console=ttyS0" \
+                     -nographic
+
+# 创建一个磁盘镜像并安装系统
+$ qemu-img create -f qcow2 ubuntu-disk.qcow2 20G
+
+# 启动带显示和网络的完整虚拟机
+$ qemu-system-x86_64 -m 4G -smp 4 \
+                     -drive file=ubuntu-disk.qcow2,format=qcow2 \
+                     -netdev user,id=net0 -device e1000,netdev=net0 \
+                     -vga virtio -display gtk</code></pre>
+
+        <table>
+            <tr><th>QEMU参数</th><th>作用</th><th>示例值</th></tr>
+            <tr><td><code>-m</code></td><td>分配虚拟机内存</td><td><code>-m 4G</code></td></tr>
+            <tr><td><code>-smp</code></td><td>分配虚拟CPU核心数</td><td><code>-smp 4</code></td></tr>
+            <tr><td><code>-kernel</code></td><td>指定启动的内核镜像</td><td><code>-kernel vmlinuz</code></td></tr>
+            <tr><td><code>-initrd</code></td><td>指定initramfs</td><td><code>-initrd initrd.img</code></td></tr>
+            <tr><td><code>-drive</code></td><td>挂载磁盘镜像</td><td><code>-drive file=disk.qcow2</code></td></tr>
+            <tr><td><code>-netdev</code></td><td>配置虚拟网卡后端</td><td><code>-netdev user,id=net0</code></td></tr>
+            <tr><td><code>-nographic</code></td><td>纯终端模式（无GUI窗口）</td><td>无参数值</td></tr>
+            <tr><td><code>-s</code></td><td>缩写，等价于 <code>-gdb tcp::1234</code></td><td>无参数值</td></tr>
+            <tr><td><code>-S</code></td><td>启动时暂停CPU（等待GDB连接）</td><td>无参数值</td></tr>
+        </table>
+
+        <div class="tip">
+            <p><strong>最佳实践</strong>：日常开发使用 <code>-nographic</code> + <code>console=ttyS0</code> 组合，QEMU的串口输出直接显示在终端，方便与GDB集成。需要图形界面时去掉 <code>-nographic</code> 即可。</p>
+        </div>
+
+        <h2>二、GDB+QEMU远程调试内核</h2>
+
+        <p>这是OS学习中最重要的调试技能。通过GDB连接到QEMU，你可以像调试普通程序一样——在源码中设置断点、单步执行、查看变量——来调试正在运行的内核。</p>
+
+        <h3>1. 编译带调试信息的内核</h3>
+
+        <pre><code># 配置内核时开启调试选项
+$ cd linux-source
+$ make menuconfig
+# 进入 Kernel hacking  →
+#   选中 "Compile the kernel with debug info" (CONFIG_DEBUG_INFO)
+#   选中 "KGDB: kernel debugger" (CONFIG_KGDB)
+
+$ make -j$(nproc)
+
+# 编译后会生成带完整符号的内核镜像
+# vmlinux — 未压缩的内核（含完整调试符号，几十MB）
+# arch/x86/boot/bzImage — 压缩后的启动镜像（几MB）</code></pre>
+
+        <h3>2. 启动QEMU并连接GDB</h3>
+
+        <pre><code># 终端1：启动QEMU，暂停CPU等待调试器
+$ qemu-system-x86_64 -kernel arch/x86/boot/bzImage \
+                     -initrd /boot/initrd.img-$(uname -r) \
+                     -append "console=ttyS0 nokaslr" \
+                     -nographic -s -S
+
+# 终端2：启动GDB，连接到QEMU
+$ gdb vmlinux
+(gdb) target remote :1234        # 连接到QEMU的GDB stub
+Remote debugging using :1234
+0xffffffff81000000 in startup_64 ()
+
+(gdb) break start_kernel          # 在内核入口设断点
+Breakpoint 1 at 0xffffffff82a0...
+
+(gdb) continue                    # 让内核运行到断点
+Continuing.
+
+Breakpoint 1, start_kernel () at init/main.c:900
+900     {
+(gdb) list                        # 显示断点附近的源码
+895     asmlinkage __visible void __init __no_sanitize start_kernel(void)
+896     {
+897             char *command_line;
+898             char *after_dashes;
+899
+900             set_task_stack_end_magic(&init_task);
+901             smp_setup_processor_id();
+902             debug_objects_early_init();
+903             init_vmlinux_branch();
+
+(gdb) print init_task.comm        # 查看当前进程名
+$1 = "swapper/0\000\000\000\000\000\000\000"
+
+(gdb) info registers              # 查看CPU寄存器
+rax            0x0                 0
+rbx            0xffffffff82a00000  0xffffffff82a00000
+rcx            0x0                 0
+...</code></pre>
+
+        <div class="highlight">
+            <p><strong>关键技巧</strong>：一定要加 <code>nokaslr</code> 内核参数！KASLR（Kernel Address Space Layout Randomization）会在启动时随机化内核代码的加载地址，导致GDB的符号地址与实际运行地址不符，断点无法命中。KASLR是安全机制，但在调试时请先关闭它。</p>
+        </div>
+
+        <h3>3. 常用GDB调试命令</h3>
+
+        <pre><code>(gdb) break mm_init                 # 在函数入口设断点
+(gdb) break mm/page_alloc.c:2500    # 在指定文件的某行设断点
+(gdb) watch init_mm.page_table_lock # 监视变量被修改（硬件watchpoint）
+(gdb) stepi                         # 单步执行一条CPU指令
+(gdb) info threads                  # 查看所有CPU核心的线程状态
+(gdb) bt                            # 打印当前调用栈（backtrace）
+(gdb) p (struct task_struct *)0xffff88812345678  # 强制类型转换查看内存
+(gdb) x/10gx 0xffffffff81000000     # 以16进制查看内存内容
+(gdb) add-symbol-file mymodule.ko 0xffffffffc0000000  # 加载模块符号</code></pre>
+
+        <div class="warning">
+            <p><strong>踩坑实录</strong>：我在调试内核时曾经连续"崩溃"了十几次，后来发现每次重新启动QEMU后，GDB连接时都提示"Remote 'g' packet reply is too long"。这是QEMU和GDB之间的CPU状态描述格式不匹配。解决方案是在 <code>~/.gdbinit</code> 里加上一行 <code>set arch i386:x86-64</code>，或者在GDB中手动设置架构为 <code>i386:x86-64</code>。如果你遇到这个奇怪的错误，现在知道原因了。</p>
+        </div>
+
+        <h2>三、xv6教学内核初体验</h2>
+
+        <p>xv6是MIT为操作系统课程"6.S081"设计的一个教学用类Unix内核。它是Unix V6（1976年的经典UNIX版本）在RISC-V和x86平台上的现代重写，去掉了所有与教学无关的复杂特性，保留了操作系统的核心概念——进程、文件系统、虚拟内存、中断、管道——而且全程用C语言编写，代码量仅约1万行，非常适合学生学习和修改。</p>
+
+        <h3>1. 克隆、编译与运行</h3>
+
+        <pre><code># 克隆xv6源码（RISC-V版本）
+$ git clone https://github.com/mit-pdos/xv6-riscv.git
+$ cd xv6-riscv
+
+# 编译xv6（需要预先安装RISC-V交叉编译工具链）
+# Ubuntu: sudo apt install gcc-riscv64-linux-gnu
+$ make
+riscv64-linux-gnu-gcc -c -o kernel/entry.o kernel/entry.S
+riscv64-linux-gnu-gcc -c -o kernel/start.o kernel/start.c
+...（编译约30秒到1分钟）
+
+# 启动xv6（需要安装qemu-system-riscv64）
+$ make qemu
+qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel
+                    -m 128M -smp 3 -nographic
+
+xv6 kernel is booting
+
+init: starting sh
+$                           ← 这就是xv6的Shell！
+$ ls
+.              1 1 1024
+..             1 1 1024
+README         2 2 2184
+cat            2 3 24728
+echo           2 4 23224
+forktest       2 5 13264
+grep           2 6 28360
+init           2 7 24536
+kill           2 8 23456
+ln             2 9 23192
+ls             2 10 26592
+mkdir          2 11 23272
+rm             2 12 23408
+sh             2 13 42592
+stressfs       2 14 24472
+usertests      2 15 161864
+wc             2 16 25240
+zombie         2 17 22664</code></pre>
+
+        <h3>2. xv6内核结构速览</h3>
+        <p>xv6的源码虽然只有1万行，却五脏俱全——它实现了进程（proc.c）、虚拟内存（vm.c）、文件系统（fs.c / file.c）、管道（pipe.c）、系统调用（syscall.c）、中断处理（trap.c）等核心子系统。MIT的6.S081课程用15个实验来让学生修改和扩展xv6——比如添加新的系统调用、实现写时复制（Copy-on-Write）机制、实现多级反馈队列调度器。这些都是真实OS的核心功能，但在xv6中移除了一切"非本质"的复杂性，让你可以在一个学期之内完成改动并看到效果。</p>
+
+        <table>
+            <tr><th>xv6源码文件</th><th>功能</th><th>约行数</th></tr>
+            <tr><td><code>kernel/proc.c</code></td><td>进程管理：fork、exec、exit、wait</td><td>~300</td></tr>
+            <tr><td><code>kernel/vm.c</code></td><td>虚拟内存：页表管理、地址空间布局</td><td>~250</td></tr>
+            <tr><td><code>kernel/syscall.c</code></td><td>系统调用分发表</td><td>~150</td></tr>
+            <tr><td><code>kernel/trap.c</code></td><td>中断和异常处理入口</td><td>~100</td></tr>
+            <tr><td><code>kernel/fs.c</code></td><td>文件系统：inode管理、块读写</td><td>~350</td></tr>
+            <tr><td><code>kernel/pipe.c</code></td><td>进程间通信管道</td><td>~80</td></tr>
+            <tr><td><code>kernel/sleeplock.c</code></td><td>睡眠锁（用于文件系统保护）</td><td>~60</td></tr>
+            <tr><td><code>kernel/spinlock.c</code></td><td>自旋锁实现</td><td>~70</td></tr>
+            <tr><td><code>kernel/uart.c</code></td><td>串口驱动（控制台I/O）</td><td>~100</td></tr>
+        </table>
+
+        <pre><code># 在xv6 Shell中体验
+$ cat README
+xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
+Version 6 (v6).  xv6  roughly  follows the structure and style of v6,
+but is implemented for a modern RISC-V multiprocessor.
+
+$ echo "hello os world"
+hello os world
+$ Ctrl-p    # 显示当前进程列表
+1 sleep  init
+2 sleep  sh
+3 run    echo
+
+# 退出xv6: Ctrl-a x</code></pre>
+
+        <div class="tip">
+            <p><strong>学习建议</strong>：MIT的6.S081课程将xv6作为完整的实验平台，全部实验材料在MIT的PDOS网站上公开。如果你希望深入操作系统实验，强烈推荐在完成本课程后挑战MIT的xv6实验——它们会要求你给xv6添加写时复制fork、懒分配（lazy allocation）、内存映射文件（mmap）等功能，这些是真实OS中的重要机制。</p>
+        </div>
+
+        <h2>四、构建分析工具链</h2>
+
+        <p>操作系统调试和性能分析不能只靠"printf打天下"。我们需要一套专业的工具来观察内核在干什么。下面四个工具是你后续章节实验的标准配置。</p>
+
+        <h3>1. perf——CPU性能计数器分析</h3>
+        <p>perf是Linux内核自带的性能分析工具，利用CPU的硬件性能计数器（PMC）来统计CPU周期、Cache Miss、分支预测失败等微架构事件。</p>
+
+        <pre><code># 安装perf
+$ sudo apt install linux-tools-common linux-tools-$(uname -r)
+
+# 统计一个命令的CPU事件
+$ perf stat dd if=/dev/zero of=/dev/null bs=1M count=1000
+1000+0 records in
+1000+0 records out
+ Performance counter stats for 'dd if=/dev/zero of=/dev/null bs=1M count=1000':
+        615.34 msec task-clock                #    0.998 CPUs utilized
+              12      context-switches        #   19.504 /sec
+               0      cpu-migrations          #    0.000 /sec
+             332      page-faults             #  539.444 /sec
+  2,477,674,293      cycles                   #    4.027 GHz
+  4,029,341,899      instructions              #    1.63  insn per cycle
+    764,381,833      branches                 #    1.242 G/sec
+      9,675,468      branch-misses            #    1.27% of all branches
+
+# 采样分析热点函数
+$ perf record -F 99 -a -g -- sleep 10
+$ perf report</code></pre>
+
+        <h3>2. ftrace——内核函数追踪器</h3>
+        <p>ftrace是Linux内核内置的追踪框架，不需要安装额外工具——直接通过 <code>/sys/kernel/tracing/</code> 下的文件系统接口使用。它可以在几乎零开销的情况下追踪内核函数的调用频次和执行时间。</p>
+
+        <pre><code># 使用ftrace追踪内核函数调用
+$ cd /sys/kernel/tracing
+$ echo function > current_tracer          # 开启函数追踪模式
+$ echo do_sys_open > set_ftrace_filter    # 只追踪do_sys_open
+$ echo 1 > tracing_on                     # 开始追踪
+$ cat /etc/passwd > /dev/null             # 触发追踪事件
+$ echo 0 > tracing_on                     # 停止追踪
+$ cat trace                               # 查看追踪结果
+# tracer: function
+#              | |       |   ||||       |         |
+      cat-5432  [001] ..... 123.456789: do_sys_open <-do_sys_openat2
+      cat-5432  [001] ..... 123.456790: do_sys_open <-do_sys_openat2</code></pre>
+
+        <h3>3. bpftrace——动态追踪脚本语言</h3>
+        <p>bpftrace是基于eBPF的高层次动态追踪工具。它提供了类似awk的脚本语法，让你可以编写简单的单行脚本来追踪内核和用户程序的事件。</p>
+
+        <pre><code># 安装bpftrace
+$ sudo apt install bpftrace
+
+# 追踪所有新创建的进程
+$ sudo bpftrace -e 'tracepoint:syscalls:sys_enter_execve { printf("%s -> %s\n", comm, str(args->filename)); }'
+Attaching 1 probe...
+bash -> /usr/bin/ls
+bash -> /usr/bin/grep
+...
+
+# 追踪哪些进程在做磁盘I/O
+$ sudo bpftrace -e 'kprobe:submit_bio { @[comm] = count(); }'
+Attaching 1 probe...
+^C
+@[kworker/u8:2]: 45
+@[mysql]: 234
+@[kworker/u8:1]: 312
+@[jbd2/sda1-8]: 567</code></pre>
+
+        <h3>4. trace-cmd——ftrace的前端封装</h3>
+        <p>trace-cmd是对ftrace的用户友好封装，提供了更简洁的命令行接口和更丰富的过滤条件。</p>
+
+        <pre><code># 安装trace-cmd
+$ sudo apt install trace-cmd
+
+# 追踪所有系统调用
+$ sudo trace-cmd record -e syscalls ls
+$ sudo trace-cmd report
+          ls-12345  [001] 123.456: sys_enter_openat: ...
+
+# 追踪特定进程的调度事件
+$ sudo trace-cmd record -e sched_switch -e sched_wakeup \
+                        -F -p 12345</code></pre>
+
+        <div class="highlight">
+            <p><strong>工具选择指南</strong>：perf适合看"哪里慢"和硬件事务；ftrace适合看"谁调用了什么函数"；bpftrace适合写自定义的实时追踪脚本快速定位问题；trace-cmd是ftrace的易用包装，适合做粗略的追踪。四个工具没有绝对优劣，根据场景选最顺手的一个。</p>
+        </div>
+
+        <div class="warning">
+            <p><strong>权限提醒</strong>：以上大多数工具需要root权限运行，或者需要将用户加入特定组。因为读取CPU性能计数器和挂载kprobe/tracepoint都需要访问内核的底层接口。在虚拟机上实验时尽量使用root或 <code>sudo</code>。在生产环境中请使用专门的性能观察账户 + 有限的capabilities（如 <code>CAP_PERFMON</code>）。</p>
+        </div>
+
+        <h2>五、结语与下一章预告</h2>
+
+        <p>本章我们搭建了四套实验环境：QEMU虚拟硬件平台让你可以"报废"操作系统而不用担心——Ctrl-C重启就好；GDB+QEMU远程调试让你能从start_kernel第一行代码起跟进内核的执行；xv6教学内核用1万行优雅代码展示了操作系统的精巧设计；perf/ftrace/bpftrace/trace-cmd组成了你的内核分析工具箱。</p>
+
+        <p>从下一章开始，我们将正式进入操作系统的核心机制——进程管理。你会学到进程到底是什么，它和程序有什么区别，内核是如何通过 <code>fork()</code>/<code>exec()</code>/<code>exit()</code> 来创建和管理进程的。当然，我们会用刚搭建的实验环境亲手验证每一个概念。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 用户态与内核态</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html" class="active">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第4章 用户态与内核态</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们比较了几种内核架构的优劣，它们有一个共性前提：用户态和内核态是分离的。这个看似简单的划分，其实是整个操作系统安全模型的基石。</p>
+
+        <p>想象一下：你写了一个程序，里面有一行 <code>*(int*)0 = 42;</code>，想往地址0写数据。如果没有用户态/内核态的隔离，这一行代码直接向物理地址0写入数据——那可能是中断向量表的位置，整个系统瞬间崩溃。但有了隔离，操作系统会优雅地给你一个"Segmentation Fault"信号，你的程序挂了，但机器安然无恙。这就是特权隔离在保护我们。</p>
+
+        <p>我分享一个亲历的安全事故。以前我带的一个实习生写了一个C程序，不小心在循环里越界写了一个超大数组。程序跑起来以后，他惊讶地发现系统越来越卡，最后其他所有应用都打不开了。他以为把程序杀掉就好了——结果杀完后系统内存使用率依然高达90%。后来一查，这个程序疯狂分配匿名内存页，虽然进程本身被杀了，但内核在回收这些页面前，系统已经被"饿"了很长时间。更可怕的是，如果这个程序是在内核态运行的，它可能直接破坏核心数据结构，机器只能靠硬重启。从那以后，我每次做性能调优都会先确认：当前代码跑在用户态还是内核态？这决定了我的调试方法和风险等级。</p>
+
+        <div class="highlight">
+            <p><strong>核心概念</strong>：用户态（User Mode）是应用程序运行时的最低特权级别，不能直接访问硬件和内核数据结构。内核态（Kernel Mode）是操作系统内核运行时的最高特权级别，可以执行任何CPU指令和访问任何内存地址。二者之间的"门"是系统调用。</p>
+        </div>
+
+        <h2>一、特权级别</h2>
+
+        <h3>1. x86的Ring 0–3</h3>
+        <p>x86架构提供了4个特权级别（Privilege Level），编号Ring 0到Ring 3。Ring 0是最高特权级（内核态），Ring 3是最低特权级（用户态），Ring 1和Ring 2在主流OS中几乎不使用（部分虚拟化方案和OS/2用过）。当前CPU的特权级由CS寄存器的CPL（Current Privilege Level）字段标识。一条指令能否执行、一个内存段能否访问，由CPL和段描述符/页表项的DPL/RPL共同决定。关键的限制包括：用户态无法执行 <code>lgdt</code> / <code>lidt</code> 等特权指令、无法直接修改控制寄存器（CR0/CR3/CR4）、无法直接操作中断控制器和I/O端口（除非I/O位图特别允许）。</p>
+
+        <h3>2. ARM的Exception Level</h3>
+        <p>ARMv8-A架构使用Exception Level（EL）来定义特权级别。EL0对应用户态（最不特权），EL1对应内核态（OS kernel），EL2对应Hypervisor（虚拟化管理程序），EL3对应Secure Monitor（安全监控）。ARM的设计更加"语义化"——EL编号越大特权越高，每个EL有独立的栈指针（SP_ELx）和异常向量表（VBAR_ELx）。当ARM CPU执行系统调用时，从EL0陷入EL1；当需要切换虚拟机时，EL1切换到EL2。ARM的安全扩展TrustZone引入了"安全世界"和"普通世界"的概念——即便在EL3之下，安全世界的内核（如Trusty）和普通世界的Linux完全隔离，安全世界可以访问普通世界不能访问的内存和外设。</p>
+
+        <table>
+            <tr><th>角色</th><th>x86特权级</th><th>ARM特权级</th><th>访问权限</th></tr>
+            <tr><td>用户程序</td><td>Ring 3</td><td>EL0</td><td>只能访问自己的虚拟地址空间，不能执行特权指令</td></tr>
+            <tr><td>OS内核</td><td>Ring 0</td><td>EL1</td><td>完全访问硬件和所有内存</td></tr>
+            <tr><td>虚拟机监视器</td><td>VMX root (Ring 0)</td><td>EL2</td><td>控制虚拟化扩展和客户机切换</td></tr>
+            <tr><td>安全监控器</td><td>SMM</td><td>EL3</td><td>管理安全世界和普通世界的切换</td></tr>
+        </table>
+
+        <div class="tip">
+            <p><strong>为什么需要特权隔离</strong>：从安全角度看，这是"最小权限原则"（Principle of Least Privilege）在硬件层面的体现。应用程序永远不应该拥有它不需要的权限。从稳定角度看，一个用户程序的bug不应该能影响到其他程序，更不应该能破坏内核。</p>
+        </div>
+
+        <h2>二、系统调用全流程</h2>
+
+        <p>理解了特权级别后，我们来看看"跨越鸿沟"的关键机制——系统调用。这是一个从用户态的 <code>printf()</code> 到内核态的 <code>sys_write()</code> 的完整旅程。</p>
+
+        <h3>1. 完整的调用链条</h3>
+        <p>以 <code>printf("hello\n");</code> 为例：应用程序的 <code>printf()</code> 函数来自glibc/C标准库 $\to$ glibc内部调用 <code>vfprintf()</code> $\to$ <code>vfprintf()</code> 在适当时候调用 <code>write()</code> 包装函数 $\to$ <code>write()</code> 包装函数将参数放入约定寄存器（x86-64为 <code>rdi</code>, <code>rsi</code>, <code>rdx</code>），系统调用号放入 <code>rax</code> $\to$ 执行 <code>syscall</code> 指令（x86-64）或 <code>svc #0</code>（ARM64）$\to$ CPU硬件自动保存返回地址并切换到EL1/Ring 0 $\to$ 跳转到内核的 <code>entry_SYSCALL_64</code> 入口 $\to$ 内核保存所有寄存器现场 $\to$ 根据 <code>rax</code> 中的系统调用号查找sys_call_table $\to$ 调用对应的 <code>sys_write()</code> 实现 $\to$ <code>sys_write()</code> 通过VFS层写入文件描述符 $\to$ 返回结果 $\to$ 内核恢复寄存器现场 $\to$ 执行 <code>sysret</code> / <code>eret</code> 切回用户态 $\to$ glibc处理返回值和可能的错误（<code>errno</code>）$\to$ <code>printf()</code> 完成后返回到你的代码。</p>
+
+        <h3>2. 参数传递与错误处理</h3>
+        <p>系统调用的参数传递不像普通函数调用那样通过栈传递——因为跨特权级时栈已经变了。x86-64架构约定前6个参数通过寄存器传递：<code>rdi</code>（arg1）、<code>rsi</code>（arg2）、<code>rdx</code>（arg3）、<code>r10</code>（arg4）、<code>r8</code>（arg5）、<code>r9</code>（arg6）。内核在返回时，返回值也放在 <code>rax</code> 中。如果返回值是负数，glibc会把它解释为负的errno值，取绝对值设置到 <code>errno</code> 全局变量中，然后返回-1给调用者。这就是为什么你的C程序判断系统调用失败时总是检查返回值是否为-1，然后查看 <code>errno</code>。</p>
+
+        <pre><code>; x86-64 系统调用的汇编代码示例
+; 调用 write(1, "hello\n", 6)
+mov    $1, %rdi        ; fd = 1 (stdout)
+lea    msg(%rip), %rsi ; buf = "hello\n"
+mov    $6, %rdx        ; count = 6
+mov    $1, %rax        ; syscall number = 1 (__NR_write)
+syscall                ; 陷入内核
+ret
+
+; 如果返回值 rax < 0，则是错误
+test   %rax, %rax
+js     handle_error    ; 跳转到错误处理</code></pre>
+
+        <div class="highlight">
+            <p><strong>重要理解</strong>：系统调用是用户态与内核态之间"协商的入口"——你不能任意跳转到内核中的任意地址去执行代码，只能通过预定义的系统调用号进入预定义的入口。这就是"门"的含义。系统调用表（sys_call_table）定义了哪些功能可以被用户态请求，内核利用这个"门"来控制所有对底层资源的访问。</p>
+        </div>
+
+        <h2>三、strace实战</h2>
+
+        <p>说一万遍不如动一次手。我们用 <code>strace</code> 这个工具来"窃听"程序与内核的对话——它会拦截并打印每一次系统调用的详细信息。</p>
+
+        <h3>1. 一个简单程序的系统调用追踪</h3>
+        <p>我们写一个最简单的 <code>hello</code> 程序，然后用strace看看它在底层做了什么：</p>
+
+        <pre><code>$ cat hello.c
+#include &lt;stdio.h&gt;
+int main() {
+    printf("Hello, OS!\n");
+    return 0;
+}
+
+$ gcc -o hello hello.c
+
+$ strace -c ./hello
+Hello, OS!
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+  0.00    0.000000           0         1           write
+  0.00    0.000000           0         1         1 access
+  0.00    0.000000           0         4           mmap
+  0.00    0.000000           0         1           execve
+  0.00    0.000000           0         1           brk
+  0.00    0.000000           0         4           openat
+  0.00    0.000000           0        17           ... (省略部分)
+------ ----------- ----------- --------- --------- ----------------
+100.00    0.000000                    33           total
+
+# 详细模式查看每次调用
+$ strace -e trace=write,mmap ./hello
+mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f...
+mmap(NULL, 413155, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f...
+write(1, "Hello, OS!\n", 11) = 11
++++ exited with 0 +++</code></pre>
+
+        <h3>2. 读strace输出的要点</h3>
+        <p>从输出可以看到：一个简单的 <code>printf()</code> 需要 <code>mmap</code> 分配内存、<code>openat</code> 打开动态链接库、<code>brk</code> 调整堆空间，最后 <code>write(1, ...)</code> 才是真正把字符串写到标准输出。一个"Hello World"程序从进程启动到退出，前前后后调用了超过30次系统调用。这些系统调用的开销累积起来就是你程序的运行时成本。</p>
+
+        <div class="warning">
+            <p><strong>实战技巧</strong>：strace是你调试线上问题的最好朋友之一。当你的程序莫名其妙变慢时，先跑一个 <code>strace -c -p PID</code> 看看系统调用的统计。如果 <code>read</code>/<code>write</code> 的调用次数异常高或errno为EAGAIN特别多，那大概率是I/O模型的问题。我曾经用这个方法定位到一个Nginx worker疯狂进行 <code>epoll_wait</code> 返回超时的问题——根本不是业务代码的锅，而是内核网络栈的参数需要调优。</p>
+        </div>
+
+        <h2>四、上下文切换的成本</h2>
+
+        <p>用户态与内核态之间的切换不是免费的。每次 <code>syscall</code> / <code>sysret</code> 或中断时，CPU都有一整套状态保存和恢复的动作，这些动作消耗CPU周期。</p>
+
+        <h3>1. 一次系统调用的周期消耗</h3>
+        <p>在x86-64上，一次最小的系统调用（比如 <code>getpid()</code>）大约需要100–200个CPU周期（约30–50纳秒）。听起来不多对吧？但如果你的程序每秒进行100万次系统调用——比如用 <code>read()</code> 每次读1字节而不是一次读1MB——那么上下文切换的开销就会从3%膨胀到80%。这背后就是"系统调用放大效应"：单次系统调用看起来很快，但在高频场景下会吃掉你所有的CPU预算。</p>
+
+        <h3>2. 上下文切换到底在干什么</h3>
+        <p>一次完整的用户态$\to$内核态$\to$用户态切换包括以下操作：切换栈指针（从用户栈切换到内核栈，再切回来）；保存和恢复通用寄存器（约16–30个寄存器）；保存和恢复浮点/向量寄存器（XMM/YMM/ZMM，可能上百字节）；刷新TLB（取决于是否切换地址空间）；执行特权指令（syscall/sysret）；CPU分支预测器的状态清空和重建。此外，切换过程中Cache的行为也会受影响：内核代码和用户代码通常不在同一Cache行，频繁切换会导致I-Cache Miss率上升，这就是"间接成本"。</p>
+
+        <table>
+            <tr><th>操作</th><th>大约CPU周期</th><th>大约耗时（3GHz CPU）</th></tr>
+            <tr><td>普通函数调用（call/ret）</td><td>2–5</td><td>~1 ns</td></tr>
+            <tr><td>syscall指令切换（纯硬件）</td><td>~30</td><td>~10 ns</td></tr>
+            <tr><td>最小系统调用（getpid）</td><td>100–200</td><td>30–70 ns</td></tr>
+            <tr><td>简单系统调用（write小数据）</td><td>300–1000</td><td>100–330 ns</td></tr>
+            <tr><td>真实文件读写（含I/O等待）</td><td>10⁴–10⁶</td><td>3 µs – 330 µs</td></tr>
+            <tr><td>进程上下文切换（完整的两进程切换）</td><td>10⁴–10⁵</td><td>3–30 µs</td></tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>性能准则</strong>：在设计高性能系统时，减少系统调用次数是首要优化目标之一。具体手段包括：使用缓冲区批量读写（减少read/write次数）、使用 <code>mmap</code> 替代read/write避免数据拷贝、使用io_uring（新Linux内核I/O模型）将多次系统调用合并为一次、使用大页面减少TLB Miss。这些都是建立在"上下文切换有成本"这个认知之上的优化。</p>
+        </div>
+
+        <div class="tip">
+            <p><strong>经典数据</strong>：Google在2019年的一篇论文中报道，在其生产服务器上，Linux内核的"系统调用开销"占用了大约5–10%的总CPU时间。这意味着在所有服务器上，大约每10台就有一台在不停地处理用户态和内核态的切换开销。优化这部分就是实打实的成本节约。</p>
+        </div>
+
+        <h2>五、结语与下一章预告</h2>
+
+        <p>本章我们深入剖析了操作系统的"特区划界"——用户态与内核态的隔离机制。我们搞懂了x86 Ring 0-3和ARM EL0-3的硬件防御体系；从glibc的 <code>printf()</code> 一路追踪到了 <code>sys_write()</code>，完整走了一遍系统调用的旅程；用strace实战观察了程序与内核的每一次"对话"；最后量化了上下文切换的CPU周期消耗，为性能优化提供了数据支撑。</p>
+
+        <p>现在你已经了解了"内核长什么样"以及"怎么进内核"。下一个自然而然的疑问是：当我们按下电脑的电源键时，内核是怎么被加载到内存中并启动起来的？下一章我们将完整走一遍启动流程——从固件到Bootloader到内核到init进程，见证操作系统从无到有的全过程。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

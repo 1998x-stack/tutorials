@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 Unsafe Rust</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦀 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Rust简介与安装</a></li>
+            <li><a href="02.html">第2章 变量与数据类型</a></li>
+            <li><a href="03.html">第3章 函数与控制流</a></li>
+            <li><a href="04.html">第4章 所有权初探</a></li>
+            <li><a href="05.html">第5章 切片与字符串</a></li>
+            <li><a href="06.html">第6章 结构体</a></li>
+            <li><a href="07.html">第7章 枚举与模式匹配</a></li>
+            <li><a href="08.html">第8章 项目管理与模块</a></li>
+            <li><a href="09.html">第9章 集合类型</a></li>
+            <li><a href="10.html">第10章 错误处理</a></li>
+            <li><a href="11.html">第11章 泛型</a></li>
+            <li><a href="12.html">第12章 Trait</a></li>
+            <li><a href="13.html">第13章 生命周期</a></li>
+            <li><a href="14.html">第14章 闭包与迭代器</a></li>
+            <li><a href="15.html">第15章 测试体系</a></li>
+            <li><a href="16.html">第16章 Cargo生态进阶</a></li>
+            <li><a href="17.html">第17章 常见实用Trait</a></li>
+            <li><a href="18.html">第18章 日志与调试</a></li>
+            <li><a href="19.html">第19章 智能指针</a></li>
+            <li><a href="20.html">第20章 并发编程</a></li>
+            <li><a href="21.html">第21章 异步编程</a></li>
+            <li><a href="22.html" class="active">第22章 Unsafe Rust</a></li>
+            <li><a href="23.html">第23章 常用库选型</a></li>
+            <li><a href="24.html">第24章 性能分析</a></li>
+            <li><a href="25.html">第25章 宏编程入门</a></li>
+            <li><a href="26.html">第26章 实战：CLI工具</a></li>
+            <li><a href="27.html">第27章 实战：Web API</a></li>
+            <li><a href="28.html">第28章 2027 Edition展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>开篇：安全世界的"核按钮"</h2>
+
+        <p>本书的前21章都在"安全Rust"的框架内——编译器像一个经验丰富的审查员，逐行检查你的代码，确保没有悬空指针、没有数据竞争、没有use-after-free。但现实世界有安全Rust无法表达的需求：调用操作系统API需要C ABI的函数签名、与硬件寄存器交互需要特定的内存布局、实现高性能的集合需要自定义内存管理。这时，我们需要按下Rust的"核按钮"——<code>unsafe</code>关键字。</p>
+
+        <p>不过在开始之前，请先记住一个最重要的原则：<strong>unsafe并不意味着代码不安全</strong>。它的真正含义是：<strong>编译器放弃了对这块代码的安全检查，把责任转交给你——程序员</strong>。unsafe代码需要你自己保证内存安全、引用有效性、数据竞争等所有条件。标准库中大量的安全抽象（<code>Vec</code>、<code>Box</code>、<code>Arc</code>等）底层都有unsafe代码——但它们对外暴露的是安全的API。这就是Rust安全抽象的核心模式：<strong>用unsafe构建内部实现，用安全API包裹外部接口</strong>。</p>
+
+        <div class="warning">
+            <strong>CRITICAL — 关于未定义行为（Undefined Behavior）</strong>：Rust标准中对unsafe代码的约束有一长串——解引用空指针、创建无效的枚举值、使用不对齐的引用等都会触发<strong>未定义行为</strong>。UB最可怕的地方在于：任何行为都是合法的——程序可能立刻崩溃，也可能看似正常运行，然后在你上线三个月后一个深夜突然崩溃，数据损坏。C/C++开发者对这些不陌生，但Rust的unsafe并未免除这些风险。一旦你在unsafe块中犯了错，编译器就不再是你的后盾了。
+        </div>
+
+        <h2>什么时候需要unsafe — 四种特权操作</h2>
+
+        <p><code>unsafe</code>关键字赋予你四种普通Rust中不允许的"超级权限"：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>操作</th>
+                    <th>描述</th>
+                    <th>风险级别</th>
+                    <th>典型场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>解引用裸指针</td>
+                    <td><code>*const T</code> 或 <code>*mut T</code> 的取值操作</td>
+                    <td>⭐⭐⭐</td>
+                    <td>与C代码交互、手动内存管理</td>
+                </tr>
+                <tr>
+                    <td>调用unsafe函数</td>
+                    <td>调用标记为<code>unsafe</code>的函数或方法</td>
+                    <td>⭐⭐</td>
+                    <td>FFI绑定、标准库底层函数</td>
+                </tr>
+                <tr>
+                    <td>访问/修改可变静态变量</td>
+                    <td>对<code>static mut</code>的读写</td>
+                    <td>⭐⭐⭐</td>
+                    <td>全局状态、C兼容的全局变量</td>
+                </tr>
+                <tr>
+                    <td>实现unsafe trait</td>
+                    <td>如<code>Send</code>、<code>Sync</code>的unsafe实现</td>
+                    <td>⭐⭐</td>
+                    <td>自定义并发原语</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>请注意：<code>unsafe</code> <strong>不关闭借用检查</strong>。在unsafe块中，所有权规则、生命周期检查、借用规则仍然生效。它只开放了上述四种操作。这是一个常见的误解——认为unsafe是完全的"法外之地"——其实不是。</p>
+
+        <h2>裸指针 — *const T / *mut T</h2>
+
+        <p>裸指针（raw pointer）是Rust中最接近C指针的类型。与引用相比，它没有编译期保障：可以是空指针、可以指向无效内存、不自动处理生命周期。</p>
+
+        <h3>创建和解引用</h3>
+
+        <pre><code>fn main() {
+    let mut x = 42;
+
+    // 从引用创建裸指针——安全操作
+    let r1 = &amp;x as *const i32;
+    let r2 = &amp;mut x as *mut i32;
+
+    // 解引用裸指针——需要在 unsafe 块中
+    unsafe {
+        println!("r1 指向的值: {}", *r1);
+        *r2 = 100;
+        println!("修改后: {}", x); // 100
+    }
+}</code></pre>
+
+        <p>注意创建裸指针本身是安全的——"违规"发生在你解引用的时候。这就是为什么<code>as *const T</code>可以在安全代码中执行——真正危险的操作是<code>*r1</code>。</p>
+
+        <h3>与引用对比</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th><code>&amp;T</code> / <code>&amp;mut T</code></th>
+                    <th><code>*const T</code> / <code>*mut T</code></th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>可为空</td>
+                    <td>否（永远是有效引用）</td>
+                    <td>是（可以是<code>null</code>）</td>
+                </tr>
+                <tr>
+                    <td>自动解引用</td>
+                    <td>是</td>
+                    <td>否（必须手动解引用）</td>
+                </tr>
+                <tr>
+                    <td>生命周期检查</td>
+                    <td>是</td>
+                    <td>无</td>
+                </tr>
+                <tr>
+                    <td>别名规则</td>
+                    <td>严格（不可变/可变互斥）</td>
+                    <td>无约束</td>
+                </tr>
+                <tr>
+                    <td>发送到其他线程</td>
+                    <td>受限（Sync trait）</td>
+                    <td>无约束</td>
+                </tr>
+                <tr>
+                    <td>安全解引用</td>
+                    <td>是</td>
+                    <td>仅在<code>unsafe</code>块中</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>安全保证的自我约束</h3>
+
+        <p>在unsafe中使用裸指针时，你必须手动确保以下条件：</p>
+        <ul>
+            <li><strong>有效性</strong>：指针指向的内存必须是已分配且对齐的，不能解引用悬垂指针</li>
+            <li><strong>不重叠</strong>：遵守Rust的别名规则——不要同时有可变和不可变裸指针指向同一内存</li>
+            <li><strong>初始化</strong>：不能读取未初始化的内存</li>
+            <li><strong>无数据竞争</strong>：跨线程的裸指针访问需要同步机制</li>
+        </ul>
+
+        <pre><code>// 典型的安全抽象模式：内部 unsafe，外部安全
+use std::ops::{Deref, DerefMut};
+
+/// 一个自定义的"安全裸指针包装器"
+/// 保证：new时不为空，解引用时一定有效
+struct SafePtr&lt;T&gt; {
+    ptr: *mut T,
+}
+
+impl&lt;T&gt; SafePtr&lt;T&gt; {
+    /// 创建一个新的安全指针——条件：传入的指针必须有效
+    ///
+    /// # Safety
+    /// 调用者必须保证 ptr 指向有效的、已初始化的 T
+    unsafe fn new(ptr: *mut T) -&gt; Self {
+        SafePtr { ptr }
+    }
+}
+
+impl&lt;T&gt; Deref for SafePtr&lt;T&gt; {
+    type Target = T;
+    fn deref(&amp;self) -&gt; &amp;T {
+        // unsafe 块被隐藏在安全的 Deref 实现中
+        unsafe { &amp;*self.ptr }
+    }
+}
+
+impl&lt;T&gt; DerefMut for SafePtr&lt;T&gt; {
+    fn deref_mut(&amp;mut self) -&gt; &amp;mut T {
+        unsafe { &amp;mut *self.ptr }
+    }
+}</code></pre>
+
+        <div class="highlight">
+            <strong>实践法则</strong>：unsafe代码的最佳实践是"最小化原则"——每个unsafe块只做一件事，添加注释说明为什么这是安全的。<code>// SAFETY:</code>注释是Rust社区的标准做法，解释在什么前置条件下这个unsafe操作是安全的。标准库的每个unsafe操作都有详尽的Safety说明，这是你应该模仿的。
+        </div>
+
+        <h2>FFI与extern — C绑定</h2>
+
+        <p>Rust程序很少完全自给自足。很多时候你需要调用现有的C库——比如系统调用、图形库、数字计算库等。这就是<strong>FFI</strong>（Foreign Function Interface）。</p>
+
+        <h3>声明外部函数</h3>
+
+        <pre><code>// 在 Rust 中调用 C 标准库的 malloc 和 free
+use std::ffi::c_void;
+
+extern "C" {
+    // 声明 C 函数
+    fn malloc(size: usize) -&gt; *mut c_void;
+    fn free(ptr: *mut c_void);
+}
+
+fn main() {
+    unsafe {
+        let ptr = malloc(100);
+        if ptr.is_null() {
+            eprintln!("内存分配失败！");
+            return;
+        }
+        // ... 使用这 100 字节 ...
+        free(ptr);
+    }
+}</code></pre>
+
+        <p><code>extern "C"</code>块告诉Rust编译器这些函数使用C的ABI（调用约定）。然后你可以在unsafe块中调用它们——因为Rust无法验证外部函数的行为是否安全。</p>
+
+        <h3>#[no_mangle] — 导出Rust函数给C调用</h3>
+
+        <p>如果你需要写一个能从C调用的Rust库——比如为已有系统添加Rust模块——需要用<code>#[no_mangle]</code>防止Rust编译器修改函数名（Rust有名称修饰机制，类似C++的name mangling）：</p>
+
+        <pre><code>// 这个函数可以从 C 代码中调用！
+#[no_mangle]
+pub extern "C" fn rust_add(a: i32, b: i32) -&gt; i32 {
+    a + b
+}
+
+// 暴露一个处理字符串的函数（复杂一点）
+use std::ffi::CStr;
+use std::os::raw::c_char;
+
+/// 从C字符串计算长度
+///
+/// # Safety
+/// s 必须指向一个有效的、以 null 结尾的 C 字符串
+#[no_mangle]
+pub unsafe extern "C" fn rust_strlen(s: *const c_char) -&gt; usize {
+    // 将 C 字符串转换为 Rust 的 &str——不安全操作
+    let c_str = unsafe { CStr::from_ptr(s) };
+    c_str.to_bytes().len()
+}</code></pre>
+
+        <p>对应的C端声明：</p>
+
+        <pre><code>// C 代码中声明
+extern int rust_add(int a, int b);
+extern size_t rust_strlen(const char *s);
+
+int main() {
+    int sum = rust_add(1, 2);         // 3
+    size_t len = rust_strlen("hello"); // 5
+    return 0;
+}</code></pre>
+
+        <div class="highlight">
+            <strong>安全包装FFI</strong>：永远不要直接暴露unsafe的FFI函数给用户。标准做法是用安全函数包装它：
+            <pre><code>/// 安全的包装器——隐藏了unsafe细节
+pub fn safe_strlen(s: &amp;str) -&gt; usize {
+    // 内部调用 unsafe FFI
+    unsafe { rust_strlen(s.as_ptr() as *const c_char) }
+}</code></pre>
+            这样用户的代码完全不需要接触<code>unsafe</code>——你替他们承担了正确调用FFI的责任。
+        </div>
+
+        <h2>可变静态变量</h2>
+
+        <p>在Rust中，<code>static</code>变量默认是不可变的，并且具有<code>'static</code>生命周期。但有些场景（比如全局计数器、C兼容的全局状态）需要可变静态变量——这是unsafe的：</p>
+
+        <pre><code>static mut COUNTER: u32 = 0;
+
+fn add_to_counter(val: u32) {
+    unsafe {
+        COUNTER += val; // 读取和修改都需要 unsafe
+    }
+}
+
+fn main() {
+    add_to_counter(42);
+
+    unsafe {
+        println!("COUNTER: {}", COUNTER); // 42
+    }
+
+    // 多线程访问 static mut 会导致数据竞争！
+    // 考虑用 AtomicU32 或 Mutex 作为安全替代
+}</code></pre>
+
+        <p>你立即注意到问题：多线程下对<code>static mut</code>的读写是数据竞争的！即使在单线程中，在unsafe块外部修改一个全局变量仍然可能导致不可预测的行为——因为编译器可能基于"这个值不会变"的假设做优化。这就是为什么Rust把<code>static mut</code>的访问也列为unsafe操作——它需要你确保没有数据竞争并且编译器优化不会破坏语义。</p>
+
+        <div class="tip">
+            <strong>替代方案</strong>：大多数情况下你不需要<code>static mut</code>。用以下安全替代品：
+            <ul>
+                <li><code>std::sync::atomic::AtomicU32</code> —— 原子全局计数器</li>
+                <li><code>std::sync::OnceLock&lt;T&gt;</code> —— 一次性初始化的全局状态</li>
+                <li><code>lazy_static!</code> 或 <code>std::sync::LazyLock</code> —— 延迟初始化</li>
+                <li><code>thread_local!</code> —— 线程本地存储</li>
+            </ul>
+            这些抽象内部使用unsafe，但对外提供了安全的API。
+        </div>
+
+        <h2>unsafe trait — 如Send/Sync的unsafe实现</h2>
+
+        <p>一个trait被标记为<code>unsafe</code>意味着：<strong>实现这个trait需要调用者承担额外的安全义务</strong>。Rust标准库中最典型的例子是<code>Send</code>和<code>Sync</code>——它们是标记trait（没有方法），但要安全地实现它们需要确保类型确实可以跨线程：</p>
+
+        <pre><code>// Send 和 Sync 的简化定义（标准库中）
+// pub unsafe auto trait Send {}
+// pub unsafe auto trait Sync {}
+
+/// 一个自定义的、包装了裸指针的类型
+struct MySendPtr&lt;T&gt;(*mut T);
+
+// 编译器不会自动为 MySendPtr 实现 Send
+// 因为 *mut T 不是 Send——裸指针可以被复制到其他线程
+
+// 但我们作为类型的设计者知道：这个类型在特定条件下可以跨线程
+unsafe impl&lt;T: Send&gt; Send for MySendPtr&lt;T&gt; {}
+
+// 同样实现 Sync
+unsafe impl&lt;T: Sync&gt; Sync for MySendPtr&lt;T&gt; {}</code></pre>
+
+        <p>关于<code>unsafe impl</code>的关键规则：</p>
+        <ul>
+            <li>绝大多数情况下你<strong>不需要</strong>手动实现<code>Send</code>/<code>Sync</code>——编译器会自动推导</li>
+            <li>当你引入裸指针或<code>UnsafeCell</code>时，自动推导会失效——因为编译器不再能确认安全性</li>
+            <li>如果确定你的类型是线程安全的，用<code>unsafe impl Send</code>告诉编译器——但如果你错了，未定义行为</li>
+            <li>永远优先考虑使用<code>Arc</code>、<code>Mutex</code>等现成的并发原语，而不是手动裸实现<code>Send</code>/<code>Sync</code></li>
+        </ul>
+
+        <p>在Rust生态中，很多底层库（如<code>crossbeam</code>、<code>parking_lot</code>）都使用了<code>unsafe impl Send/Sync</code>来提供并发原语。它们经过了极为严格的测试和形式化验证——这正是"unsafe并不意味着不安全"的最佳例证：通过严谨的unsafe代码构建出人人可用的安全抽象。</p>
+
+        <h2>一个真实的故事：一行unsafe引发的血案</h2>
+
+        <p>2019年，一个知名的Rust项目（我匿名化一下）发布了新版本。用户报告说在特定条件下，程序会以"看起来完全随机"的方式崩溃——有时在某行报segfault，有时在另一行报SIGILL。项目维护者花了三周时间逐步二分查找，最终定位到一行代码——一个<code>unsafe</code>块中对裸指针的写操作越界了4个字节。更糟的是，这行代码来自开发者在凌晨提交的一个"看起来很简单"的优化补丁。</p>
+
+        <p>4个字节的越界写入在堆上覆盖了相邻对象的内存——但这个错误不像空指针那样"立竿见影"地崩溃，而是表现为隐蔽的"数据损坏"。被损坏的数据可能几个小时都不被发现，然后某个完全不相干的函数读取了已损坏的数据——崩溃发生在离bug植入点几百万条指令之后。这就是<strong>内存安全漏洞最难调试的地方</strong>：原因和结果在时空上完全分离。</p>
+
+        <p>这个故事告诉我们两件事：第一，<strong>unsafe代码必须经过极端仔细的代码审查</strong>；第二，用<strong>MIRI</strong>（Rust的未定义行为检测工具）来测试unsafe代码——它能检测到大多数类型的UB。用以下方式运行测试：</p>
+
+        <pre><code>rustup +nightly run miri test</code></pre>
+
+        <p>MIRI是检测unsafe代码中未定义行为的最佳工具。如果你写了unsafe代码（或者用了第三方库中的unsafe代码），强烈建议你在CI中加入MIRI检查。</p>
+
+        <h2>本章小结</h2>
+
+        <p>Unsafe Rust是Rust语言最深邃的部分。我们学习了四种unsafe特权操作：裸指针解引用、unsafe函数调用、可变静态变量、unsafe trait实现。然后深入探讨了FFI绑定——如何调用C代码以及如何将Rust代码暴露给C。我们理解了<code>unsafe</code>是一个"契约"——编译器放弃检查，但你要自己保证安全。正确使用unsafe的核心模式是：<strong>最小化unsafe块，用安全抽象包裹它，加上详尽的Safety注释，并用MIRI验证</strong>。</p>
+
+        <p>unsafe是Rust作为"系统级语言"的能力证明——当你需要时，它给你C/C++级别的控制力。但请记住，即便是Rust标准库，也是用unsafe构建安全抽象的成功范例。你的目标不是"不用unsafe"，而是"在正确的地方用正确的unsafe，并且用严谨的工程实践确保它的安全性"。</p>
+
+        <p>下一章我们将脱离安全/unsafe的讨论，进入更加实用的领域——常用库选型。你将了解Rust生态中那些经过时间检验的优质crate，以及如何在项目中做出正确的技术选型。打开第23章，继续前进。</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

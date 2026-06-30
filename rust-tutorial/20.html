@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 并发编程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦀 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Rust简介与安装</a></li>
+            <li><a href="02.html">第2章 变量与数据类型</a></li>
+            <li><a href="03.html">第3章 函数与控制流</a></li>
+            <li><a href="04.html">第4章 所有权初探</a></li>
+            <li><a href="05.html">第5章 切片与字符串</a></li>
+            <li><a href="06.html">第6章 结构体</a></li>
+            <li><a href="07.html">第7章 枚举与模式匹配</a></li>
+            <li><a href="08.html">第8章 项目管理与模块</a></li>
+            <li><a href="09.html">第9章 集合类型</a></li>
+            <li><a href="10.html">第10章 错误处理</a></li>
+            <li><a href="11.html">第11章 泛型</a></li>
+            <li><a href="12.html">第12章 Trait</a></li>
+            <li><a href="13.html">第13章 生命周期</a></li>
+            <li><a href="14.html">第14章 闭包与迭代器</a></li>
+            <li><a href="15.html">第15章 测试体系</a></li>
+            <li><a href="16.html">第16章 Cargo生态进阶</a></li>
+            <li><a href="17.html">第17章 常见实用Trait</a></li>
+            <li><a href="18.html">第18章 日志与调试</a></li>
+            <li><a href="19.html">第19章 智能指针</a></li>
+            <li><a href="20.html" class="active">第20章 并发编程</a></li>
+            <li><a href="21.html">第21章 异步编程</a></li>
+            <li><a href="22.html">第22章 Unsafe Rust</a></li>
+            <li><a href="23.html">第23章 常用库选型</a></li>
+            <li><a href="24.html">第24章 性能分析</a></li>
+            <li><a href="25.html">第25章 宏编程入门</a></li>
+            <li><a href="26.html">第26章 实战：CLI工具</a></li>
+            <li><a href="27.html">第27章 实战：Web API</a></li>
+            <li><a href="28.html">第28章 2027 Edition展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>开篇：一次数据竞争的"编译期救赎"</h2>
+
+        <p>2019年，我在一个Go微服务项目中遇到一个经典的数据竞争问题：一个全局缓存map在没有锁的情况下被多个goroutine并发读写，一周出现两三次偶发panic，core dump看半天才能定位到原因。Go的race detector能发现一部分问题，但不是100%——毕竟它在运行时检测，总有漏网之鱼。</p>
+
+        <p>切到Rust后，同样的并发场景——多个线程并发读取配置、偶尔写入更新——你猜怎样？第一次编译时，Rust编译器直接拒绝了代码，告诉我数据访问可能存在竞争。我不需要花费数小时在竞态条件调试上，因为<strong>编译器已经把所有的数据竞争消灭在了代码提交之前</strong>。这就是Rust的"Fearless Concurrency"——无畏并发。</p>
+
+        <div class="highlight">
+            <strong>Rust的安全承诺</strong>：Rust的所有权系统在编译期就保证了<strong>数据竞争（Data Race）</strong>不会发生。数据竞争被定义为：两个或更多线程同时访问同一内存位置，其中至少一个是写操作，且没有同步机制。Rust的类型系统加<code>Send</code>/<code>Sync</code> trait从根源上杜绝了这种可能。
+        </div>
+
+        <h2>线程基础 — std::thread</h2>
+
+        <p>Rust标准库提供了<code>std::thread</code>模块，让你以最直接的方式创建操作系统线程。不同于Go的goroutine（M:N模型）或Erlang的进程，Rust的线程默认是<strong>1:1模型</strong>——一个Rust线程对应一个OS线程。</p>
+
+        <h3>spawn和join</h3>
+
+        <pre><code>use std::thread;
+use std::time::Duration;
+
+fn main() {
+    // 创建一个新线程
+    let handle = thread::spawn(|| {
+        for i in 0..5 {
+            println!("子线程: 计数 {}", i);
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    // 主线程继续执行
+    for i in 0..3 {
+        println!("主线程: 计数 {}", i);
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // 等待子线程结束
+    handle.join().unwrap();
+
+    println!("两个线程都执行完毕！");
+}</code></pre>
+
+        <p><code>thread::spawn</code>接收一个闭包作为线程入口。<code>join()</code>阻塞当前线程直到目标线程结束——如果忘记调用<code>join</code>，主线程可能在子线程执行完之前退出，导致子线程被强制终止。</p>
+
+        <h3>move闭包与所有权转移</h3>
+
+        <p>当子线程需要捕获外部数据时，编译器会强制你使用<code>move</code>关键字——将数据所有权从主线程转移到子线程：</p>
+
+        <pre><code>use std::thread;
+
+fn main() {
+    let data = vec![1, 2, 3, 4, 5];
+
+    // 不加 move：编译错误！
+    // 闭包可能比 data 活得更久，但 data 的所有权在主线程
+    // let handle = thread::spawn(|| {
+    //     println!("{:?}", data);
+    // });
+
+    // ✅ 用 move 将 data 所有权转移到子线程
+    let handle = thread::spawn(move || {
+        println!("子线程看到的 data: {:?}", data);
+        // data 在此处被消耗
+    });
+
+    // 此时主线程无法再访问 data——所有权已被转移
+    // println!("{:?}", data); // ❌ 编译错误：data 已被 move
+
+    handle.join().unwrap();
+}</code></pre>
+
+        <p>这个设计非常巧妙：所有权转移保证了<strong>同一份数据绝对不会同时被两个线程访问</strong>，从根本上杜绝了数据竞争。如果你想在多个线程之间共享数据，需要显式使用<code>Arc</code>（我们稍后会看到）。</p>
+
+        <h2>消息传递 — mpsc通道</h2>
+
+        <p>Go的并发哲学说"不要通过共享内存来通信，而要通过通信来共享内存"。Rust标准库提供了<strong>mpsc</strong>（Multi-Producer, Single-Consumer）通道来支持这种模式：</p>
+
+        <pre><code>use std::sync::mpsc;
+use std::thread;
+
+fn main() {
+    // 创建一个通道：发送端和接收端
+    let (tx, rx) = mpsc::channel();
+
+    // 创建3个生产者线程
+    for id in 0..3 {
+        let tx_clone = tx.clone();
+        thread::spawn(move || {
+            // 每个线程发送多条消息
+            for i in 0..3 {
+                let msg = format!("线程{}的消息 #{}", id, i);
+                tx_clone.send(msg).unwrap();
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+    }
+
+    // 丢弃原始发送端——否则接收端会一直等待
+    drop(tx);
+
+    // 接收端迭代接收所有消息
+    for received in rx {
+        println!("收到: {}", received);
+    }
+
+    println!("所有消息接收完毕！");
+}</code></pre>
+
+        <p>核心要点：</p>
+        <ul>
+            <li><code>mpsc::channel()</code>返回一对<code>(Sender, Receiver)</code></li>
+            <li><code>Sender</code>实现了<code>Clone</code>——支持多个生产者</li>
+            <li><code>Receiver</code>是<strong>单消费者</strong>——不能Clone</li>
+            <li><code>send()</code>返回<code>Result</code>——当接收端被drop时返回错误</li>
+            <li><code>rx</code>实现了<code>Iterator</code>——可以用<code>for</code>循环接收直到所有Sender都drop</li>
+        </ul>
+
+        <div class="tip">
+            <strong>通道缓冲区</strong>：<code>mpsc::channel()</code>创建的是<strong>异步通道</strong>——发送端不阻塞。标准库也提供<code>mpsc::sync_channel(n)</code>创建<strong>同步通道</strong>，缓冲区为n条消息，满了之后发送端会阻塞等待接收端消费。
+        </div>
+
+        <h2>共享状态 — Mutex、Arc、RwLock</h2>
+
+        <p>消息传递不是万能的。有些场景下共享状态更自然——比如多个线程更新同一个计数器。Rust提供了<strong>互斥锁</strong>和<strong>读写锁</strong>来安全地共享可变数据。</p>
+
+        <h3>Mutex&lt;T&gt; — 互斥锁</h3>
+
+        <pre><code>use std::sync::{Arc, Mutex};
+use std::thread;
+
+fn main() {
+    // Arc 提供跨线程共享，Mutex 提供互斥访问
+    let counter = Arc::new(Mutex::new(0));
+    let mut handles = vec![];
+
+    for _ in 0..10 {
+        let counter = Arc::clone(&amp;counter);
+        handles.push(thread::spawn(move || {
+            let mut num = counter.lock().unwrap();
+            *num += 1;
+            // 锁在 num 离开作用域时自动释放
+        }));
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    println!("最终计数: {}", *counter.lock().unwrap());
+    // 输出：最终计数: 10（100%确定，无数据竞争！）
+}</code></pre>
+
+        <p><code>Mutex</code>的<code>lock()</code>返回一个<code>MutexGuard</code>——这是一个智能指针，实现了<code>Deref</code>和<code>Drop</code>。当<code>MutexGuard</code>离开作用域，锁自动释放。如果锁被其他线程持有且<strong>发生了panic</strong>，<code>lock()</code>会返回<code>PoisonError</code>——Rust用"中毒（poisoning）"机制确保不安全状态不会被静默传播。</p>
+
+        <div class="warning">
+            <strong>死锁风险</strong>：Rust不能防止死锁！如果你同时持有两个锁（A和B），线程1锁A再锁B，线程2锁B再锁A——经典的死锁就发生了。Rust不会在编译期检测死锁，这是运行时逻辑问题。预防策略：
+            <ul>
+                <li>始终按<strong>相同的顺序</strong>获取多个锁</li>
+                <li>尽量缩短持有锁的时间——只在临界区内操作</li>
+                <li>考虑用<code>std::sync::try_lock</code>采用"尝试-回退"策略</li>
+            </ul>
+        </div>
+
+        <h3>RwLock&lt;T&gt; — 读写锁</h3>
+
+        <p>当读操作远多于写操作时，<code>RwLock</code>比<code>Mutex</code>更高效——它允许多个读取者同时访问，写操作则独占：</p>
+
+        <pre><code>use std::sync::{Arc, RwLock};
+use std::thread;
+
+fn main() {
+    let data = Arc::new(RwLock::new(vec![1, 2, 3]));
+
+    let mut handles = vec![];
+
+    // 多个读取者
+    for i in 0..5 {
+        let data = Arc::clone(&amp;data);
+        handles.push(thread::spawn(move || {
+            let read = data.read().unwrap();
+            println!("读者 {} 看到: {:?}", i, *read);
+        }));
+    }
+
+    // 一个写入者
+    {
+        let data = Arc::clone(&amp;data);
+        handles.push(thread::spawn(move || {
+            let mut write = data.write().unwrap();
+            write.push(4);
+            println!("写入者添加了元素");
+        }));
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}</code></pre>
+
+        <p><strong>RwLock vs Mutex</strong>：读多写少用<code>RwLock</code>，读写相当或写多读少用<code>Mutex</code>。<code>RwLock</code>有额外的管理开销，在写密集场景下性能可能不如<code>Mutex</code>。</p>
+
+        <h2>Send与Sync — 自动trait</h2>
+
+        <p>Rust中并发安全的核心是两个<strong>标记trait</strong>（没有方法的trait）：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Trait</th>
+                    <th>含义</th>
+                    <th>自动实现</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>Send</code></td>
+                    <td>类型的所有权可以跨线程转移</td>
+                    <td>绝大多数类型（除<code>Rc&lt;T&gt;</code>、裸指针等）</td>
+                </tr>
+                <tr>
+                    <td><code>Sync</code></td>
+                    <td>类型的不可变引用可以跨线程共享，即<code>&amp;T: Send</code></td>
+                    <td>绝大多数类型（除<code>RefCell&lt;T&gt;</code>、<code>Cell&lt;T&gt;</code>等）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>为什么会自动实现？因为编译器根据字段推导：如果一个结构体的所有字段都是<code>Send</code>，那么该结构体自动<code>Send</code>。如果一个类型的所有字段都是<code>Sync</code>（即<code>&amp;T: Send</code>），那么该类型自动<code>Sync</code>。</p>
+
+        <div class="highlight">
+            <strong>Send/Sync 自动实现的条件</strong>：你几乎不需要手动实现它们。编译器根据类型组成自动推导。如果你发现某个类型不能跨线程（比如<code>Rc&lt;T&gt;</code>），是编译器在保护你——而不是"编译器太笨"。<code>Rc</code>的非原子引用计数在多线程下会数据竞争，所以它<strong>不是Send</strong>，也不是Sync。要用<code>Arc</code>替换。
+        </div>
+
+        <p>手动实现<code>Send</code>或<code>Sync</code>需要使用<code>unsafe</code>——因为编译器无法验证你的实现是否正确。99.9%的情况下你不需要手动实现它们。</p>
+
+        <h2>原子类型 — AtomicBool / AtomicUsize</h2>
+
+        <p>对于简单的整数或布尔标志，互斥锁太重了。Rust提供了<strong>原子类型</strong>——利用CPU的原子指令实现无锁并发操作：</p>
+
+        <pre><code>use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+
+fn main() {
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = Arc::clone(&amp;running);
+
+    let worker = thread::spawn(move || {
+        while running_clone.load(Ordering::Relaxed) {
+            // 执行工作...
+            println!("工作中...");
+            thread::sleep(std::time::Duration::from_millis(100));
+        }
+        println!("收到停止信号，退出。");
+    });
+
+    // 主线程等待一会儿后发出停止信号
+    thread::sleep(std::time::Duration::from_millis(300));
+    running.store(false, Ordering::Relaxed);
+
+    worker.join().unwrap();
+}</code></pre>
+
+        <p>Rust标准库提供的原子类型包括：<code>AtomicBool</code>、<code>AtomicI8</code>/<code>AtomicI16</code>/<code>AtomicI32</code>/<code>AtomicI64</code>/<code>AtomicIsize</code>、<code>AtomicU8</code>/<code>AtomicU16</code>/<code>AtomicU32</code>/<code>AtomicU64</code>/<code>AtomicUsize</code>，以及<code>AtomicPtr&lt;T&gt;</code>。</p>
+
+        <h3>Ordering内存序</h3>
+
+        <p><code>Ordering</code>参数控制原子操作的内存顺序保证，直接影响性能和正确性：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Ordering</th>
+                    <th>保证级别</th>
+                    <th>性能</th>
+                    <th>推荐场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>Relaxed</code></td>
+                    <td>无顺序保证</td>
+                    <td>最快</td>
+                    <td>单调计数器、统计指标</td>
+                </tr>
+                <tr>
+                    <td><code>Release</code>/<code>Acquire</code></td>
+                    <td>写-读同步</td>
+                    <td>中等</td>
+                    <td>标志位、锁实现</td>
+                </tr>
+                <tr>
+                    <td><code>AcqRel</code></td>
+                    <td>Acquire+Release</td>
+                    <td>中等</td>
+                    <td>Read-Modify-Write操作</td>
+                </tr>
+                <tr>
+                    <td><code>SeqCst</code></td>
+                    <td>全局顺序一致</td>
+                    <td>最慢</td>
+                    <td>复杂同步逻辑（默认值，但谨慎使用）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>选择指南</strong>：新手通常从<code>SeqCst</code>开始（最安全但最慢），然后通过性能分析确定瓶颈后放松到<code>Acquire/Release</code>。<code>Relaxed</code>只在计数器等不依赖顺序的场景下使用。内存序是复杂的话题，理解错了可能写出比不用原子更糟糕的bug。对于大多数场景，<code>Arc&lt;Mutex&lt;T&gt;&gt;</code>已经足够。
+        </div>
+
+        <p>让我讲完这个故事：我之前提到的那个Go缓存项目，后来用Rust重写了——使用<code>Arc&lt;RwLock&lt;HashMap&gt;&gt;</code>加上一个<code>AtomicBool</code>做定期清理的标志。重写后的版本跑了18个月没出过一次并发相关的bug。在大多数公司里，一次严重的数据竞争事故造成的损失，就超过了整个团队学习Rust的成本。这就是"无畏并发"的商业价值。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>并发原语</th>
+                    <th>适用场景</th>
+                    <th>共享方式</th>
+                    <th>编译期保障</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>thread::spawn</code></td>
+                    <td>独立并行任务</td>
+                    <td>move闭包传所有权</td>
+                    <td>所有权转移保证独占访问</td>
+                </tr>
+                <tr>
+                    <td><code>mpsc::channel</code></td>
+                    <td>多生产者-单消费者</td>
+                    <td>消息传递</td>
+                    <td>Send trait保证类型安全</td>
+                </tr>
+                <tr>
+                    <td><code>Arc&lt;Mutex&lt;T&gt;&gt;</code></td>
+                    <td>共享可变状态</td>
+                    <td>互斥锁</td>
+                    <td>Arc：Sync；Mutex：互斥</td>
+                </tr>
+                <tr>
+                    <td><code>Arc&lt;RwLock&lt;T&gt;&gt;</code></td>
+                    <td>读多写少的共享状态</td>
+                    <td>读写锁</td>
+                    <td>同上</td>
+                </tr>
+                <tr>
+                    <td><code>Atomic*</code></td>
+                    <td>简单共享变量</td>
+                    <td>CPU原子指令</td>
+                    <td>类型安全，无锁</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>本章小结</h2>
+
+        <p>Rust的并发模型不是最激进的（看看Erlang的Actor模型或Go的goroutine），但它提供了<strong>在系统编程语言中独一无二的安全保障</strong>。我们从<code>std::thread</code>的线程创建开始——这是最基础但也最可控的并发方式。然后我们通过<code>mpsc</code>通道实践了消息传递模式，又用<code>Mutex</code>和<code>RwLock</code>处理了共享状态，最后理解了<code>Send</code>/<code>Sync</code>两个核心trait如何从编译期保证并发安全。原子类型为轻量级同步提供了无锁方案。</p>
+
+        <p>并发编程是你成为Rust高级开发者的必经之路。标准库线程是基础，但如果你的应用需要在I/O密集型场景下处理成千上万的并发任务，OS线程的开销就成了瓶颈——这时候我们需要<strong>异步编程</strong>。下一章我们将深入async/await的世界，学习如何用少量线程处理海量并发。打开第21章，继续前行。</p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

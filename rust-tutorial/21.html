@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 异步编程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦀 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Rust简介与安装</a></li>
+            <li><a href="02.html">第2章 变量与数据类型</a></li>
+            <li><a href="03.html">第3章 函数与控制流</a></li>
+            <li><a href="04.html">第4章 所有权初探</a></li>
+            <li><a href="05.html">第5章 切片与字符串</a></li>
+            <li><a href="06.html">第6章 结构体</a></li>
+            <li><a href="07.html">第7章 枚举与模式匹配</a></li>
+            <li><a href="08.html">第8章 项目管理与模块</a></li>
+            <li><a href="09.html">第9章 集合类型</a></li>
+            <li><a href="10.html">第10章 错误处理</a></li>
+            <li><a href="11.html">第11章 泛型</a></li>
+            <li><a href="12.html">第12章 Trait</a></li>
+            <li><a href="13.html">第13章 生命周期</a></li>
+            <li><a href="14.html">第14章 闭包与迭代器</a></li>
+            <li><a href="15.html">第15章 测试体系</a></li>
+            <li><a href="16.html">第16章 Cargo生态进阶</a></li>
+            <li><a href="17.html">第17章 常见实用Trait</a></li>
+            <li><a href="18.html">第18章 日志与调试</a></li>
+            <li><a href="19.html">第19章 智能指针</a></li>
+            <li><a href="20.html">第20章 并发编程</a></li>
+            <li><a href="21.html" class="active">第21章 异步编程</a></li>
+            <li><a href="22.html">第22章 Unsafe Rust</a></li>
+            <li><a href="23.html">第23章 常用库选型</a></li>
+            <li><a href="24.html">第24章 性能分析</a></li>
+            <li><a href="25.html">第25章 宏编程入门</a></li>
+            <li><a href="26.html">第26章 实战：CLI工具</a></li>
+            <li><a href="27.html">第27章 实战：Web API</a></li>
+            <li><a href="28.html">第28章 2027 Edition展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>开篇：一万并发连接的挑战</h2>
+
+        <p>上一章我们学习了标准线程——每个请求创建一个线程，逻辑简单直接。但让我们做一个计算：假设你的服务器每个请求处理需要50ms（主要是I/O等待——数据库查询、HTTP调用），QPS目标是20000，那么你需要同时有多少个线程？答案是：20000 × 0.05 = 1000个线程。这还只是20000 QPS。当QPS到10万时，你需要5000个并发线程。每个线程预留8MB的栈空间，5000个线程需要40GB的内存——仅仅栈空间就已经不可接受了。</p>
+
+        <p>这就是<strong>异步编程</strong>要解决的问题：用少量OS线程（通常等于CPU核心数）高效地处理大量并发I/O任务。Rust的异步模型不同于JavaScript的回调地狱，也不同于Go的goroutine（M:N调度，但每个goroutine仍有自己的栈）。Rust使用一种叫做<strong>协作式多任务</strong>的方案——async函数被编译成状态机，在<code>.await</code>点主动让出控制权，零额外内存开销。</p>
+
+        <div class="highlight">
+            <strong>Rust异步的独特之处</strong>：与其他语言不同，Rust没有内置的异步运行时。标准库只提供了<code>Future</code> trait和<code>async/await</code>语法糖，而具体的运行时（事件循环、I/O驱动）由第三方库实现，最常见的是<strong>Tokio</strong>。这意味着：零成本的运行时抽象，你只为你需要的功能付费。
+        </div>
+
+        <h2>async/await基础</h2>
+
+        <h3>Future的本质</h3>
+
+        <p>Rust中，<code>Future</code>是一个trait——一个代表"尚未完成的计算"的trait：</p>
+
+        <pre><code>use std::pin::Pin;
+use std::task::{Context, Poll};
+
+pub trait Future {
+    type Output;
+
+    fn poll(self: Pin&lt;&amp;mut Self&gt;, cx: &amp;mut Context&lt;'_&gt;) -&gt; Poll&lt;Self::Output&gt;
+}</code></pre>
+
+        <p>一个<code>Future</code>的定义简洁到令人难以置信——它就一个方法<code>poll</code>。当你调用<code>poll</code>时，有两种结果：<code>Poll::Ready(value)</code>表示计算完成，<code>Poll::Pending</code>表示还没准备好，需要稍后再试。这就是<strong>协作式调度</strong>的核心——没有抢占，没有内核切换，只有主动的"我还没好"。</p>
+
+        <h3>async fn和.await</h3>
+
+        <p><code>async fn</code>是创建<code>Future</code>的语法糖：</p>
+
+        <pre><code>use std::time::Duration;
+use tokio::time::sleep;
+
+async fn do_something() -&gt; String {
+    // 模拟异步I/O操作
+    sleep(Duration::from_millis(100)).await;
+    String::from("完成！")
+}
+
+#[tokio::main]
+async fn main() {
+    let future = do_something(); // 这里什么也没发生——Future还没被执行
+
+    let result = future.await; // 在这里执行——暂停当前函数直到Future完成
+    println!("结果: {}", result);
+}</code></pre>
+
+        <p>关键理解：</p>
+        <ul>
+            <li><code>async fn</code>的调用<strong>不执行</strong>函数体——它只创建并返回一个<code>Future</code></li>
+            <li><code>.await</code>是"让出点"——当前async函数在此处暂停执行，控制权交还给运行时</li>
+            <li>当被<code>.await</code>的<code>Future</code>就绪后，运行时恢复当前async函数的执行</li>
+            <li>整个过程<strong>不阻塞任何OS线程</strong></li>
+        </ul>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>对比维度</th>
+                    <th>同步</th>
+                    <th>异步</th>
+                    <th>OS线程</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>并发单位</td>
+                    <td>不适用</td>
+                    <td>Task（绿色线程）</td>
+                    <td>OS线程</td>
+                </tr>
+                <tr>
+                    <td>创建开销</td>
+                    <td>不适用</td>
+                    <td>~几个字节（状态机）</td>
+                    <td>~几MB（栈）</td>
+                </tr>
+                <tr>
+                    <td>切换开销</td>
+                    <td>不适用</td>
+                    <td>函数调用级别（几个ns）</td>
+                    <td>内核上下文切换（~μs级别）</td>
+                </tr>
+                <tr>
+                    <td>并发数量</td>
+                    <td>1</td>
+                    <td>10万+</td>
+                    <td>&lt;1000（受限于内存）</td>
+                </tr>
+                <tr>
+                    <td>适用场景</td>
+                    <td>CPU密集、简单脚本</td>
+                    <td>I/O密集、高并发服务</td>
+                    <td>阻塞操作、CPU密集</td>
+                </tr>
+                <tr>
+                    <td>调度方式</td>
+                    <td>不适用</td>
+                    <td>协作式（.await让出）</td>
+                    <td>抢占式（内核调度）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>Tokio运行时</h2>
+
+        <p>Tokio是Rust最流行的异步运行时，提供了事件循环（I/O驱动）、任务调度器和定时器等核心组件。要在项目中使用Tokio，在<code>Cargo.toml</code>中添加：</p>
+
+        <pre><code>[dependencies]
+tokio = { version = "1", features = ["full"] }</code></pre>
+
+        <h3>#[tokio::main]宏</h3>
+
+        <p>标注在<code>async fn main</code>上，将普通的<code>main</code>函数启动为Tokio运行时：</p>
+
+        <pre><code>#[tokio::main]
+async fn main() {
+    // 等效于以下代码：
+    // fn main() {
+    //     let rt = tokio::runtime::Runtime::new().unwrap();
+    //     rt.block_on(async {
+    //         ...
+    //     });
+    // }
+    println!("运行在Tokio运行时中！");
+}</code></pre>
+
+        <p><code>#[tokio::main]</code>默认创建一个<strong>多线程运行时</strong>（线程数等于CPU核心数）。你可以通过参数定制：<code>#[tokio::main(flavor = "current_thread")]</code>创建单线程运行时，适合轻量级场景。</p>
+
+        <h3>tokio::spawn</h3>
+
+        <p>在运行时中创建并发任务：</p>
+
+        <pre><code>use tokio::time::{sleep, Duration};
+
+#[tokio::main]
+async fn main() {
+    let mut handles = vec![];
+
+    for i in 0..5 {
+        // spawn 在每个 .await 点上让出控制权
+        let handle = tokio::spawn(async move {
+            sleep(Duration::from_millis(i * 50)).await;
+            println!("任务 {} 完成", i);
+            i * 2
+        });
+        handles.push(handle);
+    }
+
+    // 等待所有任务完成并收集结果
+    let mut results = vec![];
+    for handle in handles {
+        results.push(handle.await.unwrap());
+    }
+    println!("所有结果: {:?}", results);
+}</code></pre>
+
+        <p><code>tokio::spawn</code>返回一个<code>JoinHandle</code>——类似<code>thread::spawn</code>的句柄，但<code>.await</code>是异步等待（不阻塞当前线程）。如果内部任务panic了，<code>handle.await</code>会返回<code>JoinError</code>。</p>
+
+        <div class="warning">
+            <strong>在异步中调用阻塞函数——一个常见的坑</strong>：永远不要在Tokio的异步任务中直接调用阻塞I/O（比如<code>std::thread::sleep</code>、同步<code>std::fs::read</code>、<code>std::net::TcpListener::accept</code>）。因为Tokio工作在线程池上，一个阻塞调用会<strong>阻塞整个OS线程</strong>，导致其他排在该线程上的异步任务无法运行。正确做法：对不可避免的阻塞操作使用<code>tokio::task::spawn_blocking</code>。
+            <pre><code>// ❌ 错误：阻塞了整个Tokio工作线程
+tokio::spawn(async {
+    std::thread::sleep(Duration::from_secs(10)); // 阻塞！
+});
+
+// ✅ 正确：将阻塞操作交给专用线程池
+tokio::spawn_blocking(|| {
+    std::thread::sleep(Duration::from_secs(10));
+}).await.unwrap();</code></pre>
+        </div>
+
+        <h2>异步陷阱</h2>
+
+        <p>Rust的异步编程虽然强大，但有一些反直觉的陷阱。了解它们可以帮你避免很多痛苦。</p>
+
+        <h3>锁跨越.await</h3>
+
+        <p>如果一个<code>Mutex</code>锁在<code>.await</code>点还在被持有——恭喜你，你制造了一个潜在的<strong>死锁</strong>：</p>
+
+        <pre><code>// ❌ 危险！在 .await 期间持有锁
+async fn dangerous() {
+    let data = Arc::new(Mutex::new(42));
+    let guard = data.lock().unwrap();
+    // 在持有锁的时候 .await —— 其他任务也可能需要这把锁！
+    do_something_else().await;
+    // guard 在这里才被 drop
+    println!("{}", *guard);
+}</code></pre>
+
+        <p>为什么危险？Tokio的线程池可以在<code>.await</code>点将另一个任务调度到<strong>同一个线程</strong>上——如果那个任务也需要这把锁，但锁已被当前任务持有——卡死了！Tokio是单线程运行时最危险。解决方案：</p>
+
+        <ul>
+            <li>确保在<code>.await</code>前显式<code>drop</code>锁——缩小作用域</li>
+            <li>或者用<code>tokio::sync::Mutex</code>——它的<code>lock()</code>本身是异步的，可以安全跨<code>.await</code></li>
+        </ul>
+
+        <h3>递归async函数</h3>
+
+        <p>递归异步函数需要显式<code>Box</code>包装——因为编译器无法确定递归调用的状态机大小：</p>
+
+        <pre><code>// ❌ 编译错误：递归 async fn 无法推断大小
+async fn recurse(n: u32) {
+    if n &gt; 0 {
+        recurse(n - 1).await;
+    }
+}
+
+// ✅ 正确：显式装箱
+use tokio::task::yield_now;
+
+async fn recurse_boxed(n: u32) {
+    if n &gt; 0 {
+        Box::pin(recurse_boxed(n - 1)).await;
+    }
+}</code></pre>
+
+        <h3>取消（Cancellation）</h3>
+
+        <p>Rust中的<code>Future</code>按需执行，按需取消——当一个<code>Future</code>被<code>drop</code>时，它就被无声地取消了：</p>
+
+        <pre><code>use tokio::time::{sleep, Duration};
+
+#[tokio::main]
+async fn main() {
+    let handle = tokio::spawn(async {
+        loop {
+            // 任务中的 I/O 操作...
+            sleep(Duration::from_secs(1)).await;
+            println("还在运行...");
+        }
+    });
+
+    sleep(Duration::from_secs(3)).await;
+    drop(handle); // 任务被取消！没有警告，没有日志
+
+    // 如果 handle 被 drop，内部 Future 也立即被 drop
+    // 但它持有的资源（文件句柄、连接等）可能来不及清理
+    println!("主线程结束");
+}</code></pre>
+
+        <div class="highlight">
+            <strong>取消安全（Cancellation Safety）</strong>：当Future被取消时，中间状态直接丢弃。如果你在<code>.await</code>之间持有文件句柄、数据库连接等资源——它们会被正确关闭（因为<code>Drop</code> trait会被执行）。但如果你依赖一个操作的<strong>副作用</strong>来维持系统一致性，可能出问题。一个经典场景是<code>select!</code>宏——它同时<code>poll</code>两个Future，当一个就绪时放弃另一个——放弃的Future可能处于不一致的中间状态。选择那些"取消安全"的库操作，或者确保你的异步代码在取消时不会让系统处于损坏状态。
+        </div>
+
+        <h2>组合器 — join! / select!</h2>
+
+        <p>Tokio提供了强大的组合器来编排多个异步任务。</p>
+
+        <h3>join! — 并发等待多个Future</h3>
+
+        <pre><code>use tokio::time::{sleep, Duration};
+
+async fn fetch_user(id: u32) -&gt; String {
+    sleep(Duration::from_millis(100)).await;
+    format!("用户{}数据", id)
+}
+
+async fn fetch_posts(user_id: u32) -&gt; String {
+    sleep(Duration::from_millis(150)).await;
+    format!("用户{}的发帖", user_id)
+}
+
+#[tokio::main]
+async fn main() {
+    // 串行执行：总耗时 ~250ms
+    // let user = fetch_user(1).await;
+    // let posts = fetch_posts(1).await;
+
+    // 并发执行：总耗时 ~150ms（取最慢的）
+    let (user, posts) = tokio::join!(fetch_user(1), fetch_posts(1));
+    println!("{}", user);
+    println!("{}", posts);
+}</code></pre>
+
+        <p><code>tokio::try_join!</code>是其变体——任何一个Future返回错误时就立即停止所有Future并返回错误：</p>
+
+        <pre><code>async fn query_a() -&gt; Result&lt;String, String&gt; {
+    Ok("A的结果".to_string())
+}
+
+async fn query_b() -&gt; Result&lt;String, String&gt; {
+    Err("B失败了".to_string())
+}
+
+#[tokio::main]
+async fn main() {
+    let result = tokio::try_join!(query_a(), query_b());
+    match result {
+        Ok((a, b)) =&gt; println!("两个都成功: {}, {}", a, b),
+        Err(e) =&gt; println!("其中一个失败了: {}", e),
+    }
+}</code></pre>
+
+        <h3>select! — 等待最快的Future</h3>
+
+        <p><code>select!</code>用于竞争场景——多个Future中哪个先完成就用哪个：</p>
+
+        <pre><code>use tokio::time::{sleep, Duration};
+
+#[tokio::main]
+async fn main() {
+    let result = tokio::select! {
+        result = slow_operation() =&gt; {
+            println!("慢操作完成了: {}", result);
+            result
+        }
+        _ = timeout_check() =&gt; {
+            println!("超时！放弃慢操作");
+            String::from("超时")
+        }
+    };
+    println!("最终结果: {}", result);
+}
+
+async fn slow_operation() -&gt; String {
+    sleep(Duration::from_secs(5)).await;
+    String::from("慢操作结果")
+}
+
+async fn timeout_check() -&gt; String {
+    sleep(Duration::from_secs(2)).await;
+    String::from("超时")
+}</code></pre>
+
+        <p>注意<code>select!</code>丢弃了失败分支的<code>Future</code>——这意味着那个操作被取消了。这正是之前讨论"取消安全"的上下文：确保被丢弃的Future不会留下损坏的共享状态。</p>
+
+        <h2>异步生态 — axum / reqwest / sqlx</h2>
+
+        <p>Rust的异步生态在2026年已经非常成熟。下面是三个核心库：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>库名</th>
+                    <th>用途</th>
+                    <th>特点</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>axum</strong></td>
+                    <td>Web框架</td>
+                    <td>基于Tokio/Tower，函数式路由，生态兼容</td>
+                    <td>2026年最流行的Rust Web框架之一</td>
+                </tr>
+                <tr>
+                    <td><strong>reqwest</strong></td>
+                    <td>HTTP客户端</td>
+                    <td>异步/同步双模式，TLS支持</td>
+                    <td>最常用的HTTP请求库</td>
+                </tr>
+                <tr>
+                    <td><strong>sqlx</strong></td>
+                    <td>数据库驱动</td>
+                    <td>编译期SQL检查，支持PG/MySQL/SQLite</td>
+                    <td>异步数据库访问的事实标准</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>一个多表联合查询的例子——感受真正的异步全栈：</p>
+
+        <pre><code>use sqlx::PgPool;
+use axum::{Router, routing::get, Json};
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct UserPosts {
+    user_id: i32,
+    name: String,
+    post_count: i64,
+}
+
+async fn get_user_stats(pool: &amp;PgPool, user_id: i32) -&gt; Result&lt;UserPosts, sqlx::Error&gt; {
+    // sqlx 的 query_as 使用异步连接池
+    sqlx::query_as!(
+        UserPosts,
+        r#"
+        SELECT u.user_id, u.name, COUNT(p.post_id) as "post_count!"
+        FROM users u
+        LEFT JOIN posts p ON u.user_id = p.author_id
+        WHERE u.user_id = $1
+        GROUP BY u.user_id, u.name
+        "#,
+        user_id
+    )
+    .fetch_one(pool)
+    .await
+}
+
+async fn handler() -&gt; Json&lt;UserPosts&gt; {
+    // 实际要连接数据库，这里仅为展示
+    unimplemented!()
+}</code></pre>
+
+        <p>这才是2026年Rust异步服务的日常——axum处理HTTP请求，sqlx异步查询数据库，全程非阻塞，一个Toml文件管理依赖。整个过程<strong>一个OS线程</strong>就可以同时处理数千个请求。</p>
+
+        <h2>一个真实的故事：阻塞调用让生产环境瘫痪</h2>
+
+        <p>朋友所在的公司用Rust重写了他们的API网关。上线后的第一个周末，网关在高峰期CPU使用率飙到90%，延迟从5ms涨到800ms。团队排查了两天，最后发现一个微小的错误——有人在认证回调中用了<code>std::thread::sleep(Duration::from_secs(1))</code>来做速率限制，而不是<code>tokio::time::sleep</code>。这个调用阻塞了Tokio的工作线程。当并发量上升到一定程度时，所有工作线程都被阻塞在<code>sleep</code>上，新的请求排队等待，响应时间爆炸。</p>
+
+        <p>修复只改了一行代码——把<code>std::thread::sleep</code>换成<code>tokio::time::sleep</code>。但这次事故证明了异步编程最核心的原则：<strong>在异步代码中，你借出的运行时间不是你的——是运行时的</strong>。任何阻塞调用都是对运行时线程池的背叛。</p>
+
+        <h2>本章小结</h2>
+
+        <p>异步编程让Rust在I/O密集型场景下大放异彩。我们从<code>Future</code>的本质讲起——一个简单的<code>poll</code>方法定义了整个异步生态。然后我们深入Tokio运行时，学习了<code>#[tokio::main]</code>和<code>tokio::spawn</code>，探讨了阻塞调用、锁跨<code>.await</code>、递归和取消安全等常见陷阱。最后我们初窥了Rust异步生态——axum、reqwest、sqlx的组合能力。</p>
+
+        <p>异步编程是Rust开发者的核心技能之一。但有些场景，你需要绕过Rust的安全护栏——比如调用C库、实现自定义的内存布局。下一章我们将进入Rust的最深处：Unsafe Rust。请打开第22章，准备好面对"一切皆可能"的危险世界。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

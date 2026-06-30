@@ -1,12 +1,29 @@
 # 1998x-stack Tutorials
 
-A collection of 54 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+<p align="center">
+  <strong>77 free, comprehensive technical tutorials in Chinese</strong><br>
+  From fundamentals to production-ready skills — spanning AI, mathematics, systems, networks, finance, and more.
+</p>
 
-**Hub page:** https://1998x-stack.github.io/tutorials/
+<p align="center">
+  <a href="https://1998x-stack.github.io/tutorials/"><strong>Explore the Hub →</strong></a>
+</p>
 
-## Tutorials by Discipline
+---
 
-### AI / 数据科学 (20 courses)
+## Overview
+
+| Metric | Count |
+|--------|-------|
+| Total courses | **77** |
+| Disciplines | **10** |
+| Typical depth | **28 chapters / course** |
+
+Each course is a self-contained, static HTML tutorial with a two-column layout (sidebar navigation + main content), written in conversational Chinese with real-world "踩坑" stories. No build tools, no JavaScript frameworks, no CDN dependencies — just HTML and CSS.
+
+---
+
+## AI / 数据科学 (26 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -32,8 +49,14 @@ A collection of 54 free, comprehensive technical tutorials in Chinese — from f
 | 📊 | AI神经网络数据集分析与实战 · 从入门到精通 | 28 | [dataset-analysis-tutorial](https://1998x-stack.github.io/dataset-analysis-tutorial/) |
 | 📊 | 后训练数据集分析与构建流程 | 28 | [post-training-dataset-tutorial](https://1998x-stack.github.io/post-training-dataset-tutorial/) |
 | 🤖 | 多自主智能体系统 · 从入门到精通 | 28 | [multi-agent-systems-tutorial](https://1998x-stack.github.io/multi-agent-systems-tutorial/) |
+| 🤖 | MoE混合专家模型 · 从入门到精通 | 28 | [MOE-tutorial](https://1998x-stack.github.io/MOE-tutorial/) |
+| 🤖 | 大模型工程实践：Agent框架 | 28 | [llm-agent-engineering-tutorial](https://1998x-stack.github.io/llm-agent-engineering-tutorial/) |
+| 🤖 | BERT模型系列 · 从入门到精通 | 28 | [Bert-tutorial](https://1998x-stack.github.io/Bert-tutorial/) |
+| 🤖 | LLM数据工程 · 从入门到精通 | 28 | [LLM-data-tutorial](https://1998x-stack.github.io/LLM-data-tutorial/) |
 
-### 数学基础 (9 courses)
+---
+
+## 数学基础 (12 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -46,15 +69,20 @@ A collection of 54 free, comprehensive technical tutorials in Chinese — from f
 | 🎛️ | 数字信号处理DSP · 从入门到精通 | 28 | [digital-signal-processing-tutorial](https://1998x-stack.github.io/digital-signal-processing-tutorial/) |
 | 🔢 | 数论(高中奥数竞赛) | 22 | [olympiad-number-theory-tutorial](https://1998x-stack.github.io/olympiad-number-theory-tutorial/) |
 | 🧮 | 高中奥数组合理论 · 从入门到精通 | 28 | [combinatorial-olympiad-tutorial](https://1998x-stack.github.io/combinatorial-olympiad-tutorial/) |
+| 📡 | 信息论 · 从入门到精通 | 28 | [information-theory-tutorial](https://1998x-stack.github.io/information-theory-tutorial/) |
+| 🔐 | 密码学 · 从入门到精通 | 28 | [cryptography-tutorial](https://1998x-stack.github.io/cryptography-tutorial/) |
+| 🏗️ | 结构力学 · 从入门到精通 | 28 | [structural-mechanics-tutorial](https://1998x-stack.github.io/structural-mechanics-tutorial/) |
 
-### 系统 / 基础设施 (15 courses)
+---
+
+## 系统 / 基础设施 (15 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
 | 🧠 | vLLM 大模型推理引擎 · 从入门到精通 | 28 | [vllm-tutorial](https://1998x-stack.github.io/vllm-tutorial/) |
 | 🌐 | 分布式系统实战 | 28 | [distributed-systems-tutorial](https://1998x-stack.github.io/distributed-systems-tutorial/) |
 | 🖥️ | 操作系统 | 28 | [operating-system-tutorial](https://1998x-stack.github.io/operating-system-tutorial/) |
-| 💻 | 深入理解计算机系统（CSAPP） | 28 | [CSAPP-tutorial](https://1998x-stack.github.io/CSAPP-tutorial/) |
+| 💻 | 深入理解计算机系统（CSAPP）| 28 | [CSAPP-tutorial](https://1998x-stack.github.io/CSAPP-tutorial/) |
 | 🖥️ | CUDA 并行计算编程实战 | 28 | [cuda-tutorial](https://1998x-stack.github.io/cuda-tutorial/) |
 | 🐧 | Linux 源码分析 | 28 | [linux-kernel-source-tutorial](https://1998x-stack.github.io/linux-kernel-source-tutorial/) |
 | ⚙️ | Memcached 源码分析 | 28 | [memcached-source-analysis-tutorial](https://1998x-stack.github.io/memcached-source-analysis-tutorial/) |
@@ -67,13 +95,17 @@ A collection of 54 free, comprehensive technical tutorials in Chinese — from f
 | 🗄️ | SQLite源码分析 · 从入门到精通 | 28 | [sqlite-source-analysis-tutorial](https://1998x-stack.github.io/sqlite-source-analysis-tutorial/) |
 | 🔧 | Redis源码分析 · 从入门到精通 | 28 | [redis-source-analysis-tutorial](https://1998x-stack.github.io/redis-source-analysis-tutorial/) |
 
-### 编程语言 (1 course)
+---
+
+## 编程语言 (1 course)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
 | 🦀 | Rust编程语言 · 从入门到精通 | 28 | [rust-tutorial](https://1998x-stack.github.io/rust-tutorial/) |
 
-### 网络 / 通信 (5 courses)
+---
+
+## 网络 / 通信 (7 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -82,8 +114,12 @@ A collection of 54 free, comprehensive technical tutorials in Chinese — from f
 | 🌐 | 以太网通信 | 28 | [ethernet-tutorial](https://1998x-stack.github.io/ethernet-tutorial/) |
 | 📡 | 电波传播与天线 · 从入门到精通 | 28 | [antenna-propagation-tutorial](https://1998x-stack.github.io/antenna-propagation-tutorial/) |
 | 📡 | 传感网技术 · 从入门到精通 | 28 | [sensor-network-tutorial](https://1998x-stack.github.io/sensor-network-tutorial/) |
+| 📡 | 通信工程 · 从5G到6G | 28 | [communication-engineering-tutorial](https://1998x-stack.github.io/communication-engineering-tutorial/) |
+| 🌐 | 网络科学 · 从入门到精通 | 28 | [network-science-tutorial](https://1998x-stack.github.io/network-science-tutorial/) |
 
-### 经济 / 金融 (11 courses)
+---
+
+## 经济 / 金融 (11 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -91,7 +127,7 @@ A collection of 54 free, comprehensive technical tutorials in Chinese — from f
 | 📈 | 经济学原理 | 28 | [economics-principles-tutorial](https://1998x-stack.github.io/economics-principles-tutorial/) |
 | 📊 | 宏观经济学 | 28 | [macroeconomics-tutorial](https://1998x-stack.github.io/macroeconomics-tutorial/) |
 | 📊 | 微观经济学：从稀缺到均衡 | 28 | [microeconomics-tutorial](https://1998x-stack.github.io/microeconomics-tutorial/) |
-| 🏦 | 货币银行学（货币金融学） | 28 | [monetary-banking-tutorial](https://1998x-stack.github.io/monetary-banking-tutorial/) |
+| 🏦 | 货币银行学（货币金融学）| 28 | [monetary-banking-tutorial](https://1998x-stack.github.io/monetary-banking-tutorial/) |
 | 💹 | 金融分析实战体系 | 28 | [financial-analysis-tutorial](https://1998x-stack.github.io/financial-analysis-tutorial/) |
 | 📊 | 财报实战分析 | 28 | [financial-statement-analysis-tutorial](https://1998x-stack.github.io/financial-statement-analysis-tutorial/) |
 | 🪙 | 比特币与加密货币 | 28 | [cryptocurrency-tutorial](https://1998x-stack.github.io/cryptocurrency-tutorial/) |
@@ -99,41 +135,48 @@ A collection of 54 free, comprehensive technical tutorials in Chinese — from f
 | 🛡️ | 保险学 · 从入门到精通 | 28 | [insurance-tutorial](https://1998x-stack.github.io/insurance-tutorial/) |
 | 📈 | 证券投资分析 · 从入门到精通 | 28 | [securities-investment-analysis-tutorial](https://1998x-stack.github.io/securities-investment-analysis-tutorial/) |
 
-### 机器人 / 控制 (1 course)
+---
+
+## 机器人 / 控制 (1 course)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
 | 🤖 | 机器人学 · 从入门到精通 | 28 | [robotics-tutorial](https://1998x-stack.github.io/robotics-tutorial/) |
 
-### 算法 / 数据结构 (3 courses)
+---
+
+## 算法 / 数据结构 (4 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
 | 🧠 | 数据结构与算法实战 | 28 | [data-structures-tutorial](https://1998x-stack.github.io/data-structures-tutorial/) |
 | 🤖 | 路径规划算法 from scratch | 28 | [path-planning-algorithms-tutorial](https://1998x-stack.github.io/path-planning-algorithms-tutorial/) |
 | 📐 | 组合优化 · 从入门到精通 | 28 | [combinatorial-optimization-tutorial](https://1998x-stack.github.io/combinatorial-optimization-tutorial/) |
+| 💻 | LeetCode算法面试 · 核心解题技巧与例题讲解 | 28 | [leetcode-tutorial](https://1998x-stack.github.io/leetcode-tutorial/) |
 
-## How These Tutorials Are Built
+---
 
-All tutorials are generated using the **tutorial-publisher** Claude Code skill. Each tutorial is a set of static HTML pages:
+## Technical Details
 
-- Two-column layout (sidebar navigation + main content)
-- Pre-built CSS themes for different domains
-- Conversational Chinese teaching style with real-world "踩坑" stories
-- Self-contained pages — no JavaScript frameworks, no CDN dependencies, zero build steps
+### How Tutorials Are Built
+
+All tutorials are generated using the **tutorial-publisher** Claude Code skill. Each course is a set of static HTML pages with:
+
+- **Two-column layout** — sidebar navigation + main content
+- **Pre-built CSS themes** — domain-specific color palettes and typography
+- **Conversational Chinese** — practical teaching with real-world "踩坑" stories
+- **Zero dependencies** — no JavaScript frameworks, no CDN, no build step
 
 ### Data-Driven Index Pages
 
-Each tutorial's `index.html` loads its chapter data from `courses.json` — so new chapters can be added by updating only the JSON file. The root hub page at `index.html` loads from `tutorials.json`, which categorizes all tutorials by discipline. Adding a new tutorial requires only:
-1. Create the tutorial directory with chapters and `courses.json`
-2. Add an entry to `tutorials.json`
+Each tutorial's `index.html` loads its chapter data from `courses.json` — adding or reordering chapters requires updating only the JSON file. The root hub page at `index.html` loads from `tutorials.json`, which categorizes all tutorials by discipline.
 
-## Publishing
+### Publishing
 
-Each tutorial is deployed as its own GitHub Pages repo under the [1998x-stack](https://github.com/1998x-stack) organization.
+Each course is deployed as an independent GitHub Pages repository under the [1998x-stack](https://github.com/1998x-stack) organization. This umbrella repository tracks all course files and publishes the hub directory at [1998x-stack.github.io/tutorials](https://1998x-stack.github.io/tutorials/).
 
-This hub repository is also published at https://1998x-stack.github.io/tutorials/
+---
 
 ## License
 
-All content is freely available for personal learning use.
+All content in this repository is freely available for personal learning and educational use.

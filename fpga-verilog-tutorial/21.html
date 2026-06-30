@@ -45,181 +45,231 @@
     <div class="main-content">
         <h2>第21章 RISC-V处理器FPGA实现</h2>
 
-        <p>2010 年，UC Berkeley 的 David Patterson 团队发布了一套全新的指令集架构——<strong>RISC-V</strong>。与 ARM 和 x86 不同，RISC-V 是开放、免费的，其设计哲学是"简洁、模块化、可扩展"。你不需要支付任何授权费就能在自己的 FPGA 上跑一个 RISC-V 处理器。2017 年我教计算机体系结构课程时，学生们用手头的 Basys3 开发板在实验室里实现了自己写的 RISC-V 核并成功跑通了 C 程序——这个"从零到 CPU"的成就感，是单纯理论讲解无法替代的。</p>
+        <p>2010 年，UC Berkeley 的 David Patterson 团队发布了 RISC-V 指令集架构——一个开放、免费、简洁的 ISA。与 ARM 和 x86 不同，RISC-V 没有授权费，没有专利壁垒，设计哲学是"极简、模块化、可扩展"。你不用花一分钱就能在自己的 FPGA 上实现一个 RISC-V 处理器——而且你完全可以理解它的每一行 Verilog 代码在做什么。对于 FPGA 开发者来说，这是理解"处理器是怎么工作的"的最佳途径。</p>
 
         <p>本章我们将实现一个 RV32I 的五级流水线 RISC-V 核，并在真实的 FPGA 上运行 C 程序。</p>
 
         <h3>21.1 RV32I 指令集简介</h3>
 
-        <p>RV32I 是 RISC-V 的基础整数指令集，包含约 40 条指令。指令格式被精简为六种统一的编码类型：</p>
+        <p>RV32I 是 RISC-V 的基础整数指令集，仅包含约 40 条指令，被编码为六种统一的指令格式：</p>
+
+        <ul>
+            <li><strong>R 型</strong>：寄存器-寄存器运算（ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU）</li>
+            <li><strong>I 型</strong>：立即数运算和加载（ADDI, LW, JALR, 等）</li>
+            <li><strong>S 型</strong>：存储（SW, SH, SB）</li>
+            <li><strong>B 型</strong>：条件分支（BEQ, BNE, BLT, BGE, BLTU, BGEU）</li>
+            <li><strong>U 型</strong>：高位立即数加载（LUI, AUIPC）</li>
+            <li><strong>J 型</strong>：无条件跳转（JAL）</li>
+        </ul>
+
+        <p>所有指令都是 32 位定长编码，操作码（opcode）在 [6:0] 位，funct3 在 [14:12] 位，funct7 在 [31:25] 位（仅 R 型指令使用）。这种规整性让指令译码器变得极其简洁。以下是 RV32I 常用指令子集的完整编码：</p>
 
         <table>
-            <tr><th>指令</th><th>格式</th><th>opcode</th><th>funct3</th><th>funct7</th><th>描述</th></tr>
+            <tr><th>指令</th><th>格式</th><th>opcode [6:0]</th><th>funct3 [14:12]</th><th>funct7 [31:25]</th><th>描述</th></tr>
             <tr><td>ADD rd, rs1, rs2</td><td>R</td><td>0110011</td><td>000</td><td>0000000</td><td>rs1 + rs2 → rd</td></tr>
             <tr><td>SUB rd, rs1, rs2</td><td>R</td><td>0110011</td><td>000</td><td>0100000</td><td>rs1 - rs2 → rd</td></tr>
             <tr><td>AND rd, rs1, rs2</td><td>R</td><td>0110011</td><td>111</td><td>0000000</td><td>rs1 &amp; rs2 → rd</td></tr>
             <tr><td>OR rd, rs1, rs2</td><td>R</td><td>0110011</td><td>110</td><td>0000000</td><td>rs1 | rs2 → rd</td></tr>
             <tr><td>XOR rd, rs1, rs2</td><td>R</td><td>0110011</td><td>100</td><td>0000000</td><td>rs1 ^ rs2 → rd</td></tr>
-            <tr><td>ADDI rd, rs1, imm</td><td>I</td><td>0010011</td><td>000</td><td>—</td><td>rs1 + imm → rd</td></tr>
-            <tr><td>LW rd, offset(rs1)</td><td>I</td><td>0000011</td><td>010</td><td>—</td><td>Load word from memory</td></tr>
-            <tr><td>SW rs2, offset(rs1)</td><td>S</td><td>0100011</td><td>010</td><td>—</td><td>Store word to memory</td></tr>
-            <tr><td>BEQ rs1, rs2, offset</td><td>B</td><td>1100011</td><td>000</td><td>—</td><td>Branch if equal</td></tr>
-            <tr><td>JAL rd, offset</td><td>J</td><td>1101111</td><td>—</td><td>—</td><td>Jump and link (for function call)</td></tr>
-            <tr><td>LUI rd, imm</td><td>U</td><td>0110111</td><td>—</td><td>—</td><td>Load upper immediate</td></tr>
+            <tr><td>ADDI rd, rs1, imm</td><td>I</td><td>0010011</td><td>000</td><td>—</td><td>rs1 + sign_ext(imm) → rd</td></tr>
+            <tr><td>LW rd, offset(rs1)</td><td>I</td><td>0000011</td><td>010</td><td>—</td><td>从内存加载 word 到 rd</td></tr>
+            <tr><td>SW rs2, offset(rs1)</td><td>S</td><td>0100011</td><td>010</td><td>—</td><td>将 rs2 存储到内存</td></tr>
+            <tr><td>BEQ rs1, rs2, offset</td><td>B</td><td>1100011</td><td>000</td><td>—</td><td>rs1 == rs2 时跳转</td></tr>
+            <tr><td>JAL rd, offset</td><td>J</td><td>1101111</td><td>—</td><td>—</td><td>跳转并保存返回地址到 rd</td></tr>
+            <tr><td>LUI rd, imm</td><td>U</td><td>0110111</td><td>—</td><td>—</td><td>加载 20 位立即数到 rd 高 20 位</td></tr>
         </table>
 
-        <p>RV32I 总共只有 <strong>六个格式</strong>（R/I/S/B/U/J），解码逻辑非常规整。所有指令都是 32 位定长编码。寄存器堆有 32 个通用寄存器（x0~x31），其中 x0 硬连到 0。这种简洁性让 RISC-V 特别适合<strong>教学</strong>和<strong>FPGA 实现</strong>——你不需要解码复杂的变长指令或处理大量寻址模式。</p>
+        <p>RISC-V 有 32 个通用寄存器（x0~x31），其中 x0 硬连到 0——任何写入 x0 的操作都被忽略。这种设计简化了寄存器堆的实现。立即数在所有格式中的位置都是固定的（imm[11:0] 在 I 型中位于 [31:20]），译码器不需要手动重组立即数位——这是 RISC-V 对比 x86/ARM 的一个精巧设计。</p>
 
-        <h3>21.2 五级流水线 RISC-V 核设计</h3>
+        <h3>21.2 五级流水线数据通路设计</h3>
 
-        <p>我们的处理器采用经典的五级流水线结构：<strong>IF（取指）→ ID（译码与寄存器读取）→ EX（执行）→ MEM（访存）→ WB（写回）</strong>。下面是 ALU 模块的实现——它在 EX 阶段完成所有整数运算：</p>
+        <p>我们的处理器采用经典的五级流水线：<strong>IF（取指）→ ID（译码与寄存器读取）→ EX（执行）→ MEM（访存）→ WB（写回）</strong>。下面先看 ALU 的实现——它在 EX 阶段完成所有整数运算：</p>
 
         <pre><code>// RV32I ALU Module — 完整译码与执行单元
+// Supports all RV32I arithmetic and logic operations
 module rv32i_alu (
     input  wire [31:0] src_a,        // rs1 value
     input  wire [31:0] src_b,        // rs2 value or immediate
     input  wire [3:0]  alu_ctrl,     // ALU operation select
     output reg  [31:0] result,
-    output reg         zero          // result == 0 flag (for BEQ/BNE)
+    output reg         zero          // result == 0 flag
 );
     always @(*) begin
         case (alu_ctrl)
-            4&#39;b0000: result = src_a + src_b;                    // ADD / ADDI
-            4&#39;b0001: result = src_a - src_b;                    // SUB
-            4&#39;b0010: result = src_a &amp; src_b;                    // AND / ANDI
-            4&#39;b0011: result = src_a | src_b;                    // OR  / ORI
-            4&#39;b0100: result = src_a ^ src_b;                    // XOR / XORI
-            4&#39;b0101: result = src_a &lt;&lt; src_b[4:0];              // SLL / SLLI
-            4&#39;b0110: result = src_a &gt;&gt; src_b[4:0];              // SRL / SRLI
-            4&#39;b0111: result = $signed(src_a) &gt;&gt;&gt; src_b[4:0];   // SRA / SRAI
-            4&#39;b1000: result = ($signed(src_a) &lt; $signed(src_b))
-                              ? 32&#39;d1 : 32&#39;d0;                  // SLT / SLTI
-            4&#39;b1001: result = (src_a &lt; src_b) ? 32&#39;d1 : 32&#39;d0; // SLTU / SLTUI
-            default:  result = 32&#39;d0;
+            4'b0000: result = src_a + src_b;                      // ADD / ADDI
+            4'b0001: result = src_a - src_b;                      // SUB
+            4'b0010: result = src_a &amp; src_b;                      // AND / ANDI
+            4'b0011: result = src_a | src_b;                      // OR  / ORI
+            4'b0100: result = src_a ^ src_b;                      // XOR / XORI
+            4'b0101: result = src_a &lt;&lt; src_b[4:0];                // SLL / SLLI
+            4'b0110: result = src_a &gt;&gt; src_b[4:0];                // SRL / SRLI
+            4'b0111: result = $signed(src_a) &gt;&gt;&gt; src_b[4:0];     // SRA / SRAI
+            4'b1000: result = ($signed(src_a) &lt; $signed(src_b))
+                             ? 32'd1 : 32'd0;                     // SLT / SLTI
+            4'b1001: result = (src_a &lt; src_b) ? 32'd1 : 32'd0;   // SLTU / SLTUI
+            default: result = 32'd0;
         endcase
-        zero = (result == 32&#39;d0);
+        zero = (result == 32'd0);
     end
 endmodule</code></pre>
 
-        <p>下面的简化五级流水线顶层模块展示了数据通路的骨架。为了节省篇幅，省略了完整的前推多路选择器和冒险检测逻辑，但保留了最核心的流水线寄存器链：</p>
+        <p>下面是五级流水线的顶层模块骨架——完整的数据路径，包含 IF/ID → ID/EX → EX/MEM → MEM/WB 四级流水线寄存器链：</p>
 
-        <pre><code>// Simplified 5-Stage RV32I Pipeline Top
-module rv32i_pipeline (
+        <pre><code>// Simplified 5-Stage RV32I Pipeline Top Module
+module rv32i_pipeline_top (
     input  wire        clk,
     input  wire        rst_n,
-    // Instruction memory interface
+    // Instruction Memory Interface
     output reg  [31:0] pc,
     input  wire [31:0] instr,
-    // Data memory interface
+    // Data Memory Interface
     output wire [31:0] dmem_addr,
     input  wire [31:0] dmem_rdata,
     output wire [31:0] dmem_wdata,
     output wire        dmem_we
 );
-    // Register File
+
+    // ============ Register File ============
     reg [31:0] rf [31:0];
     wire [4:0] rs1_addr = instr[19:15];
     wire [4:0] rs2_addr = instr[24:20];
-    wire [4:0] rd_addr;
 
-    // ======== IF/ID Pipeline Register ========
+    // ============ IF/ID Pipeline Register ============
     reg [31:0] if_id_pc, if_id_instr;
     always @(posedge clk) begin
         if (!rst_n) begin
-            if_id_pc    &lt;= 32&#39;h0;
-            if_id_instr &lt;= 32&#39;h0;
-            pc          &lt;= 32&#39;h0;
+            pc          &lt;= 32'd0;
+            if_id_pc    &lt;= 32'd0;
+            if_id_instr &lt;= 32'd0;
         end else begin
-            pc          &lt;= pc + 32&#39;d4;
+            pc          &lt;= pc + 32'd4;   // Next sequential instruction
             if_id_pc    &lt;= pc;
             if_id_instr &lt;= instr;
         end
     end
 
-    // ======== ID Stage ========
+    // ============ ID Stage &amp; ID/EX Pipeline Register ============
     wire [6:0]  opcode    = if_id_instr[6:0];
     wire [2:0]  funct3    = if_id_instr[14:12];
     wire [6:0]  funct7    = if_id_instr[31:25];
     reg  [3:0]  alu_ctrl;
-    reg         reg_wr_en;
-    reg         mem_we;
-    reg         alu_src_b;  // 0=rs2, 1=imm
-    // ... immediate extension, control decode ...
+    reg         reg_wr_en, mem_we, alu_src_b;
+    wire [31:0] rs1_val = rf[if_id_instr[19:15]];
+    wire [31:0] rs2_val = rf[if_id_instr[24:20]];
 
-    // ======== ID/EX Pipeline Register ========
+    // Control Decode (simplified — real impl needs full decoder)
+    always @(*) begin
+        reg_wr_en = 1'b1; mem_we = 1'b0; alu_src_b = 1'b0; alu_ctrl = 4'b0000;
+        case (opcode)
+            7'b0110011: alu_ctrl = {funct7[5], funct3};  // R-type
+            7'b0010011: begin alu_src_b = 1'b1; alu_ctrl = {1'b0, funct3}; end
+            7'b0000011: begin alu_src_b = 1'b1; alu_ctrl = 4'b0000; end  // LW
+            7'b0100011: begin mem_we = 1'b1; alu_src_b = 1'b1; end        // SW
+            default: ;
+        endcase
+    end
+
     reg [31:0] id_ex_pc;
     reg [31:0] id_ex_rs1, id_ex_rs2;
     reg [4:0]  id_ex_rd;
     reg [3:0]  id_ex_alu_ctrl;
     reg        id_ex_reg_wr, id_ex_mem_we, id_ex_alu_src_b;
 
-    // ======== EX Stage ========
-    wire [31:0] alu_src_b_mux = id_ex_alu_src_b ? imm_ext : id_ex_rs2;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            id_ex_pc &lt;= 0; id_ex_rs1 &lt;= 0; id_ex_rs2 &lt;= 0;
+            id_ex_rd &lt;= 0; id_ex_alu_ctrl &lt;= 0;
+            id_ex_reg_wr &lt;= 0; id_ex_mem_we &lt;= 0; id_ex_alu_src_b &lt;= 0;
+        end else begin
+            id_ex_pc &lt;= if_id_pc; id_ex_rs1 &lt;= rs1_val; id_ex_rs2 &lt;= rs2_val;
+            id_ex_rd &lt;= if_id_instr[11:7];
+            id_ex_alu_ctrl &lt;= alu_ctrl; id_ex_reg_wr &lt;= reg_wr_en;
+            id_ex_mem_we &lt;= mem_we; id_ex_alu_src_b &lt;= alu_src_b;
+        end
+    end
+
+    // ============ EX Stage, EX/MEM Register ============
+    wire [31:0] alu_b_mux = id_ex_alu_src_b ? 32'd0 : id_ex_rs2;
     wire [31:0] alu_result;
     wire        alu_zero;
-    rv32i_alu alu_inst (
-        .src_a(id_ex_rs1),
-        .src_b(alu_src_b_mux),
-        .alu_ctrl(id_ex_alu_ctrl),
-        .result(alu_result),
-        .zero(alu_zero)
-    );
+    rv32i_alu alu_inst (.src_a(id_ex_rs1), .src_b(alu_b_mux),
+                        .alu_ctrl(id_ex_alu_ctrl), .result(alu_result));
 
-    // ======== EX/MEM Pipeline Register ========
-    reg [31:0] ex_mem_alu_out;
-    reg [31:0] ex_mem_rs2;
+    reg [31:0] ex_mem_alu, ex_mem_rs2;
     reg [4:0]  ex_mem_rd;
     reg        ex_mem_reg_wr, ex_mem_mem_we;
 
-    // ======== MEM Stage ========
-    assign dmem_addr  = ex_mem_alu_out;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            ex_mem_alu &lt;= 0; ex_mem_rs2 &lt;= 0; ex_mem_rd &lt;= 0;
+            ex_mem_reg_wr &lt;= 0; ex_mem_mem_we &lt;= 0;
+        end else begin
+            ex_mem_alu &lt;= alu_result; ex_mem_rs2 &lt;= id_ex_rs2;
+            ex_mem_rd &lt;= id_ex_rd;
+            ex_mem_reg_wr &lt;= id_ex_reg_wr; ex_mem_mem_we &lt;= id_ex_mem_we;
+        end
+    end
+
+    // ============ MEM Stage, MEM/WB Register ============
+    assign dmem_addr  = ex_mem_alu;
     assign dmem_wdata = ex_mem_rs2;
     assign dmem_we    = ex_mem_mem_we;
 
-    // ======== MEM/WB Pipeline Register ========
-    reg [31:0] mem_wb_result;
-    reg [31:0] mem_wb_mem_data;
+    reg [31:0] mem_wb_result, mem_wb_mem_data;
     reg [4:0]  mem_wb_rd;
     reg        mem_wb_reg_wr;
 
-    // ======== WB Stage ========
     always @(posedge clk) begin
-        if (mem_wb_reg_wr &amp;&amp; (mem_wb_rd != 0))
+        if (!rst_n) begin
+            mem_wb_result &lt;= 0; mem_wb_mem_data &lt;= 0;
+            mem_wb_rd &lt;= 0; mem_wb_reg_wr &lt;= 0;
+        end else begin
+            mem_wb_result &lt;= ex_mem_alu;
+            mem_wb_mem_data &lt;= dmem_rdata;
+            mem_wb_rd &lt;= ex_mem_rd;
+            mem_wb_reg_wr &lt;= ex_mem_reg_wr;
+        end
+    end
+
+    // ============ WB Stage ============
+    always @(posedge clk) begin
+        if (mem_wb_reg_wr &amp;&amp; (mem_wb_rd != 5'd0))
             rf[mem_wb_rd] &lt;= mem_wb_result;
     end
 
 endmodule</code></pre>
 
         <div class="tip">
-            <strong>动手建议：</strong>上面的代码是一个<strong>骨架</strong>——缺少了控制单元译码、立即数扩展、前推（Forwarding）和冒险检测（Hazard Detection）。强烈建议在理解骨架的基础上，自己补全缺失的译码逻辑和前推多路选择器。这是计算机体系结构课程中最有价值的练习之一。完整实现大约需要 300~400 行 Verilog。
+            <strong>动手建议：</strong>上面的代码是一个功能性骨架——译码是简化的，缺少了立即数扩展、前推（Forwarding）和冒险检测（Hazard Detection）逻辑。要在真实的 FPGA 上运行 C 程序，你需要补全这些缺失的部分。从骨架到完整的流水线 CPU 大约需要 500-700 行 Verilog。这是一个极好的计算机体系结构实践项目——建议在理解了骨架的基础上自己动手补全。
         </div>
 
         <h3>21.3 流水线冒险处理</h3>
 
-        <p>流水线处理器有三个经典的冒险问题需要解决：</p>
+        <p>五级流水线处理器必须解决三种冒险：</p>
 
-        <ul>
-            <li><strong>数据冒险（Data Hazard）</strong>：后面的指令需要前面指令的运算结果。解决方法是<strong>数据前推（Forwarding / Bypassing）</strong>——把 EX、MEM、WB 阶段的结果直接转发到 EX 阶段的 ALU 输入端，而不是等写回寄存器堆再读。前推逻辑的关键是三组 Forwarding MUX，分别从 EX/MEM 和 MEM/WB 流水线寄存器取结果。</li>
-            <li><strong>Load-Use 冒险</strong>：加载指令（LW）之后紧跟着使用加载结果的指令。即使有前推，LW 的结果在 EX 阶段结束前不可用，所以必须<strong>插入一个气泡（Stall / Bubble）</strong>，把流水线冻结一拍。</li>
-            <li><strong>控制冒险（Control Hazard）</strong>：分支指令（BEQ/BNE）需要知道跳转是否发生。最简单的策略是<strong>静态预测不跳转</strong>——取指阶段先取下一条地址，如果分支实际发生，冲刷（Flush）已进入流水线的两条错误指令。</li>
-        </ul>
+        <p><strong>数据冒险（Data Hazard）：</strong>后一条指令需要使用前一条指令的 ALU 结果，但结果要到 WB 阶段才写入寄存器堆。最简单的但性能最差的方法是插入气泡（Bubble）——让流水线停等。正确的方法是<strong>数据前推（Forwarding / Bypassing）</strong>：在 ID 阶段检测当前指令的 rs1/rs2 地址是否等于前一条指令（EX/MEM 寄存器中）或前前条指令（MEM/WB 寄存器中）的 rd 地址，如果匹配，用 Forwarding MUX 从流水线寄存器截取结果而不是从寄存器堆读取。三个 Forwarding MUX（rs1 来自 EX/MEM、rs1 来自 MEM/WB、rs2 同理）通常是放在 EX 阶段之前。</p>
+
+        <p><strong>Load-Use 冒险：</strong>当 LW 指令后面紧跟着一条使用加载结果的指令时——即使有前推，LW 的结果也只在 MEM 阶段结束时才可用，无法在下一个时钟周期开始时送到 EX 阶段。解决方法：插入一个气泡（Stall the pipeline for one cycle），将流水线冻结一拍。同时冲刷 ID/EX 流水级，防止旧的指令继续传播。</p>
+
+        <p><strong>控制冒险（Control Hazard）：</strong>条件分支指令（BEQ/BNE/BLT/BGE）需要 EX 阶段算出比较结果后才能知道是否跳转。最简单的策略是<strong>静态预测不跳转</strong>——在 IF 阶段总是取下一条顺序指令，如果分支实际发生，冲刷 IF 和 ID 两级流水线的无效指令。更激进的策略是引入<strong>分支预测器</strong>（BTB + BHT），可以预测 90% 以上的分支方向。</p>
 
         <h3>21.4 在 FPGA 上运行 RISC-V 程序</h3>
 
-        <p>写完 RTL，如何验证它在 FPGA 上真的能运行 C 程序？典型流程如下：</p>
+        <p>RTL 代码写完后，在 FPGA 上运行 C 程序的完整流程如下：</p>
 
         <ol>
-            <li>用 <strong>RISC-V GCC</strong> 交叉编译工具链编译 C 程序：<code>riscv32-unknown-elf-gcc -march=rv32i -O2 -o hello.elf hello.c</code>。</li>
-            <li>用 <code>riscv32-unknown-elf-objcopy -O verilog hello.elf hello.hex</code> 将 ELF 文件转换为 Verilog 可加载的 hex 格式。</li>
-            <li>将 <code>hello.hex</code> 加载到 RTL 仿真模型的指令存储器中，运行仿真验证行为正确。</li>
-            <li>综合实现后在 FPGA 上运行，通过 UART 输出 <code>"Hello, RISC-V!"</code> 字符串。</li>
+            <li><strong>编译：</strong>使用 RISC-V GCC 交叉编译工具链：<code>riscv32-unknown-elf-gcc -march=rv32i -nostdlib -T link.ld -o hello.elf hello.c</code>。</li>
+            <li><strong>转换：</strong>将 ELF 文件中的数据段和代码段提取并转换为 Verilog 可加载的 hex 格式：<code>riscv32-unknown-elf-objcopy -O verilog hello.elf hello.hex</code>（或使用 <code>hexdump</code> 生成可直接用 <code>$readmemh</code> 加载的文件）。</li>
+            <li><strong>仿真验证：</strong>在 RTL 仿真中将 hex 文件加载到指令存储器和数据存储器中，运行完整的程序仿真。检查寄存器最终值、内存中的结果、以及 UART 输出。</li>
+            <li><strong>综合实现：</strong>在 Vivado 或 Yosys 中综合布局布线，配置 Block RAM 作为指令/数据存储器，添加 UART 模块输出字符串。</li>
+            <li><strong>板级验证：</strong>将比特流下载到开发板，通过串口助手观察 <code>"Hello, RISC-V!"</code> 输出。</li>
         </ol>
 
         <div class="warning">
-            <strong>踩坑——遗忘的数据前推：</strong>在我的第一个 RISC-V 实现中，我天真地认为流水线寄存器会"顺其自然地"把数据传下去。结果在仿真一个简单的冒泡排序程序时，排序结果完全是错的。调试了一整天，发现根因是<strong>连续两条 R-type 指令：ADD x1, x2, x3 之后紧接 SUB x4, x1, x5</strong>——EX 阶段读取的 x1 还是旧值，没有等到前一条指令的 ALU 结果写回。仿真通过了单条指令的测试，但因为特定指令对的出现才暴露了问题。修复方案就是在前推 MUX 中判断：如果 EX 阶段的 rs1/rs2 地址等于前一条（EX/MEM）或前前条（MEM/WB）的目标寄存器地址，就截取转发结果而不是寄存器堆输出。
+            <strong>踩坑——忘了前推导致特定指令对计算错误：</strong>我在第一个 RISC-V 实现中遇到了一个最令人崩溃的 Bug：程序在仿真中<strong>大多数时候工作正常</strong>，但冒泡排序的结果偶尔出错。排序错了意味着 ALU 计算在某些指令组合下不正确——但单步仿真每一条指令又都是对的。花了两个整天才发现问题——根因是<strong>连续两条 R-type 指令</strong>：ADD x1, x2, x3 之后紧跟着 SUB x4, x1, x5。EX 阶段读取的 x1 是从寄存器堆读出的旧值，没有等到 ADD 的 ALU 结果写回。为什么大部分指令对没问题？因为编译器在大多数 ADD 后面插入了其他不相关的指令（加载、存储、分支），恰好隔开了依赖关系。只有特定循环中连续依赖的指令对才暴露了这个 Bug。修复方案是添加 Forwarding MUX 逻辑：在 EX 阶段比较当前 rs1/rs2 地址与 EX/MEM 和 MEM/WB 流水级中的 rd 地址，匹配时截取转发结果。这个 Bug 的教训是：<strong>流水线处理器的验证不能只靠"跑程序"——你需要定向测试覆盖所有可能的 RAW 数据冒险组合</strong>。
         </div>
 
-        <p>下一章我们将视线从处理器内部移开，望向 FPGA 的高速外部接口——从 GTP/GTX 高速收发器到 PCIe、MIPI，学习如何让 FPGA 和外部世界以 Gbps 级别速率通信。</p>
+        <p>实现了 RISC-V 核之后，你已经深刻理解了处理器的内部工作原理。处理器是"低速逻辑"（几百 MHz 的同步时序），而下一章我们将转向 FPGA 的另一个技术巅峰——<strong>高速串行接口</strong>。Gbps 级别的 SerDes 收发器、PCIe 和 MIPI 协议、8b/10b 编码和时钟恢复——这些技术让 FPGA 能够与外部世界进行超高速通信。</p>
 
         <div class="footer-nav">
             <a href="20.html">← 上一章</a>

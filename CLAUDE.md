@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 56 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 77 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
 ## Active Tutorials
 
-### AI / 数据科学 (21)
+### AI / 数据科学 (26)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `machine-learning-tutorial/` | 机器学习 | 28 | `https://1998x-stack.github.io/machine-learning-tutorial/` |
@@ -38,8 +38,9 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `pretraining-dataset-tutorial/` | LLM预训练数据集 | 28 | `https://1998x-stack.github.io/pretraining-dataset-tutorial/` |
 | `dataset-analysis-tutorial/` | 数据集分析与实战 | 28 | `https://1998x-stack.github.io/dataset-analysis-tutorial/` |
 | `post-training-dataset-tutorial/` | 后训练数据集分析与构建流程 | 28 | `https://1998x-stack.github.io/post-training-dataset-tutorial/` |
+| `LLM-data-tutorial/` | LLM数据工程 | 28 | `https://1998x-stack.github.io/LLM-data-tutorial/` |
 
-### 数学基础 (9)
+### 数学基础 (12)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `numerical-analysis-tutorial/` | 数值分析 | 28 | `https://1998x-stack.github.io/numerical-analysis-tutorial/` |
@@ -51,6 +52,9 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `digital-signal-processing-tutorial/` | 数字信号处理DSP | 28 | `https://1998x-stack.github.io/digital-signal-processing-tutorial/` |
 | `olympiad-number-theory-tutorial/` | 数论(高中奥数竞赛) | 22 | `https://1998x-stack.github.io/olympiad-number-theory-tutorial/` |
 | `combinatorial-olympiad-tutorial/` | 高中奥数组合理论 | 28 | `https://1998x-stack.github.io/combinatorial-olympiad-tutorial/` |
+| `information-theory-tutorial/` | 信息论 | 28 | `https://1998x-stack.github.io/information-theory-tutorial/` |
+| `cryptography-tutorial/` | 密码学 | 28 | `https://1998x-stack.github.io/cryptography-tutorial/` |
+| `structural-mechanics-tutorial/` | 结构力学 | 28 | `https://1998x-stack.github.io/structural-mechanics-tutorial/` |
 
 ### 系统 / 基础设施 (15)
 | Directory | Topic | Chapters | URL |
@@ -71,7 +75,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `sqlite-source-analysis-tutorial/` | SQLite源码分析 | 28 | `https://1998x-stack.github.io/sqlite-source-analysis-tutorial/` |
 | `redis-source-analysis-tutorial/` | Redis源码分析 | 28 | `https://1998x-stack.github.io/redis-source-analysis-tutorial/` |
 
-### 网络 / 通信 (5)
+### 网络 / 通信 (7)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `HTTP-protocol-tutorial/` | HTTP协议 | 28 | `https://1998x-stack.github.io/HTTP-protocol-tutorial/` |
@@ -79,6 +83,8 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `ethernet-tutorial/` | 以太网通信 | 28 | `https://1998x-stack.github.io/ethernet-tutorial/` |
 | `antenna-propagation-tutorial/` | 电波传播与天线 | 28 | `https://1998x-stack.github.io/antenna-propagation-tutorial/` |
 | `sensor-network-tutorial/` | 传感网技术 | 28 | `https://1998x-stack.github.io/sensor-network-tutorial/` |
+| `communication-engineering-tutorial/` | 通信工程 | 28 | `https://1998x-stack.github.io/communication-engineering-tutorial/` |
+| `network-science-tutorial/` | 网络科学 | 28 | `https://1998x-stack.github.io/network-science-tutorial/` |
 
 ### 经济 / 金融 (11)
 | Directory | Topic | Chapters | URL |

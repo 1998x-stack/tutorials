@@ -45,144 +45,154 @@
     <div class="main-content">
         <h2>第22章 高速串行接口设计</h2>
 
-        <p>如果你打开一块现代 FPGA 开发板的原理图，会看到几组特殊的差分信号对——它们以 "GTP_XX_P/N" 或 "GXB_XX_P/N" 命名，连接到 SMA 连接器或 PCIe 金手指上。这些就是 FPGA 的高速串行收发器（SerDes）通道。单根信号线的速率从 1 Gbps 到 32 Gbps 不等，远高于传统的并行 LVDS 或 CMOS I/O。本章我们深入理解这些高速接口的工作原理，并学习如何在 FPGA 上实现常见的串行协议。</p>
+        <p>前几章我们讨论的接口（UART、SPI、I2C）最高不过几十 MHz，但在今天的数据中心、5G 基站和 AI 加速器中，FPGA 需要以 Gbps 级别速率与外部世界通信。打开一块现代 FPGA 开发板的原理图，你会看到几组特殊的差分信号对——它们以 "GTP_X_Y_P/N" 或 "GXB_X_Y_P/N" 命名，连接到 SFP+ 笼子、SMA 连接器或 PCIe 金手指上。这些就是 FPGA 的<strong>高速串行收发器（SerDes）</strong>通道。本章我们理解它们的原理，并学习如何在 FPGA 上实现常见的 Gbps 级串行协议。</p>
 
-        <h3>22.1 从并行到串行——为什么高速要用串行</h3>
+        <h3>22.1 从并行到串行：为什么要用高速串行</h3>
 
-        <p>并行总线（如传统的 32-bit PCI、EMIF、Utopia）曾经是高速传输的主流方案。但随着速率提升，并行总线遇到了一个根本性的物理限制——<strong>信号歪斜（SKEW）</strong>。32 位并行数据在 PCB 上走线长度不同，到达时间偏差增加；加上各条线路的介电常数差异、温度变化，导致接收端的采样窗口越来越小。当数据速率超过几百 MHz 时，并行总线的时序裕量几乎为零。</p>
+        <p>在 1990 年代，系统内部互连的主流是并行总线——32/64 位宽，几十到几百 MHz。但随着速率提升，并行总线遇到了一个根本性的物理限制：<strong>信号歪斜（SKEW）</strong>。32 根数据线在 PCB 上的走线长度不可能完全相等，加上各层介电常数差异、通孔阻抗不连续、温度梯度导致的延时差——接收端看到的是 32 个信号在不同时间到达。当数据速率超过 200 MHz 时，并行总线的时序裕量几乎为零。</p>
 
-        <p><strong>SerDes（Serializer / Deserializer）</strong>的解决方案简单而优雅：不再同时传输多条信号线，而是把数据串化成高速单比特流。只需要一对差分线（P/N），配合时钟恢复电路从数据流中提取时钟，完美消除了 SKEW 问题。代价是 SerDes 的模拟电路设计难度远高于并行 I/O——这正是 FPGA 厂商的核心竞争力之一。</p>
+        <p><strong>SerDes（Serializer / Deserializer）</strong>的解决方案：把宽度为 N 的并行数据串化成单比特（或差分对）的高速串行流。只需要一对差分线（P/N），配合时钟数据恢复（CDR）从串行流中提取时钟——完美消除了 SKEW 问题。单条 SerDes 通道的速率从 1 Gbps 到 32 Gbps 不等，相当于数百条并行 CMOS I/O 线的总带宽。代价是 SerDes 需要复杂的模拟前端（PLL、CDR、均衡器）——这也是 FPGA 厂商最核心的技术壁垒。</p>
 
-        <h3>22.2 SerDes 基本原理</h3>
+        <div class="highlight">
+            <strong>为什么 SerDes 用差分信号？</strong>差分信号有两个优势：（1）共模噪声抑制——外部噪声同时耦合到 P 和 N，接收端取差值时抵消；（2）更低的电磁辐射——两根线上的电流方向相反，近场辐射相互抵消。对于超过 1 Gbps 的信号，LVDS 或 CML 差分对是唯一可行的方案。PCIe Gen3 的差分摆幅只有 800-1200 mV，而 GTY 收发器的差分摆幅可以低至 400 mV。
+        </div>
 
-        <p>一个典型的 SerDes 通道包含以下几个关键模块：</p>
+        <h3>22.2 SerDes 基础：8b/10b 编码与均衡</h3>
 
-        <ul>
-            <li><strong>8b/10b 编码：</strong>将每 8 位数据映射到 10 位码字。保证 DC 平衡（Equal number of 0s and 1s），提供足够的电平跳变用于时钟恢复。编码后的运行差异度（Running Disparity, RD）用于消除直流偏移。常见的替代方案还有 64b/66b（PCIe Gen3+、10GbE）和 128b/130b（PCIe Gen4+）。</li>
-            <li><strong>预加重（Pre-Emphasis）与去加重（De-Emphasis）：</strong>在发送端对信号的高频分量预加强，补偿传输线的高频衰减。</li>
-            <li><strong>接收均衡：</strong>接收端通过连续时间线性均衡器（CTLE）和判决反馈均衡器（DFE）恢复信号眼图。CTLE 补偿通道的频响，DFE 消除码间干扰（ISI）。</li>
-        </ul>
+        <p>一个典型的 SerDes 通道包含以下关键模块：</p>
 
-        <p>下面是一个简化版 8b/10b 编码器的 Verilog 实现，采用查找表方法：</p>
+        <p><strong>8b/10b 编码：</strong>将每 8 位数据映射到 10 位码字。目的是：保证 DC 平衡（数据流中的 0 和 1 数量大致相等），以及提供足够的电平跳变密度用于时钟数据恢复（CDR）。8b/10b 编码由 IBM 的 Widmer 和 Franaszek 在 1983 年发明，广泛应用于 PCIe Gen1/Gen2、SATA 6G、USB 3.0、千兆以太网。</p>
 
         <pre><code>// Simplified 8b/10b Encoder — Lookup Table Approach
 // 3b/4b encoding for lower nibble, 5b/6b encoding for upper nibble
+// Running Disparity (RD) tracking for DC balance
 module enc_8b10b (
     input  wire       clk,
     input  wire       rst_n,
-    input  wire [7:0] data_in,       // 8-bit input data
+    input  wire [7:0] data_in,
     input  wire       data_valid,
-    output reg  [9:0] data_out,      // 10-bit encoded output
+    output reg  [9:0] data_out,
     output reg        out_valid
 );
-    reg rd;  // running disparity: 0 = negative, 1 = positive
+    reg rd;  // Running disparity: 0 = negative, 1 = positive
 
-    // 5b/6b encoding (simplified — 8 entries for illustration)
+    // 5b/6b encoding table (partial — 8 entries for illustration)
     function [5:0] encode_5b6b;
         input [4:0] symbol;
         input       cur_rd;
         case (symbol)
-            5&#39;b00000: encode_5b6b = cur_rd ? 6&#39;b011000 : 6&#39;b100111;
-            5&#39;b00001: encode_5b6b = cur_rd ? 6&#39;b100010 : 6&#39;b011101;
-            5&#39;b00010: encode_5b6b = cur_rd ? 6&#39;b010010 : 6&#39;b101101;
-            5&#39;b00011: encode_5b6b = 6&#39;b110001;
-            5&#39;b00100: encode_5b6b = cur_rd ? 6&#39;b001010 : 6&#39;b110101;
-            default:   encode_5b6b = {symbol[0], symbol[1], symbol[2],
-                                      symbol[3], symbol[4], 1&#39;b0};
+            5'b00000: encode_5b6b = cur_rd ? 6'b011000 : 6'b100111;
+            5'b00001: encode_5b6b = cur_rd ? 6'b100010 : 6'b011101;
+            5'b00010: encode_5b6b = cur_rd ? 6'b010010 : 6'b101101;
+            5'b00011: encode_5b6b = 6'b110001;   // RD-neutral
+            5'b00100: encode_5b6b = cur_rd ? 6'b001010 : 6'b110101;
+            5'b00101: encode_5b6b = 6'b101001;
+            5'b00110: encode_5b6b = cur_rd ? 6'b011010 : 6'b100101;
+            5'b00111: encode_5b6b = 6'b111000;   // RD-neutral
+            default:  encode_5b6b = {symbol[0], symbol[1], symbol[2],
+                                     symbol[3], symbol[4], 1'b0};
         endcase
     endfunction
 
-    // 3b/4b encoding (simplified)
+    // 3b/4b encoding table (partial)
     function [3:0] encode_3b4b;
         input [2:0] symbol;
         input       cur_rd;
         case (symbol)
-            3&#39;b000: encode_3b4b = cur_rd ? 4&#39;b0100 : 4&#39;b1011;
-            3&#39;b001: encode_3b4b = cur_rd ? 4&#39;b1001 : 4&#39;b1001;
-            3&#39;b010: encode_3b4b = cur_rd ? 4&#39;b0101 : 4&#39;b0101;
-            3&#39;b011: encode_3b4b = 4&#39;b0011;
-            default: encode_3b4b = 4&#39;b0000;
+            3'b000: encode_3b4b = cur_rd ? 4'b0100 : 4'b1011;
+            3'b001: encode_3b4b = 4'b1001;       // RD-neutral
+            3'b010: encode_3b4b = 4'b0101;
+            3'b011: encode_3b4b = 4'b0011;       // RD-neutral
+            3'b100: encode_3b4b = cur_rd ? 4'b0010 : 4'b1101;
+            3'b101: encode_3b4b = 4'b1010;
+            3'b110: encode_3b4b = cur_rd ? 4'b0110 : 4'b1001;
+            3'b111: encode_3b4b = cur_rd ? 4'b0001 : 4'b1110;
+            default: encode_3b4b = 4'b0000;
         endcase
     endfunction
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            rd        &lt;= 1&#39;b0;
-            data_out  &lt;= 10&#39;d0;
-            out_valid &lt;= 1&#39;b0;
+            rd        &lt;= 1'b0;
+            data_out  &lt;= 10'd0;
+            out_valid &lt;= 1'b0;
         end else begin
             out_valid &lt;= data_valid;
             if (data_valid) begin
-                // Upper 5 bits (5b/6b), Lower 3 bits (3b/4b)
                 data_out[9:4] &lt;= encode_5b6b(data_in[7:3], rd);
-                // Update running disparity (simplified)
-                rd &lt;= rd ^ (^data_in[7:3]);  // XOR reduction for demo
+                // Update running disparity based on 5b/6b result
+                rd &lt;= rd ^ (^data_out[9:4]);  // XOR reduction
                 data_out[3:0] &lt;= encode_3b4b(data_in[2:0], rd);
             end
         end
     end
 endmodule</code></pre>
 
-        <div class="highlight">
-            <strong>注意：</strong>上面的代码是教学简化版。真实的 8b/10b 编码需要完整的 5b/6b 和 3b/4b 映射表（各 32 和 8 个有效条目），外加严格的运行差异度（RD）更新规则。完整的编码器可以参考 Widmer 和 Franaszek 1983 年的原始论文或者 IBM 的专利文档。在 Xilinx 器件中，GTP/GTX 收发器已经内置了硬件 8b/10b 编码器——通常你不需要自己实现它。
+        <div class="tip">
+            <strong>工程实务：</strong>上面的代码是教学简化版——完整的 8b/10b 编码需要 32 个 5b/6b 条目和 8 个 3b/4b 条目，以及严格的 Running Disparity 更新规则。在实际 FPGA 工程中，你几乎不需要自己实现 8b/10b——GTP/GTX 收发器内部已经集成了硬件 8b/10b 编码器/解码器，配置向导中勾选一个选项即可启用。需要你亲自写 8b/10b 的场景通常是自定义 SERDES 或低成本 FPGA（如 iCE40）。
         </div>
 
-        <h3>22.3 FPGA 高速收发器：GTP / GTX / GTH / GTY</h3>
+        <p><strong>预加重（Pre-Emphasis）与去加重（De-Emphasis）：</strong>传输线对信号的高频分量衰减大于低频分量（趋肤效应和介电损耗）。为了补偿这种衰减，发送端在跳变后的第一个 bit 加大幅度（预加重），或在后续 bit 降低幅度（去加重）。GTP/GTX 收发器通常提供 4-8 级可编程的预加重强度。</p>
 
-        <p>Xilinx 7 系列及以后的 FPGA 提供了四档 SerDes 收发器，按性能从低到高排列：</p>
+        <p><strong>接收均衡：</strong>接收端通过 <strong>CTLE（连续时间线性均衡器）</strong>和 <strong>DFE（判决反馈均衡器）</strong>恢复信号眼图。CTLE 是一个模拟高通滤波器，补偿通道的低通特性；DFE 是一个数字反馈滤波器，消除码间干扰（ISI）。在 10 Gbps 以上速率时，DFE 是必须的——CTLE 单独无法补偿长走线的 ISI。</p>
+
+        <h3>22.3 FPGA 收发器系列：从 GTP 到 GTY</h3>
+
+        <p>Xilinx（AMD）的 7 系列及后续 FPGA 提供了四个档次的 SerDes 收发器：</p>
 
         <table>
             <tr><th>收发器</th><th>最大线速率</th><th>工艺节点</th><th>典型器件</th><th>典型协议</th></tr>
-            <tr><td>GTP</td><td>3.75 Gbps</td><td>28nm</td><td>Artix-7, Zynq-7000</td><td>PCIe Gen2, SATA 3G, 1GbE</td></tr>
-            <tr><td>GTX</td><td>12.5 Gbps</td><td>28nm</td><td>Kintex-7, Virtex-7</td><td>PCIe Gen3, 10GbE, SATA 6G</td></tr>
-            <tr><td>GTH</td><td>16.3 Gbps</td><td>28nm</td><td>Kintex UltraScale, Virtex UltraScale</td><td>PCIe Gen4, 25GbE, Interlaken</td></tr>
-            <tr><td>GTY</td><td>32.75 Gbps</td><td>16nm</td><td>Kintex UltraScale+, Virtex UltraScale+</td><td>PCIe Gen5, 100GbE, 112G PAM4</td></tr>
+            <tr><td><strong>GTP</strong></td><td>3.75 Gbps</td><td>28nm</td><td>Artix-7, Zynq-7000</td><td>PCIe Gen2, SATA 3G, 1GbE</td></tr>
+            <tr><td><strong>GTX</strong></td><td>12.5 Gbps</td><td>28nm</td><td>Kintex-7, Virtex-7</td><td>PCIe Gen3, 10GbE, SATA 6G</td></tr>
+            <tr><td><strong>GTH</strong></td><td>16.3 Gbps</td><td>20nm/16nm</td><td>Kintex US, Virtex US</td><td>PCIe Gen4, 25GbE, Interlaken</td></tr>
+            <tr><td><strong>GTY</strong></td><td>32.75 Gbps</td><td>16nm</td><td>Kintex US+, Virtex US+</td><td>PCIe Gen5, 100GbE, 112G PAM4</td></tr>
         </table>
 
-        <p>Intel (Altera) 的对应层级是 GX（~17 Gbps）和 SX（~28 Gbps）。Lattice 的 ECP5 和 CertusPro-NX 也集成了 SerDes，速率在 5~10 Gbps 级别。选型时要记住：收发器的数量（通道数）和速率是决定 FPGA 成本的主要因素之一——如果你的设计只需要 1 Gbps 的连接，选择只有 GTP 的 Artix-7 比带 GTY 的 Kintex 经济得多。</p>
+        <p>Intel (Altera) 的对应产品线是 GX（Arria/Cyclone/Stratix GX）和 SX（Stratix 10 TX）。Lattice 的 ECP5 和 CertusPro-NX 也集成了 5-10 Gbps 级别的 SerDes。选型时要知道：<strong>收发器数量和速度是决定 FPGA 成本的主要因素</strong>——如果你只需要 PCIe Gen2，选择仅有 GTP 的 Artix-7（每个 GTP 通道约 $1-2 的裸片成本）比 GTY 的 Kintex US+（每个 GTY 通道约 $10-20）经济得多。</p>
 
-        <h3>22.4 PCIe 接口概述</h3>
+        <h3>22.4 PCIe 接口：从 Gen1 到 Gen5</h3>
 
-        <p><strong>PCI Express（PCIe）</strong>是目前最通用的高速串行互连标准。FPGA 端的典型实现采用 Xilinx 的 <strong>XDMA IP 核</strong>（DMA for PCI Express），它提供了完整的事务层（TLP）处理：</p>
+        <p><strong>PCI Express（PCIe）</strong>是 FPGA 连接主机 CPU 的最常用高速串行接口。PCIe 拓扑结构中有两个角色：<strong>Root Complex（根复合体）</strong>和 <strong>Endpoint（端点）</strong>——通常主机 CPU 是 Root Complex，FPGA 是 Endpoint。PCIe 链路结构分为三层：</p>
 
         <ul>
-            <li><strong>物理层（PHY）：</strong>使用 FPGA 的 GTP/GTX 收发器，负责 8b/10b 或 128b/130b 编码、串并行转换、链路训练（Link Training）。</li>
-            <li><strong>数据链路层（Data Link Layer）：</strong>提供 Ack/Nak 重传机制，确保 TLP 的可靠传输。</li>
-            <li><strong>事务层（Transaction Layer）：</strong>处理 Memory Read/Write、Completion 等 TLP 包的封装与解析。XDMA 把这一层抽象成了 AXI4-Stream 或者 AXI4-Full 接口。</li>
+            <li><strong>物理层（PHY）：</strong>使用 FPGA 的 GTP/GTX 收发器，负责编码（Gen1/Gen2 用 8b/10b，Gen3+ 用 128b/130b）、串并行转换、链路训练状态机（LTSSM）。</li>
+            <li><strong>数据链路层（Data Link Layer）：</strong>提供 Ack/Nak 重传机制，保证事务层包（TLP）的可靠传输。</li>
+            <li><strong>事务层（Transaction Layer）：</strong>处理 Memory Read/Write、Completion、I/O 和 Configuration 请求的封装与解析。</li>
         </ul>
 
-        <p>配置 XDMA 时需要在 Vivado 中指定：链路宽度（x1 / x2 / x4 / x8）、最大有效载荷（128~1024 字节）、以及 DMA 描述符队列的数量。对于典型的 PCIe Gen3 x4，理论带宽约为 3.938 GB/s（128b/130b 编码开销纳入后）。</p>
-
-        <h3>22.5 MIPI DSI / CSI 在 FPGA 上的实现</h3>
-
-        <p>MIPI（Mobile Industry Processor Interface）是移动设备中最常用的摄像头和显示器接口——DSI（显示）和 CSI（摄像头）。MIPI 在 FPGA 上的实现比 PCIe 更"接地气"，因为很多工业视觉和嵌入式项目需要把 MIPI 摄像头接到 FPGA 做图像处理。</p>
+        <p>在 FPGA 上实现 PCIe 最常用的方式是 Xilinx 的 <strong>XDMA IP 核</strong>。XDMA 将 PCIe 事务层抽象为 AXI4-Stream 或 AXI4-Full 接口，提供了 DMA 描述符引擎，允许主机 CPU 通过 DMA 直接读写 FPGA 的内存空间。PCIe 规格的演化：</p>
 
         <table>
-            <tr><th>接口协议</th><th>每通道速率</th><th>通道数</th><th>编码方式</th><th>FPGA 实现方式</th></tr>
+            <tr><th>接口协议</th><th>每通道速率</th><th>通道数</th><th>编码</th><th>典型元器件</th></tr>
             <tr><td>PCIe Gen3</td><td>8 GT/s</td><td>x1 / x4 / x8 / x16</td><td>128b/130b</td><td>GTP/GTX + XDMA IP</td></tr>
-            <tr><td>SATA 6G</td><td>6 Gbps</td><td>1</td><td>8b/10b</td><td>GTP + SATA IP</td></tr>
+            <tr><td>SATA 6G</td><td>6 Gbps</td><td>1</td><td>8b/10b</td><td>GTP + SATA AHCI IP</td></tr>
             <tr><td>USB 3.0</td><td>5 Gbps</td><td>1</td><td>8b/10b</td><td>GTP + USB3 IP 或外部 PHY</td></tr>
-            <tr><td>10GbE</td><td>10.3125 Gbps</td><td>1/4</td><td>64b/66b</td><td>GTX/GTH + 10G MAC IP</td></tr>
-            <tr><td>MIPI D-PHY</td><td>~1.5 Gbps</td><td>1~4</td><td>DDR 差分</td><td>SelectIO + 电阻网络或专用 IP</td></tr>
-            <tr><td>JESD204B</td><td>~12.5 Gbps</td><td>1~8</td><td>8b/10b</td><td>GTX/GTH + JESD204 IP</td></tr>
+            <tr><td>10GbE</td><td>10.3125 Gbps</td><td>1 / 4</td><td>64b/66b</td><td>GTX/GTH + 10G MAC IP</td></tr>
+            <tr><td>MIPI D-PHY</td><td>~1.5 Gbps</td><td>1 ~ 4 lane</td><td>DDR 差分</td><td>SelectIO + 电阻网络</td></tr>
+            <tr><td>JESD204B</td><td>~12.5 Gbps</td><td>1 ~ 8</td><td>8b/10b</td><td>GTX/GTH + JESD204 IP</td></tr>
         </table>
 
-        <p>MIPI D-PHY 的电气层比较特殊：它使用<strong>DDR 双沿采样</strong>和<strong>LP（低功耗）/ HS（高速）双模工作</strong>。FPGA 的普通 I/O BANK 很难直接满足 MIPI 的 HS 模式下 1.5 Gbps 的时序要求。常见的解决方案有二：</p>
+        <div class="highlight">
+            <strong>PCIe Gen5 展望：</strong>截至 2026 年，Virtex UltraScale+ 和 Versal ACAP 已经支持 PCIe Gen5（32 GT/s，128b/130b 编码，PAM4 信令）。Gen5 x16 的单向带宽约 63 GB/s——足以支撑 AI 推理加速器、高速数据采集和网络处理器。但 Gen5 对 PCB 设计的要求极其严格：走线长度误差需要控制在 ±5 mil 以内，阻抗容差 ±5%，插损在 16 GHz 处不超过 -20 dB。这已经不是 FPGA 设计的问题，而是 PCB 和信号完整性（SI）设计的领域了。
+        </div>
 
+        <h3>22.5 MIPI DSI/CSI 在 FPGA 上的实现</h3>
+
+        <p><strong>MIPI（Mobile Industry Processor Interface）</strong>是移动设备中最常用的摄像头和显示器接口。DSI 用于显示，CSI-2 用于摄像头。MIPI D-PHY 的电气层比较特殊——它使用<strong>DDR 双沿采样</strong>和<strong>LP（低功耗）/ HS（高速）双模工作</strong>。在 HS 模式下，每 lane 的速率可达 1.5-2.5 Gbps。</p>
+
+        <p>FPGA 的普通 I/O BANK 很难直接满足 MIPI 的 HS 模式时序要求（因为 MIPI 的差分摆幅只有 200 mV，而 FPGA 的标准 LVDS 要求 350 mV）。常见的两种实现方案：</p>
         <ul>
-            <li><strong>电阻网络方案（低成本）</strong>：用 FPGA 的 HP（High Performance）BANK + 外部电阻分压网络将 MIPI 差分信号转换为 LVDS 电平。适用于速率在 1 Gbps 以下的场景。</li>
-            <li><strong>专用 IP 方案（高可靠）</strong>：使用 Xilinx MIPI D-PHY IP（消耗专用的 I/O 资源和 SerDes 通道），支持完整的 CSI-2 / DSI 协议栈。</li>
+            <li><strong>电阻网络方案（低成本）：</strong>用 FPGA 的 HP（High Performance）BANK + 外部电阻分压网络将 MIPI 差分信号转换为 LVDS 电平。速率上限约 1 Gbps。</li>
+            <li><strong>专用 IP 方案（高可靠）：</strong>使用 Xilinx MIPI D-PHY IP 或 Lattice MIPI D-PHY，消耗 SerDes 通道和专用 I/O 资源，支持完整的 CSI-2 / DSI 协议栈。</li>
         </ul>
 
-        <div class="tip">
-            <strong>工程建议：</strong>如果你的项目需要多路高速串行接口同时工作（例如 4 路 MIPI CSI 输入 + PCIe 上传主机），一定要在选型阶段计算 SerDes 通道数预算。Artix-7 只有 4 个 GTP 通道，Kintex-7 有 16 个 GTX 通道，而 Kintex UltraScale+ 有多达 64 个 GTY 通道。选错了器件封装意味着额外的 BOM 成本和 PCB 层数。
-        </div>
+        <p>对于工业视觉应用，MIPI CSI-2 接 FPGA 做实时图像处理是一个很常见的方案。将 MIPI 摄像头信号接入 FPGA，经过 Bayer 格式转换、白平衡校正、边缘检测等图像处理流水线后，通过 PCIe 或千兆以太网传输到主机——整个过程使用小于 10W 的功率，远低于 GPU 方案。</p>
 
         <div class="warning">
-            <strong>踩坑——PCIe 链路降速：</strong>在一次为期两周的实验室环境测试中，我们的 FPGA 板在室温下 PCIe Gen3 x4 链接正常。但是用热风枪对板卡进行温循测试（0°C→85°C → 0°C 循环），PCIe 链接随机从 Gen3 降到 Gen1，带宽从 ~3.9 GB/s 骤降到 ~0.25 GB/s。用 Vivado 的 IBERT 工具测试后发现——参考时钟的 PPM（百万分之一偏差）在温度变化下达到了 200 PPM，远超过 PCIe Gen3 规范要求的 <strong>&plusmn;100 PPM</strong>（Gen1/Gen2 为 &plusmn;300 PPM，Gen3 更严格）。解决方案是换用温漂特性更好的晶振（从普通石英晶振换成了 TCXO，温漂 < 50 PPM），并在 PCB 布局上让参考时钟走线远离大功率器件。
+            <strong>踩坑——PCIe 链路温度漂移导致 Gen3→Gen1 降速：</strong>有一次我们的 FPGA 加速卡在实验室中通过了所有功能测试——PCIe Gen3 x4 在 25°C 下稳定性测试超过 72 小时无错误。但送到客户环境后，客户报告卡在运行几小时后性能突然大幅下降。使用「lspci -vvv」检查发现链路速率从 8 GT/s（Gen3）降到了 2.5 GT/s（Gen1）。调试流程：第一步，怀疑 PCIe 金手指接触不良——用酒精清洁后问题依旧。第二步，使用 Vivado 的 IBERT 工具测量眼图——在启动时眼图张开度正常，运行约 30 分钟后眼图开始闭合。第三步，用热电偶测量 FPGA 附近的 PCB 温度——在满负荷运行 30 分钟后温度达到 78°C。根因是参考时钟晶振的温度稳定性不达标——晶振规格为 ±100 ppm（PCIe Gen3 要求），但实测在 0°C 到 85°C 范围内漂移达到了 200 ppm。PCIe 的链路训练过程会测量参考时钟精度，一旦发现 PPM 超标，LTSSM 会将链路降级到 Gen1（Gen1 要求 ±300 ppm，更宽松）。修复方案：将普通石英晶振更换为 TCXO（温度补偿晶振），温漂控制在 ±50 ppm 以内，并在 PCB 布局中使参考时钟走线远离大功率电源模块。教训：<strong>高速串行接口的性能极度依赖于参考时钟的质量——晶振的 PPM 规格局限不仅仅是"精度问题"，而是系统能否稳定运行在目标速率的关键参数</strong>。在项目选型阶段，参考时钟的成本（普通晶振 $0.1 vs TCXO $1-2 vs OCXO $10-50）应该是 BOM 评审的必要项目。
         </div>
 
-        <p>下一章，我们回到设计流程中最重要的环节——硬件调试。学会了高速接口的设计，你就更需要一套系统的调试方法：从仿真波形到 ChipScope / ILA，怎样高效地定位 RTL 设计中的 Bug。</p>
+        <p>高速串行接口是 FPGA 连接真实世界的桥梁——从 PCIe 到 MIPI，从千兆以太网到 JESD204B，每一类协议都依赖 FPGA 的 SerDes 硬核。掌握这些知识后，你已经具备了构建高性能 FPGA 系统的核心能力。下一章我们将回到设计流程中更接地气的环节——硬件调试方法论：从仿真波形到 ILA 在线调试，怎样系统性地定位和修复 RTL 设计中的 Bug。</p>
 
         <div class="footer-nav">
             <a href="21.html">← 上一章</a>

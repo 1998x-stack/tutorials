@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 混合精度与显存优化</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html" class="active">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第7章 混合精度与显存优化</h2>
+
+        <p>大家好，我是你们的讲师。上一章讲到优化器时，我们提到了一个让人头疼的数字——AdamW需要为每个参数存储两个FP32的动量项，总显存高达56GB（对于7B模型）。这还只是优化器状态。如果所有东西都用FP32来算，7B模型单卡根本训不了。这就是为什么<strong>混合精度训练</strong>几乎是所有大模型训练的标配。</p>
+
+        <p>但混合精度不只是"把FP32换成FP16"这么简单。精度降得太低会导致梯度下溢（underflow）或溢出（overflow），模型根本训不动。而且，光靠混合精度还不够——你还需要Gradient Checkpointing、Activation Offloading等技术的配合才能让大模型"挤"进有限的显存中。这一章我们把这些显存优化的"十八般武艺"都过一遍。</p>
+
+        <h3>7.1 为什么需要混合精度？</h3>
+
+        <p>先看一张各种数值精度的对比表。</p>
+
+        <table>
+            <tr>
+                <th>精度格式</th>
+                <th>总位数</th>
+                <th>指数位</th>
+                <th>尾数位</th>
+                <th>近似动态范围</th>
+                <th>最小正数</th>
+            </tr>
+            <tr>
+                <td>FP32</td>
+                <td>32</td>
+                <td>8</td>
+                <td>23</td>
+                <td>~1.2e-38 到 3.4e38</td>
+                <td>1.4e-45</td>
+            </tr>
+            <tr>
+                <td>FP16</td>
+                <td>16</td>
+                <td>5</td>
+                <td>10</td>
+                <td>~6.5e-5 到 6.5e4</td>
+                <td>5.9e-8</td>
+            </tr>
+            <tr>
+                <td>BF16</td>
+                <td>16</td>
+                <td>8</td>
+                <td>7</td>
+                <td>~1.2e-38 到 3.4e38</td>
+                <td>1.2e-38</td>
+            </tr>
+            <tr>
+                <td>FP8 (E4M3)</td>
+                <td>8</td>
+                <td>4</td>
+                <td>3</td>
+                <td>~6.1e-5 到 448</td>
+                <td>6.1e-5</td>
+            </tr>
+            <tr>
+                <td>FP8 (E5M2)</td>
+                <td>8</td>
+                <td>5</td>
+                <td>2</td>
+                <td>~6.1e-5 到 5.7e4</td>
+                <td>6.1e-5</td>
+            </tr>
+        </table>
+
+        <p>FP32有23位尾数，精度约为7位有效数字。FP16只有10位尾数，精度约3位有效数字，而且动态范围窄——小于6.5e-5的值会下溢到0，大于6.5e4的值会溢出到Inf。BF16牺牲了尾数位（7位），但保留了FP32同样的8位指数，因此动态范围与FP32相同，只是精度较低（约2-3位有效数字）。FP8是最新的尝试，动态范围极其有限，主要用于推理加速，训练中使用还需要非常小心。</p>
+
+        <p>关键洞察：<strong>模型参数和激活值不需要FP32的全精度</strong>——BF16的7位尾数对于前向传播来说已经足够。但<strong>梯度和优化器状态需要更高的精度</strong>，因为梯度通常会变得非常小，FP16/BF16的精度不足以精确表示梯度更新。这就是"混合"的逻辑基点：用低精度做前向和反向的矩阵计算，用高精度做梯度累积和参数更新。</p>
+
+        <h3>7.2 混合精度训练原理</h3>
+
+        <p>混合精度训练的工程实现涉及三个核心技术：<strong>Loss Scaling、Autocast、Master Weight Copy</strong>。</p>
+
+        <p><strong>Loss Scaling</strong>解决的是梯度下溢问题。在FP16下，如果loss的梯度很小（比如1e-4），反向传播经过多层后梯度会变得更加小，很可能低于FP16的最小表示范围（6.5e-5），直接变成0。解决方案是在前向传播时先把loss乘以一个缩放因子（如2^16=65536），再反向传播，算完梯度后再除以这个缩放因子。这样梯度在FP16下就不会下溢了。缩放因子的选择需要动态调整——如果梯度中出现Inf/NaN就降低缩放因子，如果连续N步没有溢出就适当增大。</p>
+
+        <p><strong>Autocast</strong>是PyTorch提供的自动精度管理机制。它在forward过程中自动判断每个操作应该用FP16还是FP32来执行。比如：矩阵乘法（GEMM）用FP16加速，而softmax、layer norm等对精度敏感的操作用FP32来保证准确性。Autocast让你只需要几行代码就能开启混合精度训练。</p>
+
+        <p><strong>Master Weight Copy</strong>指的是维护一份FP32版本的模型参数。即使前向传播用的FP16模型，优化器更新参数时是在FP32的主权重上操作的，更新完后再转成FP16用于下一轮前向。这样做的目的是防止FP16的低精度导致参数更新的累积误差。虽然这意味着要多存一份FP32的参数，但这比用FP16直接做优化器更新要稳定得多。</p>
+
+        <pre><code># PyTorch混合精度训练的标准实现
+from torch.cuda.amp import autocast, GradScaler
+
+model = MyModel(7e9).cuda()
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+scaler = GradScaler()  # 动态loss scaling
+
+for batch in dataloader:
+    optimizer.zero_grad()
+
+    # Autocast自动管理精度：
+    # - matmul, linear, conv → FP16/BF16
+    # - softmax, layernorm, loss → FP32
+    with autocast(dtype=torch.bfloat16):  # BF16推荐
+        loss = model(batch)
+
+    # Loss scaling + 反向传播
+    scaler.scale(loss).backward()
+
+    # 梯度裁剪（要在unscale之后）
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+    # 优化器更新（FP32 master weights）
+    scaler.step(optimizer)
+    scaler.update()</code></pre>
+
+        <h3>7.3 BF16 vs FP16 vs FP8</h3>
+
+        <p>截至2026年，BF16已经成为大模型训练的<strong>事实上标准</strong>。BF16的动态范围与FP32完全相同，这意味着：<strong>你基本不需要loss scaling</strong>。使用BF16进行混合精度训练时，代码比FP16简单得多——你根本不需要GradScaler，因为BF16几乎不会下溢。这是BF16对FP16的最核心优势。</p>
+
+        <p>FP16虽然精度更"细"（10位尾数 vs BF16的7位），但动态范围的硬伤让它在大模型训练中逐渐被淘汰。FP16唯一还能发挥优势的场景是在一些小模型（<1B）上——因为小模型的梯度幅度通常在FP16的动态范围内。</p>
+
+        <p><strong>FP8训练</strong>是2025-2026年最热门的显存优化话题。NVIDIA H100和B200硬件已经原生支持FP8矩阵运算。FP8训练的理论优势是显存减半、计算吞吐量翻倍。但FP8的工程实现极其复杂：8位精度太有限，需要更精细的block-wise scaling（逐块缩放），而且FP8的前向和反向传播需要不同的数值格式——前向用E4M3（更多精度），反向用E5M2（更广动态范围）。到2026年中，FP8训练在主流框架中已经基本可用（PyTorch原生和Megatron-LM都支持），但在大模型场景下的稳定性仍然需要大量工程调优。</p>
+
+        <div class="highlight">
+            <p><strong>2026年推荐配置</strong>：如果你的GPU支持BF16（H100、A100、H200均支持），无脑用BF16混合精度。不需要loss scaling，代码简洁，训练稳定。如果你的GPU支持FP8且你有工程资源做调优，可以在大模型预训练中使用FP8来降低约30%的训练成本，但要做好遇到精度问题需要调试的准备。</p>
+        </div>
+
+        <h3>7.4 Gradient Checkpointing</h3>
+
+        <p>Gradient Checkpointing（也叫Activation Recomputation）是一种经典的<strong>以时间换空间</strong>的显存优化技术。它的原理很简单：正向传播时不保存所有中间激活值，只保存少数"检查点"的激活；反向传播时需要哪些激活值，就从最近的检查点重新计算。</p>
+
+        <p>对于一个N层的transformer，标准做法的显存占用是O(N×L×d)（N层每层都要存激活值）。Gradient Checkpointing可以把显存降低到O(sqrt(N)×L×d)甚至O(L×d)，但代价是增加了大约20-30%的前向计算时间（因为需要重计算）。</p>
+
+        <p>工程上，最重要的决策是：<strong>选择哪些层做recompute？</strong>常见的策略有三种：</p>
+
+        <p><strong>策略一：每隔k层一个checkpoint。</strong>最简单的方式。每k层存一次激活值，反向传播时需要回溯最多k层的计算。k的选择决定了显存节省和计算开销的tradeoff——k=1是不做checkpointing（无节省），k=总层数是最大节省（但重计算成本最高）。经验值是k=4-6。</p>
+
+        <p><strong>策略二：选择性recompute。</strong>只对显存消耗最大的层做checkpointing。Attention层的激活值（QKV矩阵和注意力分数）体积巨大，而FFN层的激活值相对较小。一个常见的做法是：只对Attention层做checkpointing，不对FFN层做。这样可以节省约50-60%的激活值显存，只增加约15%的计算开销。</p>
+
+        <p><strong>策略三：算子级recompute。</strong>最精细的控制。在Megatron-LM中，你可以精确控制哪些算子（如dropout、softmax、matmul）要recompute。这需要深入的profiling来识别最佳配置。</p>
+
+        <pre><code># PyTorch中的Gradient Checkpointing使用
+import torch
+import torch.utils.checkpoint as checkpoint
+
+class TransformerLayer(nn.Module):
+    def __init__(self, use_checkpoint=True):
+        super().__init__()
+        self.attention = MultiHeadAttention(...)
+        self.ffn = FeedForward(...)
+        self.use_checkpoint = use_checkpoint
+
+    def forward(self, x):
+        # 方法1：对整个层做checkpointing
+        if self.use_checkpoint:
+            x = checkpoint.checkpoint(self._forward_impl, x)
+        else:
+            x = self._forward_impl(x)
+        return x
+
+    def _forward_impl(self, x):
+        x = x + self.attention(x)
+        x = x + self.ffn(x)
+        return x
+
+# 方法2：只对attention部分做checkpointing（节省显存更多）
+class OptimizedTransformerLayer(nn.Module):
+    def forward(self, x):
+        # Attention部分做recompute，FFN不做
+        attn_out = checkpoint.checkpoint(self.attention, x)
+        x = x + attn_out
+        x = x + self.ffn(x)  # FFN正常计算
+        return x</code></pre>
+
+        <h3>7.5 Activation Offloading</h3>
+
+        <p>Gradient Checkpointing的重计算会增加GPU计算时间。而<strong>Activation Offloading</strong>提供了另一种思路：<strong>把激活值从GPU显存卸载到CPU内存</strong>，在需要时才传回GPU。它和checkpointing的核心区别是：offloading不增加计算量，只增加CPU-GPU之间的数据传输时间。</p>
+
+        <p>CPU内存通常远大于GPU显存（一台8卡机器可能有2TB系统内存但只有640GB GPU显存）。因此activation offloading可以"无限"扩展可用的激活存储空间，代价是PCIe/NVLink的传输带宽。对于激活值这种需要频繁读写的场景，传输延迟可能成为瓶颈。</p>
+
+        <p>工程上，activation offloading通常与gradient checkpointing配合使用：对于checkpointing重计算成本高的层（如非常深的transformer），采用offloading；对于重计算成本低的层，采用checkpointing。这种混合策略可以根据每层的特性做最优选择。</p>
+
+        <p><strong>Megatron的Sequence Parallelism</strong>是activation offloading思想的分布式版本。在标准的data parallel训练中，每个设备处理不同的batch，但每个batch内的序列是完整的。Sequence Parallelism将<strong>一个序列</strong>切分到多个设备上——每个设备只计算序列的一部分token的attention。这样做的主要目的是节省序列维度上的激活值显存。对于一个长度为64K的序列，单个设备的激活值内存可以从O(64K²)降到O(64K² / world_size)。这是处理超长序列的关键技术，我们在第12章会详细展开。</p>
+
+        <table>
+            <tr>
+                <th>技术</th>
+                <th>原理</th>
+                <th>显存节省</th>
+                <th>计算/时间开销</th>
+                <th>适用场景</th>
+            </tr>
+            <tr>
+                <td>混合精度 (BF16)</td>
+                <td>低精度矩阵运算</td>
+                <td>~50%（相比FP32）</td>
+                <td>计算加速~2x</td>
+                <td>所有场景，必须开启</td>
+            </tr>
+            <tr>
+                <td>Gradient Checkpointing</td>
+                <td>重计算激活值</td>
+                <td>50-80%</td>
+                <td>+20-30%计算时间</td>
+                <td>显存紧张时使用</td>
+            </tr>
+            <tr>
+                <td>Activation Offloading</td>
+                <td>卸载到CPU内存</td>
+                <td>60-90%</td>
+                <td>+10-30%传输延迟</td>
+                <td>CPU内存充裕场景</td>
+            </tr>
+            <tr>
+                <td>ZeRO-3 (FSDP)</td>
+                <td>参数/梯度/优化器分片</td>
+                <td>取决于GPU数量</td>
+                <td>+通信开销</td>
+                <td>大模型分布式训练</td>
+            </tr>
+            <tr>
+                <td>Sequence Parallelism</td>
+                <td>序列维度切分</td>
+                <td>2-4x（长序列）</td>
+                <td>+通信开销</td>
+                <td>长上下文训练</td>
+            </tr>
+        </table>
+
+        <div class="warning">
+            <p><strong>踩坑故事</strong>：一个团队在微调13B模型时发现，不管怎么调整Gradient Checkpointing的参数，显存都不够。他们用了FP16混合精度、开启了checkpointing、batch_size设为1——仍然OOM。最后排查发现，问题出在<strong>KV cache没有被释放</strong>。他们在推理模式下使用model.generate()来做评估，每次评估后没有显式清理KV cache，导致cache在显存中累积。而且训练代码中还有一个bug：<code>model.eval()</code>后没有调<code>torch.cuda.empty_cache()</code>。修复后，同样的配置下显存从"差20%就OOM"降到了"还有15GB余量"。这个故事的教训：<strong>在排查显存问题时，先检查是否有"显存泄漏"——即不再需要的张量是否被正确释放</strong>。用<code>torch.cuda.memory_summary()</code>可以清晰地看到哪些操作在占用显存。</p>
+        </div>
+
+        <div class="tip">
+            <p><strong>显存优化的分级策略</strong>：按优先级排序，①始终开启BF16混合精度（免费午餐）；②如果需要更多显存，开启Gradient Checkpointing（通常设为每4层一个checkpoint）；③如果还不行，使用FSDP ZeRO-2或ZeRO-3（在分布式场景下）；④如果训练超长序列，加上Sequence Parallelism。不要一上来就所有手段全开——每加一层技术都会引入额外的开销和复杂性，循序渐进地加，直到显存刚好够用为止。</p>
+        </div>
+
+        <p>好的，第7章的内容就到这里。今天我们从混合精度的数值表示讲起，理解了为什么要用低精度、以及BF16为什么是当前的最优选择；然后深入了混合精度的三个核心机制——Loss Scaling、Autocast和Master Weight Copy；接着介绍了显存优化的两大武器——Gradient Checkpointing（以时间换空间）和Activation Offloading（卸载到CPU）。还介绍了2026年FP8训练的最新进展。这些技术配合起来，可以让你在有限的GPU显存中训练更大规模的模型。下一章，我们进入3D并行与大规模训练——当模型大到单节点都放不下时，张量并行、流水线并行和数据并行如何协同工作。这是通往"千卡集群"的第一课。第8章见。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第5章 分布式训练基础</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html" class="active">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第5章 分布式训练基础</h2>
+
+        <p>大家好，我是你们的讲师。前面几章我们搭建了一个完整的"单卡认知"——理解了数据怎么清洗、文本怎么tokenize、Transformer结构怎么工作。但在现实中，没有任何一个大模型是在单张GPU上训练的。即使是最小的1.5B模型，在FP16下也需要约3GB显存来存放参数，但训练时的激活值、梯度、优化器状态会把显存需求放大5-10倍。7B模型的话，单卡H100（80GB）也放不下。这就是为什么我们需要分布式训练。</p>
+
+        <p>分布式训练的本质很简单：<strong>把一个人搬不动的大石头，切成小块几个人一起搬</strong>。但"切"的方式不同，就有不同的并行策略。这一章我们从最基础的开始，先理解单卡训练的瓶颈，再到数据并行和通信原语，最后讲到FSDP——这是通往大规模训练的"第一级台阶"。</p>
+
+        <h3>5.1 为什么单卡训不了大模型？</h3>
+
+        <p>我们来算一笔账。假设你想训练一个7B参数的模型，使用FP16（2 bytes per parameter），来看看每一块的显存需求：</p>
+
+        <p><strong>模型参数</strong>：7B × 2 bytes = 14GB。勉强放得下。</p>
+
+        <p><strong>梯度</strong>：和参数一样大，也是14GB。</p>
+
+        <p><strong>优化器状态</strong>：AdamW需要存储两个动量项（一阶动量和二阶动量），每个也是FP32精度（4 bytes）。所以优化器状态 = 7B × 4 × 2 = 56GB。</p>
+
+        <p><strong>激活值（Activations）</strong>：这是最大的一块。每个transformer层在forward过程中要保留中间激活值用于backward计算梯度。对于7B模型，batch_size=1、seq_len=4096时，单层的激活值可能需要数十MB到上百MB，32层加起来大约20-40GB。</p>
+
+        <p>算下来，光参数+梯度+优化器状态就已经84GB了，超过了一张H100的80GB显存。这还没算激活值！所以<strong>即使batch_size=1，7B模型在单卡H100上也训练不了</strong>。</p>
+
+        <table>
+            <tr>
+                <th>模型规模</th>
+                <th>参数(FP16)</th>
+                <th>梯度(FP16)</th>
+                <th>优化器(FP32)</th>
+                <th>激活值(典型)</th>
+                <th>总计</th>
+                <th>单卡H100能否训练</th>
+            </tr>
+            <tr>
+                <td>1.5B</td>
+                <td>3GB</td>
+                <td>3GB</td>
+                <td>12GB</td>
+                <td>4-8GB</td>
+                <td>22-26GB</td>
+                <td>可以（batch_size较小）</td>
+            </tr>
+            <tr>
+                <td>7B</td>
+                <td>14GB</td>
+                <td>14GB</td>
+                <td>56GB</td>
+                <td>20-40GB</td>
+                <td>104-124GB</td>
+                <td>超显存</td>
+            </tr>
+            <tr>
+                <td>13B</td>
+                <td>26GB</td>
+                <td>26GB</td>
+                <td>104GB</td>
+                <td>40-80GB</td>
+                <td>196-236GB</td>
+                <td>不可能</td>
+            </tr>
+            <tr>
+                <td>70B</td>
+                <td>140GB</td>
+                <td>140GB</td>
+                <td>560GB</td>
+                <td>200-400GB</td>
+                <td>1-1.2TB</td>
+                <td>需要大规模分布式</td>
+            </tr>
+        </table>
+
+        <p>另外还有<strong>算力瓶颈</strong>和<strong>时间瓶颈</strong>：即使单卡能放下7B模型，以H100每秒约1000TFLOPS的算力，训练2万亿token也需要几百天。分布式训练的核心目标就是把这几百天压缩到几天——通过让多张GPU并行工作。</p>
+
+        <h3>5.2 数据并行(DP/DDP)</h3>
+
+        <p>数据并行（Data Parallelism）是最简单、最直观的并行策略。核心思想：每张GPU都存一份完整的模型副本，但分配到不同的数据批次。正向传播时各算各的，反向传播后通过通信同步梯度，确保所有卡上的模型参数保持一致。</p>
+
+        <p><strong>DP (Data Parallel)</strong>是PyTorch最早的实现。它的工作方式是：master GPU（rank 0）收集所有卡的梯度并求和，再广播回去。有一个很明显的性能问题——所有通信流量都经过rank 0，导致它成为瓶颈，GPU利用率的扩展性很差。</p>
+
+        <p><strong>DDP (Distributed Data Parallel)</strong>是改进版。它使用了<strong>Ring AllReduce</strong>算法：所有GPU排成一个环，梯度在环上依次传递并累加，最后每个GPU都得到完整的聚合梯度。Ring AllReduce的通信量只有2*(N-1)/N * 模型大小的数据交换（随着N增大趋近于2倍模型大小），而且带宽利用率极高。DDP是目前绝大多数中小规模分布式训练的默认选择。</p>
+
+        <pre><code># 使用PyTorch DDP的标准代码框架
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+def train():
+    dist.init_process_group(backend="nccl")
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    model = MyModel(7e9).to(rank)
+    ddp_model = DDP(model, device_ids=[rank])
+
+    dataloader = get_data_loader(batch_size=2, world_size=world_size)
+    optimizer = torch.optim.AdamW(ddp_model.parameters(), lr=3e-4)
+
+    for batch in dataloader:
+        # DDP自动处理梯度同步
+        loss = ddp_model(batch)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()</code></pre>
+
+        <p>但数据并行有个很大的局限性：<strong>每张卡都要存一份完整的模型、梯度和优化器状态</strong>。对于7B模型，即使你用DDP跑在64张卡上，每张卡仍然需要~100GB以上的显存——DDP并没有解决显存问题，只是解决了计算速度问题（通过增加并行度来增大global batch size）。这正是FSDP和ZeRO要解决的痛点。</p>
+
+        <h3>5.3 通信原语深入</h3>
+
+        <p>分布式训练的本质是通信。不理解通信原语，就难以理解分布式训练的性能瓶颈。下面是四个最核心的原语。</p>
+
+        <p><strong>Broadcast</strong>：将一份数据从root节点发送到所有其他节点。例如，初始化时将模型参数从rank 0广播到所有节点。通信量 = 数据大小。时间复杂度O(N)。</p>
+
+        <p><strong>AllReduce</strong>：在所有节点上执行归约操作（通常是求和），并将结果返回到所有节点。Ring AllReduce的实现将AllReduce分解为ReduceScatter + AllGather两步，通信量 = 2 × (N-1)/N × 数据大小。这是DDP中梯度同步的核心原语。</p>
+
+        <p><strong>ReduceScatter</strong>：将所有节点的数据按块求和，每个节点持有求和后的一块数据。通信量 = (N-1)/N × 数据大小。Ring AllReduce的第一步。</p>
+
+        <p><strong>AllGather</strong>：每个节点将自己持有的一块数据广播给所有其他节点。通信量 = (N-1)/N × 数据大小。Ring AllReduce的第二步。</p>
+
+        <table>
+            <tr>
+                <th>原语</th>
+                <th>描述</th>
+                <th>通信量</th>
+                <th>主要用途</th>
+            </tr>
+            <tr>
+                <td>Broadcast</td>
+                <td>一个节点→所有节点</td>
+                <td>N × 数据大小</td>
+                <td>初始化参数广播</td>
+            </tr>
+            <tr>
+                <td>AllReduce</td>
+                <td>所有节点求和→所有节点</td>
+                <td>2(N-1)/N × 数据大小</td>
+                <td>梯度同步（DDP）</td>
+            </tr>
+            <tr>
+                <td>ReduceScatter</td>
+                <td>所有节点求和→分布到各节点</td>
+                <td>(N-1)/N × 数据大小</td>
+                <td>ZeRO梯度分片</td>
+            </tr>
+            <tr>
+                <td>AllGather</td>
+                <td>各节点的数据块→所有节点</td>
+                <td>(N-1)/N × 数据大小</td>
+                <td>ZeRO参数收集</td>
+            </tr>
+        </table>
+
+        <p>理解通信量很重要，因为它直接决定了分布式训练的<strong>通信开销占比</strong>。一个经验公式：如果通信时间大于计算时间，说明你的计算/通信比太低，需要增大batch size或者改用更高效的并行策略。</p>
+
+        <h3>5.4 通信与计算重叠</h3>
+
+        <p>一个常见的误解是：分布式训练中，通信时间是"额外"的，是白花的时间。但好的工程实现可以让通信和计算<strong>重叠</strong>（overlap），把通信"藏"在计算的背后。</p>
+
+        <p>具体来说，在DDP的反向传播过程中，模型各层的梯度是<strong>按从后往前</strong>的顺序计算的。前面的层（靠近输入的层）还在计算梯度时，后面的层（靠近输出的层）的梯度已经计算完毕了。因此，我们可以在后面的层计算一完成就立即启动该层梯度的allreduce，而不必等到所有层的梯度都计算完毕。这就是<strong>梯度异步通信</strong>，也称为bucket communication。</p>
+
+        <p>PyTorch DDP默认会按参数大小"分桶"（bucket），每个桶的梯度计算完后立即触发allreduce。默认的bucket大小是25MB，但实际项目中建议调整这个值：<strong>如果计算密度低（如小模型），减小bucket大小可以让通信更早开始；如果计算密度高（如大模型），增大bucket可以减少通信次数</strong>。</p>
+
+        <div class="tip">
+            <p><strong>实战调优</strong>：你可以通过设置环境变量<code>TORCH_DISTRIBUTED_DETAIL=DEBUG</code>来观察每个桶的通信时间。如果发现某个桶的通信时间长于下一桶的计算时间，说明overlap不够好。优化手段包括：①增大batch size提高计算密度；②调整bucket大小（<code>torch.distributed.set_default_ddp_bucket_size()</code>）；③开启<code>gradient_as_bucket_view=True</code>减少内存拷贝。</p>
+        </div>
+
+        <h3>5.5 FSDP零冗余优化</h3>
+
+        <p>前面说过，DDP最大的问题是没有减少单卡显存占用——每张卡都持有完整的模型状态。ZeRO（Zero Redundancy Optimizer）系列论文（Microsoft, 2020）提出了一种打破这个限制的思路：<strong>既然N张卡存了N份相同的数据，为什么不各自只存一份？</strong></p>
+
+        <p><strong>ZeRO-1</strong>：将优化器状态分片到各卡，每卡只存1/N的优化器状态。这节省了AdamW两个动量项的大部分内存（56GB → 56GB/N）。当N=8时，优化器状态从56GB降到7GB，效果显著。</p>
+
+        <p><strong>ZeRO-2</strong>：在ZeRO-1的基础上，将梯度也分片。每卡只存1/N的梯度。梯度内存从14GB降到14GB/N。</p>
+
+        <p><strong>ZeRO-3</strong>：在ZeRO-2的基础上，将模型参数也分片。每卡只存1/N的参数。参数内存从14GB降到14GB/N。但注意：ZeRO-3在每次forward和backward之前需要allgather来收集完整的参数，之后要reduce_scatter来更新梯度。这增加了通信量，所以ZeRO-3的通信开销比ZeRO-2高，但在模型大到放不下单卡时是必须的选择。</p>
+
+        <p><strong>FSDP（Fully Sharded Data Parallel）</strong>是PyTorch在ZeRO思想上的官方实现。它封装了ZeRO-1/2/3，通过<code>sharding_strategy</code>参数来控制分片程度。FSDP的最大优势是：<strong>你可以在不修改模型代码的情况下，通过包裹模型来实现ZeRO</strong>（类似DDP的用法）。</p>
+
+        <pre><code># FSDP使用示例（ZeRO-3模式）
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import ShardingStrategy
+
+# ZeRO-3: 参数/梯度/优化器状态全部分片
+model = FSDP(
+    MyModel(7e9),
+    sharding_strategy=ShardingStrategy.FULL_SHARD,  # ZeRO-3
+    device_id=rank,
+)
+
+# ZeRO-2: 只分片梯度和优化器状态
+model = FSDP(
+    MyModel(7e9),
+    sharding_strategy=ShardingStrategy.SHARD_GRAD_OP,  # ZeRO-2
+    device_id=rank,
+)
+
+# 训练代码与DDP完全一致
+for batch in dataloader:
+    loss = model(batch)
+    loss.backward()    # 自动执行allgather（前向）+ reduce_scatter（反向）
+    optimizer.step()</code></pre>
+
+        <div class="warning">
+            <p><strong>踩坑故事</strong>：一个团队在迁移从DDP到FSDP时遇到了一个非常隐蔽的性能问题。他们的H100集群在DDP下GPU利用率达到85%，但切换到FSDP（ZeRO-3）后利用率跌到了30%。排查了三天，发现问题的根源是FSDP的<strong>参数预取（prefetch）</strong>没开。FSDP在forward过程中，每个transformer层需要在计算前allgather参数。如果不开预取，每层都要等待参数收集完成才能开始计算，造成了大量的GPU空闲。启用<code>forward_prefetch=True</code>和<code>limit_all_gathers=True</code>之后，利用率回到了78%。还有一个坑：当使用FSDP + gradient checkpointing时，checkpoint会重新触发allgather，导致重复通信。解决方案是启用<code>reshard_after_forward=False</code>，在checkpoint重计算阶段不重新分片参数。</p>
+        </div>
+
+        <div class="highlight">
+            <p><strong>选择建议</strong>：对于7B以下模型，DDP通常已经足够（配合activation checkpointing），ZeRO-2作为可选项。对于7B-13B模型，FSDP ZeRO-2是最佳性价比——显存节省显著且通信开销可控。对于13B以上模型，FSDP ZeRO-3是唯一可行的方案，但需要仔细调优预取策略和通信配置以达到可接受的效率。</p>
+        </div>
+
+        <p>好的，第5章就到这里。今天我们覆盖了分布式训练的基础：理解了单卡训练的三大瓶颈（显存、算力、时间），掌握了数据并行（DDP）的原理和通信原语，学会了如何让通信与计算重叠来提升效率，最后学习了FSDP/ZeRO如何通过分片来突破单卡显存限制。这些知识是你理解更高级的模型并行、流水线并行和张量并行的基础。第6章，我们来聊聊优化器和学习率调度——同样的模型、同样的数据，选择一个好的优化器能让收敛速度翻倍。下章见。</p>
+
+        <div class="footer-nav">
+            <a href="04.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="06.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

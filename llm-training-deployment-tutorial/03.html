@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 Tokenizer原理与实践</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html" class="active">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第3章 Tokenizer原理与实践</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们讲了数据清洗和配比，到了这一步，你的文本数据已经是干净的、高质量的、精心配比的——但模型还读不懂它。模型只认识数字、只处理固定长度的向量序列。把文本变成模型能吃进去的数字序列，这就是<strong>tokenizer</strong>的工作。</p>
+
+        <p>Tokenizer可能是整个训练链路中最不起眼但也最容易翻车的环节。为什么这么说？因为tokenizer的问题通常不会导致训练失败（loss还会正常下降），但会导致一个隐蔽得多的后果：<strong>模型在某些任务上永远达不到预期效果</strong>，而你根本想不到问题出在tokenizer上。我见过一个做中文代码生成模型的团队，训练数据和模型架构都没问题，但生成的代码永远缺括号——最后发现是因为英文括号在中文语境下被tokenizer分错了。所以这一章，我们深度拆解tokenizer的原理、实践和常见坑点。</p>
+
+        <h3>3.1 为什么需要Tokenizer？</h3>
+
+        <p>简单来说，tokenizer的作用就是将一段文本切分成一系列<strong>token</strong>（词元），再把每个token映射到一个整数ID。这个ID就是模型Embedding层的输入。</p>
+
+        <p>举个具体的例子。对于句子"I love large language models"，一个典型的BPE tokenizer可能会把它切分成<code>["I", " love", " large", " language", " models"]</code>，然后映射成<code>[40, 1222, 539, 2541, 6735]</code>。注意那个空格——BPE tokenizer通常会把空格保留在token内部，这对模型理解词边界很关键。</p>
+
+        <p>Tokenizer的选择直接影响模型的几个核心指标：</p>
+
+        <p><strong>序列长度</strong>：同样的文本，不同的tokenizer会产生不同数量的token。例如，对于中文，"我喜欢大模型"可能被切分成<code>["我", "喜欢", "大", "模型"]</code>（4个token）。但如果tokenizer对中文字符的支持不好，可能每个字就是一个token——也就是5个token，会使有效上下文长度缩水20%。</p>
+
+        <p><strong>推理速度</strong>：token数量直接决定了transformer的计算量（因为self-attention的复杂度是O(n²)）。一个效率低的tokenizer会让你的推理成本增加30-50%，而你甚至不知道问题出在哪里。</p>
+
+        <p><strong>模型的知识表达</strong>：tokenizer的分词粒度决定了模型"看到"的信息单元。如果"reinforcement learning"被分成了一个token，模型可以直接学习到这个概念的整体语义。如果被分成了<code>["rein", "forcement", "learning"]</code>，模型就需要先从碎片中拼出概念，效率降低。</p>
+
+        <h3>3.2 BPE算法深度解析</h3>
+
+        <p>BPE（Byte Pair Encoding）是目前最主流的tokenization算法，被GPT系列、Llama系列等几乎所有主流模型采用。它的核心思想很巧妙：<strong>从字符级开始，逐步合并最频繁出现的相邻token对，直到达到目标词汇表大小</strong>。</p>
+
+        <p>我们来走一遍完整的BPE训练过程。假设我们有这样一个小小的训练语料：</p>
+
+        <pre><code># 初始语料（字符级拆分）
+"low": 5, "lower": 2, "newest": 6, "widest": 3
+
+# 第1步：初始词汇表（所有唯一字符）
+l, o, w, e, r, n, s, t, i, d
+
+# 第2步：统计所有相邻token对的频率
+("l", "o"): 7, ("o", "w"): 7, ("w", "e"): 8, ("e", "r"): 2,
+("e", "w"): 6, ("n", "e"): 6, ("s", "t"): 9, ...
+
+# 第3步：合并最频繁的对 ("e", "s") — 但这里是 ("s","t") 出现9次
+# 合并 ("s","t") -> "st"
+新词汇表: l, o, w, e, r, n, s, t, i, d, st
+
+# 第4步：重复。现在 ("e", "st") 出现9次，合并 -> "est"
+新词汇表增加: est
+
+# 第5步：继续合并，直到词汇表容量达到目标（通常是32k-128k）
+# 最终可能学到的token: low, low, er, newest, widest, ...</code></pre>
+
+        <p>这个迭代过程的关键洞察是：<strong>被合并的token对代表了语料中的常见子词模式</strong>。BPE本质上是在做一种基于频率统计的"词干提取"——"est"会被识别出来，因为它出现在"newest"和"widest"中；"low"会被保留为一个完整token，因为它高频出现。</p>
+
+        <p>实际训练中，BPE的词汇表大小一般在32,000到128,000之间。词汇表越大，每个token携带的信息量越多（压缩率越高），但Embedding层的参数也越多，推理时<strong>softmax</strong>的代价也越大。32K词汇表的embedding矩阵大约是(32768 × 4096) ≈ 1.34亿个参数——对于7B模型来说还不算大，但对于部署在手机上的小模型，这个开销就不可忽视了。</p>
+
+        <h3>3.3 主流Tokenizer对比</h3>
+
+        <p>不同模型家族使用不同风格的tokenizer，理解它们的差异对于选择合适的tokenizer（或者理解你使用的模型的tokenizer行为）至关重要。</p>
+
+        <table>
+            <tr>
+                <th>特性</th>
+                <th>GPT系列 (tiktoken/BPE)</th>
+                <th>Llama系列 (SentencePiece/BPE)</th>
+                <th>BERT (WordPiece)</th>
+            </tr>
+            <tr>
+                <td>算法基础</td>
+                <td>BPE</td>
+                <td>BPE (via SentencePiece)</td>
+                <td>WordPiece</td>
+            </tr>
+            <tr>
+                <td>是否预分词</td>
+                <td>是（GPT-2分词器）</td>
+                <td>否（原始bytes输入）</td>
+                <td>是（Moses等工具）</td>
+            </tr>
+            <tr>
+                <td>空格处理</td>
+                <td>保留空格为token前缀</td>
+                <td>用_代替空格</td>
+                <td>丢弃空格</td>
+            </tr>
+            <tr>
+                <td>未知词处理</td>
+                <td>退化为byte级别</td>
+                <td>退化为byte级别</td>
+                <td>UNK token</td>
+            </tr>
+            <tr>
+                <td>典型词汇表大小</td>
+                <td>100K (gpt-4)</td>
+                <td>32K (Llama 2/3)</td>
+                <td>30K (BERT-base)</td>
+            </tr>
+            <tr>
+                <td>中文支持</td>
+                <td>好（单字+多字组合）</td>
+                <td>好（Byte-based）</td>
+                <td>差（容易分成单字）</td>
+            </tr>
+            <tr>
+                <td>多语言表现</td>
+                <td>良好</td>
+                <td>优秀（byte-level输入）</td>
+                <td>一般</td>
+            </tr>
+        </table>
+
+        <p>其中需要特别关注的是<strong>SentencePiece</strong>的"不预分词"设计。传统的BPE（如GPT-2使用的）需要先用规则将文本切分成词（pre-tokenization），然后再对词内进行BPE。这意味着空格等分隔符被当作token边界，<code>"hello"</code>和<code>"hello!"</code>的分词结果可能在词级别完全不同。SentencePiece直接将原始文本（包括空格）作为输入，不做任何预分词，解决了多语言场景中空格边界不一致的问题——中文、日文等不使用空格的语言在预分词阶段往往表现很差，而SentencePiece就避免了这个问题。</p>
+
+        <div class="tip">
+            <p><strong>选型建议</strong>：如果你要训练一个主要面向中文和英文的双语模型，推荐使用SentencePiece + BPE的组合（即Llama方案），词汇表大小设为32K-64K。如果主要是英文场景，GPT的tiktoken方案已经非常成熟。如果你需要支持大量低资源语言（如东南亚语言），千万要选byte-level的tokenizer（如SentencePiece的byte模式），避免产生大量UNK token导致信息丢失。</p>
+        </div>
+
+        <h3>3.4 Tokenizer设计决策</h3>
+
+        <p>选定了tokenizer类型之后，你还需要做几个关键设计决策。这些决策会直接影响模型的最终表现。</p>
+
+        <p><strong>词汇表大小选择。</strong>词汇表太大（>256K）会导致embedding矩阵过大、推理时softmax计算开销剧增，而且很多token在训练中可能只出现几次，学习到的embedding质量很差。词汇表太小（<8K）则意味着每个token的信息量不足，序列太长。经验法则是：<strong>在训练数据的压缩率和模型容量之间取平衡</strong>。具体做法是：用不同大小的词汇表分别tokenize你的训练语料，观察每个token的平均压缩字节数（bytes per token），通常选取曲线"拐点"附近的词汇表大小。对于中英双语模型，64K左右是常见选择；对于纯英文，100K左右（即GPT-4的方案）更优。</p>
+
+        <p><strong>特殊token设计。</strong>特殊token（special tokens）是不可忽视的细节。至少需要预留：<code>&lt;pad&gt;</code>（填充）、<code>&lt;bos&gt;</code>/<code>&lt;s&gt;</code>（序列开始）、<code>&lt;eos&gt;</code>/<code>&lt;/s&gt;</code>（序列结束）、<code>&lt;unk&gt;</code>（未知词）。对于指令模型，还需要预留<code>&lt;|im_start|&gt;</code>和<code>&lt;|im_end|&gt;</code>来标记对话轮次。注意：<strong>一旦模型开始训练，词汇表就固定了</strong>，新加特殊token意味着要扩展embedding矩阵并重新训练或至少做embedding初始化，非常麻烦。所以训练前要把会用到的所有特殊token都预留好。</p>
+
+        <p><strong>多语言tokenization策略。</strong>如果你要做多语言模型，一个常见策略是在训练tokenizer时按语言比例对数据进行上采样，确保低频语言也能产生足够的token。但不是所有语言的字符集都适合放在tokenizer中——比如阿拉伯语和希伯来语的从右到左书写方向、中文和日文的大字符集、韩语的组合式文字，每种都需要不同的处理策略。一个实用的建议是：<strong>确保每种目标语言在你的tokenizer训练数据中至少有1GB的纯文本</strong>，否则该语言在tokenizer中的覆盖率会很低。</p>
+
+        <h3>3.5 Tokenizer常见问题</h3>
+
+        <p>下面这几个问题是实际项目中反复出现的"tokenizer杀手"，每一个都是我或我身边的团队踩过的坑。</p>
+
+        <p><strong>Tokenization Tax（分词税）。</strong>这是Andrej Karpathy提出的概念：<strong>不同词汇的token消耗差异非常大</strong>。比如"cat"在GPT-4的tokenizer中是1个token，"catastrophe"则需要3个token（"cat"+"astr"+"ophe"）。这意味着模型处理"catastrophe"需要3倍的计算量，但这个词并没有多3倍的语义信息。更极端的例子是密码学相关内容——一个base64编码的字符串可能需要几十个token来表达非常少的信息。这个问题在代码数据中尤其严重：变量名<code>get_user_by_id</code>可能被分成6-7个token，而<code>g</code>可能只占1个token。</p>
+
+        <p><strong>中文分词的"坑"。</strong>中文没有空格分隔，对于基于英文设计的tokenizer来说是个大挑战。比如"南京市长江大桥"这个经典歧义句，英文式tokenizer可能会把它分成<code>["南京", "市长", "江", "大桥"]</code>而不是正确的<code>["南京市", "长江大桥"]</code>。更实际的问题：很多中文专有名词（如"强化学习""卷积神经网络"）如果被分成了多个碎片，模型需要花额外的训练步数才能把它们"拼回来"。好的tokenizer应该让这些高频中文术语作为完整token出现。</p>
+
+        <p><strong>数字和代码的分词问题。</strong>数字是tokenizer的老大难。对于<code>3.1415926535</code>，一个基于BPE的tokenizer可能把它分成<code>["3", ".14", "15", "92", "65", "35"]</code>——完全没有保留数字的数值连续性。这直接导致<strong>大模型的数学能力受限</strong>：模型知道"3.14"是π的近似值，但当你问"3.14后面的数字是什么"时，它无法从token序列中推断出"15"紧随其后，因为表示层已经碎了。代码数据也有类似问题——缩进（空格和tab的混合）、换行符、Unicode标识符都可能导致奇怪的切分。</p>
+
+        <pre><code># 同一个数学表达式的不同tokenization结果对比
+expression = "3.1415926535 * 2 = 6.283185307"
+
+# GPT-4 tokenizer (tiktoken) 示例：
+# ["3", ".141", "59", "265", "35", " *", " 2", " =", " 6", ".283", "185", "307"]
+# 总共12个token，数字被碎片化
+
+# 一个理想的"数学友好"tokenizer:
+# ["3.1415926535", " *", " 2", " =", " 6.283185307"]
+# 总共5个token，保留了数值完整性</code></pre>
+
+        <div class="warning">
+            <p><strong>踩坑故事</strong>：我之前参与的一个项目，团队花了几百万训练了一个代码生成模型，结果在生成Python代码时频繁出现<code>IndentationError</code>。排查了两周才发现是tokenizer的问题：我们的tokenizer训练数据里，缩进混用了空格和tab，导致tokenizer把"四个空格"和"一个tab"当成了不同的token来处理。虽然它们在视觉上都产生4个空格的缩进，但token ID不同，模型在学习缩进模式时出现了混淆。最离谱的是，我们后来发现tokenizer还把<code>def</code>和<code>def </code>（带空格）分成了不同的token，导致模型在预测函数定义时，有相当概率选错token。修复方法：在训练tokenizer之前，统一把代码数据中的tab转成4个空格。</p>
+        </div>
+
+        <div class="highlight">
+            <p><strong>关于Tokenizer的黄金法则</strong>：训练tokenizer前，一定要用你的目标数据做一次"分词预览"——随机抽取1000条文本，用训练好的tokenizer切分，仔细看有没有奇怪的切分情况。特别是中文专有名词、数学表达式、代码关键字和特殊符号。如果发现异常，回头调整tokenizer训练参数或数据预处理方式。这个步骤不到30分钟，但可以避免后续数月的痛苦调试。</p>
+        </div>
+
+        <p>好的，第3章就到这里。今天我们系统地学习了tokenizer的原理、主流方案、设计决策和常见坑点。Tokenizer是模型和文本之间的桥梁，它做得好不好，直接决定了模型"看到"的世界是什么样子的。下一章，我们终于要进入Transformer架构本身了——自注意力机制、位置编码、FFN设计，这些才是模型的"大脑"。把tokenizer的基础打牢，我们再深入模型的内部。第4章见。</p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

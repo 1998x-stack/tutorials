@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 优化器与学习率调度</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html" class="active">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第6章 优化器与学习率调度</h2>
+
+        <p>大家好，我是你们的讲师。前几章我们把模型架了起来、数据喂了进去、分布式框架也搭好了。但有一个问题贯穿始终：<strong>参数到底怎么更新？</strong>这就是优化器的职责。你可能觉得优化器不就是一个SGD或者Adam吗？随便选一个就好了。但事实是，优化器的选择和学习率调度策略对训练<strong>收敛速度</strong>和<strong>最终模型质量</strong>的影响非常大。同样的模型架构、同样的数据，换一个优化器，可能训练时间缩短30%，或者下游任务准确率提升2-3个百分点。</p>
+
+        <p>2025-2026年，优化器领域出现了非常值得关注的进展：Meta的Lion、DeepSeek的Muon、以及各种改进版的AdamW变体。这些新一代优化器在某些场景下大幅超越AdamW，但也不是万能的。这一章我会带大家从SGD到AdamW再到最新的Muon，走一遍优化器的演进路线，并给出实际选择建议。</p>
+
+        <h3>6.1 从SGD到AdamW</h3>
+
+        <p>优化器的演进本质上是在解决同一个问题：<strong>如何在非凸的高维损失曲面上快速找到好的局部最小值？</strong></p>
+
+        <p><strong>SGD（随机梯度下降）</strong>是最原始的方案：<code>θ = θ - η * ∇L(θ)</code>。简单但有两个明显问题：第一，收敛慢，特别是在"峡谷"形状的损失曲面上来回震荡；第二，难以处理稀疏特征——不同参数应该有不同的学习率。于是有了<strong>动量（Momentum）</strong>的引入，它积累历史梯度方向，像滚雪球一样加速收敛并减少震荡。</p>
+
+        <p><strong>AdaGrad、RMSProp、Adam</strong>的出现解决了"每个参数自适应学习率"的问题。Adam结合了动量和RMSProp的思路：维护一阶动量（梯度指数移动平均）和二阶动量（梯度平方的指数移动平均），用二阶动量调节每个参数的学习率。直观理解：如果某个参数的历史梯度一直很大，Adam就自动给它较小的学习率；如果历史梯度很小，就给它较大的学习率。</p>
+
+        <p><strong>AdamW</strong>是目前最广泛使用的优化器。它修正了Adam中长期存在的<strong>weight decay实现错误</strong>。原始的Adam在更新公式中把weight decay加在了动量更新之后，导致weight decay的效果被动量所"稀释"。AdamW将weight decay独立出来，直接在参数更新时减去<code>λ * θ</code>，而非先算动量再加weight decay。这个修正看似微小，但对大模型训练的泛化性能有显著影响——<strong>使用AdamW训练的大模型在下游任务上的准确率通常比使用Adam高1-2%</strong>。</p>
+
+        <pre><code># AdamW vs Adam 的关键差异代码对比
+import torch
+
+def adam_update(param, grad, exp_avg, exp_avg_sq, lr, wd, beta1, beta2, eps, step):
+    """修正的AdamW: weight decay独立于动量更新"""
+    # 1) 更新动量
+    exp_avg = beta1 * exp_avg + (1 - beta1) * grad
+    exp_avg_sq = beta2 * exp_avg_sq + (1 - beta2) * grad * grad
+
+    # 2) 偏差校正
+    corr_avg = exp_avg / (1 - beta1 ** step)
+    corr_avg_sq = exp_avg_sq / (1 - beta2 ** step)
+
+    # 3) 更新参数 - weight decay在动量更新之后独立应用
+    #    (与Adam的关键区别：Adam的weight decay是和动量混合的)
+    param = param - lr * corr_avg / (sqrt(corr_avg_sq) + eps)  # 动量更新
+    param = param - lr * wd * param                              # 独立的weight decay
+    return param, exp_avg, exp_avg_sq</code></pre>
+
+        <h3>6.2 新一代优化器对比</h3>
+
+        <p>2024-2025年出现了几个引人注目的优化器，在某些场景下表现出了显著优于AdamW的潜力。</p>
+
+        <p><strong>Lion（EvoLved Sign Momentum）</strong>由Google在2023年提出，是使用遗传算法"搜索"出来的优化器。它的更新规则极其简单：<code>θ = θ - η * sign(β₁ * m + (1-β₁) * g)</code>，只保留梯度方向的符号信息，数值大小完全丢弃。Lion最大的优势是<strong>节省显存</strong>（不需要存二阶动量），且在ImageNet和某些语言任务上比AdamW快2倍收敛。但问题也很明显：Lion在某些任务上表现出不稳定性，需要更精细的学习率调优。Meta的实验表明Lion在大规模LLM训练上不稳定，因此没有在Llama系列中使用。</p>
+
+        <p><strong>Muon</strong>是DeepSeek团队在2025年公开的优化器，基于Newton-Schulz迭代来近似矩阵的奇异值分解。核心思想是：<strong>对权重矩阵的梯度做正交化处理</strong>，让更新方向更"干净"。Muon在DeepSeek-V2/V3的训练中起到了关键作用，显著提升了训练效率和收敛速度。根据DeepSeek的技术报告，Muon在相同FLOPs下比AdamW提升了约15-20%的收敛速度。但Muon目前没有通用的开源实现，使用门槛较高。</p>
+
+        <p><strong>SOAP（Shampoo with Adam Preconditioning）</strong>是Adam和Shampoo的结合体。Shampoo通过估计梯度协方差矩阵的Kronecker积来做预条件，效果好但计算量太大。SOAP通过每N步才更新一次预条件矩阵来降低计算开销，在LLM领域取得了比AdamW更好的效果，但工程实现复杂度仍然偏高。</p>
+
+        <table>
+            <tr>
+                <th>优化器</th>
+                <th>核心机制</th>
+                <th>显存开销</th>
+                <th>收敛速度</th>
+                <th>稳定性</th>
+                <th>大规模LLM适用性</th>
+            </tr>
+            <tr>
+                <td>AdamW</td>
+                <td>自适应学习率+解耦weight decay</td>
+                <td>高（2倍参数量的FP32动量）</td>
+                <td>基准</td>
+                <td>非常稳定</td>
+                <td>业界标准</td>
+            </tr>
+            <tr>
+                <td>Lion</td>
+                <td>符号动量（SignSGD增强版）</td>
+                <td>低（1倍参数量的FP32动量）</td>
+                <td>1.5-2x</td>
+                <td>中等（需精细调LR）</td>
+                <td>有限（不稳定报告）</td>
+            </tr>
+            <tr>
+                <td>Muon</td>
+                <td>梯度正交化（Newton-Schulz）</td>
+                <td>中（额外矩阵计算开销）</td>
+                <td>1.15-1.2x</td>
+                <td>良好</td>
+                <td>已在DeepSeek验证</td>
+            </tr>
+            <tr>
+                <td>SOAP</td>
+                <td>Kronecker预条件+Adam</td>
+                <td>中（预条件矩阵）</td>
+                <td>1.1-1.3x</td>
+                <td>良好</td>
+                <td>适用于大模型</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>选择建议（2026年视角）</strong>：对于大多数团队，<strong>AdamW仍然是目前最安全、最省心的选择</strong>。它经过了极其充分的验证，调参经验丰富（LR通常在1e-4到3e-4之间，β₁=0.9，β₂=0.95，weight decay=0.1）。如果你有充足的调参预算和工程资源，可以尝试Muon（如果你能获得DeepSeek的实现）或SOAP。对显存极度敏感的场景（如微调大模型），可以试试Lion，但要做好调参时间更长的准备。</p>
+        </div>
+
+        <h3>6.3 学习率调度策略</h3>
+
+        <p>优化器决定了"每一步怎么走"，学习率调度决定了"每一步走多远"。两者同等重要。</p>
+
+        <p><strong>Warmup</strong>是几乎所有大模型训练的标配。在训练的最初几千步，学习率从0线性增长到目标值。为什么需要warmup？主要有两个原因：第一，<strong>模型在初始阶段参数是随机的，梯度包含大量噪声</strong>，直接给高学习率会导致参数剧烈震荡甚至炸掉loss；第二，<strong>Adam的二阶动量估计在初始阶段是不准确的</strong>（初始化为0，需要几步才能积累到稳定值），此时使用高学习率相当于信任了不准确的动量估计。典型的warmup步数是总训练步数的1-5%。</p>
+
+        <p><strong>Cosine Decay</strong>是最流行的衰减策略。学习率在warmup后按照cosine曲线从最大值逐渐下降到接近零。Cosine decay的优势是平滑——不像step decay那样突然改变学习率，cosine曲线在每个训练阶段都给出"恰到好处"的学习率。它的细微缺点是：末期学习率降得太低，可能导致模型在最后阶段收敛不够充分。</p>
+
+        <p><strong>WSD（Warmup-Stable-Decay）</strong>是2024年提出的新策略，也被称为"MiniCPM式"调度。它将训练分成三个阶段：①Warmup（几百到几千步）；②Stable（占总训练量的80-90%，保持恒定高学习率）；③Decay（末期快速衰减，占总训练量的10-20%）。WSD的优势在于：你可以在训练过程中随时选取Stable阶段的不同checkpoint来做最后的Decay，得到多个不同训练量的模型对比，而不必每次都从头训练。MiniCPM和Llama 3都采用了类似的策略。</p>
+
+        <p><strong>Constant LR</strong>（恒定学习率）在某些场景下也够用，特别是SFT阶段或训练量不大的场景。但预训练不建议使用——没有衰减，模型在末期可能无法收敛到更精细的局部最优。</p>
+
+        <pre><code># 常见学习率调度实现
+import math
+
+def get_lr_scheduler(name, step, warmup_steps, total_steps, max_lr, min_lr=0):
+    if step &lt; warmup_steps:
+        # Warmup: 线性增长
+        return max_lr * step / warmup_steps
+
+    if name == "cosine":
+        # Cosine Decay
+        progress = (step - warmup_steps) / (total_steps - warmup_steps)
+        return min_lr + 0.5 * (max_lr - min_lr) * (1 + math.cos(math.pi * progress))
+
+    elif name == "wsd":
+        # WSD: Warmup-Stable-Decay
+        decay_start = int(total_steps * 0.85)  # 最后15%做decay
+        if step &lt;= decay_start:
+            return max_lr  # Stable阶段
+        # Decay阶段使用cosine快速下降
+        progress = (step - decay_start) / (total_steps - decay_start)
+        return max_lr * (1 - progress)  # 线性衰减，或使用cosine
+
+    elif name == "constant":
+        return max_lr</code></pre>
+
+        <h3>6.4 梯度裁剪</h3>
+
+        <p>梯度裁剪（Gradient Clipping）是一个简单但极其有效的训练稳定性保障。它的作用是防止极端梯度值破坏模型参数。</p>
+
+        <p><strong>梯度范数裁剪（Global Norm Clipping）</strong>是最常见的方法。计算所有参数的梯度向量的L2范数，如果范数超过阈值max_norm，就按比例缩放所有梯度。公式很简单：<code>g = g * min(1, max_norm / ||g||)</code>。典型的阈值在1.0到10.0之间。对于大模型训练，我发现<code>max_norm=1.0</code>是一个好的起点——太大会让裁剪失效，太小会压制正常的梯度信号。</p>
+
+        <p><strong>梯度值裁剪（Value Clipping）</strong>是把每个梯度值裁剪到一个区间内（如[-1.0, 1.0]）。这种方法在大模型中较少使用，因为大模型不同层的梯度尺度差异很大，统一的值裁剪对某些层可能过于激进。</p>
+
+        <p>梯度裁剪对训练稳定性的影响非常显著。我在一个13B模型的训练中观察到：<strong>不开启梯度裁剪时，训练大约每500步就会出现一次loss尖峰</strong>（spike），有时尖峰后模型还能自己恢复，但严重时会炸成NaN。开启max_norm=1.0后，loss尖峰的频率降低了约90%，剩下的尖峰也温和得多。</p>
+
+        <div class="warning">
+            <p><strong>踩坑故事</strong>：我遇到过的最棘手的训练问题之一：一个7B模型在训练到第3万步时突然loss暴涨，然后所有模型参数都变成了NaN。我们检查了数据、检查了梯度、逐个组件排查——花了两天发现是一些<strong>极长的序列</strong>导致的问题。数据中有几个序列长度超过8K的异常文档（应该是数据清洗时漏掉的合并文本），这些超长序列在self-attention中的梯度极大，即使开启了梯度裁剪，裁剪后的梯度仍然让某些层"中毒"了。最终的解决方案是两管齐下：①加强数据清洗，严格限制最大序列长度；②在训练代码中增加<code>detect_anomaly</code>检查，一旦检测到NaN梯度，自动跳过当前batch并记录异常样本ID。这个教训告诉我们：<strong>梯度裁剪不是万能的，它只是第一道防线</strong>。</p>
+        </div>
+
+        <h3>6.5 批次大小与学习率的关系</h3>
+
+        <p>最后一个话题：当你增加分布式训练的GPU数量时，global batch size会线性增长。那么<strong>学习率应该随着batch size增大而增大吗？</strong>答案是：是的，但有一定的适用范围。</p>
+
+        <p><strong>Linear Scaling Rule</strong>指出：当batch size乘以k时，学习率也应该大约乘以k。直觉是，更大的batch size提供了更精确的梯度估计（方差更小），因此可以承受更大的学习率。但这个规则有一个关键前提：<strong>你的学习率没有超过"最大安全LR"</strong>。当batch size增加到某个点之后，继续线性缩放学习率会导致训练不稳定。</p>
+
+        <p>实践经验上，对于7B模型：batch size在512以下时，Linear Scaling Rule基本成立；batch size在512-2048时，学习率的增长率应该小于batch size的增长率（即使用sqrt缩放而非线性缩放）；batch size超过2048后，增加batch size不再带来明显的收敛加速，反而可能因为epoch数量减少而损害泛化性能。</p>
+
+        <p>Gopher团队（DeepMind, 2022）的一个实验很能说明问题：他们将batch size从256增加到4096（16倍），学习率从1e-4调整到4e-4（只增加了4倍而非16倍），最终收敛速度提高了约3倍，但模型在语言建模任务上的困惑度略有增加。这个结果表明：<strong>大批次训练的最优学习率增长曲线介于sqrt和linear之间</strong>。</p>
+
+        <table>
+            <tr>
+                <th>Batch Size</th>
+                <th>建议学习率（7B模型）</th>
+                <th>收敛加速倍数</th>
+                <th>注意事项</th>
+            </tr>
+            <tr>
+                <td>256</td>
+                <td>3e-4</td>
+                <td>1.0x（基准）</td>
+                <td>标准配置</td>
+            </tr>
+            <tr>
+                <td>512</td>
+                <td>4.5e-4</td>
+                <td>~1.5x</td>
+                <td>轻微调高LR即可</td>
+            </tr>
+            <tr>
+                <td>1024</td>
+                <td>6e-4</td>
+                <td>~2.0x</td>
+                <td>需要更长的warmup</td>
+            </tr>
+            <tr>
+                <td>2048</td>
+                <td>7e-4</td>
+                <td>~2.5x</td>
+                <td>可能达到质量上限</td>
+            </tr>
+            <tr>
+                <td>4096</td>
+                <td>8e-4</td>
+                <td>~3.0x</td>
+                <td>泛化可能下降</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <p><strong>实用建议</strong>：在开始大规模训练前，先用小规模实验（如1B模型、10B token）跑一个学习率扫描（LR scan）：固定batch size，尝试[1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3]六个学习率，每个跑1000步，观察loss下降曲线。选取下降最快且稳定的学习率作为基础LR。然后根据上述表格，按你的batch size调整。这个流程只需几小时，但可以避免几十万美元的踩坑。</p>
+        </div>
+
+        <p>好的，第6章就到这里。今天我们系统地学习了优化器和学习率调度：从SGD到AdamW的演进路径，Lion、Muon等新一代优化器的能力和局限，Warmup、Cosine Decay、WSD等调度策略的适用场景，梯度裁剪的配置技巧，以及batch size与学习率的配合关系。下一章，我们进入一个非常实操型的话题——<strong>混合精度与显存优化</strong>。当你的模型跑在单卡上显存吃紧、或者想用更低的训练成本时，混合精度训练、Gradient Checkpointing、Activation Offloading这些技术会是你的得力工具。第7章见。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

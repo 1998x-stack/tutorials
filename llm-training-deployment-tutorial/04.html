@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 Transformer架构深度解析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html" class="active">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第4章 Transformer架构深度解析</h2>
+
+        <p>大家好，我是你们的讲师。前两章我们把数据的准备工作做完了（数据清洗和tokenizer），现在终于到了模型本身。Transformer架构是当代大模型的"心脏"，不管是GPT、Llama、DeepSeek还是Qwen，底层都是Transformer的各种变体。理解Transformer的每一个组件，是训练大模型的必修课。</p>
+
+        <p>但注意，我不是要给你念论文。我会从<strong>训练和推理的工程视角</strong>来拆解Transformer：每个组件为什么这么设计？它在反向传播时有什么特性？不同的变体对训练效率和收敛速度有什么影响？这些才是你在实际训练中需要做的决策。之前我带过一个团队，他们完全套用了BERT的架构去训练一个生成式模型，结果收敛得非常慢。问题出在哪？核心原因是<strong>BERT用的是Post-Norm，而生成式模型用Pre-Norm收敛更快</strong>。这种"细节"决定成败的情况在Transformer中比比皆是。</p>
+
+        <h3>4.1 Attention is All You Need</h3>
+
+        <p>Self-Attention是Transformer的"灵魂"。它解决了RNN的核心痛点——无法并行化。对于"我喜欢吃苹果"这句话，RNN要一个词一个词地读过去才能知道"我"和"苹果"的关系，而self-attention一步到位，让每个位置都能直接"看到"所有其他位置。</p>
+
+        <p>self-attention的计算过程可以概括为三步。第一步，对输入序列中的每个token，通过三个不同的线性变换得到三个向量：<strong>Query（Q）、Key（K）、Value（V）</strong>。第二步，用Q与所有位置的K做点积、除以根号d_k（d_k是K的维度）做缩放、通过softmax归一化得到注意力权重——这就是scaled dot-product attention的核心公式：<code>Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) V</code>。第三步，用注意力权重加权求和所有的V，得到每个位置的输出。</p>
+
+        <p>这里有一个容易忽视的细节：<strong>除以sqrt(d_k)的必要性</strong>。当d_k很大时，Q和K的点积的方差会变大，导致softmax的梯度趋于极小（softmax进入饱和区）。缩放后，梯度流动得到保证。这个"小技巧"对训练的稳定性有决定性影响——如果你自己实现attention时忘记缩放，训练大概率会炸掉。</p>
+
+        <pre><code>import torch.nn.functional as F
+
+def scaled_dot_product_attention(Q, K, V, mask=None):
+    """Scaled Dot-Product Attention 的简化实现"""
+    d_k = Q.size(-1)
+    # Q, K, V shape: (batch, heads, seq_len, d_k)
+
+    # 计算注意力分数: Q @ K^T / sqrt(d_k)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / (d_k ** 0.5)
+
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+
+    # softmax归一化
+    attn_weights = F.softmax(scores, dim=-1)
+
+    # 加权求和
+    output = torch.matmul(attn_weights, V)
+    return output, attn_weights</code></pre>
+
+        <h3>4.2 注意力机制变体</h3>
+
+        <p>标准的Multi-Head Attention（MHA）虽然有强大的表达能力，但它的计算和显存开销是最大的。特别是在推理阶段，KV cache的大小直接和头数成正比。于是研究人员提出了几种省钱的变体。</p>
+
+        <p><strong>MHA (Multi-Head Attention)</strong>：原始Transformer的方案。将Q、K、V分别投影到h个头，每个头独立计算attention，最后拼接并线性投影。假设h=32、d_k=128，那么每个token的KV cache大小是 2 × 32 × 128 = 8,192个float。对于8K上下文，单是KV cache就需要32M个float（约128MB）。</p>
+
+        <p><strong>MQA (Multi-Query Attention)</strong>：所有头共享一组K和V，每个头只用自己独立的Q。KV cache直接缩小到1/h，推理成本极大降低。PaLM和ChatGLM都采用了MQA。缺点是模型容量略有下降，但实验表明<strong>在模型规模足够大时，MQA和MHA的效果差距几乎可以忽略</strong>。</p>
+
+        <p><strong>GQA (Grouped-Query Attention)</strong>：MHA和MQA的中庸方案。将h个query头分成g组，每组共享一套K和V。Llama 2/3采用了GQA（一般是8组KV头对应32个query头）。GQA在计算效率（推理速度）和模型质量之间取得了很好的平衡，现在是2026年新模型的事实标准。</p>
+
+        <table>
+            <tr>
+                <th>特性</th>
+                <th>MHA</th>
+                <th>MQA</th>
+                <th>GQA</th>
+            </tr>
+            <tr>
+                <td>KV头数</td>
+                <td>= Q头数 (h)</td>
+                <td>1</td>
+                <td>g (通常g=8)</td>
+            </tr>
+            <tr>
+                <td>KV Cache大小</td>
+                <td>2 × h × d_k × L</td>
+                <td>2 × 1 × d_k × L</td>
+                <td>2 × g × d_k × L</td>
+            </tr>
+            <tr>
+                <td>推理加速（相对MHA）</td>
+                <td>1.0x</td>
+                <td>~1.5-2.0x</td>
+                <td>~1.3-1.6x</td>
+            </tr>
+            <tr>
+                <td>质量损失</td>
+                <td>基准</td>
+                <td>轻微（大模型可忽略）</td>
+                <td>极小</td>
+            </tr>
+            <tr>
+                <td>代表模型</td>
+                <td>BERT, GPT-2</td>
+                <td>PaLM, ChatGLM</td>
+                <td>Llama 2/3, DeepSeek-V2</td>
+            </tr>
+        </table>
+
+        <h3>4.3 前馈网络(FFN)设计</h3>
+
+        <p>Attention层负责"交流"——让token之间互相交换信息。FFN层负责"思考"——对每个token独立进行非线性变换。经典的FFN是两个线性层加一个激活函数：<code>FFN(x) = W2 * GELU(W1 * x + b1) + b2</code>。其中W1将维度从d_model映射到d_ff（通常是4× d_model），W2再映射回来。</p>
+
+        <p><strong>SwiGLU</strong>激活函数是近年最重要的FFN改进。原始的GELU激活虽然好，但被<strong>门控机制</strong>的思路超越。SwiGLU的公式为：<code>SwiGLU(x) = (x * W1) ⊙ SiLU(x * W3) * W2</code>。这里多了一个W3门控矩阵，相当于把FFN的参数量增加了约1/3。但很多实验证明，<strong>即使将d_ff缩小以保持总参数量不变，SwiGLU也显著优于GELU</strong>。LLaMA、DeepSeek、Qwen都验证了这一点。</p>
+
+        <p>FFN维度的选择也有学问。经典的<code>d_ff = 4 × d_model</code>是一个好的起点，但实际工程中需要根据模型规模调整。对于MoE架构（第9章详述），每个expert的FFN维度甚至可以缩小到<code>d_ff = d_model</code>（即每个expert只有约d_model^2的参数），以压缩总参数量。</p>
+
+        <div class="tip">
+            <p><strong>实践建议</strong>：不管你做什么模型，如果从头设计Transformer，建议直接采用SwiGLU FFN + GQA的组合。这个组合在LLaMA 2/3上被充分验证过，后续的DeepSeek和Qwen系列也验证了这个选择。别在激活函数上浪费时间创新——SwiGLU是目前工程上最有优势的选择。</p>
+        </div>
+
+        <h3>4.4 位置编码演进</h3>
+
+        <p>Self-Attention本身是<strong>置换不变</strong>（permutation-invariant）的——你把输入序列的顺序打乱，self-attention的输出也会以同样的方式打乱，但语义就全变了！位置编码的作用就是给模型提供"token在序列中的位置信息"。</p>
+
+        <p><strong>Sinusoidal位置编码</strong>是原始Transformer的方案，用不同频率的正弦和余弦函数来编码位置。它的优点是不需要学习（固定编码）、可以外推到训练时没见过的序列长度。效果上总体来说够用，但在长序列场景下表现不如后来出现的可学习位置编码。</p>
+
+        <p><strong>RoPE（旋转位置编码）</strong>是目前的主流方案，几乎所有2023年后的大模型都采用了它。RoPE的核心思想非常巧妙：<strong>不是把位置编码加到输入embedding上，而是通过旋转矩阵来变换Q和K向量</strong>。具体来说，对于位置p的Q向量，RoPE将其第i和第i+1维构成一个二维平面，在这个平面上旋转p×θ_i弧度，其中θ_i是预设的频率。这样做的数学性质非常好：<code>Q_p · K_q</code>（位置p的Q和位置q的K的点积）<strong>只取决于p-q的相对距离</strong>，而不是绝对位置。</p>
+
+        <p>RoPE还有一个关键优势：<strong>更好的外推能力</strong>。因为相对位置编码的天然特性，RoPE在推理时处理比训练时更长的序列时，效果衰减比绝对位置编码慢得多。这为NTK-aware scaling和YaRN等扩展上下文窗口的方法奠定了基础（我们会在第12章详细讨论）。</p>
+
+        <p>截至2026年，几乎所有主流大模型（Llama、DeepSeek、Qwen、Mistral）都已经切换到RoPE。如果你还在使用可学习位置编码或其它方案，强烈建议迁移。</p>
+
+        <h3>4.5 归一化与残差连接</h3>
+
+        <p>归一化和残差连接是让深层网络能够稳定训练的"工程奇迹"。没有它们，几十层甚至上百层的transformer根本无法收敛。</p>
+
+        <p><strong>Pre-Norm vs Post-Norm</strong>的争议是transformer架构历史上最重要的一次演进。原始Transformer论文用的是<strong>Post-Norm</strong>：<code>output = LayerNorm(x + Sublayer(x))</code>。但实验发现Post-Norm在深层网络中训练不稳定，需要非常细致的warmup策略。GPT-2和之后的模型转向了<strong>Pre-Norm</strong>：<code>output = x + Sublayer(LayerNorm(x))</code>。Pre-Norm的梯度流动在初始阶段更健康——每个残差分支的梯度可以直接传到前面的层，不受layer norm的缩放影响。</p>
+
+        <pre><code># Post-Norm vs Pre-Norm 对比
+class PostNormBlock(nn.Module):
+    """原始Transformer的Post-Norm"""
+    def forward(self, x):
+        return LayerNorm(x + self.attention(x))
+
+class PreNormBlock(nn.Module):
+    """现代LLM的Pre-Norm"""
+    def forward(self, x):
+        return x + self.attention(LayerNorm(x))</code></pre>
+
+        <p><strong>RMSNorm</strong>是LayerNorm的简化版本。LayerNorm计算均值和方差来做归一化，而RMSNorm只计算RMS（均方根），去掉了均值中心化步骤。实验表明RMSNorm在各种任务上的表现与LayerNorm几乎没有差别，但因为少了一次统计量计算，在分布式训练中可以减少一次allreduce通信。Llama和DeepSeek都使用了RMSNorm。</p>
+
+        <p><strong>残差连接的梯度流动</strong>是一个容易被忽视但极其重要的话题。在Post-Norm中，梯度需要穿过layer norm的缩放，这在深层网络中会导致梯度衰减。而在Pre-Norm中，由于<code>output = x + F(LN(x))</code>，浅层的梯度直接从恒等分支传回来，不受深度影响。这也是为什么Pre-Norm可以在几百层的网络中稳定训练。但Pre-Norm也有代价：<strong>最终层的输出归一化不足</strong>，所以通常需要在所有transformer层之后再加一层final layer norm。</p>
+
+        <div class="warning">
+            <p><strong>踩坑故事</strong>：我曾经参与一个项目，团队在7B模型上做架构实验，想看看Post-Norm能不能在现代规模下追上Pre-Norm。我们在WMT机器翻译的小数据集上验证时，Post-Norm的收敛速度确实正常。但把训练扩展到500B token时，Post-Norm的loss出现了周期性的"尖峰"——每训练几千步，loss突然暴涨，然后缓慢恢复。检查梯度发现，Post-Norm在某些层的梯度范数出现了剧烈波动。而换成Pre-Norm之后彻底消除了这个问题。结论很清楚：<strong>在小规模实验上成立的结论，在大规模训练中可能完全不成</strong>。Post-Norm在深层网络中的不稳定性，在模型规模和训练数据量扩大时会被急剧放大。</p>
+        </div>
+
+        <div class="highlight">
+            <p><strong>本章核心架构公式（2026年推荐配置）</strong>：<br>
+            Pre-Norm + RMSNorm + RoPE + GQA(h=32,g=8) + SwiGLU FFN(d_ff=4×d_model)<br>
+            这五件套构成了当前大多数成功的大语言模型的通用框架。即使不做任何创新，照搬这个组合也能达到业界水准。</p>
+        </div>
+
+        <p>好的，第4章的内容到这里。今天我们详解了Transformer的核心组件：从attention机制（MHA/MQA/GQA的取舍），到FFN设计（SwiGLU的胜利），再到位置编码（RoPE的统治地位）和归一化策略（Pre-Norm + RMSNorm的组合）。理解这些组件的原理和工程意义，是你后续理解和学会分布式训练、MoE、训练稳定性等话题的基础。第5章，我们进入分布式训练的世界——为什么单张GPU训不了大模型，以及数据并行、FSDP等技术是如何解决这个问题的。咱们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 34 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 38 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
@@ -25,14 +25,15 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `tts-model-history-tutorial/` | TTS模型发展史 | 28 | `https://1998x-stack.github.io/tts-model-history-tutorial/` |
 | `llm-training-deployment-tutorial/` | 大模型训练与部署 | 28 | `https://1998x-stack.github.io/llm-training-deployment-tutorial/` |
 
-### 数学基础 (3)
+### 数学基础 (4)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `numerical-analysis-tutorial/` | 数值分析 | 28 | `https://1998x-stack.github.io/numerical-analysis-tutorial/` |
 | `advanced-matrix-analysis-tutorial/` | 高级矩阵分析 | 28 | `https://1998x-stack.github.io/advanced-matrix-analysis-tutorial/` |
 | `calculus-tutorial/` | 微积分 | 28 | `https://1998x-stack.github.io/calculus-tutorial/` |
+| `electromagnetism-tutorial/` | 电磁学 | 28 | `https://1998x-stack.github.io/electromagnetism-tutorial/` |
 
-### 系统 / 基础设施 (10)
+### 系统 / 基础设施 (11)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `vllm-tutorial/` | vLLM推理引擎 | 28 | `https://1998x-stack.github.io/vllm-tutorial/` |
@@ -45,6 +46,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `claude-code-agent-tutorial/` | Claude Code Agent | 28 | `https://1998x-stack.github.io/claude-code-agent-tutorial/` |
 | `backend-development-tutorial/` | 后端开发实战 | 28 | `https://1998x-stack.github.io/backend-development-tutorial/` |
 | `compiler-principles-tutorial/` | 编译原理 | 28 | `https://1998x-stack.github.io/compiler-principles-tutorial/` |
+| `computer-architecture-tutorial/` | 计算机体系结构 | 28 | `https://1998x-stack.github.io/computer-architecture-tutorial/` |
 
 ### 网络 / 通信 (3)
 | Directory | Topic | Chapters | URL |

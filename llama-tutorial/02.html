@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第2章 Transformer回顾与LLaMA总览 — LLaMA 完全拆解教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦙 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLaMA系列概述</a></li>
+            <li><a href="02.html" class="active">第2章 Transformer回顾与LLaMA总览</a></li>
+            <li><a href="03.html">第3章 RoPE旋转位置编码</a></li>
+            <li><a href="04.html">第4章 RMSNorm归一化</a></li>
+            <li><a href="05.html">第5章 SwiGLU激活函数</a></li>
+            <li><a href="06.html">第6章 分词器与词表设计</a></li>
+            <li><a href="07.html">第7章 缩放定律与训练策略</a></li>
+            <li><a href="08.html">第8章 GQA分组查询注意力</a></li>
+            <li><a href="09.html">第9章 预训练数据工程</a></li>
+            <li><a href="10.html">第10章 训练稳定性与优化器</a></li>
+            <li><a href="11.html">第11章 LLaMA 1完整预训练流程</a></li>
+            <li><a href="12.html">第12章 LLaMA 2对话模型与SFT</a></li>
+            <li><a href="13.html">第13章 RLHF全流程</a></li>
+            <li><a href="14.html">第14章 安全对齐与幻觉抑制</a></li>
+            <li><a href="15.html">第15章 模型量化与推理加速</a></li>
+            <li><a href="16.html">第16章 分布式训练策略</a></li>
+            <li><a href="17.html">第17章 上下文窗口扩展</a></li>
+            <li><a href="18.html">第18章 评估体系与基准测试</a></li>
+            <li><a href="19.html">第19章 LLaMA 3大规模训练系统</a></li>
+            <li><a href="20.html">第20章 多模态融合</a></li>
+            <li><a href="21.html">第21章 工具调用与代码能力</a></li>
+            <li><a href="22.html">第22章 多语言扩展策略</a></li>
+            <li><a href="23.html">第23章 HuggingFace生态与模型加载</a></li>
+            <li><a href="24.html">第24章 LoRA微调实战</a></li>
+            <li><a href="25.html">第25章 推理部署方案</a></li>
+            <li><a href="26.html">第26章 LLaMA 3.2边缘部署与小模型</a></li>
+            <li><a href="27.html">第27章 LLaMA 4展望与MoE架构</a></li>
+            <li><a href="28.html">第28章 开源LLM生态与未来趋势</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第2章 Transformer回顾与LLaMA总览</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们居高临下地俯瞰了LLaMA帝国的全貌，从系列演进到生态影响力都有了整体认知。现在我们要降落到地面，开始真正搭建技术理解的根基。这一章我们要做两件事：第一，回顾标准Transformer架构的核心组件——因为LLaMA的所有设计都是在Transformer基础上的改进；第二，在Transformer的参照系中，看清LLaMA整体架构的全貌，建立起"基础架构对比清单"。</p>
+
+        <p>如果你对Transformer已经很熟悉了，可以直接跳到2.3节看LLaMA的架构全景。但我建议还是花几分钟快速过一遍前面内容——因为LLaMA对标准Transformer的修改非常精准，只有对原始设计有深刻理解，才能体会这些修改的巧妙之处。</p>
+
+        <h3>2.1 标准Transformer架构回顾</h3>
+
+        <p>2017年Google发表的论文<em>"Attention Is All You Need"</em>彻底改变了NLP领域的游戏规则。Transformer的核心思想是：<strong>抛弃循环和卷积，完全基于注意力机制来建模序列中的依赖关系</strong>。这个看似激进的决策，后来被证明是那个十年中最成功的架构创新之一。</p>
+
+        <p>标准的Transformer架构是一个Encoder-Decoder结构。Encoder负责将输入序列编码成连续的表示，Decoder则基于这些表示自回归地生成输出。我们逐一拆解其中的关键组件。</p>
+
+        <h4>2.1.1 Self-Attention（自注意力机制）</h4>
+
+        <p>Self-Attention是Transformer的核心中的核心。它的直觉是这样：对于序列中的每一个token，我们需要决定在生成它的表示时，应该"关注"序列中的哪些其他token。比如在句子"I saw a cat and it was cute"中，理解"it"这个代词时，模型需要把注意力集中在"cat"上。</p>
+
+        <p>数学上，Self-Attention通过三个投影矩阵将每个token的输入向量分别映射为Query（Q）、Key（K）和Value（V）：</p>
+
+        <pre><code># Self-Attention 数学形式
+# 输入: X ∈ R^(n×d), 其中 n=序列长度, d=隐藏维度
+# 投影矩阵: W_Q, W_K, W_V ∈ R^(d×d_k), W_O ∈ R^(d_k×d)
+
+Q = X · W_Q      # Query: 表示当前token"想找什么"
+K = X · W_K      # Key:   表示当前token"有什么"
+V = X · W_V      # Value: 表示当前token"要提供什么"
+
+# 注意力分数 = Q · K^T / sqrt(d_k)
+# 注意力权重 = softmax(注意力分数)
+# 输出 = 注意力权重 · V
+
+Attention(Q,K,V) = softmax(Q · K^T / sqrt(d_k)) · V</code></pre>
+
+        <p>这里有一个很重要的设计细节：除以sqrt(d_k)是为了防止内积过大导致softmax梯度消失。当d_k很大时，Q和K的点积可能数值很大，经过softmax后会集中在极少数的token上，梯度几乎为零——训练就没法继续了。这个scaling factor是Transformer数不惊人的精妙设计之一。</p>
+
+        <p>Multi-Head Attention（多头注意力）是这个机制的扩展：我们不只做一次Self-Attention，而是并行地做h次，每次使用不同的投影矩阵，然后把所有头的输出拼接起来再做一次线性变换。这样做的好处是让模型能够在不同的表示子空间里捕捉不同类型的依赖关系——有些头可能关注语法关系，有些头关注语义关联。</p>
+
+        <h4>2.1.2 FFN（前馈神经网络层）</h4>
+
+        <p>每个Transformer层在Self-Attention之后都有一个Feed-Forward Network（FFN）。它的结构很简单：两个线性变换夹一个非线性激活函数。标准Transformer使用的激活函数是ReLU。</p>
+
+        <pre><code># 标准Transformer FFN
+# 输入: x ∈ R^d
+# 隐藏层维度: d_ff (通常是 4×d)
+
+FFN(x) = W_2 · ReLU(W_1 · x + b_1) + b_2</code></pre>
+
+        <p>为什么Self-Attention之后还需要FFN？直觉上，Self-Attention负责在不同位置之间交换信息（"注意力在哪里"），而FFN负责对每个位置独立地进行非线性变换（"这个信息怎么变换"）。两者分工协作，缺一不可。没有FFN的Transformer就像一个只能"传话"不能"思考"的系统——每个token知道谁在关注它，但不知道怎么处理收到的信息。</p>
+
+        <div class="tip">
+            <strong>思考题：</strong> 为什么FFN的隐藏层维度通常是4×d？这个"4"是拍脑袋拍出来的吗？实际上，这个选择在原始的Transformer论文中确实没有给出严格的理论依据，更多是基于"这个大小效果不错"的经验选择。有趣的是，LLaMA 3在405B模型中将这个比例从4×调整到了约(8/3)×——我们在第5章会解释为什么。
+        </div>
+
+        <h4>2.1.3 LayerNorm与残差连接</h4>
+
+        <p>Transformer的另一个关键设计是Add & Norm——在Self-Attention和FFN之后，先做残差连接（Add），再做Layer Normalization（Norm）。</p>
+
+        <p>残差连接最初在ResNet中被提出，解决深度网络中的梯度消失问题。Transformer借用了这个思路：每个子层的输出是"输入 + 子层运算结果"，这样梯度可以直接通过残差路径回传到浅层，训练数十层的Transformer变得可行。</p>
+
+        <p>LayerNorm则是将每个token的表示归一化到均值为0、方差为1的分布上，然后通过可学习的缩放参数γ和偏移参数β来恢复模型的表达能力。公式如下：</p>
+
+        <pre><code># LayerNorm
+# 输入: x ∈ R^d
+μ = mean(x)           # 计算均值
+σ = std(x)            # 计算标准差
+x_norm = (x - μ) / σ  # 归一化
+y = γ · x_norm + β   # 缩放和平移</code></pre>
+
+        <p>LayerNorm的重要性在于它能稳定训练过程，减少对学习率的敏感性。我们会在第4章深入讨论LLaMA为什么用RMSNorm替代了LayerNorm。</p>
+
+        <h4>2.1.4 位置编码（Positional Encoding）</h4>
+
+        <p>Transformer的Self-Attention是一个排列不变（permutation-invariant）的操作——如果把输入序列的顺序打乱，输出也会相应打乱，但attention map本身不变。这意味着Transformer自己不知道"cat在I之后"这样的位置信息。所以我们必须在输入中注入位置信息。</p>
+
+        <p>原始Transformer使用了Sinusoidal位置编码：用不同频率的正弦和余弦函数为每个位置生成一个固定向量，加到输入embedding上。这种方法的好处是不需要学习额外的参数，而且可以外推到训练时未见过的序列长度。但缺点是绝对位置编码的表达能力有限，无法很好地建模相对位置关系——这正是LLaMA选择RoPE的原因之一。</p>
+
+        <div class="highlight">
+            <strong>回顾总结：</strong> 标准Transformer = Embedding + Positional Encoding + N×(Self-Attention + FFN + Add & Norm)。Encoder和Decoder都遵循这个结构，但Decoder多了一个Masked Self-Attention和Cross-Attention。Encoder处理输入序列，Decoder根据Encoder的输出自回归地生成目标序列。这个架构在机器翻译、文本摘要等Seq2Seq任务上取得了巨大成功。
+        </div>
+
+        <h3>2.2 Decoder-only架构的兴起</h3>
+
+        <p>LLaMA和GPT系列都使用了Decoder-only架构，而不是原始的Encoder-Decoder。这个转变的背后有深刻的历史和技术原因。</p>
+
+        <p>GPT-1（2018）率先证明了只用Decoder就能做有效的语言建模：在用Masked Self-Attention保证因果性（即每个token只能看到它前面的token）的前提下，训练一个自回归语言模型。GPT-2展示了这种架构的scaling潜力：模型越大，zero-shot能力越强。GPT-3则彻底验证了Decoder-only架构在few-shot learning上的优势。</p>
+
+        <p>为什么Decoder-only在LLM时代胜出了？有以下几个原因：</p>
+
+        <table>
+            <tr>
+                <th>考量维度</th>
+                <th>Encoder-Decoder</th>
+                <th>Decoder-only</th>
+            </tr>
+            <tr>
+                <td>参数量效率</td>
+                <td>需要两套参数（编码器+解码器）</td>
+                <td>一套参数，同等计算量下模型更大</td>
+            </tr>
+            <tr>
+                <td>训练目标</td>
+                <td>Denoising + Auto-regressive（多阶段）</td>
+                <td>Next token prediction（单一目标）</td>
+            </tr>
+            <tr>
+                <td>推理效率</td>
+                <td>需先编码再解码，延迟更高</td>
+                <td>自回归生成，无需编码阶段</td>
+            </tr>
+            <tr>
+                <td>长文本处理</td>
+                <td>Encoder能处理全文，但Decoder有长度限制</td>
+                <td>受限于上下文窗口，但可通过RoPE等扩展</td>
+            </tr>
+            <tr>
+                <td>Chat/对话适配</td>
+                <td>需要额外适配</td>
+                <td>天然适合多轮对话（前缀就是上下文）</td>
+            </tr>
+            <tr>
+                <td>代表性模型</td>
+                <td>T5, BART</td>
+                <td>GPT系列, LLaMA, Mistral</td>
+            </tr>
+        </table>
+
+        <p>Decoder-only架构一个经常被忽视的优势是训练目标的简洁性。Next token prediction是一个极其简单的损失函数：对于输入序列中的每个位置，模型需要预测下一个token。这种简洁性意味着可以高效地使用海量文本数据进行训练——不需要构造特殊的输入-输出对，任何文本序列都可以用作训练数据。相比之下，Encoder-Decoder的Denoising目标（如T5的span corruption）需要额外的数据预处理步骤。</p>
+
+        <div class="warning">
+            <strong>注意区分：</strong> Decoder-only和"仅使用Decoder的Transformer架构"其实有细微差别。原始Transformer的Decoder使用了Cross-Attention来关注Encoder的输出，而Decoder-only模型（如GPT和LLaMA）去掉Cross-Attention层，只保留Masked Self-Attention和FFN。所以更准确地说，LLaMA的架构是"去掉Cross-Attention的Decoder"。
+        </div>
+
+        <h3>2.3 LLaMA原生解码器架构全景</h3>
+
+        <p>现在我们来正式介绍LLaMA的架构。LLaMA使用的是Decoder-only架构，但相比原始Transformer的Decoder，LLaMA做了几项关键改进。下面这张对照表可以让差异一目了然：</p>
+
+        <table>
+            <tr>
+                <th>组件</th>
+                <th>原始Transformer Decoder</th>
+                <th>LLaMA Decoder</th>
+                <th>差异说明</th>
+            </tr>
+            <tr>
+                <td>归一化方式</td>
+                <td>Post-LayerNorm</td>
+                <td>Pre-RMSNorm</td>
+                <td>归一化位置从子层输出移到输入，去掉均值中心化</td>
+            </tr>
+            <tr>
+                <td>激活函数</td>
+                <td>ReLU</td>
+                <td>SwiGLU</td>
+                <td>门控线性单元 + Swish激活</td>
+            </tr>
+            <tr>
+                <td>位置编码</td>
+                <td>Sinusoidal（绝对位置编码）</td>
+                <td>RoPE（旋转位置编码）</td>
+                <td>相对位置编码，更好的外推能力</td>
+            </tr>
+            <tr>
+                <td>注意力机制</td>
+                <td>MHA（标准多头注意力）</td>
+                <td>MHA / GQA（取决于版本）</td>
+                <td>LLaMA 2-70B及LLaMA 3系列使用GQA</td>
+            </tr>
+            <tr>
+                <td>Bias项</td>
+                <td>有bias</td>
+                <td>无bias（线性层中）</td>
+                <td>简化设计，减少参数</td>
+            </tr>
+            <tr>
+                <td>Dropout</td>
+                <td>有dropout</td>
+                <td>无dropout</td>
+                <td>预训练阶段不使用dropout</td>
+            </tr>
+            <tr>
+                <td>分词器</td>
+                <td>BPE</td>
+                <td>SentencePiece / tiktoken</td>
+                <td>LLaMA 3改用tiktoken，词表128K</td>
+            </tr>
+        </table>
+
+        <p>光看表格可能还不够直观，让我用文字描述一个LLaMA Decoder层的完整数据流：</p>
+
+        <pre><code># LLaMA Decoder 层的数据流
+# 输入: x (hidden_dim 维向量)
+
+1. x_norm = RMSNorm(x)                          # Pre-normalization
+2. x_attn = SelfAttention(x_norm) + x            # RoPE + Masked MHA/GQA + 残差连接
+3. x_norm2 = RMSNorm(x_attn)                     # Pre-normalization（第二处）
+4. x_ffn = SwiGLU_FFN(x_norm2) + x_attn          # SwiGLU FFN + 残差连接
+5. 输出: x_ffn                                   # 作为下一层的输入
+
+# 核心要点
+# - RMSNorm 放在每个子层之前（Pre-normalization）
+# - Self-Attention 中无 bias
+# - FFN 使用三个权重矩阵（SwiGLU 门控结构）
+# - 无 dropout
+# - 所有子层都有残差连接</code></pre>
+
+        <h3>2.4 LLaMA系列参数配置表</h3>
+
+        <p>LLaMA家族每一代都有多种参数规模的版本，理解它们的配置差异对后续章节的学习至关重要。下面是各代模型的核心架构参数一览：</p>
+
+        <table>
+            <tr>
+                <th>模型版本</th>
+                <th>参数量</th>
+                <th>隐藏维度</th>
+                <th>注意力头数</th>
+                <th>层数</th>
+                <th>FFN中间维度</th>
+                <th>上下文长度</th>
+            </tr>
+            <tr>
+                <td rowspan="4">LLaMA 1</td>
+                <td>7B</td>
+                <td>4096</td>
+                <td>32</td>
+                <td>32</td>
+                <td>11008</td>
+                <td>2048</td>
+            </tr>
+            <tr>
+                <td>13B</td>
+                <td>5120</td>
+                <td>40</td>
+                <td>40</td>
+                <td>13824</td>
+                <td>2048</td>
+            </tr>
+            <tr>
+                <td>33B</td>
+                <td>6656</td>
+                <td>52</td>
+                <td>60</td>
+                <td>17920</td>
+                <td>2048</td>
+            </tr>
+            <tr>
+                <td>65B</td>
+                <td>8192</td>
+                <td>64</td>
+                <td>80</td>
+                <td>22016</td>
+                <td>2048</td>
+            </tr>
+            <tr>
+                <td rowspan="3">LLaMA 2</td>
+                <td>7B</td>
+                <td>4096</td>
+                <td>32</td>
+                <td>32</td>
+                <td>11008</td>
+                <td>4096</td>
+            </tr>
+            <tr>
+                <td>13B</td>
+                <td>5120</td>
+                <td>40</td>
+                <td>40</td>
+                <td>13824</td>
+                <td>4096</td>
+            </tr>
+            <tr>
+                <td>70B</td>
+                <td>8192</td>
+                <td>64 (8 KV heads)</td>
+                <td>80</td>
+                <td>28672</td>
+                <td>4096</td>
+            </tr>
+            <tr>
+                <td rowspan="3">LLaMA 3</td>
+                <td>8B</td>
+                <td>4096</td>
+                <td>32 (8 KV heads)</td>
+                <td>32</td>
+                <td>14336</td>
+                <td>8192</td>
+            </tr>
+            <tr>
+                <td>70B</td>
+                <td>8192</td>
+                <td>64 (8 KV heads)</td>
+                <td>80</td>
+                <td>28672</td>
+                <td>8192</td>
+            </tr>
+            <tr>
+                <td>405B</td>
+                <td>16384</td>
+                <td>128 (8 KV heads)</td>
+                <td>126</td>
+                <td>53248</td>
+                <td>8192</td>
+            </tr>
+        </table>
+
+        <p>观察这张表，有几个值得注意的模式。首先，<strong>隐藏维度（hidden_dim）和层数（num_layers）随着参数量大致呈线性增长</strong>，但注意力头数（num_heads）的增加相对缓慢。这意味着在更大的模型中，每个注意力头处理的维度更大。其次，<strong>FFN中间维度从LLaMA 1约2.7×d增长到LLaMA 3约3.5×d</strong>——这反映了SwiGLU的hidden_dim与标准ReLU FFN的差异（我们第5章会解释原因）。</p>
+
+        <p>再看上下文长度：LLaMA 1是2K，LLaMA 2翻倍到4K，LLaMA 3进一步提升到8K（后续可通过NTK-aware scaling扩展到128K）。这不仅仅是简单的"扩内存"，每次扩展都需要在RoPE的频率设计、训练数据的长度分布等方面做调整。</p>
+
+        <p>还有一个容易被忽视的变化：<strong>LLaMA 2的70B首次引入GQA</strong>，而LLaMA 3的所有规模都使用了GQA。GQA的KV头数（8）不随参数量变化——也就是说，405B模型虽然注意力头有128个，但KV投影只有8组（每组服务16个query头）。这个设计对推理效率的影响我们在第8章会深入分析。</p>
+
+        <h3>2.5 架构演进路线图</h3>
+
+        <p>从LLaMA 1到LLaMA 3，架构层面的演进呈现出一个清晰的路径。让我用一张路线图串联起来：</p>
+
+        <p><strong>LLaMA 1（2023.02）—— 架构奠基期</strong><br>
+        LLaMA 1定义了三项核心架构创新：RoPE替代绝对位置编码、RMSNorm替代LayerNorm、SwiGLU替代ReLU。这三个选择的组合在多种benchmark上展现出显著优势，后续几乎全部开源LLM都沿用了这个范式。LLaMA 1的架构在今天的标准来看已经算"朴素"——没有GQA、没有Grouped-Query Attention、词表只有32K——但它为所有后续版本奠定了基础。</p>
+
+        <p><strong>LLaMA 2（2023.07）—— 注意力优化期</strong><br>
+        LLaMA 2在架构层面的主要变化是在70B模型上引入了GQA（Grouped Query Attention）。这个改进的动机非常实际：70B模型的KV Cache在推理时占用大量显存，有了GQA可以用更少的显存支持更大的batch size。对于小规模（7B和13B）版本，LLaMA 2保留了标准的MHA。另外，上下文长度从2K扩展到4K。</p>
+
+        <p><strong>LLaMA 3（2024.04）—— 全面升级期</strong><br>
+        LLaMA 3是架构变动最大的一次。核心升级包括：词表从32K扩充到128K（使用tiktoken替代SentencePiece）；所有规模都使用GQA；FFN中间维度重新调整；上下文长度进一步扩展到8K。最大的架构新闻是405B模型——这是一个纯稠密模型，在MoE盛行的年代显得特立独行。LLaMA 3还加入了多模态支持，通过一个image adapter将视觉信息融入语言模型。</p>
+
+        <div class="highlight">
+            <strong>架构演进的一个核心线索：</strong> LLaMA系列的架构演变始终服从于两个目标——<strong>训练效率</strong>和<strong>推理效率</strong>。RoPE提高了训练时对长序列的支持效率；RMSNorm减少了训练时的计算开销；SwiGLU在相同FLOPs下提升了模型质量；GQA在大幅减少推理KV Cache的同时几乎不牺牲效果；更大的词表减少了序列长度从而加速了推理。每一个设计决策都可以归因到这两个目标上。
+        </div>
+
+        <p>讲到这里我想分享一个亲身经历的"踩坑"故事。我在2023年初第一次尝试在项目中"复现"LLaMA架构时，犯了一个低级错误：我以为LLaMA用的是标准的Post-LayerNorm（这是原始Transformer的风格），结果训练一直不稳定，loss反复震荡，一度怀疑是自己的代码有问题。反复Debug了两天后，偶然读到LLaMA论文中关于Pre-RMSNorm的描述，才发现自己把Normalization的位置搞反了。修改之后训练立刻稳定下来。这个教训让我深刻理解了：<strong>在LLM架构中，组件的位置（placement）和组件本身一样重要</strong>。Pre-Norm vs Post-Norm的差异在理论上就一行代码，但对训练的稳定性有着天壤之别。</p>
+
+        <h3>2.6 与其他开源模型的架构对比</h3>
+
+        <p>LLaMA的架构设计影响力巨大，但不是唯一的Decoder-only路线。让我们看看其他主流开源模型在架构上与LLaMA的异同。</p>
+
+        <table>
+            <tr>
+                <th>模型</th>
+                <th>归一化</th>
+                <th>激活函数</th>
+                <th>位置编码</th>
+                <th>注意力</th>
+                <th>词表大小</th>
+            </tr>
+            <tr>
+                <td>LLaMA 1/2/3</td>
+                <td>Pre-RMSNorm</td>
+                <td>SwiGLU</td>
+                <td>RoPE</td>
+                <td>MHA / GQA</td>
+                <td>32K / 128K</td>
+            </tr>
+            <tr>
+                <td>Mistral</td>
+                <td>Pre-RMSNorm</td>
+                <td>SwiGLU</td>
+                <td>RoPE</td>
+                <td>GQA (8 KV heads)</td>
+                <td>32K</td>
+            </tr>
+            <tr>
+                <td>Gemma</td>
+                <td>Pre-RMSNorm</td>
+                <td>GeGLU</td>
+                <td>RoPE</td>
+                <td>MHA</td>
+                <td>256K</td>
+            </tr>
+            <tr>
+                <td>Qwen 2.5</td>
+                <td>Pre-RMSNorm</td>
+                <td>SwiGLU</td>
+                <td>RoPE</td>
+                <td>GQA</td>
+                <td>151K</td>
+            </tr>
+            <tr>
+                <td>Falcon</td>
+                <td>Pre-LayerNorm</td>
+                <td>GELU</td>
+                <td>RoPE</td>
+                <td>MHA</td>
+                <td>65K</td>
+            </tr>
+            <tr>
+                <td>GPT-3 (参考)</td>
+                <td>Post-LayerNorm</td>
+                <td>GELU</td>
+                <td>Learned Absolute</td>
+                <td>MHA</td>
+                <td>50K</td>
+            </tr>
+        </table>
+
+        <p>从这张表中可以发现一个重要趋势：<strong>几乎所有的"后LLaMA"开源模型都采纳了LLaMA的核心架构选择</strong>——Pre-RMSNorm + SwiGLU + RoPE成了2023-2024年开源LLM的"标准配置"。这就像2017年后几乎所有NLP模型都使用Transformer一样，LLaMA在架构层面实现了一个"范式锁定"。</p>
+
+        <p>但各种模型在细节上仍有差异。比如Gemma用GeGLU替代了SwiGLU（两者在GLU家族中差异不大），Qwen 2.5使用了更大的151K词表（针对多语言做了优化），而Falcon仍然使用LayerNorm而不是RMSNorm（这对GPU kernel优化更友好）。这些差异反映了不同团队在架构选择上的权衡。</p>
+
+        <p>好了，这一章我们从Transformer的根基出发，完整回顾了标准架构的各个组件，然后在这个参照系中精确定位了LLaMA的设计选择。你现在应该已经对LLaMA的整体架构有了清晰的认识，并且知道了它为优化训练和推理效率所做的各项改进。下一章，我们将深入第一个核心组件——RoPE旋转位置编码。<strong>这是LLaMA在位置编码领域的核心创新，也是理解LLaMA外推能力的关键。</strong></p>
+
+        <div class="footer-nav">
+            <a href="01.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="03.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

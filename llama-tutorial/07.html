@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 缩放定律与训练策略 — LLaMA 完全拆解教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦙 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLaMA系列概述</a></li>
+            <li><a href="02.html">第2章 Transformer回顾与LLaMA总览</a></li>
+            <li><a href="03.html">第3章 RoPE旋转位置编码</a></li>
+            <li><a href="04.html">第4章 RMSNorm归一化</a></li>
+            <li><a href="05.html">第5章 SwiGLU激活函数</a></li>
+            <li><a href="06.html">第6章 分词器与词表设计</a></li>
+            <li><a href="07.html" class="active">第7章 缩放定律与训练策略</a></li>
+            <li><a href="08.html">第8章 GQA分组查询注意力</a></li>
+            <li><a href="09.html">第9章 预训练数据工程</a></li>
+            <li><a href="10.html">第10章 训练稳定性与优化器</a></li>
+            <li><a href="11.html">第11章 LLaMA 1完整预训练流程</a></li>
+            <li><a href="12.html">第12章 LLaMA 2对话模型与SFT</a></li>
+            <li><a href="13.html">第13章 RLHF全流程</a></li>
+            <li><a href="14.html">第14章 安全对齐与幻觉抑制</a></li>
+            <li><a href="15.html">第15章 模型量化与推理加速</a></li>
+            <li><a href="16.html">第16章 分布式训练策略</a></li>
+            <li><a href="17.html">第17章 上下文窗口扩展</a></li>
+            <li><a href="18.html">第18章 评估体系与基准测试</a></li>
+            <li><a href="19.html">第19章 LLaMA 3大规模训练系统</a></li>
+            <li><a href="20.html">第20章 多模态融合</a></li>
+            <li><a href="21.html">第21章 工具调用与代码能力</a></li>
+            <li><a href="22.html">第22章 多语言扩展策略</a></li>
+            <li><a href="23.html">第23章 HuggingFace生态与模型加载</a></li>
+            <li><a href="24.html">第24章 LoRA微调实战</a></li>
+            <li><a href="25.html">第25章 推理部署方案</a></li>
+            <li><a href="26.html">第26章 LLaMA 3.2边缘部署与小模型</a></li>
+            <li><a href="27.html">第27章 LLaMA 4展望与MoE架构</a></li>
+            <li><a href="28.html">第28章 开源LLM生态与未来趋势</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第7章 缩放定律与训练策略</h2>
+
+        <p>大家好，我是你们的讲师。前面几章我们一直在讨论"怎么做"——RoPE怎么做、RMSNorm怎么做、SwiGLU怎么做。从这一章开始，我们要问一个更深层的问题：<strong>"做多大、做多好、怎么做最划算"</strong>。这就是缩放定律（Scaling Law）要回答的问题。</p>
+
+        <p>缩放定律可能是整个LLM领域最反直觉也最重要的发现。它告诉我们：模型的性能与模型参数量、训练数据量、计算量之间存在一种可预测的幂律关系。这意味着在某种程度上，我们可以<strong>预测</strong>一个还没有训练的模型的表现。LLaMA系列从第一代开始就深刻理解和应用了这些定律——它的训练策略就是缩放定律的活教材。</p>
+
+        <p>这一章我们会逐一覆盖：Kaplan缩放定律、Chinchilla最优分配、LLaMA各代的数据/参数配置、学习率调度策略，以及那些训练过程中惊心动魄的"高光时刻"和"惨痛教训"。</p>
+
+        <h3>7.1 Kaplan缩放定律回顾</h3>
+
+        <p>2020年，OpenAI发表了一篇影响深远的论文<em>"Scaling Laws for Neural Language Models"</em>（通常被称为Kaplan缩放定律，以第一作者Jared Kaplan命名）。这篇论文的核心结论是：<strong>Transformer语言模型的交叉熵损失与模型参数量N、数据量D、计算量C之间存在光滑的幂律关系</strong>。</p>
+
+        <p>具体来说：</p>
+
+        <pre><code># Kaplan Scaling Laws (简化形式)
+# 模型性能 (交叉熵损失) ≈ 可预测的幂律函数
+
+L(N, D) ≈ a / N^α + b / D^β + L_∞
+
+# 其中:
+# N = 模型参数量 (不含embedding)
+# D = 训练token数
+# C ≈ 6ND = 总计算量 (FLOPs)
+# L_∞ = 不可约损失 (数据本身的熵)
+# a, b, α, β = 经验常数
+
+# 关键发现:
+# 1. 在计算量固定时: 同时增大N和D比只增大一个效果好
+# 2. 模型越大 → 样本效率越高 (更大的模型用更少的样本达到相同loss)
+# 3. 没有"过拟合": 更大的模型不会因数据足够多而过拟合
+# 4. 损失随计算量的衰减呈幂律: L ∝ C^{-0.05} ← 非常缓慢</code></pre>
+
+        <p>Kaplan论文最反直觉的发现是第二点——<strong>大模型比小模型的样本效率更高</strong>。也就是说，如果你有100B tokens，用1B参数的模型训练到收敛，可能还不如用10B参数但只训练10B tokens（即只使用了10%的数据）效果好。这个现象的直观解释是：大模型有更强的"吸收能力"，每个训练样本能提供更多的信息增益。</p>
+
+        <p>但Kaplan定律有一个重要的适用条件：它是在"计算量预算固定"的前提下推导的。也就是说，给定你只有x FLOPs的算力，应该怎么分配N和D才能达到最低的loss？Kaplan给出的建议是：<strong>在计算预算固定时，N和D应该以大致相等的比例增长</strong>。</p>
+
+        <div class="highlight">
+            <strong>历史背景：</strong> Kaplan定律发表于2020年，当时最大的语言模型是GPT-3（175B）。OpenAI依靠这个定律来指导GPT-3的设计——即给定他们可用的算力，应该训练多大的模型、用多少数据。而LLaMA 1（2023年）则在同样的定律指导下走出了相反的路线：既然小模型+更多数据也可以达到相同的效果，那我们就用小一点的模型，但喂更多的数据。这样做的优势是：小模型推理成本更低，更容易部署。
+        </div>
+
+        <h3>7.2 Chinchilla最优计算分配</h3>
+
+        <p>2022年，DeepMind对Kaplan定律发起了挑战。他们的论文<em>"Training Compute-Optimal Large Language Models"</em>（通常称为Chinchilla定律）重新审视了Kaplan的结论，并得出了不同的最优分配比例。</p>
+
+        <p>Chinchilla的研究使用了更系统的实验方法——他们训练了超过400个不同大小的模型（从70M到16B参数），使用不同的token数量，精确地绘制了损失函数在"参数量-数据量"平面上的等高线图。核心发现是：<strong>Kaplan定律高估了模型参数量的最优值，低估了数据量的最优值</strong>。</p>
+
+        <p>Chinchilla的最优分配比例是：<strong>对于给定的计算预算C，最优的模型参数量N_opt和数据量D_opt满足D_opt ≈ 20 × N_opt</strong>。也就是说，每1B参数需要约20B tokens来训练。</p>
+
+        <pre><code># Chinchilla Optimal 计算
+# 给定计算预算 C (FLOPs)
+
+# 最优参数量: N_opt = C / (6 × 20)  ≈ C / 120
+# 最优数据量: D_opt = 20 × N_opt
+
+# 示例: 如果有 1e23 FLOPs 的预算
+# N_opt ≈ 1e23 / 120 ≈ 8.3e20 params (太大了, 不现实)
+# 实际上: 对于 1e23 FLOPs, Chinchilla推荐的N是约50B, D是约1T tokens
+
+# 几个已知模型的 Chinchilla 对比
+# GPT-3 175B: 训练了 300B tokens → D/N = 1.71 (远低于20!)
+#   结论: GPT-3 在 Chinchilla 框架下是"欠训练"的
+# Chinchilla 70B: 训练了 1.4T tokens → D/N = 20 (最优!)
+#   这就是 Chinchilla 名字的由来: 70B但用了更多数据
+
+# LLaMA 系列对比
+# LLaMA 1 7B: 1.0T tokens → D/N = 142 (远超20!)
+# LLaMA 1 65B: 1.4T tokens → D/N = 21.5 (接近最优)
+# LLaMA 2 7B: 2.0T tokens → D/N = 285 (远超20!)
+# LLaMA 3 8B: 15.6T tokens → D/N = 1950 (极度远超!)
+# LLaMA 3 405B: 15.6T tokens → D/N = 38.5 (仍远超20)</code></pre>
+
+        <p>从这个分析可以看到，LLaMA系列走的是一条"在数据量上极度慷慨"的路线——除了最大的模型接近Chinchilla最优外，小模型的训练数据量远超Chinchilla的建议值。这是有意为之的：<strong>因为模型参数量小了，推理成本低，所以可以让小模型看更多的数据来弥补参数量上的不足</strong>。这个策略在LLaMA 1上被证明非常成功——7B模型在1T tokens训练后，性能超过了GPT-3（175B）。</p>
+
+        <p>但Chinchilla定律本身也在不断被挑战。LLaMA 3的405B模型使用了15.6T tokens（D/N ≈ 38.5），而这个模型并没有出现性能饱和——实际上它的表现还在持续提升。这说明Chinchilla的"20:1"可能不是绝对的硬边界，而是一个经验参考值。在超大规模训练中，<strong>更多的数据几乎总是会带来更好的性能，只是边际收益在递减</strong>。</p>
+
+        <h3>7.3 LLaMA各代的训练策略对比</h3>
+
+        <p>让我们用一张大表来对比LLaMA各代的训练策略：</p>
+
+        <table>
+            <tr>
+                <th>策略维度</th>
+                <th>LLaMA 1</th>
+                <th>LLaMA 2</th>
+                <th>LLaMA 3</th>
+            </tr>
+            <tr>
+                <td>训练tokens</td>
+                <td>1.0T - 1.4T</td>
+                <td>2.0T</td>
+                <td>15.6T</td>
+            </tr>
+            <tr>
+                <td>数据来源</td>
+                <td>CommonCrawl + C4 + 维基百科 + 书籍 + arXiv + GitHub</td>
+                <td>LLaMA 1数据 + 更多清洗后的公开数据</td>
+                <td>大规模清洗后的公开数据 + 授权数据 + 合成数据</td>
+            </tr>
+            <tr>
+                <td>数据去重</td>
+                <td>URL级去重 + 行级去重</td>
+                <td>更强的去歧义和去重</td>
+                <td>多层级去重 + 隐私过滤 + 安全过滤</td>
+            </tr>
+            <tr>
+                <td>批量大小</td>
+                <td>逐渐增大: 0.5M → 4M tokens</td>
+                <td>与LLaMA 1类似</td>
+                <td>大规模动态调整，峰值约16M tokens</td>
+            </tr>
+            <tr>
+                <td>学习率调度</td>
+                <td>Cosine decay with warmup</td>
+                <td>Cosine decay with warmup</td>
+                <td>Cosine decay with warmup + cooldown</td>
+            </tr>
+            <tr>
+                <td>峰值学习率</td>
+                <td>3e-4 (7B) / 1.5e-4 (65B)</td>
+                <td>3e-4 (7B) / 1.5e-4 (70B)</td>
+                <td>未公开，但推测更低</td>
+            </tr>
+            <tr>
+                <td>权重衰减</td>
+                <td>0.1</td>
+                <td>0.1</td>
+                <td>0.1（推测）</td>
+            </tr>
+            <tr>
+                <td>优化器</td>
+                <td>AdamW</td>
+                <td>AdamW</td>
+                <td>AdamW + 额外技巧</td>
+            </tr>
+            <tr>
+                <td>梯度裁剪</td>
+                <td>最大梯度范数 1.0</td>
+                <td>最大梯度范数 1.0</td>
+                <td>更精细的逐层梯度裁剪</td>
+            </tr>
+            <tr>
+                <td>warmup步数</td>
+                <td>1000 - 2000步</td>
+                <td>2000步</td>
+                <td>数千步（具体未公开）</td>
+            </tr>
+        </table>
+
+        <p>从这个对比中可以看到几个明确的趋势：</p>
+
+        <p>第一，<strong>数据量在持续暴涨</strong>。从1.4T到2.0T到15.6T，数据量增长了10倍以上。这不仅是算力提升的结果，更是"数据驱动"理念的体现——LLaMA团队越来越相信，高质量、大规模的数据比模型架构创新更重要。</p>
+
+        <p>第二，<strong>数据质量在持续提升</strong>。LLaMA 1的数据清洗主要做基本的去重和过滤，LLaMA 2增加了更多的清洗步骤，LLaMA 3则引入了大规模分类器（用LLaMA 2来标注数据质量）和合成数据。这个演进反映了整个行业的认知升级——模型性能的下限由数据质量决定。</p>
+
+        <p>第三，<strong>训练超参数的设计越来越精细</strong>。LLaMA 3引入了cooldown阶段（在训练的最后阶段线性降低学习率到接近零），这个技巧据称可以提升模型的最终收敛质量。我们在第11章会更详细地讨论训练流程。</p>
+
+        <div class="tip">
+            <strong>小模型"过度训练"的红利：</strong> LLaMA 1 7B用了1T tokens（D/N=142），LLaMA 3 8B用了15.6T tokens（D/N=1950）。从Chinchilla的角度看，这些模型被极度"过度训练"了。但实际上，这些小模型因为看了太多数据，在很多下游任务上超过了更大的模型。比如LLaMA 1 7B在多个benchmark上超过了GPT-3（175B）。这种"用数据换推理效率"的策略在资源受限的场景下极其有用——你可以用一个小模型得到接近大模型的性能，但推理成本只有大模型的几十分之一。
+        </div>
+
+        <h3>7.4 学习率调度策略</h3>
+
+        <p>LLaMA系列使用的学习率调度是标准的Cosine Decay with Warmup。这个策略包含两个阶段：</p>
+
+        <p><strong>第一阶段：Warmup（预热）</strong> — 在训练的最初N步中，学习率从0逐渐线性增长到峰值。这个阶段的作用是防止模型在初始状态下参数变化过于剧烈。想象一下，在训练开始时，模型的所有参数都是随机初始化的，如果直接用大学习率，梯度方向可能很不稳定，loss可能直接爆炸。所以我们需要"小心地启动"。</p>
+
+        <p><strong>第二阶段：Cosine Decay（余弦衰减）</strong> — 学习率从峰值按照余弦曲线逐渐降低到接近0。这个阶段让模型在训练后期慢慢"收敛"到最优解，而不是在最优解附近震荡。</p>
+
+        <pre><code># LLaMA 的学习率调度策略 (PyTorch 伪代码)
+
+def get_cosine_schedule_with_warmup(
+    optimizer,
+    warmup_steps: int = 2000,
+    total_steps: int = 500000,
+    peak_lr: float = 3e-4,
+    min_lr: float = 3e-5,
+):
+    """
+    生成 LLaMA 风格的 cosine warmup 学习率调度
+    """
+    def lr_lambda(current_step):
+        # Warmup 阶段
+        if current_step < warmup_steps:
+            return current_step / warmup_steps
+
+        # Cosine Decay 阶段
+        progress = (current_step - warmup_steps) / (total_steps - warmup_steps)
+        cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+
+        # 缩放: 从 peak_lr 到 min_lr
+        return cosine_decay * (1 - min_lr/peak_lr) + min_lr/peak_lr
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+# LLaMA 1 7B 训练配置示例
+# total_steps ≈ 1T tokens / (batch_size × seq_len)
+# batch_size 从初始 0.5M tokens 逐渐增大到 4M tokens
+# 假设平均 batch_size = 2M tokens, seq_len = 2048
+# tokens_per_step = 2M
+# total_steps ≈ 1T / 2M = 500,000 步
+
+# LLaMA 3 8B 训练配置（推算）
+# total_steps ≈ 15.6T / (平均~4M tokens/步) ≈ 3,900,000 步
+# warmup_steps ≈ 5000 - 10000 步
+# 训练时长: 约 3.9M 步 @ 每步~几秒 = 数百 GPU 天</code></pre>
+
+        <p>LLaMA 3引入了一个额外的"cooldown"阶段，其实就是在训练的最后几万步中把学习率降到非常接近零（比如1e-6甚至更低）。这个阶段的目的是让模型在"低噪声"环境下微调参数。有研究表明，cooldown阶段可以让模型的最终PPL降低0.1-0.2——在大模型竞赛中，这是个不小的差距。</p>
+
+        <h3>7.5 训练稳定性考量</h3>
+
+        <p>训练一个数十亿参数的大模型，最大的挑战不是模型设计，而是<strong>让训练不崩溃</strong>。LLaMA团队在论文中坦白地描述了他们遇到的训练稳定性问题和解决方案。</p>
+
+        <p><strong>梯度裁剪：</strong> LLaMA使用梯度范数裁剪（max_grad_norm=1.0），即如果所有参数的梯度向量的L2范数超过了1.0，就等比例缩小。这个看似简单的操作，对于防止loss spike（loss突然跳高）至关重要。想象一下，如果某个batch的数据非常异常（比如包含大量噪声或特殊字符），模型可能会产生一个非常大的梯度——如果不加以限制，参数的巨大更新可能导致模型永久性地损坏。</p>
+
+        <p><strong>权重衰减：</strong> LLaMA使用0.1的权重衰减系数。权重衰减等价于L2正则化——在损失函数中加入参数的平方和作为惩罚项，防止参数变得过大。一个有趣的现象是：LLaMA在注意力层和FFN层都使用了权重衰减，但在LayerNorm（RMSNorm）的参数上<strong>不使用</strong>权重衰减。因为归一化层的参数（γ）只在控制scaling的程度，如果也对它做权重衰减，会导致γ不断趋近于0，反而破坏了归一化的效果。</p>
+
+        <p><strong>AdamW优化器：</strong> LLaMA使用AdamW而不是Adam。Adam和AdamW的区别在于权重衰减的实现方式。在Adam中，权重衰减是通过修改损失函数（L2正则化）间接实现的；在AdamW中，权重衰减是在参数更新时直接施加的。后者的好处是权重衰减与学习率解耦——AdamW在训练中的表现更加稳定。</p>
+
+        <pre><code># Adam vs AdamW 的权重衰减差异
+# θ_t: 第t步的参数
+# g_t: 第t步的梯度
+# η: 学习率
+# λ: 权重衰减系数
+
+# Adam (L2正则化版本):
+# g'_t = g_t + λ · θ_t          # 梯度增加了权重衰减项
+# m_t = β₁·m_{t-1} + (1-β₁)·g'_t
+# v_t = β₂·v_{t-1} + (1-β₂)·(g'_t)²
+# θ_{t+1} = θ_t - η · m_t / (√v_t + ε)
+# 问题: λ 的效果被 m_t/v_t 的累积间接缩放
+
+# AdamW (解耦权重衰减):
+# g'_t = g_t                     # 梯度不变
+# m_t = β₁·m_{t-1} + (1-β₁)·g'_t
+# v_t = β₂·v_{t-1} + (1-β₂)·(g'_t)²
+# θ_{t+1} = θ_t - η · (m_t / (√v_t + ε) + λ · θ_t)
+# 优势: λ 直接施加在参数上, 不受自适应学习率影响</code></pre>
+
+        <h3>7.6 训练失败的经典case分析</h3>
+
+        <p>讲几个真实发生过的训练事故，这些故事能帮助你更好地理解"训练稳定性"这个概念在实战中的分量。</p>
+
+        <p><strong>Case 1: Loss Spike 灾难</strong></p>
+
+        <p>在一次大规模的LLM训练中（具体模型不便透露），训练在进行了20000步后，loss从2.3突然跳到了18.5。整个训练集群的管理员们瞬间紧张了起来——因为这种情况下，loss要么自动恢复，要么永远不恢复，而后者意味着数百小时的GPU算力全部白费。</p>
+
+        <p>根本原因是：训练数据中的一个HTML文件没有被正确清洗，里面包含了一段非常长的、没有空格的base64编码文本。这段文本通过tokenizer后被切成了数千个数字和字母的tokens，产生了极端的激活值分布，导致模型在这个位置产生了巨大的梯度。</p>
+
+        <p>LLaMA团队的处理方法是：<strong>在loss spike发生后，回退到最近的checkpoint，使用更小的学习率从该点继续训练</strong>。这要求训练框架必须定期保存checkpoint（通常每1000步或每损失一定量）。同时，LLaMA在数据预处理中增加了针对异常长字符串的过滤规则。这个教训告诉我们：<strong>数据清洗的质量不仅仅决定模型性能，更决定训练能不能跑完</strong>。</p>
+
+        <p><strong>Case 2: NaN 陷阱</strong></p>
+
+        <p>NaN（Not a Number）是大模型训练中的噩梦——一旦某个参数因为数值溢出变成了NaN，它会在后续的计算中传播，最终导致整个模型崩溃。NaN通常由以下几种原因引起：</p>
+
+        <ul>
+            <li><strong>梯度爆炸：</strong> 梯度的某个维度变得非常大，超过了FP16/FP32的表示范围，变成inf，经过某些运算后变成NaN。</li>
+            <li><strong>除零操作：</strong> RMSNorm或LayerNorm中分母的方差接近0，除以一个极小的数后得到inf。</li>
+            <li><strong>softmax溢出：</strong> Attention分数中的某个值非常大（比如100+），softmax的指数运算结果超过FP16的最大值。</li>
+        </ul>
+
+        <p>LLaMA的解决方案是多管齐下：使用混合精度训练（FP16/BF16 + FP32 master weights），在关键位置（如softmax的输入、LayerNorm的分母）加入数值稳定的保护逻辑（如对softmax输入减去最大值、在分母加上一个小的epsilon）。</p>
+
+        <div class="warning">
+            <strong>一个让很多新手崩溃的问题：</strong> 在训练LLM时，如果你发现"模型一开始训练loss就是NaN"或者"训练了几千步后突然变成NaN"，90%的概率是数据问题——某个数据样本包含异常值导致模型崩溃了。排查方法很简单：从训练数据中拿出一个子集（几百个样本），如果在这个小数据集上训练正常，那就说明是数据集中某个样本有bug。用二分法不断缩小数据集的范围，可以快速定位到问题样本。我自己的经验是，问题样本通常是：大量不可见字符、过长的无空格序列、或非文本二进制数据。
+        </div>
+
+        <h3>7.7 不同缩放策略的实际效果验证</h3>
+
+        <p>我们已经有足够的公开数据来验证不同缩放策略的实际效果。下面这张表汇总了一些关键模型的训练配置和性能：</p>
+
+        <table>
+            <tr>
+                <th>模型</th>
+                <th>参数量</th>
+                <th>训练tokens</th>
+                <th>D/N比例</th>
+                <th>是否接近Chinchilla最优</th>
+                <th>下游性能评价</th>
+            </tr>
+            <tr>
+                <td>GPT-3</td>
+                <td>175B</td>
+                <td>300B</td>
+                <td>1.71</td>
+                <td>远欠训练</td>
+                <td>历史标杆，非最优</td>
+            </tr>
+            <tr>
+                <td>Chinchilla</td>
+                <td>70B</td>
+                <td>1.4T</td>
+                <td>20.0</td>
+                <td>最优</td>
+                <td>以70B超越GPT-3</td>
+            </tr>
+            <tr>
+                <td>LLaMA 1 7B</td>
+                <td>7B</td>
+                <td>1.0T</td>
+                <td>142.9</td>
+                <td>过度训练</td>
+                <td>超越GPT-3 175B</td>
+            </tr>
+            <tr>
+                <td>LLaMA 1 65B</td>
+                <td>65B</td>
+                <td>1.4T</td>
+                <td>21.5</td>
+                <td>接近最优</td>
+                <td>与Chinchilla持平</td>
+            </tr>
+            <tr>
+                <td>LLaMA 2 7B</td>
+                <td>7B</td>
+                <td>2.0T</td>
+                <td>285.7</td>
+                <td>极度过度训练</td>
+                <td>大幅超越同等规模模型</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3 8B</td>
+                <td>8B</td>
+                <td>15.6T</td>
+                <td>1950</td>
+                <td>极度过度训练</td>
+                <td>领先同级模型</td>
+            </tr>
+            <tr>
+                <td>LLaMA 3 405B</td>
+                <td>405B</td>
+                <td>15.6T</td>
+                <td>38.5</td>
+                <td>略超最优</td>
+                <td>接近GPT-4水平</td>
+            </tr>
+        </table>
+
+        <p>这个表格揭示了一个有趣的规律：<strong>"过度训练"的小模型在经济上可能比"最优"的大模型更划算</strong>。LLaMA 3 8B的训练成本（按token算）远低于405B——但8B模型在很多任务上的表现已经够用了。这个策略对于预算有限的团队尤其有价值——你可以训练一个8B的小模型，但让它看15T+ tokens，在推理成本可控的前提下获得尽可能好的性能。</p>
+
+        <p>但要注意，过度训练存在一个"天花板"：随着训练token的增加，性能提升的边际收益在递减。LLaMA 3 8B在训练到大约8T tokens时性能已经接近饱和，后面7T tokens带来的提升越来越小。Meta决定继续训练到15.6T，可能是因为"任何一点性能提升都值得"——在LLM竞争中，哪怕0.1%的优势也可能是决定性的。</p>
+
+        <div class="highlight">
+            <strong>我们学到了什么？</strong> 缩放定律告诉我们三件事。第一，<strong>大语言模型的性能是可以预测的</strong>——给定参数量和计算量，你可以大致估计出模型的最终表现。第二，<strong>数据比参数更重要</strong>——在合理范围内，增加训练数据比增加模型参数带来的收益更大。第三，<strong>没有免费的午餐</strong>——最终决定模型性能的还是总计算量，只是分配方式不同而已。LLaMA选择了"小模型大数据"的路线，降低了部署成本，但训练成本并不低。
+        </div>
+
+        <p>好了，这一章我们从Kaplan定律讲到Chinchilla最优，从学习率调度讲到数值稳定性。这些都是理解LLaMA训练策略的理论基础。你现在应该能清楚地回答这个问题：<strong>"为什么LLaMA 1 7B在1T tokens训练后能超过GPT-3 175B？"</strong>——因为GPT-3只训了300B tokens（严重欠训练），而LLaMA 1 7B虽然参数少了25倍，但token数多了3倍多（在D/N比例上极度宽裕）。这个比较生动地说明了"分配方式比总规模更重要"。</p>
+
+        <p>下一章，我们将再次回到架构层面，讨论LLaMA在注意力机制上的重要改进——GQA（Grouped Query Attention）。这是LLaMA 2在70B模型上首次引入，并在LLaMA 3中全面普及的关键技术，它解决的是大模型推理时的显存瓶颈问题。<strong>GQA的设计哲学是：既然推理时大部分显存都用来存KV Cache了，那我们就让KV Cache变小。</strong></p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

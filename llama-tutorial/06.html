@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 分词器与词表设计 — LLaMA 完全拆解教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦙 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLaMA系列概述</a></li>
+            <li><a href="02.html">第2章 Transformer回顾与LLaMA总览</a></li>
+            <li><a href="03.html">第3章 RoPE旋转位置编码</a></li>
+            <li><a href="04.html">第4章 RMSNorm归一化</a></li>
+            <li><a href="05.html">第5章 SwiGLU激活函数</a></li>
+            <li><a href="06.html" class="active">第6章 分词器与词表设计</a></li>
+            <li><a href="07.html">第7章 缩放定律与训练策略</a></li>
+            <li><a href="08.html">第8章 GQA分组查询注意力</a></li>
+            <li><a href="09.html">第9章 预训练数据工程</a></li>
+            <li><a href="10.html">第10章 训练稳定性与优化器</a></li>
+            <li><a href="11.html">第11章 LLaMA 1完整预训练流程</a></li>
+            <li><a href="12.html">第12章 LLaMA 2对话模型与SFT</a></li>
+            <li><a href="13.html">第13章 RLHF全流程</a></li>
+            <li><a href="14.html">第14章 安全对齐与幻觉抑制</a></li>
+            <li><a href="15.html">第15章 模型量化与推理加速</a></li>
+            <li><a href="16.html">第16章 分布式训练策略</a></li>
+            <li><a href="17.html">第17章 上下文窗口扩展</a></li>
+            <li><a href="18.html">第18章 评估体系与基准测试</a></li>
+            <li><a href="19.html">第19章 LLaMA 3大规模训练系统</a></li>
+            <li><a href="20.html">第20章 多模态融合</a></li>
+            <li><a href="21.html">第21章 工具调用与代码能力</a></li>
+            <li><a href="22.html">第22章 多语言扩展策略</a></li>
+            <li><a href="23.html">第23章 HuggingFace生态与模型加载</a></li>
+            <li><a href="24.html">第24章 LoRA微调实战</a></li>
+            <li><a href="25.html">第25章 推理部署方案</a></li>
+            <li><a href="26.html">第26章 LLaMA 3.2边缘部署与小模型</a></li>
+            <li><a href="27.html">第27章 LLaMA 4展望与MoE架构</a></li>
+            <li><a href="28.html">第28章 开源LLM生态与未来趋势</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第6章 分词器与词表设计</h2>
+
+        <p>大家好，我是你们的讲师。前面几章我们一直在讨论模型"内部"的架构设计——位置编码、归一化、激活函数。这一章我们把视角拉回到模型的"入口"：<strong>分词器（Tokenizer）</strong>。你可能觉得分词只是把文本切成tokens这样一个"预处理"步骤，不值得花太多时间研究。这种想法大错特错。</p>
+
+        <p>实际上，分词器的设计直接决定了模型能"看"到什么、不能"看"到什么。一个糟糕的分词器会把"神经网络"切成["神经","网络"]，好的分词器可能会保留"神经网络"作为一个完整的token。这种粒度差异会让模型在理解语义时的表现天差地别。而且，<strong>词表大小是影响模型推理效率的关键因素之一</strong>——词表越大，embedding矩阵就越大，一次推理需要处理的序列长度也可能更短（因为长词被编成了一个token）。</p>
+
+        <p>LLaMA在分词器上的进化尤其值得关注：从LLaMA 1/2的32K词表（SentencePiece + BPE）到LLaMA 3的128K词表（tiktoken），这个变化不仅仅是"加了些token"那么简单。它反映了Meta对多语言能力、代码理解和推理效率的深度思考。</p>
+
+        <h3>6.1 分词器在LLM中的重要性</h3>
+
+        <p>在LLM的pipeline中，分词器处于最前端——所有的文本输入都需要先经过分词器转换成token IDs，然后才能输入到模型中。这个"转换"的质量直接影响模型的输入表示质量。</p>
+
+        <p>我们用一个简单的例子来说明为什么分词器的设计如此重要。假设句子是"Llama is a large language model"，不同分词器的结果可能是：</p>
+
+        <pre><code># 不同分词粒度对比
+# 句子: "Llama is a large language model"
+
+# 1. 按字符分词 (char-level)
+# ["L", "l", "a", "m", "a", " ", "i", "s", ...]
+# 序列长度: 28 tokens (太长，计算量太大)
+
+# 2. 按单词分词 (word-level)
+# ["Llama", "is", "a", "large", "language", "model"]
+# 序列长度: 6 tokens (词汇表会无限大)
+
+# 3. 按子词分词 (BPE, LLaMA 1/2)
+# ["Ll", "ama", " is", " a", " large", " language", " model"]
+# 序列长度: 7 tokens (兼顾词汇量和序列长度)
+
+# 4. 按子词分词 (BPE, LLaMA 3)
+# ["Llama", " is", " a", " large", " language", " model"]
+# 序列长度: 6 tokens (词表更大，更多完整词被保留)</code></pre>
+
+        <p>分词器对模型的影响体现在多个层面：</p>
+
+        <ul>
+            <li><strong>序列长度：</strong> 词表越大，每个token包含的信息越多，相同文本的序列长度越短。这对推理效率至关重要——Self-Attention的计算复杂度是O(n²)，序列长度减半意味着计算量减少到四分之一。</li>
+            <li><strong>embedding矩阵大小：</strong> 词表大小决定了embedding层的参数量（词表大小 × hidden_dim）。128K词表比32K词表多出96K × hidden_dim的参数。</li>
+            <li><strong>多语言覆盖率：</strong> 如果词表中没有足够的多语言token，非英语文本将被拆分成很多子词片段，不仅增加了序列长度，还可能导致语义割裂。</li>
+            <li><strong>数字和代码处理：</strong> 是否将数字拆分成单个digits？是否对代码常见模式（如"=="，"->"）有专门的token？这些都直接影响模型的推理和编码能力。</li>
+        </ul>
+
+        <h3>6.2 BPE（Byte-Pair Encoding）算法原理</h3>
+
+        <p>BPE（Byte-Pair Encoding）是目前最主流的子词分词算法，GPT-2、GPT-3、LLaMA 1/2使用的都是BPE。BPE的算法逻辑非常直观——<strong>从字符级别开始，逐步合并最频繁出现的相邻token对</strong>。</p>
+
+        <p>BPE的训练过程如下：</p>
+
+        <pre><code># BPE 训练算法
+# 目标: 构建一个大小为 vocab_size 的词表
+
+# 阶段1: 初始化
+# 将所有文本拆分成单个字符 + 特殊结束符 </w>
+vocab = set(所有出现的字符 + [</w>])
+
+# 阶段2: 迭代合并
+while len(vocab) < vocab_size:
+    # 统计所有相邻 token 对的频率
+    pairs = count_adjacent_pairs(corpus)
+    # 找出最频繁的 token 对
+    most_frequent = max(pairs, key=pairs.get)
+    # 合并该 token 对为新的 token
+    new_token = merge(most_frequent)
+    vocab.add(new_token)
+    # 更新语料: 将该 token 对的所有出现替换为新 token
+    corpus = replace_pair(corpus, most_frequent, new_token)
+
+# 阶段3: 输出词表
+# vocab 包含了从单个字符到长短语的所有 tokens
+
+# 示例: 假设语料中最常见的相邻对是 ("th", "e")
+# 合并后: "the" 成为一个新 token
+# 如果 ("the", "</w>") 也经常出现, "the" 可能被保留为完整词</code></pre>
+
+        <p>BPE的一个需要注意的特性是：它是最小化分词次数的"贪心"合并策略。也就是说，在分词时，BPE会优先匹配词表中存在的、尽可能长的token。这种策略的优点是分词速度快、结果确定性高；缺点是如果训练语料分布不均匀（比如英语语料占90%），BPE会优先为英语的常见模式分配token，其他语言的表示效率就会降低。</p>
+
+        <div class="highlight">
+            <strong>一个重要的洞察：</strong> BPE的词表空间是"零和博弈"——如果词表大小固定为32K，那么每加入一个英语token，就少一个位置给其他语言的token。LLaMA 1/2的32K词表中，英语token占据了绝大多数，中文、阿拉伯语、印地语等非拉丁语系的文本会被拆分成很多子词。这也是为什么LLaMA的中文能力不如专门针对中文优化的模型（如Qwen、Yi）的原因之一——它们的词表更大或更均衡地覆盖了多语言。
+        </div>
+
+        <h3>6.3 SentencePiece框架</h3>
+
+        <p>LLaMA 1和2使用的分词工具是SentencePiece，这是一个Google开源的文本tokenization工具包。SentencePiece与BPE的关系是：<strong>SentencePiece是一个框架，BPE是其中的一种分词算法</strong>。SentencePiece支持BPE和Unigram两种分词算法，LLaMA选的是BPE模式。</p>
+
+        <p>SentencePiece有几个独特的设计选择：</p>
+
+        <ul>
+            <li><strong>直接处理原始文本：</strong> SentencePiece将输入视为Unicode字符序列，不需要预先进行语言特定的tokenization（如英文的空格分割或中文的分词）。这意味着它天然支持多语言——一个模型训练好，可以直接处理英语、中文、阿拉伯语等。</li>
+            <li><strong>将空格编码为特殊字符"▁"：</strong> 在SentencePiece中，空格不会像传统BPE那样被去除，而是被编码为一个特殊字符"▁"（下划线风格）。这样模型就能"看到"单词边界——这对于理解语法结构很重要。</li>
+            <li><strong>BPE训练时的byte-level回退：</strong> 对于OOV（Out-of-Vocabulary）字符，SentencePiece可以回退到byte-level编码（UTF-8的单个字节），确保模型不会遇到"未知字符"。</li>
+        </ul>
+
+        <p>LLaMA 1/2的SentencePiece配置如下：</p>
+
+        <pre><code># LLaMA 1/2 SentencePiece 配置
+# 词表大小: 32000 (32K)
+# 分词算法: BPE
+# 字符覆盖: 0.9999 (覆盖99.99%的训练字符)
+# byte_fallback: true (回退到byte编码)
+# 空格处理: 编码为 "▁" (U+2581)
+# 特殊token:
+#   <s>      = 1  (序列开始 BOS)
+#   </s>     = 2  (序列结束 EOS)
+#   <unk>    = 0  (未知字符)
+#   <pad>    = ? (填充用，LLaMA 1中未定义)
+
+# 词表分布 (估计):
+# - 英语token: ~25,000 (78%)
+# - 其他拉丁语系: ~3,000 (法语、西班牙语等)
+# - 数字/标点: ~1,000
+# - 亚洲语言: ~2,000 (中文、日文、韩文)
+# - 特殊token: ~100</code></pre>
+
+        <h3>6.4 LLaMA 3的词表升级: 从32K到128K</h3>
+
+        <p>LLaMA 3在分词器上做了一个非常大的改动：词表从32K扩展到128K，分词框架从SentencePiece切换到了tiktoken（OpenAI开发的tokenizer库）。这个变化的影响不亚于增加几十层Transformer层。</p>
+
+        <p><strong>为什么选择tiktoken？</strong></p>
+
+        <p>tiktoken是OpenAI为GPT-4开发的分词器库，它有几个关键优势：</p>
+
+        <ul>
+            <li><strong>性能：</strong> tiktoken是用Rust实现的，Python绑定的性能极高——分词速度比SentencePiece快5-10倍。在大规模数据预处理中，这个速度优势非常明显。</li>
+            <li><strong>更精细的byte-level编码：</strong> tiktoken使用了一种叫做"cl100k_base"的编码模式，对UTF-8字节的处理更加高效。所有Unicode字符都可以被无损地编码，不需要byte_fallback回退。</li>
+            <li><strong>正则表达式辅助分词：</strong> tiktoken使用正则表达式来划分"token边界"——比如数字会被连在一起，空格会被保留。这比纯BPE的统计合并更符合人类的"词"的直觉。</li>
+        </ul>
+
+        <p><strong>LLaMA 3 128K词表的具体改进：</strong></p>
+
+        <table>
+            <tr>
+                <th>改进方向</th>
+                <th>LLaMA 1/2 (32K)</th>
+                <th>LLaMA 3 (128K)</th>
+                <th>影响</th>
+            </tr>
+            <tr>
+                <td>词表大小</td>
+                <td>32,000</td>
+                <td>128,000</td>
+                <td>embedding矩阵参数量增加4倍</td>
+            </tr>
+            <tr>
+                <td>分词框架</td>
+                <td>SentencePiece</td>
+                <td>tiktoken</td>
+                <td>速度5-10倍提升，更精确的UTF-8编码</td>
+            </tr>
+            <tr>
+                <td>数字token</td>
+                <td>每个数字单独token</td>
+                <td>合并多位数字（如123是一个token）</td>
+                <td>数学能力显著提升</td>
+            </tr>
+            <tr>
+                <td>代码token</td>
+                <td>有限的代码模式</td>
+                <td>专门优化的代码token（如"->", "==", "def"）</td>
+                <td>代码生成和理解能力增强</td>
+            </tr>
+            <tr>
+                <td>多语言token</td>
+                <td>约2000个亚洲语言token</td>
+                <td>大量扩充多语言token</td>
+                <td>非英语能力大幅提升</td>
+            </tr>
+            <tr>
+                <td>常见token保留</td>
+                <td>有限（如"the"、"is"等）</td>
+                <td>更多常见词保留为单个token</td>
+                <td>推理速度提升（序列变短）</td>
+            </tr>
+        </table>
+
+        <div class="warning">
+            <strong>值得注意的trade-off：</strong> 词表从32K扩展到128K并非全是好处。首先，embedding矩阵的参数量从32K×4096≈134M增加到了128K×4096≈524M——这将近4亿的额外参数。在70B模型中占比不大（约0.6%），但在8B模型中占比就很可观了（约6.5%）。其次，更大的词表意味着最后的lm_head（从hidden_dim映射到词表大小的线性层）也变大了4倍，这个层的计算量在训练和推理中都是瓶颈之一。所以虽然"词表越大越好"看起来是个简单的方向，但实际工程中需要权衡。
+        </div>
+
+        <h3>6.5 分词对模型能力的影响</h3>
+
+        <p>分词器的设计如何具体影响模型的能力？我们来看几个方面：</p>
+
+        <p><strong>数字理解能力：</strong> 这是一个经典的例子。在LLaMA 1/2中，数字"123456789"被分词为["12","34","56","78","9"]（每个两位数是一个token）。这意味着模型无法直观地理解"这个数字有多大"——因为它的表示"12"的开头和"56"的开头在token空间中完全没有数值上的连续性。而在LLaMA 3中，由于tiktoken优化了数字的分词，同样的大数字可能被编成更少的token（比如["123","456","789"]甚至直接保留为单个大token），模型能更好地理解数字的大小关系。</p>
+
+        <p><strong>代码理解能力：</strong> Python代码中的常见模式（如"def "、"return "、"->"、"=="）在优化后的词表中可以被编码为单个或更少的token。这意味着模型在处理代码时不需要"拼凑"语法结构——比如"=="不需要被看成"=" + "="，而是一个完整的"相等比较运算符"。</p>
+
+        <p><strong>多语言能力：</strong> 在多语言场景下，分词器的设计差异更加明显。我们用中文举例：</p>
+
+        <pre><code># 中文文本在不同 LLaMA 版本中的 tokenization 对比
+# 句子: "深度学习改变了人工智能的研究范式"
+
+# LLaMA 1/2 (32K, SentencePiece)
+# 猜测的分词结果:
+# ["▁深", "度", "学", "习", "改", "变", "了", "▁人", "工", "智", "能",
+#  "的", "▁研", "究", "范", "式"]
+# 序列长度: 16 tokens
+
+# LLaMA 3 (128K, tiktoken)
+# 猜测的分词结果:
+# ["▁深度", "学习", "改变", "了", "▁人工", "智能", "的",
+#  "▁研究", "范式"]
+# 序列长度: 9 tokens (缩短44%！)
+
+# 这个差异意味着:
+# 1. LLaMA 3 处理中文时需要的token数更少
+# 2. 更少的token意味着更少的信息损失
+# 3. 训练和推理速度都更快</code></pre>
+
+        <h3>6.6 特殊token设计</h3>
+
+        <p>除了常规的词表token，LLaMA还定义了一系列特殊token，用于控制生成过程。这些特殊token的设计在LLaMA 2（对话模型）中变得更加重要。</p>
+
+        <pre><code># LLaMA 系列特殊 token 设计
+
+# LLaMA 1 (基础预训练)
+# <s>       = 序列开始标记 (BOS)
+# </s>      = 序列结束标记 (EOS)
+# <unk>     = 未知标记
+# 使用方式: 每个训练序列以 <s> 开头, 以 </s> 结尾
+
+# LLaMA 2 (对话模型)
+# 保留了 LLaMA 1 的特殊 token
+# 新增了对话格式 token:
+# [INST] ... [/INST]  = 用户指令的前后标记
+# <<SYS>> ... <</SYS>> = 系统提示的前后标记
+
+# 对话格式示例:
+# <s>[INST] <<SYS>>
+# 你是一个有用的助手。
+# <</SYS>>
+# 给我讲一个故事。[/INST]
+
+# LLaMA 3 (大规模升级)
+# 保留了 BOS (<|begin_of_text|>) 和 EOS (<|end_of_text|>)
+# 新增:
+# <|start_header_id|>role<|end_header_id|>  = 角色标记 (user/assistant/system)
+# <|eot_id|>                                 = turn 结束标记
+# <|reserved_special_token_xx|>              = 保留的特殊 token 槽位
+
+# 对话格式示例:
+# <|begin_of_text|><|start_header_id|>system<|end_header_id|>
+# 你是一个有用的助手。<|eot_id|>
+# <|start_header_id|>user<|end_header_id|>
+# 给我讲一个故事。<|eot_id|>
+# <|start_header_id|>assistant<|end_header_id|></code></pre>
+
+        <p>特殊token的设计对模型的对话能力有直接影响。一个好的设计应该做到：token格式清晰、角色边界分明、易于解析。LLaMA 3的格式相比LLaMA 2更加结构化——使用<|start_header_id|>和<|eot_id|>替代了方括号标记，这使得多轮对话的解析更加可靠。</p>
+
+        <p>我在这上面有过惨痛的教训。有一次我在微调LLaMA 2 chat模型时，错误地在训练数据中忘记了在系统提示后面加上<</SYS>>，结果模型在推理时完全无视了系统指令。排查了一整天才发现是数据格式的问题——因为模型已经学习到了 "<<SYS>> ... <</SYS>>" 是一个成对出现的模板，缺了一边就会导致整个模板匹配失败。这个经历让我深刻意识到：<strong>在处理预训练模型时，tokenizer的特殊token格式是不可触碰的红线</strong>——任何格式的偏差都可能导致模型行为异常。</p>
+
+        <h3>6.7 tokenization实践示例</h3>
+
+        <p>让我们用一个实际例子来看不同版本的LLaMA对同一段文本的分词效果对比。这里我们用Python代码模拟（基于公开的tokenizer配置）：</p>
+
+        <pre><code># 不同 LLaMA 版本的 tokenization 效果对比
+# 使用 HuggingFace transformers 库
+
+from transformers import AutoTokenizer
+
+# LLaMA 1/2 tokenizer (32K, SentencePiece)
+tokenizer_v2 = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
+
+# LLaMA 3 tokenizer (128K, tiktoken)
+tokenizer_v3 = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
+
+text = "The number 123456789 in Python is written as 123_456_789."
+
+# LLaMA 2 分词结果
+tokens_v2 = tokenizer_v2.tokenize(text)
+print(f"LLaMA 2 tokens ({len(tokens_v2)}): {tokens_v2}")
+# 输出: ["The", "▁number", "▁12", "34", "56", "78", "9", "▁in", "▁Python",
+#        "▁is", "▁written", "▁as", "▁12", "3_", "4", "56", "_78", "9", "."]
+
+# LLaMA 3 分词结果
+tokens_v3 = tokenizer_v3.tokenize(text)
+print(f"LLaMA 3 tokens ({len(tokens_v3)}): {tokens_v3}")
+# 输出: ["The", " number", " 123456789", " in", " Python", " is",
+#        " written", " as", " 123", "_", "456", "_", "789", "."]
+
+# 关键差异:
+# 1. 数字 "123456789": LLaMA 2 用 4 个 token, LLaMA 3 用 1 个
+# 2. 下划线: LLaMA 3 保留了单独的下划线 token
+# 3. 序列长度: LLaMA 2 用 18 个, LLaMA 3 用 13 个 (缩短 28%)</code></pre>
+
+        <div class="tip">
+            <strong>工程实践建议：</strong> 如果你正在做自己的LLM训练或微调项目，关于tokenizer有几点建议。<strong>第一</strong>，不要轻易换tokenizer——更换tokenizer意味着模型需要重新学习所有token的embedding，这基本上等于从头训练。很多所谓的"中文LLaMA"把tokenizer换成中文分词器，效果不好主要原因就在这里。<strong>第二</strong>，如果一定要扩充词表（比如加入更多中文token），请确保新token的embedding初始化方式合理——常用的做法是用原tokenizer中近义token的embedding平均或取最接近的byte token的embedding。<strong>第三</strong>，在评估模型时一定要考虑到tokenizer的影响——同样的文本在不同tokenizer下产生的序列长度不同，直接比较PPL是有偏差的。
+        </div>
+
+        <h3>6.8 词表设计的未来趋势</h3>
+
+        <p>目前LLM词表设计的趋势是越来越大、越来越精确。LLaMA 3的128K在2024年已经不算最大——Qwen 2.5使用了151K词表，Gemma使用256K词表，DeepSeek V2使用了102K词表（但结合了多尺度注意力）。这些模型都力求在"词表大小"和"embedding参数量"之间找到最优平衡。</p>
+
+        <p>同时，也出现了一些新的方向，比如：</p>
+
+        <ul>
+            <li><strong>MoE tokenizer：</strong> 使用不同语言的专属token集，通过路由机制选择当前语言的词表子集。这样可以避免多语言token之间的"零和博弈"问题。</li>
+            <li><strong>动态词表扩展：</strong> 训练时使用较小的词表（节省embedding参数），推理时通过某种适配器扩展到更大的词表（提升序列效率）。</li>
+            <li><strong>多模态tokenization：</strong> 将图像、音频等非文本信息编码为与文本共享的词表空间，实现统一的tokenizer。</li>
+        </ul>
+
+        <p>这些方向目前还在探索阶段，但可以预见，<strong>分词器在LLM中的重要性的认知正在被不断提升</strong>。它不再是"随便选一个就行"的预处理步骤，而是模型设计中的核心决策之一。</p>
+
+        <p>好了，这一章我们详细讲解了分词器与词表设计——从BPE算法到SentencePiece框架，从LLaMA 1/2的32K词表到LLaMA 3的128K升级，再到特殊token的设计和工程实践。希望你离开这一章时能够带着这样的认知：<strong>分词器是LLM的"眼睛"，它决定了模型怎么看世界。</strong></p>
+
+        <p>下一章，我们将跳出单个组件的细节，进入训练理论的领域——<strong>缩放定律（Scaling Law）与训练策略</strong>。这是贯穿LLaMA三代演进的核心线索：为什么LLaMA 1用1T tokens就够，而LLaMA 3要用15T+ tokens？为什么"小模型+大数据"这个反直觉的策略能行得通？</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

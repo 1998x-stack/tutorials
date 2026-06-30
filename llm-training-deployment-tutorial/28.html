@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第28章 从零到一：完整实战项目</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html" class="active">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第28章 从零到一：完整实战项目</h2>
+
+        <p>大家好，我是你们的讲师。欢迎来到这门课的最后一章。整整27章的技术讲解过后，终于到了"把知识变成代码"的时候了。这一章我们要做一个完整的端到端实战项目：<strong>从零开始预训练一个1B参数的 decoder-only 语言模型，完成SFT和DPO后训练，最后量化部署上线</strong>。</p>
+
+        <p>选择1B规模而不是更大的参数，基于两个考虑：第一，1B模型在单机多卡（4-8张GPU）上就能跑起来，不需要千卡集群，读者更容易复现。第二，1B模型的全流程训练是理解更大模型训练的"最小完备集"——预训练、SFT、DPO、量化、部署，每个环节在大模型上遇到的问题在1B模型上都会原样出现，只是规模小一些。走通这个小模型的全流程，你就获得了驾驭大规模训练的核心心智模型。</p>
+
+        <h3>28.1 项目规划——选型、预算与时间线</h3>
+
+        <p>任何训练项目的第一步都不是写代码，而是做规划。一个清晰的项目规划就像建筑蓝图——它决定了后续所有工作的方向和边界。</p>
+
+        <p><strong>模型选型：1B Decoder-only。</strong>我们选择基于LLaMA架构——这是2025-2026年最成熟最文档化的架构。具体配置：hidden size=2048，num layers=24，num attention heads=16，intermediate size=5632（约2.75x hidden size），total params约1.1B。这个配置可以在单张A100 80GB上用FSDP跑完整预训练，batch size per GPU设为16，gradient accumulation steps设为4，总micro batch size = 64。</p>
+
+        <p><strong>算力预算。</strong>我们规划用8张A100 80GB GPU（或等价的H100），训练约100B tokens的数据。在BF16混合精度下，1B模型的训练吞吐量约为每GPU每秒15,000 tokens（以A100计）。8张GPU的峰值吞吐量为120K tokens/s。100B tokens的预训练大约需要100B / 120K / 3600 ≈ 231小时 ≈ 9.6天。加上SFT（约1天）和DPO（约1.5天），总训练时间约12天。以云上A100约$2/GPU-hour计算，总成本约8×2×24×12 ≈ $4,600。如果使用spot实例，可以降到$1,500左右。</p>
+
+        <p><strong>时间规划。</strong></p>
+
+        <table>
+            <tr>
+                <th>阶段</th>
+                <th>时间</th>
+                <th>主要工作</th>
+            </tr>
+            <tr>
+                <td>数据准备</td>
+                <td>第1-3天</td>
+                <td>数据采集、清洗、去重、tokenization</td>
+            </tr>
+            <tr>
+                <td>预训练</td>
+                <td>第4-13天</td>
+                <td>1B模型预训练100B tokens</td>
+            </tr>
+            <tr>
+                <td>SFT</td>
+                <td>第14-15天</td>
+                <td>指令微调，50K高质量数据</td>
+            </tr>
+            <tr>
+                <td>DPO</td>
+                <td>第16-17天</td>
+                <td>偏好对齐，20K对比数据</td>
+            </tr>
+            <tr>
+                <td>评估迭代</td>
+                <td>贯穿全程</td>
+                <td>每阶段保存checkpoint并评估</td>
+            </tr>
+            <tr>
+                <td>量化部署</td>
+                <td>第18-20天</td>
+                <td>INT4量化、vLLM部署、API测试</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>核心建议</strong>：在正式开始之前，先用一个小规模实验验证整个pipeline。拿1B tokens的数据跑一个mini预训练（只需几小时），然后走完整SFT+DPO+量化流程。这样能在投入全量资源之前发现pipeline中的bug——数据格式问题、模型维度配置错误、推理代码不兼容等。我见过太多团队直接上全量训练，结果跑了三天后发现loss不对，回头排查是数据预处理代码里把label和input搞反了。<strong>先跑通一个mini version，再上全量——这个习惯价值百万美元</strong>。</p>
+        </div>
+
+        <h3>28.2 数据准备——小规模但高质量的训练语料库</h3>
+
+        <p>我们的目标不是打造一个"通用大模型"——那是巨头和开源社区的事情。我们的目标是打造一个"在小规模高质量数据上训练出的、具有清晰语言理解和指令遵循能力的模型"。因此数据质量远重要于数据数量。</p>
+
+        <p><strong>预训练数据来源。</strong>我们计划使用以下数据源构建约100B tokens的预训练语料：中文开源语料（如Wudao、CLUECorpus的子集，约40B tokens）、英文开源语料（如FineWeb-Edu、Dolma的子集，约30B tokens）、代码语料（从GitHub公开仓库抽取的Python、JavaScript、Rust代码，约20B tokens）、领域专业知识语料（数学、物理、生物等维基百科和教科书，约10B tokens）。</p>
+
+        <p><strong>数据清洗流程。</strong>原始数据到可用语料之间有一条复杂的pipeline。第一步是去重——使用MinHash+LSH算法做模糊去重，去除URL、文本正文级别的重复文档。在我们的实验中，MinHash去重通常会移除15-25%的文档。第二步是质量过滤——用fastText分类器（在人工标注的高质量/低质量语料上训练的）过滤低质量文档。第三步是PII（Personal Identifiable Information）脱敏——使用正则表达式和NER模型去除身份证号、电话号码、银行卡号等敏感信息。第四步是语言均衡——调整中英文比例到约7:3。</p>
+
+        <p><strong>Tokenization。</strong>我们使用与LLaMA兼容的tokenizer——基于SentencePiece的BPE tokenizer，vocab size=32K，byte-fallback enabled。关键是在训练语料上训练tokenizer，而不是直接使用现成的——因为我们的数据分布（中英文混合+代码）可能与通用tokenizer的训练分布不同。训练tokenizer需要约1-5GB的采样数据，通常耗时几小时。</p>
+
+        <pre><code># 数据预处理pipeline（伪代码架构）
+class DataPreprocessingPipeline:
+    def __init__(self, tokenizer_path):
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+
+    def deduplicate(self, documents):
+        # MinHash LSH去重
+        minhash = MinHash(num_perm=128)
+        hashed_docs = [minhash.hash(doc) for doc in documents]
+        lsh = LSH(threshold=0.8, num_bands=16)
+        duplicates = lsh.query(hashed_docs)
+        return [doc for i, doc in enumerate(documents) if i not in duplicates]
+
+    def quality_filter(self, documents):
+        # fastText质量分类
+        classifier = fastText.load_model("quality_filter.bin")
+        scores = classifier.predict(documents)
+        return [doc for doc, score in zip(documents, scores) if score > 0.7]
+
+    def tokenize(self, documents):
+        tokens = []
+        for doc in documents:
+            ids = self.tokenizer.encode(
+                doc, truncation=True, max_length=4096
+            )
+            tokens.extend(ids)
+        return torch.tensor(tokens, dtype=torch.long)
+
+    def run(self, raw_docs):
+        deduped = self.deduplicate(raw_docs)         # 去重
+        filtered = self.quality_filter(deduped)      # 质量过滤
+        tokenized = self.tokenize(filtered)          # Token化
+        return tokenized</code></pre>
+
+        <h3>28.3 预训练实战——FSDP、DeepSpeed与训练监控</h3>
+
+        <p>预训练是整条链路中最长、最贵、最容易出问题的环节。我们选择FSDP（Fully Sharded Data Parallelism）作为分布式训练策略——它对代码侵入性最小，与原生PyTorch兼容最好，适合1B级别的模型。</p>
+
+        <p><strong>FSDP配置。</strong>我们使用混合策略：self-attention层不shard（因为attention计算对通信延迟敏感），FFN层shard（因为FFN的参数占大头且计算密集度适中）。混合精度策略：BF16用于前向和反向计算，FP32用于master weight和optimizer state。启用activation checkpointing（也叫gradient checkpointing）来节省显存——在1B模型上，activation checkpointing可以把每GPU的显存占用从约60GB降到约35GB，代价是约15%的计算开销。</p>
+
+        <p><strong>Optimizer配置。</strong>使用AdamW优化器，beta1=0.9, beta2=0.95, weight decay=0.1。学习率使用cosine schedule：从0预热到3e-4（前1000步线性预热），然后按cosine曲线下降到3e-5。Batch size在这个cosine schedule中不需要warmup——从第一天起就用full batch size训练。Gradient clipping设为1.0，防止梯度爆炸。</p>
+
+        <p><strong>Loss曲线阅读。</strong>在1B模型的预训练中，loss从初始约11.0（随机初始化时的交叉熵损失，≈ vocab_size的均匀分布），经过~5K步快速下降到约4.5，然后进入缓慢下降阶段。到100K步（约100B tokens）时，loss大约在2.8-3.2之间（取决于数据质量）。"好"的loss曲线应该是平滑的、单调下降的——如果loss突然上升0.5以上，立即暂停排查。如果loss在某一区间平坦超过1万步，可以尝试稍微提高学习率。</p>
+
+        <div class="warning">
+            <p><strong>踩坑故事</strong>：我第一次跑1B模型预训练时遇到过一个令人崩溃的问题——loss在前5000步正常下降，但到8000步时突然飙升到12.0，然后跳回正常，再过2000步又飙升一次。排查了整整三天，检查了数据、优化器、分布式配置，一无所获。最后用tcpdump抓包分析通信，发现是NCCL的all-reduce操作在某个特定step出现了数据损坏——两个rank之间偶尔会出现重复的梯度包。根因是交换机的ECMP（Equal-Cost Multipath）哈希导致部分UDP包被路由器分片和重排序。解决方法是启用NCCL的NVLink优先路由策略，或者改用TCP over InfiniBand（如果硬件支持）。这个bug在1000次训练中大约出现3次，极难复现，<strong>但一旦遇到就会浪费数十小时的训练量</strong>。这次经历让我深刻理解了为什么大型训练集群需要专用的高性能网络——共享的以太网基础设施真的不适合万卡级别的训练。</p>
+        </div>
+
+        <h3>28.4 后训练管道——SFT + DPO的完整流程</h3>
+
+        <p>预训练完成后，我们得到了一个base model。它的语言能力已经很强了，但它还不会"对话"——你问它一个问题，它可能会继续写一段相关文本而非回答你的问题。后训练的目的就是教会它"好好回答问题"。</p>
+
+        <p><strong>SFT（监督微调）。</strong>我们构建约50K条高质量的指令-回答数据。数据来源包括：开源SFT数据集（如OpenAssistant、ShareGPT的子集，筛选质量高的条目）、合成数据（使用GPT-4或Claude生成的指令-回答对，覆盖问答、写作、翻译、摘要、代码生成等任务，约30K条）、领域特定数据（针对我们的目标场景定制的指令，约10K条）。SFT训练使用标准的下一个token预测loss，但只计算回答部分的loss（mask掉指令部分的token）。学习率设为2e-5，cosine schedule，训练3个epoch。数据非常重要的一点是多样性——宁可要50K条覆盖50种任务的高质量数据，也不要500K条只覆盖5种任务的同质数据。</p>
+
+        <p><strong>DPO（Direct Preference Optimization）。</strong>SFT之后模型已经会"回答问题"了，但它不知道什么样的回答是"好"回答。DPO通过直接在偏好数据上优化来对齐模型行为。我们构建约20K条偏好数据对（chosen/rejected pairs），每条包含一个prompt和两个模型回答（chosen是更好的回答，rejected是较差的）。数据来源：从SFT阶段用模型生成多个候选回答，人工标注偏好。DPO的训练与SFT略有不同——它使用Binary Cross-Entropy loss，核心是在chosen回答的log probability和rejected回答的log probability之间施加一个margin。DPO的beta参数（控制KL约束强度）设为0.1。</p>
+
+        <p><strong>评估Checkpoint。</strong>每个checkpoint都必须在固定benchmark上评估，才能判断训练是否向正确方向进行。我们在每个SFT和DPO checkpoint上评估以下指标：MMLU（多任务知识理解），我们期望1B模型达到约35-40%（随机基线25%）；HumanEval（代码生成），期望pass@1约15-20%；自建的instruction-following benchmark（50条指令，GPT-4打分），期望score > 7/10。如果某个checkpoint的benchmark分数出现下降，说明可能出现了灾难性遗忘或过度优化——需要回退到上一个好checkpoint并降低学习率。</p>
+
+        <pre><code># DPO训练的核心逻辑（简化版）
+def dpo_loss(policy_logps, ref_logps, chosen_ids, rejected_ids, beta=0.1):
+    """
+    policy_logps: 当前策略模型输出的log probabilities
+    ref_logps: 参考模型（冻结的SFT模型）输出的log probabilities
+    """
+    # 提取chosen和rejected回答部分的log probability
+    chosen_policy_logps = gather_logps(policy_logps, chosen_ids)
+    chosen_ref_logps = gather_logps(ref_logps, chosen_ids)
+    rejected_policy_logps = gather_logps(policy_logps, rejected_ids)
+    rejected_ref_logps = gather_logps(ref_logps, rejected_ids)
+
+    # 计算DPO loss
+    policy_log_ratio = chosen_policy_logps - rejected_policy_logps
+    ref_log_ratio = chosen_ref_logps - rejected_ref_logps
+    logits = beta * (policy_log_ratio - ref_log_ratio)
+    loss = -F.logsigmoid(logits).mean()
+    return loss</code></pre>
+
+        <h3>28.5 量化部署——从训练权重到生产服务</h3>
+
+        <p>模型训练完毕，现在是时候把它部署到生产环境了。对于1B模型，我们可以直接部署FP16版本（约2GB显存），但为了更好的性价比和边缘部署兼容性，我们选择量化到INT4。</p>
+
+        <p><strong>INT4量化。</strong>使用AutoGPTQ对模型进行训练后量化（PTQ）。关键步骤是：准备一小批校准数据（calibration data，通常128-512条，从训练数据中采样的代表性样本），运行GPTQ算法，对权重做group-wise INT4量化（group size=128），同时对activation做INT8动态量化。量化后的模型大小从约2GB（FP16）降到约550MB（INT4）。对1B模型，GPTQ量化的精度损失通常非常小——MMLU分数下降不超过1-2个百分点。</p>
+
+        <p><strong>vLLM部署。</strong>使用vLLM作为推理服务引擎，它提供了PagedAttention、continuous batching、prefix caching等优化。配置：max_model_len=4096，gpu_memory_utilization=0.9，max_num_batched_tokens=8192。部署后通过OpenAI兼容的API提供服务。实测在单张A100上，INT4量化的1B模型可以达到约2,000 tokens/s的吞吐量（batch size=32，输入128 tokens，输出128 tokens）。对于一个小型应用（日均10万次推理请求），单张GPU就能轻松应对。</p>
+
+        <pre><code># 使用vLLM部署量化模型的完整脚本
+from vllm import LLM, SamplingParams
+from vllm.model_executor.models import ModelRegistry
+
+# 1. 加载GPTQ量化模型
+model = LLM(
+    model="./checkpoints/final_model_gptq/",  # GPTQ量化后的模型目录
+    tokenizer="./checkpoints/final_model_gptq/",
+    quantization="gptq",
+    dtype="float16",           # 计算使用FP16，权重是INT4
+    max_model_len=4096,
+    gpu_memory_utilization=0.9,
+    trust_remote_code=True,
+    tensor_parallel_size=1,    # 1B模型单卡即可
+)
+
+# 2. 定义采样参数
+sampling_params = SamplingParams(
+    temperature=0.7,
+    top_p=0.9,
+    max_tokens=1024,
+    stop=["<|im_end|>", "<|endoftext|>"],
+)
+
+# 3. 推理
+prompt = "<|im_start|>user\n请用Python实现一个快速排序算法<|im_end|>\n<|im_start|>assistant\n"
+outputs = model.generate([prompt], sampling_params)
+for output in outputs:
+    print(output.outputs[0].text)
+
+# 4. 启动API服务（命令行方式）
+# python -m vllm.entrypoints.openai.api_server \
+#     --model ./checkpoints/final_model_gptq/ \
+#     --quantization gptq \
+#     --dtype float16 \
+#     --max-model-len 4096 \
+#     --port 8000</code></pre>
+
+        <div class="tip">
+            <p><strong>部署经验</strong>：你可能注意到我们直接用vLLM加载GPTQ模型。这是2025-2026年的标准做法——vLLM原生支持GPTQ、AWQ和SqueezeLLM量化格式，不需要额外的转换步骤。如果你在实际项目中需要更高的吞吐量，可以考虑以下优化：使用tensor parallelism跨多卡推理（1B模型一般不需要）、启用prefix caching（如果前缀重复率高）、使用spectral offloading（将不常用的expert offload到CPU）。对于1B模型，单卡的吞吐量通常已经足够了。</p>
+        </div>
+
+        <h3>28.6 踩坑总结与未来展望</h3>
+
+        <p>走完整整28章的技术内容，我想用这个实战项目的踩坑总结作为课程的收尾。以下是我遇到过的最值得分享的教训。</p>
+
+        <p><strong>踩坑一：数据问题永远是第一号敌人。</strong>在我参与过的所有训练项目中，超过60%的问题根源是数据——数据重复、数据噪声、数据分布偏移、tokenization错误。而这些问题往往在训练开始后的3-5天才会暴露（当模型"学会"了数据中的模式后）。防坑建议：投入至少30%的项目时间做数据质量分析和可视化。</p>
+
+        <p><strong>踩坑二：分布式训练的复现性比你想象的低。</strong>同样的代码、同样的数据、同样的配置，在不同节点上跑可能得到不同的loss曲线。原因包括：GPU型号的微差异（A100 rev A vs rev B）、CUDA版本和cuDNN版本的数值精度差异、NCCL的通信顺序不确定性。防坑建议：在关键实验中固定seed、固定CUDA deterministic flag、在相同硬件上对比实验。</p>
+
+        <p><strong>踩坑三：量化后的精度损失可能在特定任务上被放大。</strong>INT4量化在MMLU等通用benchmark上确实只掉1-2个点，但在某些细粒度任务上（特别是数学推理和代码生成），量化后的错误率可能上升5-10%。防坑建议：不要只看通用benchmark，要在你的目标场景上做细粒度的量化评估。如果发现问题，考虑用QAT（Quantization-Aware Training）替代PTQ。</p>
+
+        <p><strong>踩坑四：训练和部署环境的"配置漂移"导致线上问题。</strong>模型在训练环境里跑得好好的，到生产环境就崩了——这是经典的"it works on my machine"问题。常见原因包括：CUDA版本不一致导致的算子行为差异、transformer库版本不同导致的forward逻辑变化、tokenizer配置（特别是add_bos_token等参数）不一致。防坑建议：用Docker容器固化训练和部署环境，tokenizer配置通过JSON文件显式保存而非依赖环境默认值。</p>
+
+        <p><strong>展望2027及以后。</strong>这门课写于2026年中，技术的演进从未停歇。展望未来几年，有几个方向我认为会深刻改变"训练和部署"的范式。第一，<strong>Agentic Training</strong>——模型不再只是"回答问题"，而是"完成任务"。训练范式将从问答对扩展到工具使用轨迹、多步推理链、环境交互反馈。第二，<strong>Test-Time Compute Scaling</strong>——推理时可以通过"多花算力"来提升质量（如chain-of-thought、beam search、self-consistency），训练策略需要为test-time compute做优化。第三，<strong>完全的端侧训练</strong>——随着NPU算力和内存带宽的指数增长，几年后或许每个人都能在手机上微调自己的个性化AI。</p>
+
+        <div class="highlight">
+            <p><strong>老师的话</strong>：到此为止，28章的内容全部结束了。感谢你一路坚持到这里。写这门课的过程中，我回想起自己从2019年开始接触Transformer到今天的整个学习曲线——走过太多弯路，踩过太多坑。这门课的价值不在于它讲了多深的技术细节，而在于它把那些"需要花几年时间踩坑才能获得的经验"浓缩了出来，让你站在前人的肩膀上少走弯路。记住：<strong>大模型训练不是一个"跑通就行"的事情，而是一个"系统性的工程实践"</strong>——数据、算法、工程、运维，每个环节都不可或缺。如果你完整跟完了这门课，你已经有能力从零开始构建和部署自己的语言模型了。去创造吧，AI的未来值得期待。</p>
+        </div>
+
+        <pre><code># 28章课程回顾：从零到一的完整技术栈
+#
+# Parts overview:
+# Part 1 (Ch01-04):   Fundamentals —— 全景图、数据、Tokenizer、Transformer
+# Part 2 (Ch05-11):   Distributed Training —— 并行、优化器、显存、MoE、Scaling
+# Part 3 (Ch12-14):   Data & Continuous Training —— 长上下文、合成数据、Mid-train
+# Part 4 (Ch15-20):   Post-training Alignment —— SFT、RLHF、DPO、PEFT、RLVR
+# Part 5 (Ch21-22):   Advanced Techniques —— 多模态、蒸馏
+# Part 6 (Ch23-28):   Deployment & Engineering —— 量化、推理、端侧、运维、实战
+#
+# 祝你训练顺利，模型收敛！🚀</code></pre>
+
+        <div class="footer-nav">
+            <a href="27.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="javascript:void(0)">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

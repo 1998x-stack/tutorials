@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 模型保存与加载 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html" class="active">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第11章 模型保存与加载</h2>
+
+<p>大家好，我是你们的讲师。</p>
+
+<p>到目前为止，我们训练的所有模型都在内存里——一旦程序退出，模型参数就灰飞烟灭了。训练一个模型少则几小时多则数天，如果每次都得从头开始，那这个框架就没法用了。模型保存和加载看起来是件小事，但一旦出了问题，损失可能是灾难性的。</p>
+
+<p>2019 年，我参加 Kaggle 的一个比赛，训练了整整 72 小时，模型在验证集上达到了当时的最优成绩。我随手用 <code>torch.save(model, 'model.pth')</code> 保存了模型，然后心满意足地去睡觉。第二天起来想继续训练——发现模型加载后完全没办法接着训练，因为优化器的状态和 epoch 信息都没保存。更要命的是，我保存模型的那个环境有 GPU，但我当天想在一台新机器上做推断，那台机器只有 CPU——结果一加载就报 CUDA 错误。这个故事告诉我们：<strong>模型保存不是存个 .pth 文件那么简单</strong>。这一章我们来系统性地解决这些问题。</p>
+
+<h3>11.1 state_dict() vs 完整模型保存</h3>
+
+<p>PyTorch 提供了两种保存方式，适用场景完全不同：</p>
+
+<pre><code># 方式一：保存完整模型（不推荐）
+torch.save(model, 'model_complete.pth')
+model = torch.load('model_complete.pth')
+
+# 方式二：保存 state_dict（推荐）
+torch.save(model.state_dict(), 'model_state.pth')
+model.load_state_dict(torch.load('model_state.pth'))</code></pre>
+
+<table>
+    <thead>
+        <tr>
+            <th>维度</th>
+            <th>完整模型保存</th>
+            <th>state_dict 保存</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>存储内容</td>
+            <td>模型结构 + 参数 + 训练配置</td>
+            <td>仅参数字典（层名 → 权重张量）</td>
+        </tr>
+        <tr>
+            <td>文件大小</td>
+            <td>略大（包含序列化的类定义）</td>
+            <td>较小（仅权重）</td>
+        </tr>
+        <tr>
+            <td>加载方式</td>
+            <td>一行代码，无需定义模型类</td>
+            <td>需要先实例化模型再 load_state_dict</td>
+        </tr>
+        <tr>
+            <td>安全性</td>
+            <td>潜在 pickle 漏洞（任意代码执行）</td>
+            <td>较安全（仅加载张量数据）</td>
+        </tr>
+        <tr>
+            <td>可移植性</td>
+            <td>差（PyTorch 版本、代码结构变化会出错）</td>
+            <td>好（只要模型定义兼容即可）</td>
+        </tr>
+        <tr>
+            <td>推荐场景</td>
+            <td>快速原型、临时实验</td>
+            <td>生产部署、长期保存、分享给他人</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="warning">
+    <strong>永远不要在正式项目中使用完整模型保存。</strong>完整模型使用 Python 的 pickle 序列化，它保存的是 Python class 的引用路径。一旦你修改了模型代码（改了类名、换了目录），之前保存的权重就无法加载了。更严重的是，pickle 格式存在安全风险——恶意的 .pth 文件可以在你加载时执行任意代码（我们稍后会讲到 <code>weights_only=True</code>）。
+</div>
+
+<h3>11.2 检查点（Checkpoint）设计模式</h3>
+
+<p>在正式的训练项目中，一个 checkpoint 应该包含所有需要恢复训练的信息。标准模式是把所有状态打包成一个字典：</p>
+
+<pre><code>import torch
+
+def save_checkpoint(model, optimizer, scheduler, epoch, loss, filepath):
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'loss': loss,
+        # 可选：保存随机状态以便复现
+        'rng_state': torch.get_rng_state(),
+    }
+    torch.save(checkpoint, filepath)
+    print(f"Checkpoint saved at epoch {epoch}, loss={loss:.4f}")</code></pre>
+
+<p>加载时，你可以从 checkpoint 中恢复全部训练状态：</p>
+
+<pre><code>def load_checkpoint(filepath, model, optimizer, scheduler):
+    checkpoint = torch.load(filepath)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    start_epoch = checkpoint['epoch'] + 1  # 从下一 epoch 继续
+    best_loss = checkpoint['loss']
+    return start_epoch, best_loss</code></pre>
+
+<p>这个模式的好处：你只需要一个文件就包含了"快照"时刻的所有状态。<strong>而且不管训练中断多少次，都能接上。</strong>在实际项目中，我通常还会保留最近 3 个 checkpoint 和最佳的一个：</p>
+
+<pre><code>def save_with_rotation(model, optimizer, scheduler, epoch, loss, base_dir):
+    # 总是保存最新的 checkpoint
+    save_checkpoint(model, optimizer, scheduler, epoch, loss,
+                    f"{base_dir}/checkpoint_latest.pt")
+    # 保存最佳 checkpoint
+    if loss < best_loss:
+        save_checkpoint(model, optimizer, scheduler, epoch, loss,
+                        f"{base_dir}/checkpoint_best.pt")
+    # 每 N 个 epoch 保存一次（历史快照）
+    if epoch % 10 == 0:
+        save_checkpoint(model, optimizer, scheduler, epoch, loss,
+                        f"{base_dir}/checkpoint_epoch_{epoch:03d}.pt")</code></pre>
+
+<h3>11.3 map_location：跨设备加载</h3>
+
+<p>上面的"踩坑"故事里，那个在 CPU 机器上加载 GPU 模型的惨痛经历，实际上有一个标准解决方案——<code>map_location</code> 参数：</p>
+
+<pre><code># GPU 上训练 → CPU 上加载
+checkpoint = torch.load('checkpoint.pt', map_location='cpu')
+model.load_state_dict(checkpoint['model_state_dict'])
+
+# CPU 上训练 → GPU 上加载
+checkpoint = torch.load('checkpoint.pt', map_location='cuda:0')
+
+# GPU 0 上训练 → GPU 1 上加载
+checkpoint = torch.load('checkpoint.pt', map_location='cuda:1')
+
+# 更灵活的方式：手动映射
+checkpoint = torch.load('checkpoint.pt',
+    map_location=lambda storage, loc: storage.cuda(1))</code></pre>
+
+<table>
+    <thead>
+        <tr>
+            <th>保存设备</th>
+            <th>加载设备</th>
+            <th>map_location 值</th>
+            <th>说明</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>GPU (cuda:0)</td>
+            <td>CPU</td>
+            <td><code>'cpu'</code></td>
+            <td>最常见的场景：生产部署机器没有 GPU</td>
+        </tr>
+        <tr>
+            <td>CPU</td>
+            <td>GPU (cuda:0)</td>
+            <td><code>'cuda:0'</code></td>
+            <td>先在小规模 CPU 上训练，再迁移到 GPU 推理</td>
+        </tr>
+        <tr>
+            <td>GPU (cuda:0)</td>
+            <td>GPU (cuda:1)</td>
+            <td><code>'cuda:1'</code></td>
+            <td>多卡环境下的设备重映射</td>
+        </tr>
+        <tr>
+            <td>GPU (cuda:0)</td>
+            <td>MPS (Apple Silicon)</td>
+            <td><code>'mps'</code></td>
+            <td>跨硬件平台加载（需 PyTorch 2.0+）</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>11.4 weights_only=True 与安全</h3>
+
+<p>2023 年，安全研究人员发现了一个令人不安的事实：<strong>恶意的 .pth 文件可以利用 pickle 的任意代码执行漏洞，在加载模型时植入病毒</strong>。攻击者可以训练一个完全正常的模型，但在保存时通过特殊的 pickle 操作插入恶意代码。你加载这个模型时，恶意代码就会被执行。</p>
+
+<p>幸运的是，PyTorch 从 2.1 版本开始引入了 <code>weights_only=True</code> 参数：</p>
+
+<pre><code># 安全加载（推荐）
+checkpoint = torch.load('model.pth', weights_only=True)
+
+# 从不可信的来源加载时，务必使用这个参数
+# 如果是自己训练的模型，且环境可信，可以不用</code></pre>
+
+<div class="highlight">
+    <strong>Security 最佳实践：</strong>
+    <ul>
+        <li>只加载自己训练的或来自可信来源的模型文件</li>
+        <li>加载第三方模型时始终使用 <code>weights_only=True</code></li>
+        <li>不要在公开环境中轻易使用 <code>torch.load('unknown_model.pth')</code></li>
+        <li>Hugging Face Hub 上大多数模型使用 safetensors 格式（天生安全）</li>
+    </ul>
+</div>
+
+<h3>11.5 版本兼容性陷阱</h3>
+
+<p>PyTorch 不同版本之间保存的权重文件可能不兼容。这是一个容易被忽视的问题：</p>
+
+<ul>
+    <li><strong>PyTorch 1.x → 2.x</strong>：state_dict 格式兼容，但序列化格式有变化。直接加载通常没问题，但复杂场景（如自定义 C++ 扩展、TorchScript）可能出错。</li>
+    <li><strong>Python 版本差异</strong>：pickle 序列化在 Python 3.8 和 3.12 之间基本兼容，但自定义类的 <code>__getstate__</code>/<code>__setstate__</code> 行为可能不同。</li>
+    <li><strong>CUDA 版本差异</strong>：同一个 PyTorch 版本但不同 CUDA 编译版本加载，通常没有问题。但如果 GPU 架构差异太大（如 V100 → H100），某些 CUDA 扩展可能需要重新编译。</li>
+</ul>
+
+<div class="tip">
+    <strong>版本兼容的最佳实践：</strong>
+    <ul>
+        <li>在保存 checkpoint 时，把 PyTorch 版本号也作为元数据存进去</li>
+        <li>长期保存的模型建议定期使用最新 PyTorch 版本重新保存一次</li>
+        <li>如果分发模型给他人，用 <code>torch.save(model.state_dict(), ...)</code> 而非完整模型</li>
+    </ul>
+</div>
+
+<p>这一章我们学习了模型保存与加载的核心知识：state_dict 和完整保存的优劣对比、checkpoint 的标准设计模式、跨设备加载的 map_location 方案、weights_only 的安全保护，以及版本兼容性问题。掌握了这些，你就能安全地在不同环境间迁移训练任务，也能自信地和他人分享你的模型权重。下一章我们来看训练技巧——学习率调度、初始化策略、梯度裁剪等实战调参经验。</p>
+
+    <div class="footer-nav">
+        <a href="10.html">← 上一章</a>
+        <a href="index.html">📖 返回目录</a>
+        <a href="12.html">下一章 →</a>
+    </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

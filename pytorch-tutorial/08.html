@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 数据加载与预处理 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html" class="active">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第8章 数据加载与预处理</h2>
+
+<p>大家好，我是你们的讲师。欢迎回到 PyTorch 课程。</p>
+
+<p>前面七章我们一直在讲模型结构、损失函数和训练流程，但有一个基础问题一直被忽略了——<strong>数据从哪里来？</strong>你可能觉得这有什么好讲的，不就是把图片或文本读进内存，然后塞给模型吗？但现实是，数据加载往往是整个训练流程中最容易出问题、也最容易被低估的环节。</p>
+
+<p>我见过太多团队花了几周时间设计一个花哨的模型架构，结果训练到一半发现数据加载成了瓶颈——GPU 利用率一直挂在 30% 以下，训练效率惨不忍睹。他们也见过 debug 了一整天才发现是 DataLoader 参数配错了导致模型根本没有收敛。这一章我们来系统地学习 PyTorch 的数据加载体系：从 Dataset 到 DataLoader，再到各种数据增强和预处理手段。学完这一章，你再也不会被"数据"这个看似简单的问题绊倒。</p>
+
+<h3>8.1 torch.utils.data 核心架构</h3>
+
+<p>PyTorch 的数据加载体系分为两层：<strong>Dataset</strong>（数据集）和 <strong>DataLoader</strong>（数据加载器）。Dataset 负责定义"如何获取一条数据"，DataLoader 负责定义"如何批量地、高效地获取这些数据"。</p>
+
+<p>Dataset 有两种类型：</p>
+
+<ul>
+  <li><strong>Map-style Dataset</strong>：继承 <code>torch.utils.data.Dataset</code>，需要实现 <code>__len__</code> 和 <code>__getitem__</code> 两个方法。它像 Python 的字典或列表——你可以通过索引 <code>dataset[i]</code> 随机访问任意一条数据。这是最常用的 Dataset 类型。</li>
+  <li><strong>Iterable-style Dataset</strong>：继承 <code>torch.utils.data.IterableDataset</code>，需要实现 <code>__iter__</code> 方法。它像 Python 的生成器——数据只能按顺序读取，不能随机访问。适用于数据流无法预知长度（如实时日志流、数据库游标）或数据量太大无法全部索引的场景。</li>
+</ul>
+
+<p>何时用 IterableDataset？想象一下你在处理一个每天产生 TB 级数据的实时流，或者你在从一个大数据库里按批次读取数据——这时候你根本不知道总共有多少条数据，用 Map-style Dataset 强行实现 <code>__len__</code> 既不现实也没必要。IterableDataset 就是为这种场景准备的。</p>
+
+<pre><code># Map-style Dataset 的基本模板
+from torch.utils.data import Dataset
+
+class MyMapDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+# 使用
+dataset = MyMapDataset([1, 2, 3, 4, 5])
+print(dataset[2])  # 输出: 3</code></pre>
+
+<pre><code># Iterable-style Dataset 的基本模板
+from torch.utils.data import IterableDataset
+
+class MyIterableDataset(IterableDataset):
+    def __init__(self, data_stream):
+        self.data_stream = data_stream
+
+    def __iter__(self):
+        for item in self.data_stream:
+            yield item
+
+# 使用：数据只能按顺序读取
+dataset = MyIterableDataset(iter([10, 20, 30, 40]))
+for item in dataset:
+    print(item)</code></pre>
+
+<h3>8.2 DataLoader 参数深度解析</h3>
+
+<p>有了 Dataset 之后，DataLoader 才是真正的"发动机"。DataLoader 的参数非常多，但每个参数都直接影响到训练的速度和正确性。</p>
+
+<pre><code>from torch.utils.data import DataLoader
+
+dataloader = DataLoader(
+    dataset,
+    batch_size=32,           # 每个 batch 的样本数
+    shuffle=True,             # 是否打乱数据（训练集=True，验证集/测试集=False）
+    num_workers=4,            # 并行加载数据的子进程数
+    pin_memory=True,          # 是否将数据固定在 CPU 内存，加速 GPU 传输
+    persistent_workers=True,  # 是否在 epoch 间保持 worker 进程存活
+    prefetch_factor=2,        # 每个 worker 预取的 batch 数量
+    drop_last=False,          # 是否丢弃最后一个不完整的 batch
+)</code></pre>
+
+<p>以下是 DataLoader 各参数的详细对比：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>参数</th>
+            <th>默认值</th>
+            <th>作用</th>
+            <th>注意事项</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>batch_size</code></td>
+            <td>1</td>
+            <td>每个 batch 的样本数</td>
+            <td>过大导致 OOM，过小训练慢。通常从 32/64 起步调试。</td>
+        </tr>
+        <tr>
+            <td><code>shuffle</code></td>
+            <td>False</td>
+            <td>每个 epoch 开始时是否打乱数据</td>
+            <td>训练集应设 True，验证/测试集必须 False。不打乱容易学到数据顺序的伪模式。</td>
+        </tr>
+        <tr>
+            <td><code>num_workers</code></td>
+            <td>0</td>
+            <td>用于数据加载的子进程数</td>
+            <td>建议设为 CPU 核心数。太大反而变慢（多进程开销），甚至死锁。</td>
+        </tr>
+        <tr>
+            <td><code>pin_memory</code></td>
+            <td>False</td>
+            <td>将数据固定在页锁定内存中</td>
+            <td>GPU 训练强烈建议设为 True，可将 CPU→GPU 传输提速约 2 倍。</td>
+        </tr>
+        <tr>
+            <td><code>persistent_workers</code></td>
+            <td>False</td>
+            <td>epoch 结束后是否保留 worker 进程</td>
+            <td>设为 True 可避免每个 epoch 重新创建 worker 的开销，但占用更多内存。</td>
+        </tr>
+        <tr>
+            <td><code>prefetch_factor</code></td>
+            <td>2</td>
+            <td>每个 worker 预取的 batch 数</td>
+            <td>设为 2 是平衡方案。太大浪费内存，太小可能导致 GPU 等数据。</td>
+        </tr>
+        <tr>
+            <td><code>drop_last</code></td>
+            <td>False</td>
+            <td>是否丢弃最后一个不完整的 batch</td>
+            <td>如果总样本数不能被 batch_size 整除，最后一批会很小。设 True 可保持 batch 大小一致。</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>8.3 实战：自定义 CSV 数据集</h3>
+
+<p>在真实项目中，数据通常存储在 CSV 文件中。我们来写一个自定义的 Dataset 来读取 CSV 格式的表格数据：</p>
+
+<pre><code>import pandas as pd
+import torch
+from torch.utils.data import Dataset
+
+class CSVDataset(Dataset):
+    """读取 CSV 文件的自定义数据集"""
+    def __init__(self, csv_path, feature_cols, target_col, transform=None):
+        self.df = pd.read_csv(csv_path)
+        self.features = self.df[feature_cols].values.astype('float32')
+        self.targets = self.df[target_col].values.astype('float32')
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        x = torch.tensor(self.features[idx])
+        y = torch.tensor(self.targets[idx])
+        if self.transform:
+            x = self.transform(x)
+        return x, y
+
+# 用法
+dataset = CSVDataset(
+    csv_path='./data/train.csv',
+    feature_cols=['age', 'income', 'spend_score'],
+    target_col='label',
+)
+dataloader = DataLoader(dataset, batch_size=32, shuffle=True)</code></pre>
+
+<p>这个实现虽然简单，但在实际项目中非常实用。很多团队会用 Pandas 先做数据清洗和预处理，然后通过自定义 Dataset 把清洗后的数据喂给模型。注意这里我们在 <code>__init__</code> 中一次性读取了整个 CSV——这对中小规模数据（百万行以内）是 OK 的，但如果数据达到千万级别，你可能需要用 <code>chunksize</code> 分批读取。</p>
+
+<h3>8.4 实战：自定义图像数据集</h3>
+
+<p>图像数据集的实现比 CSV 稍微复杂一些，因为需要处理图片文件的解码和变换：</p>
+
+<pre><code>import torch
+from torch.utils.data import Dataset
+from PIL import Image
+import os
+
+class ImageFolderDataset(Dataset):
+    """文件夹格式的图像数据集
+    目录结构：
+    data/
+      ├── cat/    (类别0)
+      │   ├── cat_001.jpg
+      │   └── ...
+      └── dog/    (类别1)
+          ├── dog_001.jpg
+          └── ...
+    """
+    def __init__(self, root_dir, transform=None):
+        self.samples = []
+        self.classes = sorted(os.listdir(root_dir))
+        self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
+        self.transform = transform
+
+        for class_name in self.classes:
+            class_dir = os.path.join(root_dir, class_name)
+            if not os.path.isdir(class_dir):
+                continue
+            for fname in os.listdir(class_dir):
+                if fname.lower().endswith(('.jpg', '.png', '.jpeg')):
+                    self.samples.append((
+                        os.path.join(class_dir, fname),
+                        self.class_to_idx[class_name]
+                    ))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        image = Image.open(img_path).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+        return image, label</code></pre>
+
+<div class="tip">
+    <strong>性能小贴士：</strong>在 <code>__getitem__</code> 中，每次读取图片时都调用 <code>Image.open()</code> 并做变换，这其实是 PyTorch 的设计哲学——不在 <code>__init__</code> 中预加载所有图片到内存（会撑爆内存），而是按需读取。配合 num_workers 多进程并行，你可以在 1 秒内加载成百上千张图片，而内存占用只和 batch_size 有关，和数据集总量无关。
+</div>
+
+<h3>8.5 常见的 DataLoader 踩坑实录</h3>
+
+<p>这一节我们来讲 DataLoader 最经典的几个"坑"。</p>
+
+<p><strong>踩坑一：num_workers=16 在 4 核机器上</strong></p>
+
+<p>这是一个真实的故事。2023 年我帮一个做医疗影像识别团队做性能优化，他们告诉我训练特别慢。我一看代码，发现 <code>num_workers=16</code>。我问"你们机器有几个 CPU 核心？"他们说"4 个"。</p>
+
+<p>这就是典型的"多进程误区"——你以为 worker 越多越好，但实际上，每个 worker 是一个独立的 Python 进程。如果你有 4 个物理核心却启动了 16 个 worker，操作系统需要在这 16 个进程之间来回上下文切换，每个进程都在争抢 CPU 时间片。结果就是：<strong>数据加载的速度反而比 num_workers=0 还要慢</strong>，而且系统几乎卡死。</p>
+
+<div class="warning">
+    <strong>黄金法则：</strong>num_workers 通常设置为 <strong>CPU 核心数</strong>（或者 2 倍核心数，如果数据加载涉及大量 I/O 等待）。在 Linux 上，可以用 <code>os.cpu_count()</code> 获取核心数。即使核心很多，也不建议超过 8-12 个，因为过多的进程间通信也会成为瓶颈。
+</div>
+
+<p><strong>踩坑二：prefetch_factor 太小导致 GPU "断粮"</strong></p>
+
+<p>另一个常见的问题发生在高 GPU 吞吐场景（比如用了 NVIDIA A100 或 H100）。如果你的 GPU 计算速度快如闪电，但 DataLoader 的 prefetch_factor 太小，会发生什么？GPU 每算完一个 batch 就得停下来等 CPU 把下一个 batch 送过来。这就是所谓的 <strong>"GPU 饥饿"</strong>。你会看到 GPU 利用率曲线像锯齿一样上下跳动，平均利用率不到 50%。</p>
+
+<p><strong>踩坑三：pin_memory=False 时的隐蔽性能损失</strong></p>
+
+<p>很多人不理解 <code>pin_memory</code> 的作用。简单说，CPU 内存到 GPU 显存的数据传输，默认是通过一个"中转缓冲区"完成的，这个中转过程会复制一次数据。而 <code>pin_memory=True</code> 把 CPU 内存固定在物理地址上（不被交换出去），使 GPU 可以直接从这个地址读取数据，跳过一次复制。在训练任务中，这通常能带来 10-20% 的整体性能提升——免费的性能，只需要改一个布尔值。</p>
+
+<h3>8.6 torchvision.transforms 预处理流水线</h3>
+
+<p>对于图像任务，torchvision 提供了强大的预处理工具链。截至 2026 年，torchvision 的 <strong>transforms.v2</strong> 已经是官方推荐的标准方案。</p>
+
+<pre><code>from torchvision import transforms as T
+
+# v2 风格的 transforms 组合
+train_transform = T.Compose([
+    T.Resize((224, 224)),            # 调整尺寸
+    T.RandomHorizontalFlip(p=0.5),   # 随机水平翻转（训练时增强）
+    T.RandomRotation(degrees=15),    # 随机旋转 ±15 度
+    T.ColorJitter(brightness=0.2, contrast=0.2),  # 颜色抖动
+    T.ToTensor(),                    # PIL/HWC → Tensor/CHW，[0,255]→[0,1]
+    T.Normalize(
+        mean=[0.485, 0.456, 0.406],  # ImageNet 统计均值
+        std=[0.229, 0.224, 0.225]    # ImageNet 统计标准差
+    )
+])
+
+# 验证集只需要 resize 和 normalize
+val_transform = T.Compose([
+    T.Resize((224, 224)),
+    T.ToTensor(),
+    T.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])</code></pre>
+
+<div class="highlight">
+    <strong>重要提示：</strong>transforms.v2 最大的改进是原生支持 torch.Tensor 类型的数据（而不只是 PIL Image）。这意味着你可以在 augmentations 链中混入 <code>torchvision.transforms.v2.RandomErasing</code>、<code>v2.CutMix</code>、<code>v2.MixUp</code> 等高级增强，而不用担心数据类型兼容问题。在 v2 之前，这些操作需要繁琐的 PIL ↔ Tensor 转换。
+</div>
+
+<p>还有一个容易被忽视的细节：<strong>Normalize 的均值和标准差必须和预训练模型匹配</strong>。如果你使用 ImageNet 预训练权重（比如 ResNet、ViT），一定要用 ImageNet 的 mean/std。如果你训练自己的模型，这些值应该从你的训练集统计得到。</p>
+
+<p>这一章我们学习了 PyTorch 的数据加载体系：从 Dataset 的两种类型到 DataLoader 的参数调优，从 CSV 和图像的自定义 Dataset 到 transforms 预处理流水线。数据是深度学习的基础，这一章的知识会在后续所有章节中反复用到。下一章我们来学习卷积神经网络——真正让深度学习在计算机视觉领域大放异彩的核心架构。</p>
+
+    <div class="footer-nav">
+        <a href="07.html">← 上一章</a>
+        <a href="index.html">📖 返回目录</a>
+        <a href="09.html">下一章 →</a>
+    </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

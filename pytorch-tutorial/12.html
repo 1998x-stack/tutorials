@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 训练技巧与调参 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html" class="active">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第12章 训练技巧与调参</h2>
+
+<p>大家好，我是你们的讲师。</p>
+
+<p>模型训练中最让人沮丧的一件事情就是：明明代码写得都对，网络结构也没问题，但 loss 就是不掉。或者 loss 降了一段时间后突然放飞自我——变成 NaN。这种时候你开始怀疑人生，怀疑是学习率的问题还是初始化的问题，还是 optimizer 选错了？</p>
+
+<p>我从事深度学习这么多年，有一个最深刻的体会：<strong>"不要盲目调参——你遇到的 90% 的训练问题都不是玄学，而是科学。"</strong> 梯度爆炸有数学原因，初始化不对有统计解释，学习率选择有系统方法。这一章我们不讲"玄学调参"，而是分享一套系统性的训练技巧，帮你从"瞎调"走向"科学调参"。</p>
+
+<h3>12.1 学习率找法（LR Range Test）</h3>
+
+<p>很多人在训练模型时花最多时间的就是手动试学习率：1e-3 不行就 1e-4，1e-4 不行就 3e-4——这不是调参，这是"撞大运"。</p>
+
+<p>学习率找法（Learning Rate Range Test）是一种系统性的方法：<strong>从一个很小的学习率开始，每个 batch 后指数增加学习率，同时记录 loss 的变化</strong>。你会发现 loss 先下降，到某个点开始上升。那个"最低点"附近就是最佳学习率的起点。</p>
+
+<pre><code>def lr_finder(model, dataloader, criterion, optimizer, device,
+              start_lr=1e-7, end_lr=10, num_iter=100):
+    """学习率范围测试"""
+    lrs = []
+    losses = []
+    lr = start_lr
+
+    # 指数增长因子
+    factor = (end_lr / start_lr) ** (1.0 / num_iter)
+
+    model.train()
+    for i, (inputs, targets) in enumerate(dataloader):
+        if i >= num_iter:
+            break
+
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        # 更新当前学习率
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+
+        lrs.append(lr)
+        losses.append(loss.item())
+
+        lr *= factor
+
+    return lrs, losses
+
+# 画出 loss vs learning rate 曲线
+# 找到 loss 下降最快的区域对应的 lr 值</code></pre>
+
+<div class="tip">
+    <strong>LR Range Test 的使用技巧：</strong>画出来的曲线通常是一个 U 形（或 V 形）。最佳学习率选在 loss 开始快速下降的那个点的附近——通常比曲线最低点略低一些（更保守）。对于 Adam 优化器，典型的"好"学习率在 3e-4 到 1e-3 之间。
+</div>
+
+<h3>12.2 Early Stopping（早停法）</h3>
+
+<p>Early Stopping 看似简单——验证 loss 不再下降时就停止训练——但实现起来有几个关键点容易被忽略：</p>
+
+<pre><code>class EarlyStopping:
+    def __init__(self, patience=10, min_delta=1e-4):
+        self.patience = patience   # 等待多少个 epoch 没有改善
+        self.min_delta = min_delta # 最小改善幅度
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0        # 有改善，重置计数器
+        else:
+            self.counter += 1       # 没有改善，计数 +1
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+        return self.early_stop</code></pre>
+
+<p>一个经常被问到的问题：<strong>patience 设多少合适？</strong>答案是：取决于验证集 loss 的"抖动"程度。如果 loss 曲线比较平滑，patience=5-7 就够；如果 loss 抖动很厉害，patience 可能需要 15-20。我的习惯是设一个略大的 patience（如 20），同时配合 <strong>最佳模型保存</strong>——这样即使早停触发了，也能恢复历史最佳模型。</p>
+
+<h3>12.3 参数初始化方法</h3>
+
+<p>这一节我们来详细讲讲初始化。为什么不正确初始化会导致模型不收敛？原因很简单：<strong>初始化决定了梯度的初始"信噪比"。</strong></p>
+
+<p>如果初始参数太大，经过逐层变换激活值会迅速膨胀（或压缩），导致梯度爆炸或消失。如果初始参数太小，信号在传递过程中逐渐衰减为零。</p>
+
+<p>PyTorch 默认的初始化是 Kaiming Uniform（针对 ReLU 激活函数），但在使用其他激活函数时需要手动调整：</p>
+
+<pre><code>import torch.nn.init as init
+
+def init_weights(model):
+    for name, param in model.named_parameters():
+        if 'weight' in name and param.dim() >= 2:
+            # 根据激活函数选择初始化方法
+            if isinstance(model, nn.Linear):
+                init.xavier_uniform_(param)     # tanh/sigmoid
+            else:
+                init.kaiming_uniform_(param, mode='fan_in', nonlinearity='relu')
+        elif 'bias' in name:
+            init.zeros_(param)</code></pre>
+
+<table>
+    <thead>
+        <tr>
+            <th>初始化方法</th>
+            <th>适用激活函数</th>
+            <th>核心思想</th>
+            <th>PyTorch API</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>Xavier/Glorot Uniform</td>
+            <td>tanh, sigmoid</td>
+            <td>保持各层输入输出方差一致</td>
+            <td><code>init.xavier_uniform_</code></td>
+        </tr>
+        <tr>
+            <td>Xavier/Glorot Normal</td>
+            <td>tanh, sigmoid</td>
+            <td>同上，正态分布版本</td>
+            <td><code>init.xavier_normal_</code></td>
+        </tr>
+        <tr>
+            <td>Kaiming/He Uniform</td>
+            <td>ReLU, LeakyReLU</td>
+            <td>考虑到 ReLU 将一半输出置零，方差需要加倍</td>
+            <td><code>init.kaiming_uniform_</code></td>
+        </tr>
+        <tr>
+            <td>Kaiming/He Normal</td>
+            <td>ReLU, LeakyReLU</td>
+            <td>同上，正态分布版本</td>
+            <td><code>init.kaiming_normal_</code></td>
+        </tr>
+        <tr>
+            <td>正交初始化</td>
+            <td>RNN/LSTM</td>
+            <td>保持 RNN 梯度的方向信息</td>
+            <td><code>init.orthogonal_</code></td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="warning">
+    <strong>一个真实的惨痛教训：</strong>2021 年我帮一个朋友调试一个模型，他的网络用了 tanh 激活但没有做 Xavier 初始化，而是用了 PyTorch 默认的 Kaiming 初始化。结果 loss 在训练初期居然比以前还要高——因为 Kaiming 初始化假设激活函数是 ReLU（取一半的方差），而 tanh 没有这个"砍半"的特性，导致激活值方差偏大，梯度不稳定。我们改用 Xavier 后，loss 在 10 个 epoch 内就追平了之前 50 个 epoch 的效果。
+</div>
+
+<h3>12.4 梯度裁剪（Gradient Clipping）</h3>
+
+<p>梯度爆炸通常发生在 RNN 训练或训练初期。当 loss 突然变成了 NaN，十有八九是梯度爆炸。解决方案是梯度裁剪：</p>
+
+<pre><code># 在 loss.backward() 之后、optimizer.step() 之前
+
+# 方式一：按值裁剪（每梯度元素不超过 [-clip, clip]）
+torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=1.0)
+
+# 方式二：按范数裁剪（梯度向量的总范数不超过 max_norm）
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, norm_type=2)
+
+# 推荐使用 clip_grad_norm_，更优雅</code></pre>
+
+<p>梯度裁剪的 max_norm 怎么设？通常从 1.0 开始。如果训练稳定，可以适当增大（加速收敛）；如果还是出现 NaN，减小到 0.5 或 0.1。在训练 RNN/LSTM 时，梯度裁剪几乎是<strong>必须</strong>的操作。</p>
+
+<h3>12.5 Warmup 策略</h3>
+
+<p>训练初期，模型的参数是随机的，此时如果直接用大的学习率，很容易把参数"推"到一个不好的区域。Warmup 的意思是：<strong>在训练的前若干步用很小的学习率"预热"——让模型先找到一个大致的"好方向"，然后再使用正常的学习率</strong>。</p>
+
+<pre><code># 线性 Warmup + Cosine Decay 的完整实现
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR
+
+# PyTorch 2.x 推荐使用 SequentialLR 组合 scheduler
+warmup_epochs = 5
+total_epochs = 100
+
+warmup_scheduler = LinearLR(
+    optimizer,
+    start_factor=0.01,        # 初始学习率为目标学习率的 1%
+    total_iters=warmup_epochs # 5 个 epoch 达到全速
+)
+
+cosine_scheduler = CosineAnnealingLR(
+    optimizer,
+    T_max=total_epochs - warmup_epochs,
+    eta_min=1e-6              # 最小学习率
+)
+
+# 使用 ChainedScheduler 组合
+from torch.optim.lr_scheduler import ChainedScheduler
+scheduler = ChainedScheduler([
+    warmup_scheduler,
+    cosine_scheduler,
+])</code></pre>
+
+<p>Warmup 在训练大模型时格外重要。实际上，几乎所有大语言模型的训练都采用了"Warmup + Cosine Decay"这一黄金组合。</p>
+
+<h3>12.6 Batch Size 与学习率的关系</h3>
+
+<p>有一个经验法则叫做 <strong>Linear Scaling Rule</strong>：当你把 batch size 翻倍时，学习率也应该翻倍。</p>
+
+<pre><code># 假设 batch_size=64 时最优 lr=1e-3
+# 如果 batch_size 改为 256（4 倍），lr 应该设为约 4e-3
+# 注意：这个规律只在 batch_size 在一定范围内成立（通常 ≤ 4096）</code></pre>
+
+<p>为什么？因为更大的 batch 意味着梯度估计的方差更小——你可以更大步地前进而不用担心走偏。但同时要注意，过大的 batch size（几千上万）会导致泛化能力下降，因为梯度估计过于精确，可能收敛到尖锐的局部极小值。</p>
+
+<h3>12.7 Weight Decay 和 L2 正则化的区别</h3>
+
+<p>这两个概念经常被混为一谈，但在 PyTorch 中它们有微妙的区别：</p>
+
+<ul>
+    <li><strong>L2 正则化</strong>：在 loss 函数中加入权重平方和作为惩罚项，即 <code>loss = original_loss + λ * ||W||²</code>。它在梯度中产生一个 <code>2λW</code> 的项。</li>
+    <li><strong>Weight Decay</strong>：在梯度更新时直接减去一个和权重成比例的项，即 <code>W = W - lr * (grad + λ * W)</code>。在 SGD 中，weight decay 和 L2 正则化是等价的。但在 Adam 等自适应优化器中，两者<strong>不等价</strong>。</li>
+</ul>
+
+<pre><code># 正确的 Weight Decay 使用方式
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=1e-3,
+    weight_decay=1e-2   # AdamW 使用解耦的 weight decay
+)
+
+# 注意：不要在同一优化器上同时使用 L2 正则化和 weight decay
+# 在 AdamW 中，weight_decay 会从梯度中"解耦"出来单独处理</code></pre>
+
+<div class="highlight">
+    <strong>Adam vs AdamW：</strong>AdamW 是 PyTorch 中推荐的优化器，它修正了 Adam 中 weight decay 的错误实现（在 Adam 中 weight decay 和 L2 正则会互相干扰）。从 PyTorch 2.x 开始，<code>torch.optim.AdamW</code> 是官方推荐的默认选择。如果你还在用 <code>torch.optim.Adam</code> 并且设置了 weight_decay，建议迁移到 AdamW。
+</div>
+
+<p>这一章我们系统地学习了训练调参的核心技巧：学习率找法让你告别"瞎蒙"学习率，early stopping 帮你自动收敛，正确初始化解决"不收敛"的根本问题，梯度裁剪应对梯度爆炸，warmup 策略保护训练初期，以及 batch size 和学习率的联动关系。这些技巧组合起来，可以应对绝大多数训练中的"玄学"问题。下一章我们来看如何评估模型的真实性能——accuracy、precision、recall、F1，以及如何用 TensorBoard 可视化训练过程。</p>
+
+    <div class="footer-nav">
+        <a href="11.html">← 上一章</a>
+        <a href="index.html">📖 返回目录</a>
+        <a href="13.html">下一章 →</a>
+    </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

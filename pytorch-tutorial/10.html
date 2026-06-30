@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 循环神经网络与注意力 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html" class="active">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第10章 循环神经网络与注意力</h2>
+
+<p>大家好，我是你们的讲师。欢迎来到第十章。</p>
+
+<p>在处理序列数据时，我们面临一个和图像完全不同的挑战：<strong>文本、音频、时间序列不像图像那样有固定的空间结构</strong>。一句话可以有 5 个词也可以有 50 个词，同一个意思可以用不同的语序表达。处理这种变长数据，我们需要一种能够"记住"历史信息的网络结构——这就是循环神经网络（RNN）的出发点。</p>
+
+<p>从 2014 年到 2020 年左右，RNN 和它的变体 LSTM、GRU 几乎统治了所有的序列建模任务：机器翻译、语音识别、文本生成、情感分析。直到 2017 年 Transformer 和自注意力机制的横空出世，格局才被彻底改写。但即使在 2026 年的今天，RNN 在特定场景下仍然有不可替代的价值。而理解 RNN 的局限性，恰恰能帮你更好地理解注意力机制为什么有效。这一章我们先讲 RNN 和 LSTM，然后过渡到自注意力——你会发现，这两者解决的是同一个问题，只是思路不同。</p>
+
+<h3>10.1 RNN 面临的挑战：变长与长期依赖</h3>
+
+<p>CNN 在图像上表现优秀，但无法直接处理序列数据，原因有二：</p>
+
+<ul>
+    <li><strong>变长输入</strong>：CNN 的卷积核尺寸是固定的，输入图片必须 resize 到相同尺寸。但句子长度天然不同，你不能把每句话都"resize"到相同长度——会丢失信息。</li>
+    <li><strong>时间依赖</strong>：序列中的每个元素都和前后的元素相关。CNN 只能看到局部区域（感受野有限），无法捕捉"前面说过的内容和后面有联系"这种长距离依赖。</li>
+</ul>
+
+<p>RNN 的设计思想很直接：<strong>每次处理序列中的一个元素，同时维护一个"隐状态（hidden state）"向量，这个向量像接力棒一样在时间步之间传递</strong>。每一步，隐状态都会根据当前输入和上一步的隐状态进行更新。</p>
+
+<pre><code>import torch.nn as nn
+
+# 最简单的 RNN
+rnn = nn.RNN(
+    input_size=100,    # 每个时间步的输入维度（如词嵌入维度）
+    hidden_size=128,   # 隐状态的维度
+    num_layers=1,
+    batch_first=True,  # 输入形状: [B, seq_len, input_size]
+)
+
+# 前向传播
+output, h_n = rnn(x)
+# output: [B, seq_len, 128]  每个时间步的输出
+# h_n:    [1, B, 128]         最后一个时间步的隐状态</code></pre>
+
+<h3>10.2 梯度消失与 LSTM</h3>
+
+<p>普通 RNN 有一个致命缺陷——<strong>梯度消失</strong>。想象你在看一本 500 页的小说，看到第 500 页时还想记住第 1 页的内容。在 RNN 中，第 1 步的信息要经过 499 次矩阵乘法才能传到第 500 步，每次乘法都会把梯度缩小一些。经过几百步的累积，梯度几乎降为零——模型根本学不会"长期依赖"。</p>
+
+<p>这种效应在反向传播中尤为直观：</p>
+
+<pre><code># 梯度消失的数学直觉
+# 在每个时间步，梯度乘以 W_hh 的权重矩阵
+# 经过 T 步后，梯度 ≈ 初始梯度 × (W_hh)^T
+# 如果 W_hh 的特征值小于 1 (T 很大时)，梯度趋向于 0
+# 如果 W_hh 的特征值大于 1，梯度爆炸（梯度裁剪能缓解但不能解决消失）</code></pre>
+
+<p>LSTM（Long Short-Term Memory）通过引入"门控机制"解决了这个问题。它不再简单地用矩阵乘法更新隐状态，而是设计了三个门来精确控制信息的流动：</p>
+
+<ul>
+    <li><strong>遗忘门（Forget Gate）</strong>：决定"过去的信息有哪些需要丢弃"。一个 sigmoid 层输出 0~1 的值，0 表示"完全忘记"，1 表示"完全保留"。</li>
+    <li><strong>输入门（Input Gate）</strong>：决定"当前输入中有哪些新信息需要存入记忆"。用 sigmoid 决定要更新的内容，用 tanh 生成候选值。</li>
+    <li><strong>输出门（Output Gate）</strong>：决定"当前记忆中有哪些需要输出到隐状态"。</li>
+</ul>
+
+<pre><code>lstm = nn.LSTM(
+    input_size=100,
+    hidden_size=128,
+    num_layers=2,
+    batch_first=True,
+    dropout=0.3,      # 多层 LSTM 层间 dropout
+)
+
+# 输出
+output, (h_n, c_n) = lstm(x)
+# output: [B, seq_len, 128]
+# h_n:    [2, B, 128]  各层的最后隐状态
+# c_n:    [2, B, 128]  各层的最后单元状态（LSTM 独有）</code></pre>
+
+<div class="tip">
+    <strong>LSTM 的三个门，一个简单的直觉：</strong>
+    <ul>
+        <li>遗忘门：你在读一本推理小说，记到第 10 章时，第一章的细节已经不重要了，可以忘掉。</li>
+        <li>输入门：第 11 章出现了一个关键线索，需要重点记住。</li>
+        <li>输出门：有人问你这本书讲了什么，你从记忆中提取最关键的部分回答。</li>
+    </ul>
+    这种"选择性记忆"的机制，让 LSTM 可以轻松处理上百步的序列。
+</div>
+
+<h3>10.3 GRU：LSTM 的简洁版本</h3>
+
+<p>GRU（Gated Recurrent Unit）是 LSTM 的简化变体，它将遗忘门和输入门合并为一个"更新门"（Update Gate），并且去掉了单独的单元状态（cell state）。结果就是：<strong>GRU 的参数比 LSTM 少约 25%，但性能在很多任务上和 LSTM 不相上下</strong>。</p>
+
+<pre><code>gru = nn.GRU(
+    input_size=100,
+    hidden_size=128,
+    num_layers=2,
+    batch_first=True,
+)
+
+output, h_n = gru(x)
+# output: [B, seq_len, 128]
+# h_n: [2, B, 128]</code></pre>
+
+<p>选择建议：如果你的数据量不大，或者需要快速迭代，GRU 是更好的起点。如果数据量很大且你有足够的计算资源，LSTM 的额外参数可以带来更好的表现力。对于大多数实际项目，<strong>GRU 通常是最佳性价比选择</strong>。</p>
+
+<h3>10.4 2026 年的 RNN：还有用武之地吗？</h3>
+
+<p>在大模型时代，RNN 被很多人认为已经过时了。但事实上，RNN 在以下几个场景中依然生机勃勃：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>场景</th>
+            <th>为什么 RNN 仍适合</th>
+            <th>典型应用</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>边缘设备推理</td>
+            <td>RNN 参数量小、计算量低，可以在 MCU 上运行</td>
+            <td>智能手表上的语音唤醒</td>
+        </tr>
+        <tr>
+            <td>实时信号处理</td>
+            <td>RNN 是流式处理的天然选择，不需要完整序列</td>
+            <td>ECG 心电异常检测、传感器数据</td>
+        </tr>
+        <tr>
+            <td>时间序列预测</td>
+            <td>中等长度的时序数据，RNN/LSTM 仍有竞争力</td>
+            <td>股票价格、气象数据、工业监测</td>
+        </tr>
+        <tr>
+            <td>小样本序列任务</td>
+            <td>数据量少时，RNN 比 Transformer 更不容易过拟合</td>
+            <td>少量标注的语音/文本数据</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>10.5 自注意力：更好的选择</h3>
+
+<p>好，现在我们来说说为什么对于大多数序列任务，你应该用自注意力而不是 RNN。</p>
+
+<p>先讲一个故事。2017 年，我参与了一个翻译项目，需要把中文新闻翻译成英文。我们用了一个基于 LSTM 的 seq2seq 模型，输入编码器的是 100 个词以内的中文句子。翻译短句时效果很好，但一旦句子超过 30 个词，质量就开始下降。到 60 个词时，翻译结果已经是"词不对意"了。我们试了双向 LSTM、注意力增强的 LSTM、甚至堆叠了 4 层 LSTM 编码器——效果有提升，但 100 步的距离始终是个瓶颈。</p>
+
+<p>直到 2018 年我们尝试了 Transformer——同样的训练数据，同样的计算资源，<strong>翻译质量直接提升了 10 个 BLEU 点</strong>。原因很简单：Transformer 的自注意力机制允许每个位置直接"看"到序列中的所有其他位置，而不是像 RNN 那样一步一步地传递信息。</p>
+
+<p>自注意力（Self-Attention）的核心思想只有三个概念：</p>
+
+<ul>
+    <li><strong>Query（查询）</strong>：当前这个位置"想找什么"</li>
+    <li><strong>Key（键）</strong>：每个位置"有什么"</li>
+    <li><strong>Value（值）</strong>：每个位置"能提供什么信息"</li>
+</ul>
+
+<p>它的计算过程就像一个信息检索系统：每个位置生成 Q、K、V，然后计算每个位置的 Query 和所有位置的 Key 的相似度（点积），得到注意力权重，最后用权重加权求和所有位置的 Value。这样，每个位置的输出都集结了整个序列的信息，而且路径长度只有 1——无论序列多长，信息都可以一步到达。</p>
+
+<pre><code># 自注意力的核心计算（简化版）
+def scaled_dot_product_attention(Q, K, V):
+    # Q, K, V: [B, seq_len, d_k]
+    scores = torch.matmul(Q, K.transpose(-2, -1))  # [B, seq_len, seq_len]
+    scores = scores / (K.size(-1) ** 0.5)            # 缩放
+
+    # 注意力权重
+    attn_weights = torch.softmax(scores, dim=-1)
+
+    # 加权求和
+    output = torch.matmul(attn_weights, V)
+    return output, attn_weights</code></pre>
+
+<h3>10.6 Transformer 编码器简介</h3>
+
+<p>一个简化的 Transformer Encoder 层包含两个子层：<strong>多头自注意力（Multi-Head Self-Attention）</strong>和 <strong>前馈网络（Feed-Forward Network, FFN）</strong>，每个子层都有残差连接（Residual Connection）和层归一化（LayerNorm）。</p>
+
+<pre><code>from torch.nn import TransformerEncoder, TransformerEncoderLayer
+
+# 一个 Transformer 编码器层
+encoder_layer = nn.TransformerEncoderLayer(
+    d_model=512,        # 嵌入维度
+    nhead=8,            # 注意力头数
+    dim_feedforward=2048,
+    dropout=0.1,
+    batch_first=True,
+)
+
+encoder = nn.TransformerEncoder(encoder_layer, num_layers=6)
+# 输入: [B, seq_len, 512]</code></pre>
+
+<div class="highlight">
+    <strong>RNN 和自注意力的根本区别：</strong>
+    <ul>
+        <li>RNN 是<strong>顺序处理</strong>——每一步依赖前一步的结果，不能并行，呈 O(seq_len) 的计算复杂度。</li>
+        <li>自注意力是<strong>全局访问</strong>——所有位置同时参与计算，可完全并行，呈 O(seq_len²) 的复杂度（这是 Transformer 的瓶颈，但在 seq_len &lt; 2048 时通常可以接受）。</li>
+    </ul>
+    简单说：RNN 慢但省内存，Transformer 快但吃内存。这也是为什么长文本场景依然在用各种高效注意力变体的原因。
+</div>
+
+<p>这一章我们从 RNN 的梯度消失问题出发，理解了 LSTM 和 GRU 的门控设计哲学，也看到了为什么自注意力在大多数情况下是更好的选择。序列数据处理是深度学习中最丰富、最具挑战性的领域之一，RNN 和注意力就是我们理解这个领域的两个支点。下一章我们来讨论一个非常实用的话题——模型保存与加载。在这个大模型时代，学会怎么把训练好的模型安全地存起来、正确地加载出来，是每个工程师的必备技能。</p>
+
+    <div class="footer-nav">
+        <a href="09.html">← 上一章</a>
+        <a href="index.html">📖 返回目录</a>
+        <a href="11.html">下一章 →</a>
+    </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

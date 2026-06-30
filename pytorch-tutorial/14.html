@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 迁移学习 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html" class="active">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第14章 迁移学习</h2>
+
+<p>大家好，我是你们的讲师。</p>
+
+<p>如果你现在需要做一个医学影像分类任务——区分胸片是否异常。你手上只有 500 张标注好的胸片。如果从零开始训练一个 CNN，结果大概率是过拟合得一塌糊涂。那怎么办？答案很简单：<strong>借用一个在 ImageNet 上（1400 万张图片）预训练好的模型，在你这 500 张胸片上微调一下</strong>。这就是迁移学习（Transfer Learning）的核心思想。</p>
+
+<p>迁移学习在深度学习领域取得了巨大的成功。不管是计算机视觉还是自然语言处理，"在大型数据集上预训练 + 在目标任务上微调"已经成为标准范式。但迁移学习也常被误用——不是所有场景都该微调，也不是微调的方式都一样。这一章我们来系统地理解什么时候该用、怎么用，以及用的时候要注意什么。</p>
+
+<h3>14.1 为什么迁移学习有效？</h3>
+
+<p>开篇的"胸片"例子听起来可能有点反直觉——ImageNet 的数据集都是日常图片（猫、狗、汽车），和医学影像看起来毫无关系。为什么在猫狗图片上训练的特征能用来分析胸片？</p>
+
+<p>原因在于：<strong>深度神经网络的前几层学到的不是"猫"或"狗"这种高层的语义概念，而是通用的、低级的视觉特征——边缘、角落、纹理、颜色渐变等</strong>。无论你最终要识别的是猫还是肺部结节，这些低级特征都是通用的。深层网络才会逐渐组合这些低级特征形成任务特定的高级特征。</p>
+
+<p>也就是说，迁移学习的本质是：<strong>把在一个数据丰富任务上学到的"通用知识"（如何提取基础特征），迁移到一个数据稀缺的任务上</strong>。</p>
+
+<div class="tip">
+    <strong>一个真实的案例：</strong>2020 年，有一个团队用 ImageNet 预训练的 ResNet-50 来识别新冠肺炎患者的 CT 影像。尽管 ImageNet 上没有任何医学图片，但预训练模型的前几层（边缘检测、纹理识别）直接可用。他们只需要微调最后几层来识别"磨玻璃影"等新冠肺炎特有特征。最终模型在 2000 张 CT 图像上达到了 96% 的准确率——而从零训练同样模型，在同样数据量下只达到 82%。
+</div>
+
+<h3>14.2 torchvision.models 预训练模型</h3>
+
+<p>在 PyTorch 中使用预训练模型非常简单。从 PyTorch 2.x 开始，推荐使用 <code>weights=</code> API：</p>
+
+<pre><code>import torchvision.models as models
+
+# PyTorch 2.x 推荐的方式：使用 weights 枚举
+resnet50 = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+
+# 可选的其他模型
+efficientnet = models.efficientnet_b0(
+    weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1
+)
+
+# ViT（Vision Transformer）
+vit = models.vit_b_16(
+    weights=models.ViT_B_16_Weights.IMAGENET1K_V1
+)</code></pre>
+
+<table>
+    <thead>
+        <tr>
+            <th>模型</th>
+            <th>参数量</th>
+            <th>ImageNet Top-1 准确率</th>
+            <th>特点</th>
+            <th>适用场景</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>ResNet-50</td>
+            <td>25.6M</td>
+            <td>80.8%</td>
+            <td>经典的 CNN 骨干，计算量适中</td>
+            <td>通用图像分类，特征提取基线</td>
+        </tr>
+        <tr>
+            <td>ResNet-101</td>
+            <td>44.5M</td>
+            <td>82.0%</td>
+            <td>更深，效果略好</td>
+            <td>需要更好精度的场景</td>
+        </tr>
+        <tr>
+            <td>EfficientNet-B0</td>
+            <td>5.3M</td>
+            <td>77.7%</td>
+            <td>小模型，计算量低</td>
+            <td>移动端、边缘设备</td>
+        </tr>
+        <tr>
+            <td>EfficientNet-B3</td>
+            <td>12.0M</td>
+            <td>81.9%</td>
+            <td>精度/效率平衡</td>
+            <td>大多数应用的推荐选择</td>
+        </tr>
+        <tr>
+            <td>ViT-B-16</td>
+            <td>86.6M</td>
+            <td>81.1%</td>
+            <td>Transformer 结构</td>
+            <td>大数据量场景，或与 CNN 做对比实验</td>
+        </tr>
+        <tr>
+            <td>ConvNeXt-Tiny</td>
+            <td>28.6M</td>
+            <td>82.5%</td>
+            <td>现代 CNN，融合 Transformer 设计</td>
+            <td>现代 CNN 的最佳选择之一</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>14.3 特征提取（Feature Extraction）</h3>
+
+<p>特征提取是最简单的迁移学习方式：<strong>冻结预训练模型的所有层（不让它们更新），只把最后一层分类器替换成你自己的</strong>。整个训练过程中，只有新分类器的参数被更新。</p>
+
+<pre><code>import torch.nn as nn
+import torchvision.models as models
+
+# 1. 加载预训练模型
+model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+
+# 2. 冻结所有参数
+for param in model.parameters():
+    param.requires_grad = False
+
+# 3. 替换分类器（ResNet50 的分类器是 model.fc）
+num_features = model.fc.in_features  # 2048
+num_classes = 5  # 你的任务类别数
+model.fc = nn.Sequential(
+    nn.Dropout(0.2),
+    nn.Linear(num_features, 512),
+    nn.ReLU(),
+    nn.Linear(512, num_classes),
+)
+
+# 4. 只优化分类器参数
+optimizer = torch.optim.Adam(model.fc.parameters(), lr=1e-3)</code></pre>
+
+<div class="warning">
+    <strong>注意：</strong>虽然主干网络被冻结，但训练时仍然需要在 <code>model.train()</code> 模式下运行——因为分类器层需要训练。如果你在训练分类器时使用了 BatchNorm，它会为这个小分类器维护自己的 running statistics。主干网络的 BN 层在冻结状态下仍然使用预训练时积累的 statistics，这个行为是正确的。
+</div>
+
+<h3>14.4 微调（Fine-Tuning）</h3>
+
+<p>当你的数据集足够大（比如几千张以上），或者你的任务和 ImageNet 差异较大时，特征提取就不够了。你需要微调——<strong>解冻部分主干网络层，让它们也参与训练</strong>。</p>
+
+<pre><code># 1. 加载预训练模型（不冻结）
+model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+
+# 2. 替换分类器
+model.fc = nn.Linear(model.fc.in_features, num_classes)
+
+# 3. 选择性冻结浅层（前几个 stage 不训练）
+# ResNet50 有 4 个 layer（layer1, layer2, layer3, layer4）
+# 通常冻结 layer1 和之前的层（最浅的部分）
+for name, param in model.named_parameters():
+    if 'layer1' in name or 'layer2' in name:
+        param.requires_grad = False
+
+# 4. 使用更低的学习率
+optimizer = torch.optim.Adam(
+    filter(lambda p: p.requires_grad, model.parameters()),
+    lr=5e-5  # 微调比从头训练的学习率低 10-50 倍
+)</code></pre>
+
+<h3>14.5 学习率歧视（Discriminative Learning Rates）</h3>
+
+<p>迁移学习中一个更高级的技巧是<strong>对不同层使用不同的学习率</strong>——浅层（通用特征）用小学习率微调，深层（任务特定特征）用大学习率更新。</p>
+
+<pre><code>def get_optimizer_with_discriminative_lrs(model, base_lr=1e-4):
+    """对模型的深层和浅层使用不同的学习率"""
+    # 将模型参数按层分组
+    backbone_params = []
+    classifier_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'fc' in name or 'classifier' in name:
+            classifier_params.append(param)
+        else:
+            backbone_params.append(param)
+
+    optimizer = torch.optim.AdamW([
+        {'params': backbone_params,   'lr': base_lr},       # 主干：低 LR
+        {'params': classifier_params, 'lr': base_lr * 10},  # 分类器：高 LR
+    ])
+    return optimizer
+
+# 使用
+optimizer = get_optimizer_with_discriminative_lrs(model, base_lr=1e-4)
+# 效果：主干以 1e-4 微调，分类器以 1e-3 从头学习</code></pre>
+
+<p>这个技巧在实践中非常有效——因为分类器是随机初始化的，需要较大的更新步伐来快速学习；而主干网络已经在 ImageNet 上训练好了，只需要微调，太快的更新反而可能"破坏"已经学好的特征。</p>
+
+<h3>14.6 何时微调 vs 从零训练？</h3>
+
+<p>这是迁移学习中最常被问到的问题。下面的表格可以帮助你做决定：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>目标数据量</th>
+            <th>与预训练数据相似度</th>
+            <th>推荐策略</th>
+            <th>说明</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>小（&lt; 1K）</td>
+            <td>高</td>
+            <td>特征提取</td>
+            <td>冻结主干，只训练分类器。数据量太小，微调容易过拟合。</td>
+        </tr>
+        <tr>
+            <td>小（&lt; 1K）</td>
+            <td>低</td>
+            <td>特征提取 + 正则化</td>
+            <td>数据量小且领域差异大——结果可能不会太好，但迁移学习仍然远好于从头训练。</td>
+        </tr>
+        <tr>
+            <td>中（1K-10K）</td>
+            <td>高</td>
+            <td>微调</td>
+            <td>数据量适中且领域相似，微调最后几层（layer3, layer4）即可。</td>
+        </tr>
+        <tr>
+            <td>中（1K-10K）</td>
+            <td>低</td>
+            <td>微调更多层</td>
+            <td>需要解冻更多主干层，从头学习领域特定特征。</td>
+        </tr>
+        <tr>
+            <td>大（&gt; 10K）</td>
+            <td>高</td>
+            <td>微调全部</td>
+            <td>数据足够多，可以安全微调整个网络。</td>
+        </tr>
+        <tr>
+            <td>大（&gt; 10K）</td>
+            <td>低</td>
+            <td>微调全部或从零训练</td>
+            <td>如果目标数据量足够大且领域差异极大，从零训练也是一个选项。</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="highlight">
+    <strong>迁移学习的通用工作流程：</strong>
+    <ol>
+        <li>先用特征提取快速基线——在几分钟内得到一个 baseline</li>
+        <li>如果欠拟合（训练 loss 高），逐步解冻更多层并降低学习率</li>
+        <li>如果过拟合（训练 loss 低但验证 loss 高），增加冻结层数或增强正则化</li>
+        <li>始终保存验证集上表现最好的 checkpoint</li>
+    </ol>
+</div>
+
+<p>这一章我们学习了迁移学习的原理和实践：从为什么预训练特征可以迁移到新任务，到 torchvision.models 的预训练模型库，从特征提取到微调，从学习率歧视到何时应该/不应该使用迁移学习。迁移学习是深度学习实战中最实用的技术之一——它让你不需要几千张 GPU 天数的计算资源也能训练出高质量的模型。下一章我们进入一个非常实战的话题——混合精度训练。如何在不降低模型精度的情况下，把训练速度提升 2-3 倍、同时减少一半的显存占用。</p>
+
+    <div class="footer-nav">
+        <a href="13.html">← 上一章</a>
+        <a href="index.html">📖 返回目录</a>
+        <a href="15.html">下一章 →</a>
+    </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 事件驱动：libevent集成</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html" class="active">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第15章 事件驱动：libevent集成</h1>
+
+        <p>大家好，我是你们的讲师。从这一章开始，我们进入本课程的第四个部分——<strong>网络与并发</strong>。前面 14 章我们一直在讲"数据怎么存"，从 slab allocator 到 item 再到 LRU 和哈希表，Memcached 的内部数据管理机制我们已经了然于胸。但有一个关键问题我们还没回答：<strong>数据是怎么进来的？</strong></p>
+
+        <p>客户端发起一个 set 请求，从网卡收到数据包到 Memcached 调用 item_alloc 分配内存，这中间发生了什么？答案是：<strong>事件驱动</strong>。Memcached 使用 libevent 库来管理所有网络 I/O，本章我们就来深入剖析这个集成过程。</p>
+
+        <h2>为什么需要事件驱动</h2>
+
+        <p>在传统的阻塞式网络编程中，每接受一个连接就创建一个线程去处理它。这种"一个连接一个线程"的模型在并发量低时很直观，但一旦连接数上升到几千甚至几万，线程上下文切换的开销就会让性能直线下降。Memcached 需要支持数千个并发连接，因此它选择了<strong>事件驱动</strong>模型——用少量的线程管理大量的连接，所有 I/O 操作都是非阻塞的。</p>
+
+        <p>事件驱动模型的核心思想可以概括为一句话：<strong>你告诉我什么时候可以读/写，我再去读/写</strong>。应用程序向事件库注册感兴趣的 fd 和事件类型（可读、可写），然后进入事件循环。当 fd 就绪时，事件库回调注册的处理函数——这个模式就是经典的 Reactor 模式。</p>
+
+        <p>Memcached 选用 libevent 作为事件库，没有自己造轮子。原因很简单：libevent 是 C 语言生态中最成熟的事件库之一，跨平台、高性能、社区活跃。自己实现 epoll/kqueue 封装不仅工作量大，而且容易踩坑——事实上，后面我们会提到，即便是 libevent 也踩过 epoll 的 bug。</p>
+
+        <h2>libevent 核心概念速览</h2>
+
+        <p>在深入源码之前，我们先快速过一下 libevent 的几个核心概念。如果你已经熟悉 libevent，可以跳过这一节；如果不熟悉，请务必理解清楚，因为后面所有的网络代码都建立在这些概念之上。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>概念</th>
+                    <th>类型</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>event_base</td>
+                    <td><code>struct event_base</code></td>
+                    <td>事件循环的"上下文"，相当于 epoll 实例的封装。一个 event_base 管理一组事件并驱动事件循环。</td>
+                </tr>
+                <tr>
+                    <td>event</td>
+                    <td><code>struct event</code></td>
+                    <td>事件的抽象，绑定一个 fd、一组标志（EV_READ/EV_WRITE）和回调函数。</td>
+                </tr>
+                <tr>
+                    <td>回调函数</td>
+                    <td><code>void (*cb)(evutil_socket_t, short, void *)</code></td>
+                    <td>当事件就绪时 libevent 调用的函数，参数是 fd、事件类型和用户传入的上下文指针。</td>
+                </tr>
+                <tr>
+                    <td>event_add</td>
+                    <td>函数</td>
+                    <td>将 event 注册到 event_base 中，使其被事件循环监控。可选超时参数。</td>
+                </tr>
+                <tr>
+                    <td>event_del</td>
+                    <td>函数</td>
+                    <td>从 event_base 中移除 event，停止监控。</td>
+                </tr>
+                <tr>
+                    <td>event_base_loop</td>
+                    <td>函数</td>
+                    <td>进入事件循环，持续调用 poll/epoll/kqueue 等后端，直到没有事件或主动退出。</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这些概念组合起来构成了一个完整的事件驱动框架：创建一个 event_base，创建 event 并绑定 fd 和回调，调用 event_add 开始监听，最后调用 event_base_loop 进入循环——事件来了，回调被调用，处理完继续等待。</p>
+
+        <h2>Memcached 中的 libevent 初始化</h2>
+
+        <p>我们打开 <code>memcached.c</code>，找到 <code>main()</code> 函数。在解析完命令行参数、初始化 slab allocator 和哈希表之后，Memcached 会初始化事件系统。核心代码非常简单——其实就是调用 libevent 的 API：</p>
+
+        <pre><code>// memcached.c - main()
+// 创建主线程的 event_base
+main_base = event_init();  // libevent 2.0 版本
+
+// 创建监听 socket
+sock = server_socket(settings.port, ...);
+
+// 将监听 socket 注册到 event_base
+event_set(listener_event, sock, EV_READ | EV_PERSIST,
+          event_handler, (void *)listener_event);
+event_base_set(main_base, listener_event);
+event_add(listener_event, 0);</code></pre>
+
+        <p>注意上面的代码展示的是 libevent 2.0 的 API 风格。在 libevent 2.1 中，event_set() 已被标记为 deprecated，推荐使用 <code>event_new()</code>。Memcached 为了兼容旧版本，封装了一层宏定义来处理这个差异——我们稍后会详细讨论版本兼容性问题。</p>
+
+        <div class="tip">
+            <strong>关键理解：</strong><code>EV_PERSIST</code> 标志意味着事件触发后不会自动从 event_base 中移除。如果没有这个标志，每次事件触发后都需要重新 event_add，这在高频 I/O 场景下会产生大量不必要的系统调用。
+        </div>
+
+        <h2>event_handler：所有 I/O 事件的统一入口</h2>
+
+        <p>上面代码中注册的回调函数是 <code>event_handler</code>。这个函数是 Memcached 网络层的<strong>总入口</strong>——无论是一个新连接到来、一个已有的连接有数据可读、还是可以写数据，最终都会汇聚到这个函数中。</p>
+
+        <p>我们来看看它的实现：</p>
+
+        <pre><code>// memcached.c
+void event_handler(const evutil_socket_t fd, const short which, void *arg) {
+    conn *c;
+
+    // 从 arg 中恢复 conn 结构体
+    c = (conn *)arg;
+
+    // 记录事件类型
+    c->which = which;
+
+    // 如果这是监听 socket（新连接），which 一定是 EV_READ
+    // 如果是普通连接，which 可能是 EV_READ | EV_WRITE
+
+    // 进入连接状态机——这是我们下一章的重点
+    drive_machine(c);
+
+    // 如果连接被标记为关闭或出错，执行清理
+    if (c->state == conn_closed || c->state == conn_immediate_close) {
+        conn_close(c);
+    }
+
+    return;
+}</code></pre>
+
+        <p><code>event_handler</code> 做的事情出奇地少——它只是记录了事件类型，然后调用 <code>drive_machine()</code>。这体现了 Memcached 的一个核心设计思想：<strong>事件层只负责告诉你"有事情发生了"，具体怎么做由连接状态机来决定</strong>。这种分离让代码结构非常清晰。</p>
+
+        <h2>EV_PERSIST 模式下的事件处理</h2>
+
+        <p>EV_PERSIST 是一个非常聪明的设计。我们来看看没有 EV_PERSIST 的情况下，处理一个读事件需要做什么：</p>
+
+        <pre><code>// 没有 EV_PERSIST 的伪代码
+void read_callback(fd, which, arg) {
+    // 1. 读取数据
+    read(fd, buf, len);
+    // 2. 重新注册事件（否则下次不会收到通知）
+    event_add(event, 0);
+}</code></pre>
+
+        <p>每次回调都要重新 event_add，这意味着一次额外的系统调用。在每秒几十万次请求的高并发场景下，这种开销不可忽视。有了 EV_PERSIST，事件触发后仍然保持在 event_base 中，下次 fd 就绪时会再次通知——不需要重新注册。</p>
+
+        <p>但在 EV_PERSIST 模式下有一个重要细节需要注意：如果回调函数中处理了部分数据，而非全部数据，那么 libevent 不会再次触发事件（因为 fd 在 epoll 中仍然是就绪状态，但内核可能不会再通知）。这时候需要手动重新设置事件。不过 Memcached 的处理方式不同——它依赖连接状态机来确保数据被完全处理，状态机本身会在需要时重新注册事件。</p>
+
+        <h2>libevent 版本兼容性：2.0 vs 2.1</h2>
+
+        <p>Memcached 需要支持从 CentOS 6 到最新的 Ubuntu 24.04 等各种操作系统，而不同发行版打包的 libevent 版本差异巨大。为了让代码在 libevent 2.0 和 2.1 上都能编译，Memcached 的 header 文件中有一系列的条件编译宏：</p>
+
+        <pre><code>// memcached.h
+#if defined(LIBEVENT_VERSION_NUMBER) && LIBEVENT_VERSION_NUMBER >= 0x02010500
+    // libevent 2.1.x — 使用 event_new / event_free
+    #define EVENT_NEW(event, base, fd, what, cb, arg) \
+        (event) = event_new((base), (fd), (what), (cb), (arg))
+    #define EVENT_ADD(event, tv) \
+        event_add((event), (tv))
+    #define EVENT_DEL(event) \
+        event_del((event))
+    #define EVENT_FREE(event) \
+        event_free(event)
+#else
+    // libevent 2.0.x — 使用 event_set / event_base_set
+    #define EVENT_NEW(event, base, fd, what, cb, arg) do { \
+        event_set((event), (fd), (what), (cb), (arg)); \
+        event_base_set((base), (event)); \
+    } while (0)
+    #define EVENT_ADD(event, tv) \
+        event_add((event), (tv))
+    #define EVENT_DEL(event) \
+        event_del((event))
+    #define EVENT_FREE(event) \
+        (void)0  // 2.0 的栈上 event 不需要释放
+#endif</code></pre>
+
+        <p>这两个版本的核心区别在于内存管理方式：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>libevent 2.0</th>
+                    <th>libevent 2.1</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>event 分配</td>
+                    <td>栈上分配 <code>struct event</code>，开发者管理内存</td>
+                    <td>堆上分配 <code>event_new()</code>，event_free() 释放</td>
+                </tr>
+                <tr>
+                    <td>初始化方式</td>
+                    <td><code>event_set()</code> + <code>event_base_set()</code></td>
+                    <td><code>event_new()</code> 一步完成</td>
+                </tr>
+                <tr>
+                    <td>线程安全</td>
+                    <td>核心 API 不保证线程安全</td>
+                    <td>增加了 <code>event_base_foreach_event()</code> 等线程安全 API</td>
+                </tr>
+                <tr>
+                    <td>后端接口</td>
+                    <td>直接暴露后端接口（epoll/kqueue）</td>
+                    <td>更严格的后端抽象，新增 <code>evmap_io</code> 管理</td>
+                </tr>
+                <tr>
+                    <td>常见 bug 修复</td>
+                    <td>已知多个 epoll 边缘触发相关 bug</td>
+                    <td>修复了 2.0 中的大部分 epoll 问题</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>版本兼容性实践：</strong>Memcached 用宏封装的方式优雅地解决了版本差异问题。在代码主体中，你只会看到 EVENT_NEW、EVENT_ADD 和 EVENT_DEL 这些统一的宏，不会看到任何 #ifdef 分支——所有的版本差异都被隔离在头文件中。这种"接口统一、实现隔离"的做法在大型 C 项目中非常值得借鉴。
+        </div>
+
+        <h2>为什么每个 Worker 线程需要独立的 event_base</h2>
+
+        <p>这一章我们主要讨论的是<strong>主线程</strong>的事件处理——主线程负责 accept 新连接。但 Memcached 是多线程的，每一个 worker 线程也有自己独立的 event_base。这是为什么？</p>
+
+        <p>答案其实很简单：<strong>libevent 的 event_base 不是线程安全的</strong>。如果多个线程共享同一个 event_base，同时调用 event_add 或 event_del 会导致数据竞争。虽然 libevent 2.1 部分 API 增加了锁保护，但全局锁在高并发下会成为瓶颈。</p>
+
+        <p>更本质的原因是：<strong>每个线程独立处理自己的一组连接，不需要跨线程协调</strong>。一旦一个连接被分配给某个 worker 线程，它的所有 I/O 事件都在该线程的 event_base 上处理——没有竞争、没有锁、没有跨线程通信的开销。这种设计在下一章（多线程模型）中我们会详细分析。</p>
+
+        <h2>event_base_loop 事件循环</h2>
+
+        <p>最后，我们来看看事件循环的启动。在主线程完成所有初始化后，调用：</p>
+
+        <pre><code>// 主线程事件循环
+while (!stop_main_loop) {
+    event_base_loop(main_base, EVLOOP_ONCE);
+    // 处理一些定时维护任务
+    ...
+}</code></pre>
+
+        <p>这里的 <code>EVLOOP_ONCE</code> 标志意味着 event_base_loop 只处理一轮事件就返回，而不是永久阻塞。这样主线程可以在处理网络事件的同时，定期执行一些后台维护任务。Worker 线程则使用 <code>event_base_loop(main_base, 0)</code>（0 表示一直循环直到没有事件），因为 worker 线程不需要关心后台维护——这些都由主线程负责。</p>
+
+        <p>事件循环的简化流程如下：</p>
+
+        <pre><code>event_base_loop:
+  1. 调用 epoll_wait / kevent 等待事件就绪
+  2. 对每一个就绪的事件，调用注册的回调函数
+  3. 如果还有未处理的事件，继续处理
+  4. 如果没有事件了，根据标志决定是阻塞等待还是返回</code></pre>
+
+        <p>整个过程就是一个永不停歇的生产-消费循环：内核是生产者，它告诉我们哪些 fd 就绪了；事件回调是消费者，它读取数据并处理。</p>
+
+        <h2>踩坑：libevent 2.0 的 epoll 边缘触发 bug</h2>
+
+        <p>聊一个经典的踩坑经历。在 libevent 2.0.x 版本中（特别是 2.0.21 之前的版本），当使用 epoll 边缘触发（ET）模式时，存在一个隐蔽的 bug。</p>
+
+        <p>问题的表现是：<strong>在高并发场景下，部分连接会莫名其妙地"卡死"——客户端已经发送了数据，但服务端收不到任何事件通知</strong>。连接没有断开，但就是收不到数据，直到超时被关闭。</p>
+
+        <p>根因是 libevent 2.0 在 epoll ET 模式下，处理事件时存在一个竞态条件。具体来说，当 event_base_loop 在遍历就绪事件列表的过程中，如果某个 fd 上又来了新数据，epoll 的 ET 模式不会再次通知（因为数据还没被读取完），但 libevent 2.0 在处理完一个 fd 的事件后，没有将该 fd 从 epoll 中重新加入，导致该 fd 被"漏掉"了。</p>
+
+        <p>这个 bug 在 libevent 2.0.21 中修复（提交 0f6a9e1e），修复方式是在处理完一个 fd 的事件后，如果有剩余数据未读，主动将该 fd 重新标记为就绪。Memcached 的解决方案更简单：<strong>升级到 libevent 2.1</strong>，或者如果无法升级，配置使用电平触发（LT）模式而不是边缘触发模式。</p>
+
+        <div class="warning">
+            <strong>教训：</strong>这不是 libevent 自身的错，而是 epoll 边缘触发模式的固有复杂度。ET 模式比 LT 模式高效（减少不必要的事件通知），但使用门槛更高——你必须确保每次读事件都把数据读完，否则就会丢事件。Memcached 的解决方案是：<strong>不用 ET，用 LT + EV_PERSIST</strong>，性能虽然略低一点，但可靠性大幅提升。在缓存系统中，可靠性往往比极致的性能更重要。
+        </div>
+
+        <h2>小结</h2>
+
+        <p>这一章我们学习了 Memcached 中 libevent 的集成方式。核心要点是：</p>
+
+        <ul>
+            <li>libevent 提供了 event_base、event 和回调函数三个抽象，构成了事件驱动模型的三要素。</li>
+            <li><code>event_handler</code> 是 Memcached 所有 I/O 事件的统一入口，但它只做了一件事——把控制权交给连接状态机。</li>
+            <li>EV_PERSIST 标志避免了高频场景下反复 event_add 的开销。</li>
+            <li>通过宏封装，Memcached 优雅地兼容了 libevent 2.0 和 2.1 两代 API。</li>
+            <li>每个 worker 线程拥有独立的 event_base，避免了跨线程锁竞争。</li>
+        </ul>
+
+        <p>但 event_handler 只是抛出了"有事情发生了"这个信号，真正处理逻辑在哪里？在 <code>drive_machine()</code>——那个庞大而精妙的连接状态机。下一章，我们就来解剖这个状态机，看看一个连接从创建到关闭经历了哪些状态，每个状态下又做了什么。</p>
+
+        <p>好，第 15 章就到这里。下一章我们将深入 Memcached 最核心的网络代码。我们第 16 章见。</p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

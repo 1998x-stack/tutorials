@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 多线程模型：Master-Worker架构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html" class="active">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第17章 多线程模型：Master-Worker架构</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们跟踪了一个 set 请求在连接状态机中的完整旅程，其中有一步非常关键：<code>dispatch_conn_new()</code>——把新连接交给 worker 线程。这一步背后隐藏着 Memcached 多线程模型中<strong>最精妙的设计</strong>：如何使用管道（pipe）+ libevent 实现跨线程唤醒，如何在无锁的情况下分发连接，以及为什么这种设计比共享队列更加高效。</p>
+
+        <p>Memcached 的多线程模型是标准的 <strong>Master-Worker 架构</strong>：一个主线程（Master）负责 accept 新连接，多个 worker 线程（Worker）负责处理连接上的 I/O 和业务逻辑。这个模型后来被无数网络服务器借鉴（包括 Nginx、Redis 6.0+ 等），Memcached 可以说是这方面的先行者之一。</p>
+
+        <h2>LIBEVENT_THREAD 结构体</h2>
+
+        <p>在 <code>thread.c</code> 中定义了 worker 线程的核心数据结构：</p>
+
+        <pre><code>// thread.c
+typedef struct {
+    pthread_t thread_id;          // 线程 ID
+    struct event_base *base;      // 该线程独立的 event_base
+    struct event notify_event;    // 用于接收主线程通知的 libevent event
+    int notify_receive_fd;        // 管道的读端
+    int notify_send_fd;           // 管道的写端
+    struct conn_queue *new_conn_queue;  // 新连接队列（CQ）
+    int last;                     // 上次分发的索引（用于统计）
+} LIBEVENT_THREAD;</code></pre>
+
+        <p>每个 worker 线程持有一整套完整的事件处理基础设施：</p>
+
+        <ul>
+            <li><strong>base</strong>：独立的 event_base，该线程上所有连接的 I/O 事件都在这个 base 上注册和管理。</li>
+            <li><strong>notify_receive_fd / notify_send_fd</strong>：一对 pipe fd，用于主线程通知 worker 线程"有新连接来了"。</li>
+            <li><strong>notify_event</strong>：绑定在 notify_receive_fd 上的 libevent event，当管道可读时触发线程处理新连接。</li>
+            <li><strong>new_conn_queue</strong>：连接队列（CQ），主线程把新连接放入队列，worker 线程从队列取出。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>理解要点：</strong>每个 worker 线程都是一个"迷你事件驱动服务器"——它有自己独立的 event_base、独立的连接队列、独立的事件循环。线程之间除了通过管道发送一个字节的信号外没有任何共享资源。这种"完全隔离"的设计是 Memcached 高性能的基础。
+        </div>
+
+        <h2>主线程 accept + dispatch 完整流程</h2>
+
+        <p>当一个新的 TCP 连接到达时，从 accept 到连接被 worker 线程接管，经历了哪些步骤？我们来追踪完整的链路：</p>
+
+        <pre><code>主线程:
+1. 事件循环中 epoll_wait 返回，监听 socket 可读
+2. event_handler() 被调用
+3. drive_machine() → conn_listening 状态
+4. accept() 返回新的 client fd
+5. set_nonblock(client_fd) 设置为非阻塞
+6. dispatch_conn_new(client_fd, ...)   ← 关键一步
+   ├─ 选择一个 worker 线程（Round-Robin）
+   ├─ 将 client_fd 包装成 CQ item，放入该线程的 new_conn_queue
+   └─ write(notify_send_fd, "c", 1)   ← 通过管道发送 1 字节唤醒信号
+7. 回到事件循环，继续 accept 下一个连接
+
+Worker 线程:
+1. 线程的 event_base_loop 中，notify_receive_fd 可读
+2. thread_libevent_process() 被调用
+   ├─ read(notify_receive_fd, buf, 1)   ← 读取那个 1 字节信号
+   ├─ conn_queue_pop() 从 new_conn_queue 取出新连接
+   ├─ conn_new(client_fd, ...) 初始化连接
+   │   └─ 将 client_fd 注册到该线程的 event_base 上
+   └─ 从此这个连接的所有 I/O 都在此线程处理</code></pre>
+
+        <p>注意一个关键点：主线程只是<strong>把 fd 传给 worker 线程</strong>，后续对这个 fd 的所有读写操作都在 worker 线程中完成。主线程不再参与任何 client 连接的 I/O 处理。</p>
+
+        <h2>管道唤醒：精妙的跨线程通信设计</h2>
+
+        <p>上面流程中最让我拍案叫绝的是<strong>管道（pipe）唤醒</strong>机制。这个设计解决了什么问题？</p>
+
+        <p>主线程把新连接放入了 worker 线程的 new_conn_queue，但 worker 线程此时正在 event_base_loop 中阻塞等待事件。如何让 worker 线程"醒过来"取走这个连接？</p>
+
+        <p>常见的做法是使用条件变量 + 互斥锁，但条件变量有一个问题：它与 libevent 的事件循环是"两套系统"。如果 worker 线程用 pthread_cond_wait 阻塞，那就无法同时等待网络事件——信号来了，它醒了，但它还要回到 event_base_loop 检查新事件。</p>
+
+        <p>Memcached 的精妙之处在于：<strong>它把"线程间通知"也变成了一个 libevent 事件</strong>。具体做法是：</p>
+
+        <pre><code>// thread.c - 初始化 worker 线程
+static void setup_thread(LIBEVENT_THREAD *me) {
+    // 1. 创建管道
+    int fds[2];
+    pipe(fds);
+    me->notify_receive_fd = fds[0];  // 读端
+    me->notify_send_fd = fds[1];     // 写端
+
+    // 2. 将管道的读端注册到 libevent
+    event_set(&me->notify_event, me->notify_receive_fd,
+              EV_READ | EV_PERSIST, thread_libevent_process, me);
+    event_base_set(me->base, &me->notify_event);
+    event_add(&me->notify_event, 0);
+
+    // 3. 初始化连接队列
+    me->new_conn_queue = conn_queue_init();
+}</code></pre>
+
+        <p>现在，worker 线程的 event_base_loop 可以同时等待以下事件：</p>
+        <ul>
+            <li>已分配连接的 I/O 事件（EV_READ / EV_WRITE）</li>
+            <li>主线程通过管道发来的通知（notify_receive_fd 可读）</li>
+        </ul>
+
+        <p>两者都在同一套事件循环中，完美统一。主线程只需要调用 <code>write(pipe_fd, "c", 1)</code>，worker 线程的 event_base_loop 就会立即返回，处理新连接。</p>
+
+        <div class="highlight">
+            <strong>为什么不用条件变量？</strong>条件变量和 libevent 的事件循环是"两套等待机制"。如果 worker 线程在 pthread_cond_wait 上阻塞，它必须持有互斥锁，这会阻塞所有网络事件的处理。而且线程被唤醒后，需要重新获取锁并返回事件循环，这个来回切换的开销并不小。管道方案的核心优势是：<strong>所有唤醒源（网络 I/O 和线程间通知）都在同一个 event_base 中管理</strong>，统一、高效、无竞态。
+        </div>
+
+        <h2>dispatch_conn_new：Round-Robin 轮询</h2>
+
+        <p>主线程如何选择将新连接交给哪个 worker 线程？答案是简单到令人惊讶的 <strong>Round-Robin 轮询</strong>：</p>
+
+        <pre><code>// thread.c
+void dispatch_conn_new(int sfd, enum conn_states init_state,
+                       int event_flags, int read_buffer_size,
+                       enum network_transport transport) {
+    CQ_ITEM *item = cqi_new();  // 分配 CQ item
+    if (item == NULL) {
+        close(sfd);
+        return;
+    }
+
+    // 填充 item
+    item->sfd = sfd;
+    item->init_state = init_state;
+    item->event_flags = event_flags;
+    item->read_buffer_size = read_buffer_size;
+    item->transport = transport;
+
+    // Round-Robin：原子递增，取模 worker 线程数
+    int tid = (last_thread + 1) % settings.num_threads;
+    LIBEVENT_THREAD *thread = threads + tid;
+    last_thread = tid;  // 注意：这里不是原子的，但没关系
+
+    // 放入目标线程的连接队列
+    conn_queue_push(thread->new_conn_queue, item);
+
+    // 发出管道信号，唤醒目标线程
+    MEMCACHED_THREAD_DISPATCH(sfd, thread, tid);
+    char buf = 'c';
+    if (write(thread->notify_send_fd, &buf, 1) != 1) {
+        // 写失败，重试或忽略
+    }
+}</code></pre>
+
+        <p>这是 Memcached 中我最喜欢的函数之一——<strong>极简但完整</strong>。它做了四件事：创建 item、填充数据、放入队列、发送信号。没有任何多余的步骤。</p>
+
+        <p>这里 <code>last_thread</code> 的更新没有加锁——因为只有主线程在写入它，而多个 worker 线程只读取它（作为 CQ 中的 tid 元信息），所以在 x86/arm 等常见架构上这是安全的。但严格来说，这是一个 data race——dormando（现任维护者）曾经考虑过将其改为原子变量，但因为实际从未出现问题，最终没有修改。</p>
+
+        <h2>CQ（Connection Queue）连接队列</h2>
+
+        <p>CQ 的设计同样极简——就是一个无锁的单生产者-单消费者队列：</p>
+
+        <pre><code>// thread.c
+struct conn_queue {
+    CQ_ITEM *head;
+    CQ_ITEM *tail;
+    pthread_mutex_t lock;  // 实际上还是用了锁
+};
+
+// 入队（主线程调用）
+void conn_queue_push(struct conn_queue *q, CQ_ITEM *item) {
+    item->next = NULL;
+    pthread_mutex_lock(&q->lock);
+    if (q->tail == NULL) {
+        q->head = q->tail = item;
+    } else {
+        q->tail->next = item;
+        q->tail = item;
+    }
+    pthread_mutex_unlock(&q->lock);
+}
+
+// 出队（worker 线程调用）
+CQ_ITEM *conn_queue_pop(struct conn_queue *q) {
+    pthread_mutex_lock(&q->lock);
+    CQ_ITEM *item = q->head;
+    if (item != NULL) {
+        q->head = item->next;
+        if (q->head == NULL)
+            q->tail = NULL;
+    }
+    pthread_mutex_unlock(&q->lock);
+    return item;
+}</code></pre>
+
+        <p>等等，这里用了 <code>pthread_mutex_t</code>！说好的"无锁设计"呢？</p>
+
+        <p>实际上，这里的锁不是必需的——在主线程的 dispatch 路径上，只有一个主线程在 push，也只有一个 worker 线程在 pop（每个队列只属于一个 worker 线程）。这本来是一个完美的 MPMC 退化成 SPSC 的场景。之所以还保留锁，是因为历史上曾有过多个 dispatcher 线程的场景（后来被移除），而 dormando 选择保留锁作为一种安全网。</p>
+
+        <div class="tip">
+            <strong>性能影响：</strong>虽然 CQ 用了锁，但在实际生产中这个锁的竞争几乎为零——主线程往一个 worker 线程的队列 push 的同时，该 worker 线程几乎不会刚好在 pop（它大部分时间在处理 I/O）。即使同时发生，锁的持有时间也只有几条指针赋值，纳秒级别。所以这个锁的代价可以忽略不计。
+        </div>
+
+        <h2>worker_libevent() 和 thread_libevent_process()</h2>
+
+        <p>每个 worker 线程的主函数是 <code>worker_libevent()</code>：</p>
+
+        <pre><code>// thread.c
+void *worker_libevent(void *arg) {
+    LIBEVENT_THREAD *me = (LIBEVENT_THREAD *)arg;
+
+    // 每个 worker 线程初始化自己的随机数种子
+    srand(time(NULL) + me->thread_id);
+
+    // 进入事件循环 —— 永不停歇
+    event_base_loop(me->base, 0);
+
+    return NULL;
+}</code></pre>
+
+        <p>这个函数简短到不可思议。所有初始化都在 setup_thread 中完成了，worker 线程启动后直接进入事件循环——等待网络事件或主线程通知。</p>
+
+        <p>当主线程通过管道发送信号后，thread_libevent_process 被调用：</p>
+
+        <pre><code>// thread.c
+void thread_libevent_process(evutil_socket_t fd, short which, void *arg) {
+    LIBEVENT_THREAD *me = (LIBEVENT_THREAD *)arg;
+
+    // 读取管道的 1 字节信号（清空缓冲区）
+    char buf[1];
+    if (read(fd, buf, 1) != 1) {
+        // 读取失败，忽略
+    }
+
+    // 取出所有待处理的连接
+    CQ_ITEM *item;
+    while ((item = conn_queue_pop(me->new_conn_queue)) != NULL) {
+        // 初始化连接：设置非阻塞、注册 libevent 事件
+        conn_new(item->sfd, item->init_state, item->event_flags,
+                 item->read_buffer_size, item->transport, me->base);
+        cqi_free(item);
+    }
+}</code></pre>
+
+        <p>注意这里使用了 while 循环——一次管道信号可能对应多个新连接。如果主线程在短时间内接收了大量连接，它会连续往管道写多个字节，但线程只被唤醒一次。while 循环确保所有排队的连接都被处理。</p>
+
+        <h2>连接粘性（Connection Pinning）</h2>
+
+        <p>一旦一个连接被分配给某个 worker 线程，这个连接的所有操作就永久绑定在该线程上——这就是 <strong>connection pinning</strong>（连接粘性）。</p>
+
+        <p>这个设计决策对性能有深远的影响：</p>
+
+        <ul>
+            <li><strong>无锁 I/O：</strong>该连接上的所有 read、write、状态转换都在同一个线程中完成，不需要任何同步机制。</li>
+            <li><strong>CPU 缓存亲和性：</strong>同一个连接的数据结构始终由同一个 CPU 核心处理，L1/L2 缓存的命中率更高。</li>
+            <li><strong>避免惊群效应：</strong>不会出现多个线程同时争抢一个连接的情况。</li>
+            <li><strong>天然的顺序保证：</strong>同一个连接上的请求按顺序处理，不需要额外的排序或同步。</li>
+        </ul>
+
+        <p>代价是什么？<strong>负载不均衡</strong>。如果一个线程分配到了"重连接"（大量请求），而另一个线程分配到了"轻连接"，那么 CPU 利用率就会不均衡。不过在生产实践中，<strong>大数定律</strong>起作用——当连接数量足够多时，Round-Robin 分配的负载偏差在统计上非常小。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>方案</th>
+                    <th>优点</th>
+                    <th>缺点</th>
+                    <th>使用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Connection Pinning</td>
+                    <td>零锁 I/O、缓存亲和、无惊群</td>
+                    <td>可能负载不均</td>
+                    <td>连接数多、请求均匀</td>
+                </tr>
+                <tr>
+                    <td>共享队列 + 多消费者</td>
+                    <td>负载自动均衡</td>
+                    <td>队列锁竞争、缓存颠簸</td>
+                    <td>连接少、请求不均匀</td>
+                </tr>
+                <tr>
+                    <td>每个请求重新分配</td>
+                    <td>最均衡的负载</td>
+                    <td>跨线程状态同步开销大</td>
+                    <td>无状态请求处理</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>为什么不用共享队列？</h2>
+
+        <p>你可能会问：为什么不把所有连接放在一个共享队列中，让所有 worker 线程去抢？这样负载不就天然均衡了吗？</p>
+
+        <p>答案是：<strong>共享队列的锁竞争会成为瓶颈</strong>。假设有 8 个 worker 线程，每秒处理 100 万个请求，每个请求都需要从共享队列中取数据或者往共享队列里放数据——这意味着 8 个线程在同一个锁上激烈竞争。随着核心数的增加，锁竞争的恶化程度呈超线性增长（因为 cache line  bouncing 会随着核心数增加而加剧）。</p>
+
+        <p>Memcached 的设计哲学是：<strong>能避免的锁就避免，避免不了的就用分段锁</strong>。为每个 worker 线程分配独立的连接队列，本质上就是一种"分段"——把一把全局锁拆成了 N 把独立的锁，每把锁的竞争程度降为 1/N。</p>
+
+        <h2>踩坑：管道缓冲区满导致主线程阻塞</h2>
+
+        <p>最后分享一个非常隐蔽的坑。在早期的 Memcached 版本中，有一个 bug：当大量新连接在极短时间内涌入时，主线程向某个 worker 线程的管道写信号时可能会<strong>阻塞</strong>。</p>
+
+        <p>Linux 的管道默认缓冲区大小是 65536 字节（可以 <code>fcntl(fd, F_SETPIPE_SZ)</code> 修改）。正常情况下，主线程每次只写 1 个字节，不会写满。但在极端情况下——比如某个 worker 线程卡住了（例如正在处理一个耗时的 slab rebalance 操作），无法及时读取管道中的数据——管道缓冲区可能被写满。</p>
+
+        <p>问题在于：管道的写操作是<strong>阻塞的</strong>。当管道满时，write() 会阻塞，而这发生在主线程的 dispatch_conn_new 中——主线程被阻塞了，无法继续 accept 新连接，导致整个服务器"假死"。</p>
+
+        <div class="warning">
+            <strong>解决方案：</strong>这个问题在后续版本中通过两个措施解决。第一，将管道的写端设置为非阻塞模式（<code>fcntl(fd, F_SETFL, O_NONBLOCK)</code>），这样写满时 write 返回 -1 而不是阻塞。第二，增加一个"待处理连接计数"，如果队列太长，暂时停止向该线程分发新连接。生产环境中更常见的做法是：<strong>增大管道缓冲区</strong>（如设置为 1MB），因为正常场景下 1MB 的缓冲区几乎不可能被写满。
+        </div>
+
+        <h2>小结</h2>
+
+        <p>这一章我们深入分析了 Memcached 的 Master-Worker 多线程模型。核心要点是：</p>
+
+        <ul>
+            <li>每个 worker 线程拥有独立的 event_base、连接队列和管道，形成了一个个"迷你事件驱动服务器"。</li>
+            <li>管道 + libevent 的跨线程唤醒机制，将线程间通知与网络事件统一在同一套事件循环中。</li>
+            <li>Round-Robin 轮询分配新连接，简单高效，连接一旦分配就永久绑定到该线程（connection pinning）。</li>
+            <li>CQ 连接队列虽然是互斥锁保护，但实际竞争极低，可以近似看作无锁。</li>
+            <li>与共享队列方案相比，独立队列 + connection pinning 避免了全局锁竞争和缓存颠簸。</li>
+        </ul>
+
+        <p>但是，多线程必然带来锁。即使 Memcached 已经通过独立 event_base 和连接粘性将锁竞争降到了最低，某些全局资源仍然需要锁来保护。下一章，我们将全面梳理 Memcached 中的锁策略——哪些地方用了锁？用了什么类型的锁？以及那些"无锁"的路径是怎么做到的。</p>
+
+        <p>好，第 17 章就到这里。下一章我们将深入并发控制的细节。我们第 18 章见。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

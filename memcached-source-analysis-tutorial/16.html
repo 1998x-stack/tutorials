@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 连接状态机：drive_machine详解</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html" class="active">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第16章 连接状态机：drive_machine详解</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们说到，event_handler 接收到 libevent 的事件通知后，什么实际工作也没做——它只是把控制权转交给了 <code>drive_machine()</code>。那么 drive_machine 到底做了什么？答案是：它实现了一个<strong>连接状态机</strong>，这也是 Memcached 网络层最核心、最精妙的部分。</p>
+
+        <p>如果用一个词来形容 drive_machine，那就是<strong>"状态驱动的协程"</strong>。每个连接都有一个当前状态，每次调用 drive_machine 都从当前状态开始执行，处理完一个状态后可能跳到下一个状态，也可能因为数据不够而返回等待。整个过程是异步的、非阻塞的——这正是高性能网络服务器的精髓所在。</p>
+
+        <h2>conn_states 枚举：11 个状态</h2>
+
+        <p>在 <code>memcached.h</code> 中，定义了连接的所有可能状态：</p>
+
+        <pre><code>// memcached.h
+enum conn_states {
+    conn_listening,      // 监听 socket，等待新连接
+    conn_new_cmd,        // 准备读取新命令
+    conn_waiting,        // 等待事件就绪（读或写）
+    conn_read,           // 读取数据到输入缓冲区
+    conn_parse_cmd,      // 解析命令
+    conn_nread,          // 读取命令后的数据体（如 set 的 value）
+    conn_mwrite,         // 写响应数据到输出缓冲区
+    conn_closing,        // 正在关闭连接
+    conn_immediate_close,// 立即关闭连接
+    conn_swallow,        // 吞掉多余的数据（协议错误后恢复）
+    conn_closed          // 连接已关闭（最终状态）
+};</code></pre>
+
+        <p>这 11 个状态覆盖了一个连接从生到死的完整过程。下面的表格总结了每个状态的含义和典型操作：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>状态</th>
+                    <th>触发条件</th>
+                    <th>主要操作</th>
+                    <th>下一状态</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>conn_listening</td>
+                    <td>监听 socket 有可读事件</td>
+                    <td>accept() 新连接，创建 conn 结构</td>
+                    <td>conn_new_cmd</td>
+                </tr>
+                <tr>
+                    <td>conn_new_cmd</td>
+                    <td>新连接建立或上一条命令处理完</td>
+                    <td>重置命令上下文，设置下一状态</td>
+                    <td>conn_waiting</td>
+                </tr>
+                <tr>
+                    <td>conn_waiting</td>
+                    <td>等待 I/O 事件就绪</td>
+                    <td>注册 EV_READ/EV_WRITE 到 libevent</td>
+                    <td>conn_read / conn_mwrite</td>
+                </tr>
+                <tr>
+                    <td>conn_read</td>
+                    <td>EV_READ 事件触发</td>
+                    <td>read() 数据到输入缓冲区</td>
+                    <td>conn_parse_cmd</td>
+                </tr>
+                <tr>
+                    <td>conn_parse_cmd</td>
+                    <td>输入缓冲区有数据</td>
+                    <td>解析命令类型（get/set/delete 等）</td>
+                    <td>conn_nread / conn_new_cmd</td>
+                </tr>
+                <tr>
+                    <td>conn_nread</td>
+                    <td>命令需要额外数据体（如 set 的 value）</td>
+                    <td>读取指定字节的数据体</td>
+                    <td>conn_new_cmd / conn_mwrite</td>
+                </tr>
+                <tr>
+                    <td>conn_mwrite</td>
+                    <td>有数据待写出</td>
+                    <td>writev() 批量写出响应</td>
+                    <td>conn_new_cmd / conn_closing</td>
+                </tr>
+                <tr>
+                    <td>conn_swallow</td>
+                    <td>协议错误，跳过剩余数据</td>
+                    <td>读取并丢弃指定字节</td>
+                    <td>conn_new_cmd / conn_closing</td>
+                </tr>
+                <tr>
+                    <td>conn_closing</td>
+                    <td>正常关闭流程</td>
+                    <td>发送关闭前数据，关闭 socket</td>
+                    <td>conn_closed</td>
+                </tr>
+                <tr>
+                    <td>conn_immediate_close</td>
+                    <td>错误或强制关闭</td>
+                    <td>立即关闭 socket，不发送剩余数据</td>
+                    <td>conn_closed</td>
+                </tr>
+                <tr>
+                    <td>conn_closed</td>
+                    <td>连接已关闭</td>
+                    <td>清理资源，释放 conn</td>
+                    <td>终态</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>drive_machine() 逐状态解析</h2>
+
+        <p>drive_machine 是一个巨大的 <code>switch-case</code> 结构体，代码大约 300 行。我们来看核心骨架：</p>
+
+        <pre><code>// memcached.c
+static void drive_machine(conn *c) {
+    bool stop = false;
+    int sfd;
+    socklen_t addrlen;
+    struct sockaddr_storage addr;
+
+    while (!stop) {
+        switch (c->state) {
+
+        case conn_listening:
+            // accept 新连接
+            addrlen = sizeof(addr);
+            sfd = accept(c->sfd, (struct sockaddr *)&addr, &addrlen);
+            if (sfd == -1) {
+                // EAGAIN / EINTR 时停止
+                stop = true;
+                break;
+            }
+            // 设置为非阻塞
+            set_nonblock(sfd);
+            // 分配新 conn 结构，初始化状态为 conn_new_cmd
+            conn_new(sfd, ...);
+            break;
+
+        case conn_new_cmd:
+            // 重置命令解析上下文
+            c->cmd = -1;
+            c->substate = 0;
+            // 尝试调到 conn_waiting 或 conn_read
+            // 如果输入缓冲区已有数据，直接去 conn_read
+            if (c->rbuf[0] != 0) {
+                c->state = conn_read;
+            } else {
+                c->state = conn_waiting;
+            }
+            break;
+
+        case conn_waiting:
+            // 注册 libevent 事件，等待 fd 就绪
+            EVENT_NEW(&c->event, c->event_base, c->sfd,
+                      EV_READ | EV_PERSIST | EV_WRITE,
+                      event_handler, (void *)c);
+            stop = true;  // 等待事件，停止 drive_machine
+            break;
+
+        // ... 其余 case 类似
+        }
+    }
+}</code></pre>
+
+        <p>注意到 <code>stop</code> 变量的使用——这是状态机的心脏。每次状态处理完后，根据条件决定是否继续执行下一状态。如果当前操作无法立即完成（比如 read 返回 EAGAIN），就设置 <code>stop = true</code> 退出循环，等待下一次事件通知。</p>
+
+        <h2>完整状态流转路径：一个 set 请求的旅程</h2>
+
+        <p>让我们通过一个实际的 set 请求，来追踪一个连接经历的所有状态。这是理解 drive_machine 最好的方法：</p>
+
+        <pre><code>状态流转路径（set命令）:
+                          新连接到达
+                             │
+                      [conn_listening]
+                      accept() 新连接
+                             │
+                      [conn_new_cmd]
+                      重置上下文
+                             │
+                      [conn_waiting]
+                      注册 libevent EV_READ
+                             │
+                   (等待客户端发送数据)
+                      数据到达 → EV_READ
+                             │
+                      [conn_read]
+                      read() 到 rbuf
+                             │
+                      [conn_parse_cmd]
+                      解析命令: "set mykey 0 60 5\r\n"
+                      → 需要后续 5 字节 value
+                             │
+                      [conn_nread]
+                      读取 5 字节 value + "\r\n"
+                      → 调用 complete_nread()
+                          → process_command()
+                            → item_alloc() + item_link()
+                             │
+                      [conn_mwrite]
+                      writev() 返回 "STORED\r\n"
+                             │
+                      [conn_new_cmd]
+                      准备处理下一条命令
+                             │
+                          ...循环...</code></pre>
+
+        <p>关键观察：<strong>一个请求的处理不是一次性完成的</strong>。如果数据包分多次到达（这在 TCP 中非常常见），连接可能在 conn_read、conn_parse_cmd、conn_nread 之间反复切换，每次收到一部分数据就处理一部分。这就是非阻塞编程的核心挑战——你必须能够"记住"处理到哪里了，下次从断点继续。</p>
+
+        <h2>conn_listening：主线程 accept 新连接</h2>
+
+        <p>conn_listening 是唯一一个在主线程上处理的状态。当监听 socket 上有 EV_READ 事件时，event_handler 被调用，然后 drive_machine 进入 conn_listening 分支。</p>
+
+        <p>这里的关键逻辑是 <code>accept()</code> 之后的处理：</p>
+
+        <pre><code>case conn_listening:
+    sfd = accept(c->sfd, ...);
+    if (sfd == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            stop = true;  // 没有更多新连接了
+        } else if (errno == EINTR) {
+            continue;     // 被信号中断，重试
+        }
+        break;
+    }
+    // 新连接来了，交给 worker 线程
+    dispatch_conn_new(sfd, conn_new_cmd, EV_READ, ...);
+    // 没有 stop = true，继续 accept 下一个
+    break;</code></pre>
+
+        <p>注意 <code>dispatch_conn_new()</code>——这里把新连接分发给了 worker 线程。之后这个连接的所有 I/O 处理都在 worker 线程上进行，主线程不再参与。下一章我们详细分析这个分发过程。</p>
+
+        <h2>conn_nread：处理 set 命令的 value 体</h2>
+
+        <p>conn_nread 是处理写类型命令（set、add、replace 等）的关键状态。当 conn_parse_cmd 解析出命令需要额外数据时（比如 set 命令需要读取 value），就会跳转到 conn_nread：</p>
+
+        <pre><code>case conn_nread:
+    // 尝试读取所需字节数
+    toread = c->rlbytes;  // 还需要读多少字节
+    res = read(c->sfd, c->rcurr, toread);
+
+    if (res &gt; 0) {
+        c->rcurr += res;
+        c->rlbytes -= res;
+
+        if (c->rlbytes == 0) {
+            // 数据读取完毕，交给 complete_nread
+            complete_nread(c);
+            // 状态在 complete_nread 内部会切换
+        }
+        // 如果数据还没读完，不切换状态，等待下次读事件
+    } else if (res == 0) {
+        // 连接关闭
+        c->state = conn_closed;
+    } else {
+        // EAGAIN，停止等待
+        stop = true;
+    }
+    break;</code></pre>
+
+        <p>注意 <code>c->rlbytes</code> 和 <code>c->rcurr</code> 的作用：它们记录着"还需要读多少字节"和"当前写到哪了"。这是实现"部分读取"的关键——TCP 是流式协议，一个包可能只带了 value 的一部分，下一次数据到达后继续从断点读起。</p>
+
+        <h2>conn_mwrite：批量写响应</h2>
+
+        <p>conn_mwrite 是写响应的状态，它使用 <code>writev()</code> 来实现批量写：</p>
+
+        <pre><code>case conn_mwrite:
+    // 使用 writev 批量写出
+    res = writev(c->sfd, c->wmsg_iov, c->wmsg_iov_used);
+
+    if (res &gt; 0) {
+        c->wmsg_bytes += res;
+        // 更新 iovec 偏移量
+        // ...
+
+        if (所有数据写完了) {
+            // 写完毕，回到 conn_new_cmd 等新命令
+            c->state = conn_new_cmd;
+        }
+        // 没写完，接着写
+    } else if (res == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        stop = true;
+    } else {
+        c->state = conn_closing;
+    }
+    break;</code></pre>
+
+        <p>使用 writev 代替多次 write 是一个重要的性能优化：在返回多条数据时（比如 get 多个 key），Memcached 会把多条响应消息组装成一个 iovec 数组，一次 writev 调用全部写出。这减少了系统调用次数，大幅提升了吞吐量。</p>
+
+        <div class="tip">
+            <strong>设计细节：</strong>Memcached 在 conn_mwrite 中使用的是 <strong>writev</strong> 而非 write，因为一个响应可能由多个不连续的内存块组成（比如协议头 + value 数据）。writev 可以一次写出多个不连续的缓冲区，避免了内存拷贝的开销。这个技巧在网络编程中非常实用。
+        </div>
+
+        <h2>conn_swallow：协议错误恢复</h2>
+
+        <p>conn_swallow 是一个有意思的状态——它的存在是为了处理<strong>协议错误后的恢复</strong>。</p>
+
+        <p>假设客户端发送了一个格式错误的 set 命令，比如指定 value 长度为 10 字节但实际只发送了 5 字节。服务器已经读取了命令行并期望读取 10 字节的 value，但客户端已经发送了下一批数据——这正是协议状态不同步的情况。</p>
+
+        <p>conn_swallow 的处理方式很简单：把预期读取的剩余数据"吞掉"，然后回到 conn_new_cmd 重新开始同步：</p>
+
+        <pre><code>case conn_swallow:
+    // 丢弃 rlbytes 字节数据
+    res = read(c->sfd, c->rbuf, c->rlbytes);
+    if (res > 0) {
+        c->rlbytes -= res;
+        if (c->rlbytes == 0) {
+            // 吞完了，重新开始
+            c->state = conn_new_cmd;
+        }
+    }
+    // ... 错误处理
+    break;</code></pre>
+
+        <div class="highlight">
+            <strong>容错设计：</strong>conn_swallow 体现了 Memcached 的"尽力恢复"哲学。它不会因为一个错误命令就关闭连接，而是尝试丢弃错误数据、恢复协议同步。这种设计在生产环境中非常重要，因为客户端 bug 或网络问题导致的畸形数据很常见，断开连接的成本远比丢弃几字节数据高。
+        </div>
+
+        <h2>状态转换图（ASCII art）</h2>
+
+        <p>为了帮助大家从整体上理解状态机的结构，下面是完整的 ASCII 状态转换图：</p>
+
+        <pre><code>                    ┌──────────────────────┐
+                    │   conn_listening      │  ← 主线程
+                    │   (accept 新连接)      │
+                    └──────────┬───────────┘
+                               │ dispatch_conn_new()
+                               ▼
+                    ┌──────────────────────┐
+              ┌───→│   conn_new_cmd        │
+              │    │   (重置上下文)          │
+              │    └──────────┬───────────┘
+              │               │
+              │               ▼
+              │    ┌──────────────────────┐
+              │    │   conn_waiting        │ ←─ 注册 libevent 事件
+              │    │   (等待 EV_READ)      │
+              │    └──────────┬───────────┘
+              │               │ EV_READ 触发
+              │               ▼
+              │    ┌──────────────────────┐
+              │    │   conn_read           │
+              │    │   (读数据到 rbuf)      │
+              │    └──────────┬───────────┘
+              │               │
+              │               ▼
+              │    ┌──────────────────────┐
+              │    │   conn_parse_cmd      │
+              │    │   (解析命令类型)       │
+              │    └──────┬───────────┬───┘
+              │           │           │
+              │    需要数据体    无需数据体
+              │           │           │
+              │           ▼           │
+              │    ┌──────────┐       │
+              │    │conn_nread│       │
+              │    │(读value) │       │
+              │    └────┬─────┘       │
+              │         │ 读完       │
+              │         ▼            │
+              │    ┌──────────┐      │
+              │    │conn_mwrite│◄─────┘
+              │    │(写响应)   │
+              │    └────┬─────┘
+              │         │ 写完
+              └─────────┘
+              (回到 conn_new_cmd)
+
+              异常路径:
+              conn_read / conn_nread / conn_mwrite
+                       │ 出错
+                       ▼
+              ┌──────────────────────┐
+              │   conn_swallow        │ → 吞数据 → conn_new_cmd
+              │   conn_closing        │ → 正常关闭
+              │   conn_immediate_close│ → 强制关闭
+              └──────────────────────┘</code></pre>
+
+        <h2>stop 条件：何时停止状态机</h2>
+
+        <p>drive_machine 的循环由 <code>stop</code> 变量控制。那么这个 stop 条件到底是什么时候设置的？总结起来有三种情况：</p>
+
+        <ul>
+            <li><strong>等待 I/O：</strong>最常见的情况。在 conn_waiting 中设置 stop = true，因为需要等待下一次事件通知。在 conn_read / conn_nread / conn_mwrite 中遇到 EAGAIN 也设置 stop。</li>
+            <li><strong>连接关闭：</strong>当检测到连接关闭（read 返回 0）或发生不可恢复的错误时，设置 stop = true 并切换到 conn_closed。</li>
+            <li><strong>超时：</strong>在 conn_waiting 中如果设置了超时时间，libevent 会在超时后触发事件，此时 drive_machine 会进入超时处理逻辑，关闭连接。</li>
+        </ul>
+
+        <h2>踩坑：conn_timeout 设置不当导致大量 TIME_WAIT</h2>
+
+        <p>讲一个我在生产环境中遇到的实际问题。有一次，我们发现线上 Memcached 服务器出现了大量 <code>TIME_WAIT</code> 状态的连接，数量达到数万个，导致新连接建立困难（端口耗尽）。</p>
+
+        <p>调查过程是这样的：先看 netstat，TIME_WAIT 的连接全部是 Memcached 主动关闭的。这说明 <strong>Memcached 在频繁地关闭空闲连接</strong>。查看配置发现，<code>-o idle_timeout</code> 设置的是 30 秒——也就是说，客户端连接空闲 30 秒就会被 Memcached 主动关闭。</p>
+
+        <p>看起来是合理的配置，为什么会有问题呢？进一步分析发现，这是一个连接池的使用场景：客户端创建了大量连接，但连接池中的连接在空闲时被 Memcached 关闭了，然后客户端继续用已关闭的连接发送请求，导致错误后重新建立连接……如此反复，服务器端积累了大量 TIME_WAIT。</p>
+
+        <p>解决方案是：根据业务场景合理设置 idle_timeout。对于连接池场景，建议设置较长的超时时间（如 300 秒以上），或者干脆禁用空闲超时（设置 <code>-o idle_timeout=0</code>）。同时客户端连接池也要配置心跳检测，确保及时回收不用的连接。</p>
+
+        <div class="warning">
+            <strong>经验教训：</strong>Memcached 的 conn_timeout 机制在 conn_waiting 状态中通过 libevent 的超时事件实现。设置太短会导致频繁关闭连接，产生大量 TIME_WAIT；设置太长会导致连接泄漏，占用服务器资源。没有一个"万能"的配置值——你需要根据业务场景的并发模式和连接池大小来权衡。一般来说，<strong>300 秒是一个不错的起点</strong>，然后通过监控调整。
+        </div>
+
+        <h2>小结</h2>
+
+        <p>这一章我们深入分析了 drive_machine 连接状态机——Memcached 网络层的核心引擎。核心要点是：</p>
+
+        <ul>
+            <li>11 个 conn_states 状态覆盖了连接从创建到关闭的完整生命周期，每个状态职责单一、边界清晰。</li>
+            <li>状态机的每次执行都是"尽力而为"的——能处理多少就处理多少，遇到阻塞就返回等待。</li>
+            <li>conn_listening 在主线程处理，其余状态在 worker 线程处理。</li>
+            <li>conn_nread 和 conn_mwrite 使用部分读取/写入的方式，配合 rlbytes 和 iovec 管理进度。</li>
+            <li>conn_swallow 提供了协议错误的优雅恢复机制。</li>
+        </ul>
+
+        <p>但还有一个关键问题我们没有展开：新连接是怎么从主线程交给 worker 线程的？这里面涉及管道通信、连接队列、Round-Robin 调度等精妙的设计——这就是下一章要讲的多线程模型。</p>
+
+        <p>好，第 16 章就到这里。下一章我们将进入 Master-Worker 架构的源码解析。我们第 17 章见。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 并发控制：锁策略与无锁设计</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html" class="active">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第18章 并发控制：锁策略与无锁设计</h1>
+
+        <p>大家好，我是你们的讲师。前面三章我们一直在强调"每个 worker 线程拥有独立的 event_base"、"连接一旦分配就绑定在一个线程上"——这些设计都是为了<strong>减少锁</strong>。但减少不等于消除。在多线程模型中，仍然有一些全局资源需要被多个线程访问：哈希表、LRU 链表、slab 分配器、统计数据……这些资源必须用锁来保护。</p>
+
+        <p>这一章我们就来全面梳理 Memcached 中的锁策略。你会发现，Memcached 的锁设计遵循一个明确的指导思想：<strong>能不用就不用，非用不可就分段，分段还不够就尽量缩小临界区</strong>。这不仅是 Memcached 的哲学，也是所有高性能并发系统的共同追求。</p>
+
+        <h2>锁分类总览</h2>
+
+        <p>Memcached 中主要使用 <code>pthread_mutex_t</code> 互斥锁，分布在不同的模块中。下面是完整的锁分类表：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>锁名称</th>
+                    <th>变量名</th>
+                    <th>所在模块</th>
+                    <th>保护对象</th>
+                    <th>类型</th>
+                    <th>竞争程度</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>item_lock</td>
+                    <td><code>item_lock[]</code></td>
+                    <td>assoc / item</td>
+                    <td>哈希桶链表 + item 引用计数</td>
+                    <td>分段锁</td>
+                    <td>低（分段后每条链竞争极低）</td>
+                </tr>
+                <tr>
+                    <td>cache_lock</td>
+                    <td><code>cache_lock</code></td>
+                    <td>item</td>
+                    <td>LRU 链表操作（LUR maintainer 线程）</td>
+                    <td>全局锁</td>
+                    <td>中等</td>
+                </tr>
+                <tr>
+                    <td>slab_lock</td>
+                    <td><code>slab_lock</code></td>
+                    <td>slabs</td>
+                    <td>slab class 的统计数据和内存分配</td>
+                    <td>全局锁</td>
+                    <td>低（分配路径短）</td>
+                </tr>
+                <tr>
+                    <td>conn_lock</td>
+                    <td><code>conn_lock</code></td>
+                    <td>thread</td>
+                    <td>CQ 连接队列</td>
+                    <td>per-queue 锁</td>
+                    <td>极低</td>
+                </tr>
+                <tr>
+                    <td>stats_lock</td>
+                    <td><code>stats_lock</code></td>
+                    <td>stats</td>
+                    <td>全局统计数据</td>
+                    <td>全局锁</td>
+                    <td>低（仅在 stats 命令时访问）</td>
+                </tr>
+                <tr>
+                    <td>crawler_lock</td>
+                    <td><code>crawler_lock</code></td>
+                    <td>crawler</td>
+                    <td>LRU 爬虫状态</td>
+                    <td>全局锁</td>
+                    <td>极低</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>核心观察：</strong>整个 Memcached 只有 6 组锁。对于一个支持 64 线程、每秒处理百万级请求的服务器来说，这已经是非常精简的锁设计。作为对比，早期 Redis 是单线程的——零锁。但 Memcached 选择多线程来利用多核，付出的代价就是这 6 组锁。
+        </div>
+
+        <h2>item_lock：分段锁设计</h2>
+
+        <p>item_lock 是 Memcached 中<strong>最重要的锁</strong>，也是设计最精巧的锁。它保护的是哈希表的每个桶（bucket）中的链表操作——包括哈希查找、插入、删除，以及每个 item 的引用计数更新。</p>
+
+        <p>如果使用一把全局哈希表锁，那么在高并发 set/get 的场景下，所有线程都在争抢同一把锁——性能会急剧下降。Memcached 的解决方案是<strong>分段锁</strong>：</p>
+
+        <pre><code>// assoc.c
+#define DEFAULT_HASH_BULK_MOVE 1
+int hash_items = 0;              // 总 item 数
+pthread_mutex_t *item_lock;      // 分段锁数组
+unsigned int item_lock_count;    // 分段锁的数量
+unsigned int item_lock_hashpower;// 锁分段的对数（默认 16，即 65536 把锁）
+
+// 初始化
+void assoc_init(const int hashtable_init) {
+    // ... 初始化哈希表 ...
+
+    // 初始化分段锁数组
+    item_lock_count = hashsize(item_lock_hashpower);
+    item_lock = calloc(item_lock_count, sizeof(pthread_mutex_t));
+    for (unsigned int i = 0; i &lt; item_lock_count; i++) {
+        pthread_mutex_init(&item_lock[i], NULL);
+    }
+}
+
+// 根据 key 的 hash 值定位锁
+#define hash2lock(h) ((h) & (item_lock_count - 1))
+
+// 加锁 / 解锁宏
+#define ITEM_LOCK(h) pthread_mutex_lock(&item_lock[hash2lock(h)])
+#define ITEM_UNLOCK(h) pthread_mutex_unlock(&item_lock[hash2lock(h)])</code></pre>
+
+        <p>关键思路：<code>hash2lock(h)</code> 通过对 hash 值取模来映射到某一把锁。默认 <code>item_lock_hashpower = 16</code>，也就是 65536 把锁。这意味着哈希表中的 65536 个桶共享 65536 把锁——平均每个锁保护一个桶。当桶数量小于锁数量时（这在大多数情况下成立），一把锁保护多个桶也是安全的，因为锁只保护对该桶链表的操作，不同桶之间没有冲突。</p>
+
+        <p>那么锁的粒度到底有多细？我们来看看实际使用场景：</p>
+
+        <pre><code>// 在 do_item_get 中查找 item
+item *do_item_get(const char *key, const size_t nkey, const uint32_t hv) {
+    // hv 是 key 的 hash 值
+    ITEM_LOCK(hv);           // 锁住对应分段
+    item *it = assoc_find(key, nkey, hv);  // 在哈希表中查找
+    if (it != NULL) {
+        refcount_incr(&it->refcount);  // 增加引用计数
+    }
+    ITEM_UNLOCK(hv);         // 解锁
+    // ... 其他处理（可能在 cache_lock 下）
+}</code></pre>
+
+        <p>当一个线程在 get key_A（hash=0x1234）时，它只锁住 <code>item_lock[0x1234 & 0xFFFF]</code>。另一个线程同时 get key_B（hash=0x5678），它锁住的是 <code>item_lock[0x5678 & 0xFFFF]</code>——只要 0x1234 和 0x5678 的低 16 位不同，这两个操作就<strong>完全并行</strong>，没有任何锁竞争。</p>
+
+        <div class="tip">
+            <strong>分段锁的数学原理：</strong>如果分段锁数量为 N，每个锁的预期竞争程度是全局锁的 1/N。但更重要的是，在 Memcached 的 65536 把锁下，两个随机 key 冲突的概率约为 1/65536——这在实际生产中可以忽略不计。分段锁是"用空间换并行度"的经典案例：多用了 65536 个 mutex 的内存（约 2MB），换来了接近无锁的哈希表并发访问性能。
+        </div>
+
+        <h2>cache_lock：保护 LRU 链表</h2>
+
+        <p><code>cache_lock</code> 是 Memcached 中竞争最"激烈"的一把锁——它保护所有 LRU 链表操作。为什么要用全局锁而不是分段锁？因为 LRU 链表的本质是<strong>全局有序的</strong>。每次访问一个 item，都要把它移到链表头部，这涉及跨 slab class 的链表操作，天然不适合分段。</p>
+
+        <p>在早期的 Memcached 版本中，cache_lock 确实是性能瓶颈。后来引入了 <strong>LRU maintainer 线程</strong>——一个专门负责 LRU 维护的后台线程，把 cache_lock 的大部分工作从 worker 线程中剥离了出去。worker 线程在 item 访问路径上只需要持有 cache_lock 很短的时间，大部分 LRU 调整工作由 maintainer 线程在后台异步完成。</p>
+
+        <pre><code>// item.c - LRU 维护线程的简化逻辑
+static void *lru_maintainer_thread(void *arg) {
+    while (!stop_lru_maintainer_thread) {
+        // 休眠一段时间（settings.lru_maintainer_sleep_ms）
+        usleep(settings.lru_maintainer_sleep_ms * 1000);
+
+        pthread_mutex_lock(&cache_lock);
+        // 遍历所有 slab class，检查和调整 LRU 队列
+        for (int sid = 0; sid &lt; MAX_NUMBER_OF_SLAB_CLASSES; sid++) {
+            lru_pull_tail(sid, ...);
+        }
+        pthread_mutex_unlock(&cache_lock);
+    }
+    return NULL;
+}</code></pre>
+
+        <p>这个设计大大降低了 cache_lock 的竞争压力。worker 线程只在 item_link（插入新 item 到 LRU）和 item_unlink（删除 item）时需要短暂的 cache_lock，而大部分 LRU 队列的维护工作都集中到了 maintainer 线程中。</p>
+
+        <h2>slab_lock 和 conn_lock</h2>
+
+        <p><strong>slab_lock</strong> 保护 slab allocator 的内部状态——每个 slab class 的空闲列表、已用页面数等。这个锁的持有时间非常短，几乎只有几条指针操作：</p>
+
+        <pre><code>// slabs.c
+void *slabs_alloc(size_t size, unsigned int id, ...) {
+    pthread_mutex_lock(&slab_lock);
+    // 1. 从 slab class 的空闲列表取一块内存
+    // 2. 如果空闲列表为空，调用 do_slabs_newslab() 分配新页
+    // 3. 更新统计
+    pthread_mutex_unlock(&slab_lock);
+    return ptr;
+}</code></pre>
+
+        <p>由于 slab allocator 的分配路径非常短（通常只有几十条指令），slab_lock 的竞争程度很低。在大多数生产场景下，slab_lock 几乎从不成为瓶颈。</p>
+
+        <p><strong>conn_lock</strong> 保护连接队列（CQ）的操作。如上一章所述，虽然它是互斥锁保护的，但由于每个 worker 线程有自己独立的队列，而且 push/pop 几乎不会同时发生，这个锁的竞争程度在所有锁中是最低的。</p>
+
+        <h2>stats_lock：被低估的瓶颈</h2>
+
+        <p>stats_lock 是一个有趣的特例。它保护全局统计数据，看起来似乎无关紧要——只有执行 stats 命令时才需要访问。但问题在于：<strong>统计数据更新需要加锁吗？</strong></p>
+
+        <p>是的。Memcached 几乎在每个请求路径上都会更新计数器——get 命中数、get 未命中数、set 次数、删除次数、字节数……这些更新是原子的吗？不是。如果不加锁，多线程同时更新同一个计数器会导致数据竞争（data race）。</p>
+
+        <p>解决方案是什么？Memcached 的早期版本使用了全局 stats_lock，每次统计更新都加锁解锁——这在百万 QPS 下的开销不可忽视。后来引入了 <strong>per-thread 统计</strong>：每个 worker 线程维护自己的一组统计计数器，互不干扰，只有 stats 命令时才累加所有线程的计数器。这样就完全消除了统计更新路径上的锁。</p>
+
+        <div class="highlight">
+            <strong>设计演变：</strong>从全局 stats_lock 到 per-thread 统计，是一个非常典型的"先有后优"的演进案例。很多锁在初期看起来"无所谓"，只有在压测到百万 QPS 时才会暴露出问题。Memcached 的优化策略是：<strong>先确保正确性，再用 profiling 定位瓶颈，最后用 per-thread 变量消除锁</strong>。
+        </div>
+
+        <h2>哪些路径是无锁的</h2>
+
+        <p>聊完了所有锁，我们来看一个同样重要的问题：<strong>哪些代码路径是完全无锁的？</strong></p>
+
+        <p>答案是，Memcached 中<strong>大部分代码路径都是无锁的</strong>。这是怎么做到的？</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>路径</th>
+                    <th>无锁原因</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>连接 I/O（read/write）</td>
+                    <td>每个连接绑定一个 worker 线程，读写缓冲区是线程私有的</td>
+                </tr>
+                <tr>
+                    <td>协议解析（parse_cmd）</td>
+                    <td>解析在 worker 线程内完成，不涉及全局数据</td>
+                </tr>
+                <tr>
+                    <td>命令分发（process_command）</td>
+                    <td>只操作线程私有的 conn 结构</td>
+                </tr>
+                <tr>
+                    <td>响应组装</td>
+                    <td>写缓冲区是线程私有的，writev 调用也是</td>
+                </tr>
+                <tr>
+                    <td>event_base 操作</td>
+                    <td>每个线程独立的 event_base，libevent 内部不加锁</td>
+                </tr>
+                <tr>
+                    <td>局部 slab 分配</td>
+                    <td>slab_lock 只在分配时短暂持有，分配路径本身很短</td>
+                </tr>
+                <tr>
+                    <td>连接队列操作（CQ）</td>
+                    <td>虽然用锁，但竞争极低，可近似看作无锁</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>总结一下无锁的秘诀：<strong>数据分片</strong>。Memcached 把所有需要频繁访问的数据按照"连接"或"线程"维度进行了分片——每个线程拥有自己的 event_base、读写缓冲区、统计数据、连接队列。分片后，大部分操作只访问线程本地数据，不需要锁。</p>
+
+        <h2>锁粒度 vs 性能权衡</h2>
+
+        <p>为什么 Memcached 不干脆用一把全局大锁？原因很简单：<strong>粒度太粗的锁会扼杀并行度</strong>。</p>
+
+        <p>想象一下，如果哈希表、LRU、slab allocator 都用同一把锁保护（这在一些早期的简单缓存库中确实存在），那么高并发下的场景是这样的：</p>
+
+        <pre><code>线程 A: 获得锁 → 处理 get key_1 → 释放锁
+线程 B: 等待锁 → 获得锁 → 处理 set key_2 → 释放锁
+线程 C: 等待锁 → 等待锁 → 获得锁 → 处理 delete key_3 → 释放锁
+线程 D: 等待锁 → 等待锁 → 等待锁 → 获得锁 → ...</code></pre>
+
+        <p>在 8 核机器上，理想情况是 8 个线程同时工作，但全局大锁会让 7 个线程都在等待——CPU 利用率只有 12.5%。</p>
+
+        <p>Memcached 的锁粒度选择遵循以下原则：</p>
+
+        <ul>
+            <li><strong>能不锁就不锁</strong>：通过 connection pinning 和 per-thread 数据消除大部分锁需求。</li>
+            <li><strong>必须锁就分段</strong>：item_lock 分成 65536 段，把竞争概率降到 1/65536。</li>
+            <li><strong>无法分段的就异步</strong>：cache_lock 的大部分工作交给 LRU maintainer 线程异步处理。</li>
+            <li><strong>异步也解决不了的尽量短</strong>：slab_lock 的临界区只有几条指令。</li>
+        </ul>
+
+        <h2>死锁案例分析：item_lock 和 cache_lock</h2>
+
+        <p>说完了锁的设计，我们来看一个容易踩的坑——<strong>锁的顺序</strong>。在 do_item_link（将 item 插入哈希表和 LRU）时，涉及两把锁：</p>
+
+        <pre><code>// item.c
+int do_item_link(item *it, const uint32_t hv) {
+    ITEM_LOCK(hv);          // 先锁 item_lock（分段锁）
+    assoc_insert(it, hv);   // 插入哈希表
+
+    pthread_mutex_lock(&cache_lock);  // 再锁 cache_lock
+    // 插入 LRU 队列
+    ...;
+    pthread_mutex_unlock(&cache_lock);
+
+    ITEM_UNLOCK(hv);
+    // ...
+}</code></pre>
+
+        <p>而在 do_item_unlink（删除 item）时：</p>
+
+        <pre><code>// item.c
+void do_item_unlink(item *it, const uint32_t hv) {
+    ITEM_LOCK(hv);          // 先锁 item_lock
+    assoc_delete(it, hv);   // 从哈希表删除
+
+    pthread_mutex_lock(&cache_lock);  // 再锁 cache_lock
+    // 从 LRU 队列移除
+    ...;
+    pthread_mutex_unlock(&cache_lock);
+
+    ITEM_UNLOCK(hv);
+}</code></pre>
+
+        <p>两个函数都遵循 <strong>item_lock → cache_lock</strong> 的顺序，因此不会死锁。</p>
+
+        <p>但如果某个函数（假设在某个分支中误写了）按 cache_lock → item_lock 的顺序加锁，而另一个线程正在执行 item_lock → cache_lock，就会产生经典的<strong>ABBA 死锁</strong>。</p>
+
+        <div class="warning">
+            <strong>实战教训：</strong>在 2016 年的一个提交中，确实出现过类似的死锁 bug（commit f6b0a05）。当时引入了一个新的统计路径，在 cache_lock 的保护下又调用了 item_lock——刚好反了。这个 bug 在压测中表现为服务周期性"卡死"几秒钟，然后恢复。排查过程非常痛苦，最终通过加锁检测工具（helgrind）定位到了问题。<strong>在任何多线程 C 项目中，锁的顺序都应该通过注释或工具明确约定，并定期用 ThreadSanitizer 进行检查。</strong>
+        </div>
+
+        <h2>踩坑：分段锁数量设置太少</h2>
+
+        <p>最后分享一个真实的生产问题。有一个团队部署了 Memcached，发现在 32 核机器上性能只能利用到大约 8 核的吞吐量，继续增加线程数性能不再提升。CPU 火焰图显示，大量时间花在 <code>pthread_mutex_lock</code> 上——具体来说是 item_lock 的竞争。</p>
+
+        <p>排查发现，这个部署使用了非常旧的 Memcached 版本（1.4.x），其中 item_lock 的默认分段数是 8（即 <code>item_lock_hashpower = 3</code>）。这意味着只有 8 把锁保护整个哈希表！8 个线程同时访问哈希表时，冲突概率非常高——平均每两个请求就有 1/8 的概率撞锁。</p>
+
+        <p>解决方案：升级到 1.5+ 版本，其中 item_lock_hashpower 默认值提升到了 16（65536 把锁）。如果必须使用旧版本，可以通过启动参数手动调大：</p>
+
+        <pre><code># 旧版本中手动指定分段锁数量（2^20 = 1048576 把锁）
+memcached -o hashpower=20</code></pre>
+
+        <div class="highlight">
+            <strong>最佳实践：</strong>在部署 Memcached 时，建议根据 CPU 核心数和预期的 QPS 来配置。对于 16 核以上的机器，确保 item_lock_hashpower 至少为 16。一个简单的经验公式：<strong>分段锁数量 &ge; worker 线程数 &times; 100</strong>。这样可以确保锁竞争概率低于 1%，锁的开销可以忽略不计。
+        </div>
+
+        <h2>小结</h2>
+
+        <p>这一章我们全面梳理了 Memcached 的并发控制策略。核心要点是：</p>
+
+        <ul>
+            <li>Memcached 只有 6 组锁，大多数代码路径是无锁的——秘诀是通过 connection pinning 和 per-thread 数据分片消除锁需求。</li>
+            <li>item_lock 分段锁是核心设计：65536 把锁均匀覆盖哈希表，使锁竞争概率降到 1/65536。</li>
+            <li>cache_lock 通过 LRU maintainer 线程异步化来降低竞争压力。</li>
+            <li>stats_lock 通过 per-thread 计数器优化彻底消除了统计更新路径上的锁。</li>
+            <li>锁的获取顺序必须严格约定（item_lock → cache_lock），否则可能触发 ABBA 死锁。</li>
+            <li>分段锁数量需要根据硬件配置合理设置，过少会导致锁竞争成为性能瓶颈。</li>
+        </ul>
+
+        <p>至此，本课程的第四个部分"网络与并发"——涵盖 libevent 集成、连接状态机、多线程模型、锁策略——就全部结束了。从下一章开始，我们将进入第五部分"协议与扩展"：首先从最基础的 ASCII 文本协议讲起，看看 Memcached 如何用短短几百行代码实现一套功能完整的网络协议。</p>
+
+        <p>好，第 18 章就到这里。下一章我们将进入协议的精彩世界。我们第 19 章见。</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

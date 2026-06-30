@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 字符设备驱动(上)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html" class="active">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。前两章我们沉浸在块设备的世界里——硬盘、扇区、请求队列、中断搬运。现在让我们把注意力转向操作系统中最具"人情味"的设备：<strong>终端</strong>。</p>
+
+        <p>如果说块设备驱动是为了让机器高效地存储和读取数据，那么字符设备驱动就是为了<strong>让人类与机器交流</strong>。键盘、鼠标、串口、控制台显示器——这些都是字符设备。它们的特点是：以字符流的形式读写数据，不支持随机访问，通常有交互性要求。</p>
+
+        <p>在Linux 0.11中，字符设备驱动集中在<code>kernel/chr_drv/</code>目录下。这一章我们重点分析<strong>tty子系统</strong>——它负责管理用户的所有终端交互，是字符设备驱动中最核心也最精巧的部分。</p>
+
+        <h2>引言——终端是用户与内核交互的窗口</h2>
+
+        <p>想象一下你在终端里敲下<code>ls -la</code>然后按回车的那一刻，系统内部发生了什么？每个按键都产生一个中断，每个字符都需要被处理、回显、缓存，直到回车键按下，这一行才被交给shell程序去解析执行。这种"一行一行输入"的模式，背后是一个精妙的三队列模型在支撑。</p>
+
+        <p>在Linux 0.11中，tty子系统由以下几个文件组成：</p>
+
+        <ul>
+            <li><code>tty_io.c</code> — tty核心I/O操作（读、写、打开、关闭）</li>
+            <li><code>tty_ioctl.c</code> — tty控制命令（波特率设置、行规程参数）</li>
+            <li><code>console.c</code> — 控制台终端（显示器+键盘）</li>
+            <li><code>serial.c</code> — 串口终端驱动</li>
+            <li><code>keyboard.S</code> — 键盘中断处理（汇编）</li>
+        </ul>
+
+        <p>这些文件加起来大约1500行代码，定义了三种终端类型：<strong>串口终端</strong>（通过RS-232连接到真正的物理终端）、<strong>控制台终端</strong>（PC的显示器和键盘组合）、以及后来的<strong>伪终端PTY</strong>（用于网络登录等场景）。尽管硬件完全不同，但它们通过同一个抽象——<code>tty_struct</code>——被统一管理。</p>
+
+        <div class="tip">
+            <strong>历史背景</strong>："tty"是"Teletype"（电传打字机）的缩写。在计算机诞生的早期，用户通过电传打字机与大型机交互——输入的字符被打印在纸上，输出的字符也被打印在纸上。虽然今天我们使用的是液晶显示屏和USB键盘，但"tty"这个名字一直沿用至今。
+        </div>
+
+        <h2>tty子系统架构</h2>
+
+        <p>Linux 0.11的tty架构可以用一个简单的分层模型来理解：</p>
+
+        <pre><code>Linux 0.11 tty 子系统架构
+
+用户进程（shell, editor, ...）
+          │
+          │ read() / write()
+          ▼
+    ┌─────────────────┐
+    │  tty_io.c       │  ← 核心文件：tty_read(), tty_write()
+    │  tty_ioctl.c    │  ← 控制命令：波特率、行规程设置
+    └────────┬────────┘
+             │
+    ┌────────▼────────┐
+    │  line discipline │  ← 行规程：退格、行编辑、信号生成
+    │  (tty_io.c内嵌)  │     ^C生成SIGINT, ^\生成SIGQUIT
+    └────────┬────────┘
+             │
+    ┌────────▼────────┐
+    │  底层驱动层      │  ← console.c / serial.c / keyboard.S
+    │  操作具体硬件     │     CRTC寄存器、UART寄存器、键盘控制器
+    └─────────────────┘</code></pre>
+
+        <p>用户进程通过<code>read()</code>/<code>write()</code>系统调用与tty设备交互。这些调用经过VFS层后，到达<code>tty_io.c</code>中的<code>tty_read()</code>和<code>tty_write()</code>。然后数据经过行规程（line discipline）的处理，最终到达底层驱动，由它们操作具体的硬件。</p>
+
+        <h2>tty_struct数据结构——三队列模型</h2>
+
+        <p>每个tty设备对应一个<code>tty_struct</code>结构体。在Linux 0.11中，系统最多支持8个tty设备（可以通过修改<code>NR_TTYS</code>宏来调整）。每个<code>tty_struct</code>包含三个队列——这是整个tty子系统设计的核心：</p>
+
+        <pre><code>// include/linux/tty.h — tty_struct核心字段
+struct tty_struct {
+    struct termios termios;     // 终端参数（波特率、数据位、停止位等）
+    int pgrp;                   // 前台进程组ID
+    int stopped;                // 是否停止输出
+    int write;                  // 是否正在写入
+    struct tty_queue write_q;   // 写队列：用户→设备的数据
+    struct tty_queue read_q;    // 读队列：设备→用户的数据
+    struct tty_queue secondary; // 辅助队列：行规程处理后的数据
+    // ... 其他字段
+};
+
+struct tty_queue {
+    unsigned long data[128];    // 环形缓冲区（实际是unsigned long数组）
+    int head, tail;             // 队列头尾指针
+    struct task_struct *proc_list; // 等待该队列的进程列表
+};</code></pre>
+
+        <p>三个队列各自扮演不同的角色：</p>
+
+        <table>
+            <thead>
+                <tr><th>队列</th><th>方向</th><th>作用</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>write_q（写队列）</td><td>用户 → 设备</td><td>用户写入的数据先进入此队列，底层驱动从中取数据显示到屏幕或发送到串口</td></tr>
+                <tr><td>read_q（读队列）</td><td>设备 → 用户</td><td>键盘中断或串口中断接收的原始字符放入此队列</td></tr>
+                <tr><td>secondary（辅助队列）</td><td>处理后 → 用户</td><td>行规程对read_q中的原始数据进行行编辑后，放入此队列等待用户读取</td></tr>
+            </tbody>
+        </table>
+
+        <p>你可能注意到了——为什么需要三个队列？简单来说：<code>write_q</code>负责输出（用户写的字符要发出去），<code>read_q</code>负责输入（硬件收到的字符先存起来），<code>secondary</code>负责"加工后的输入"（原始输入经过行规程编辑后，才是用户真正想要读取的）。</p>
+
+        <div class="warning">
+            <strong>队列缓冲区的大小</strong>：tty_queue使用<code>unsigned long data[128]</code>作为存储空间——在16位机上，每个unsigned long是4字节，所以总容量是512字节。如果你的终端每秒接收大量数据而用户进程来不及读取，队列会溢出。这在实际系统中确实会发生！
+        </div>
+
+        <h2>tty_io.c核心函数——tty_read()与tty_write()</h2>
+
+        <p>现在来看tty子系统的两个核心函数。<code>tty_read()</code>是用户通过<code>read(fd, buf, n)</code>读取终端数据时的最终归宿：</p>
+
+        <pre><code>// kernel/chr_drv/tty_io.c — tty_read()逻辑
+int tty_read(int channel, char *buf, int nr)
+{
+    struct tty_struct *tty = &tty_table[channel];
+    int c, i = 0;
+
+    // 循环读取，直到读取了nr个字符或发生错误
+    while (i < nr) {
+        // 尝试从辅助队列取一个字符
+        while (tty->secondary.head != tty->secondary.tail) {
+            c = tty->secondary.data[tty->secondary.tail];
+            tty->secondary.tail = (tty->secondary.tail + 1) & 127;
+
+            // 行规程的"原始模式" vs "规范模式"处理
+            // 在规范模式下，读完一行（遇到\n）就返回
+            put_user_char(c, buf + i++);
+            if (c == '\n')  // 一行结束，返回
+                return i;
+        }
+
+        // 辅助队列为空 → 睡眠等待
+        if (i == 0)
+            sleep_on(&tty->secondary.proc_list);
+        else
+            break;  // 已经读到了数据，返回
+    }
+    return i;
+}</code></pre>
+
+        <p><code>tty_write()</code>则相对简单——把用户要输出的字符放入写队列，然后调用底层驱动的<code>write()</code>函数去实际传输：</p>
+
+        <pre><code>// kernel/chr_drv/tty_io.c — tty_write()逻辑
+int tty_write(int channel, char *buf, int nr)
+{
+    struct tty_struct *tty = &tty_table[channel];
+    int c;
+
+    while (nr > 0) {
+        // 从用户缓冲区取字符放入写队列
+        // 如果写队列满了，等待
+        while (tty->write_q.head != tty->write_q.tail) {
+            // 实际处理需要检查队列是否有空间
+            // ...
+            put_user_char(c, buf++);
+            tty->write_q.data[tty->write_q.head] = c;
+            tty->write_q.head = (tty->write_q.head + 1) & 127;
+            nr--;
+        }
+        // 调用底层驱动的写函数将数据发送出去
+        tty->write(tty);
+        if (nr > 0)
+            sleep_on(&tty->write_q.proc_list);
+    }
+    return 0;
+}</code></pre>
+
+        <p>注意这里有一个<code>tty->write(tty)</code>函数指针调用——每个tty设备的底层驱动实现了自己的<code>write()</code>函数，控制台驱动把字符输出到VGA显存，串口驱动把字符通过UART发送出去。这是典型的<strong>面向对象的多态</strong>思想——在C语言中通过函数指针实现。</p>
+
+        <div class="tip">
+            <strong>设计模式</strong>：tty子系统的"三队列+函数指针"架构，与Linux 0.11中文件系统的VFS（虚拟文件系统）设计如出一辙。它们都使用"统一的接口抽象 + 底层差异化实现"的模式，是C语言面向对象编程的经典范例。
+        </div>
+
+        <h2>console.c——控制台</h2>
+
+        <p>控制台是用户最直接面对的设备——键盘输入、显示器输出。控制台驱动<code>console.c</code>的主要工作是管理显示器，而键盘输入由<code>keyboard.S</code>处理（下一章详解）。</p>
+
+        <p>控制台的核心操作对象是<strong>VGA显存</strong>。在文本模式下，VGA显存位于物理地址<code>0xB8000</code>，每个字符占用两个字节：</p>
+
+        <pre><code>VGA文本模式显存布局 (0xB8000)
+
+地址:   0xB8000  0xB8002  0xB8004  0xB8006  ...
+内容: [字符1][属性1][字符2][属性2][字符3][属性3]...
+
+每行80个字符 → 160字节
+每屏25行 → 4000字节
+
+属性字节格式:
+  bit 7:      闪烁(1) / 不闪烁(0)
+  bit 6-4:    背景色（0-7）
+  bit 3:      前景高亮
+  bit 2-0:    前景色（0-7）</code></pre>
+
+        <p>控制台驱动需要处理滚动——当光标到达屏幕底部时，把整个屏幕的内容上移一行，新行显示空白。<code>con_scroll()</code>函数实现了这个逻辑：</p>
+
+        <pre><code>// console.c — con_scroll 屏幕滚动
+void con_scroll(struct tty_struct *tty)
+{
+    // 将第2行到第25行的内容复制到第1行到第24行
+    // 即：整体上移一行
+    memcpy((char *)0xB8000,
+           (char *)0xB8000 + 160,   // 每行160字节
+           160 * 24);
+
+    // 清除最后一行（第25行）
+    memset((char *)0xB8000 + 160 * 24, 0, 160);
+}</code></pre>
+
+        <p>光标位置通过CRT控制器的两个端口控制：<code>0x3D4</code>（索引寄存器）和<code>0x3D5</code>（数据寄存器）。先向<code>0x3D4</code>写入要访问的寄存器索引（14=光标高字节，15=光标低字节），然后通过<code>0x3D5</code>读写数据。</p>
+
+        <pre><code>// 设置CRT光标位置
+void set_cursor(int position)
+{
+    outb(14, 0x3D4);                // 选择光标高字节寄存器
+    outb(position >> 8, 0x3D5);     // 写入高字节
+    outb(15, 0x3D4);                // 选择光标低字节寄存器
+    outb(position & 0xFF, 0x3D5);   // 写入低字节
+}</code></pre>
+
+        <h2>行规程(line discipline)——输入加工的中间层</h2>
+
+        <p>行规程是tty子系统中一个经常被忽略但极其重要的组件。它位于<code>tty_read()</code>和底层驱动之间，对原始输入进行加工处理。</p>
+
+        <p>原始输入从键盘中断到达<code>read_q</code>，经过行规程处理后进入<code>secondary</code>队列，然后被<code>tty_read()</code>消费。行规程的核心功能包括：</p>
+
+        <ul>
+            <li><strong>退格处理（^H）</strong>：用户按下Backspace时，不是直接把字符发到应用程序，而是从输入缓冲区中删除上一个字符</li>
+            <li><strong>行编辑</strong>：使用<code>^U</code>可以删除整行输入</li>
+            <li><strong>信号生成</strong>：<code>^C</code>产生SIGINT，<code>^\</code>产生SIGQUIT，<code>^Z</code>产生SIGTSTP</li>
+            <li><strong>回车转换</strong>：将<code>\r</code>转换为<code>\n</code></li>
+            <li><strong>大小写转换</strong>：可选的<code>^U</code>大写转换</li>
+        </ul>
+
+        <pre><code>// tty_io.c — 行规程处理的核心逻辑（copy_to_cooked）
+void copy_to_cooked(struct tty_struct *tty)
+{
+    // 从read_q取出原始字符
+    char c = tty->read_q.data[tty->read_q.tail];
+    tty->read_q.tail = (tty->read_q.tail + 1) & 127;
+
+    // 处理特殊字符
+    if (c == '\r') {
+        c = '\n';  // 回车→换行
+        // 如果开启了回显，同时在屏幕上显示\n
+    }
+    if (c == 0x08) {  // Backspace
+        // 从辅助队列删除上一个字符
+        tty->secondary.tail = (tty->secondary.tail - 1) & 127;
+        // 屏幕上也回退一格
+        return;
+    }
+    if (c == 0x03) {  // Ctrl+C
+        // 发送SIGINT给前台进程组
+        kill_pg(tty->pgrp, SIGINT, 1);
+        return;
+    }
+
+    // 普通字符：放入辅助队列
+    tty->secondary.data[tty->secondary.head] = c;
+    tty->secondary.head = (tty->secondary.head + 1) & 127;
+
+    // 唤醒在secondary队列上等待的进程
+    wake_up(&tty->secondary.proc_list);
+}</code></pre>
+
+        <p>这段看似简单的代码，实际上承担了巨大的责任。没有行规程，你在终端里就不能删除输错的字符，<code>^C</code>也无法中断程序——每按一个键都会直接送到应用程序的输入流中。行规程是"原始终端"和"智能终端"之间的分水岭。</p>
+
+        <h2>踩坑故事——终端回显的诡异Bug</h2>
+
+        <p>说到行规程，我想分享一个我在自己的终端驱动开发中遇到的、让我抓狂了一整天的Bug。这个故事完美地诠释了双队列设计的重要性——以及如果处理不当会出现什么后果。</p>
+
+        <p>事情是这样的：我在一个嵌入式系统上移植了Linux的终端驱动。移植完成后进行测试，输入一个字符<code>a</code>，屏幕上却出现了<strong>两个</strong><code>a</code>。输入<code>hello</code>，屏幕上显示<code>hheelllloo</code>。每个字符都变成了双份。</p>
+
+        <p>第一反应：是不是键盘中断处理程序出了问题，每次按键产生了两次中断？用逻辑分析仪抓了键盘控制器的信号——没有问题，确实只产生了一次中断。</p>
+
+        <p>第二反应：是不是UART串口有回环？检查了串口配置——MCR寄存器的LOOP位是0，没有自环。</p>
+
+        <p>排查到第三天，我终于找到了罪魁祸首——<strong>回显做了两次</strong>。</p>
+
+        <p>正常的终端回显流程应该是：键盘中断 → 行规程处理 → 把字符放入辅助队列 → 同时调用<code>tty_write()</code>将字符输出到屏幕（回显）。</p>
+
+        <p>但我的代码中有一个Bug：在底层串口驱动（serial.c）的<code>write()</code>函数里，我又加了一段逻辑——当检测到写入的字符是来自键盘输入时，再回显一次。而上一层的行规程已经做过回显了。结果就是：行规程回显了第一个<code>a</code>，底层驱动又回显了第二个<code>a</code>。</p>
+
+        <div class="highlight">
+            <strong>教训</strong>：这个问题本质上是一个<strong>分层职责不清</strong>的经典案例。行规程负责回显，底层驱动只负责将写队列的数据发送给硬件——两者各司其职，不应重叠。而我在底层驱动里"自作聪明"地加了额外回显逻辑，破坏了分层边界。修复方法很简单：删除底层驱动中的多余回显代码。
+        </div>
+
+        <p>这个故事告诉我们：在操作系统中，分层架构不是一种"可有可无的设计优雅性"——它是保证正确性的必要条件。每一层都有明确的职责边界，打破这个边界往往不是带来"灵活性"，而是引入难以排查的Bug。</p>
+
+        <p>好了，这一章我们完整分析了tty子系统的架构——三队列模型、行规程处理、控制台驱动。下一章，我们将继续探索字符设备驱动的另一半：<strong>键盘驱动</strong>和<strong>串口驱动</strong>，看看物理世界的按键和串行信号是如何被转化为操作系统中的字符流的。</p>
+
+        <p><strong>下一章预告：字符设备驱动(下)</strong> —— 深入keyboard.S的扫描码处理，分析串口驱动的UART寄存器编程，看看键盘中断是如何将按键变成ASCII字符的。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 块设备驱动(下)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html" class="active">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们构建了块设备驱动的宏观框架——理解了请求队列模型和电梯调度算法。但聪明的你一定在问一个问题：<strong>请求队列里的请求，究竟是怎么变成硬盘上磁头的物理运动的？</strong></p>
+
+        <p>这一章，我们就来揭开这个谜底。我们要深入到<code>kernel/blk_drv/hd.c</code>和<code>kernel/blk_drv/ramdisk.c</code>中，看看Linux 0.11是如何与IDE硬盘控制器打交道的，以及RAM虚拟盘是如何在没有真实硬件的情况下模拟块设备的。</p>
+
+        <h2>引言——最复杂的设备驱动</h2>
+
+        <p>在Linux 0.11的所有设备驱动中，硬盘驱动是最复杂的。它直接操作IDE控制器的I/O端口、处理中断、进行DMA（实际上0.11用的是PIO而非真正的DMA）数据传输。一个闪失就可能导致数据损坏或者系统崩溃。</p>
+
+        <p>你可以这样理解硬盘驱动的角色定位：文件系统认为它是忠实的"数据搬运工"，但实际上它是一个需要精确控制硬件时序的"体操运动员"。每个参数的设置——扇区号、磁头号、柱面号、命令码——都不能有丝毫差错。</p>
+
+        <div class="tip">
+            <strong>历史背景</strong>：1991年的主流硬盘是IDE接口（Integrated Drive Electronics），容量通常在40MB到200MB之间，使用CHS（Cylinder-Head-Sector）寻址方式。LBA（Logical Block Addressing）虽然已经存在，但在0.11中仍然是可选的支持方式。
+        </div>
+
+        <h2>IDE硬盘控制器编程</h2>
+
+        <p>IDE控制器通过一组I/O端口暴露给CPU。在x86体系中，端口地址空间与内存地址空间是独立的，通过<code>inb()</code>/<code>outb()</code>指令访问。Linux 0.11中硬盘控制器占据的I/O端口范围是<code>0x1F0 - 0x1F7</code>：</p>
+
+        <pre><code>// include/linux/hdreg.h — IDE控制器I/O端口定义
+#define HD_DATA        0x1F0   // 数据寄存器（16位宽）
+#define HD_ERROR       0x1F1   // 错误寄存器（读） / 特性寄存器（写）
+#define HD_NSECTOR     0x1F2   // 扇区数寄存器
+#define HD_SECTOR      0x1F3   // 起始扇区号（LBA低8位）
+#define HD_LCYL        0x1F4   // 柱面低字节（LBA中8位）
+#define HD_HCYL        0x1F5   // 柱面高字节（LBA高8位）
+#define HD_CURRENT     0x1F6   // 驱动器/磁头号（LBA最高4位）
+#define HD_STATUS      0x1F7   // 状态寄存器（读） / 命令寄存器（写）
+
+// 状态寄存器标志位
+#define BUSY       0x80   // 控制器忙
+#define READY      0x40   // 设备就绪
+#define DRQ        0x08   // 数据请求（准备好传输数据）
+#define ERROR      0x01   // 发生错误</code></pre>
+
+        <p>总共8个端口，但涵盖了硬盘操作的所有方面。数据寄存器<code>0x1F0</code>是16位宽的，每次in/out操作传输两个字节。这是典型的PIO（Programmed I/O）模式——CPU亲自参与数据搬运。在现代系统中这已经被DMA取代，但在0.11中，PIO的设计让代码更简单直接。</p>
+
+        <p>向硬盘发送一个命令的基本流程是：</p>
+
+        <p><strong>1.</strong> 轮询状态寄存器（<code>0x1F7</code>），等待<code>BUSY</code>位清零且<code>READY</code>位置位。<br>
+        <strong>2.</strong> 设置扇区数寄存器、扇区号寄存器、柱面寄存器、磁头寄存器。<br>
+        <strong>3.</strong> 向命令寄存器写入命令码（<code>0x20</code>=读, <code>0x30</code>=写）。<br>
+        <strong>4.</strong> 等待中断发生。</p>
+
+        <h2>hd_info结构——硬盘参数</h2>
+
+        <p>要正确操作硬盘，驱动程序必须知道硬盘的几何参数——磁头数、柱面数、每柱面扇区数。在Linux 0.11中，这些参数存储在<code>hd_info</code>数组中：</p>
+
+        <pre><code>// kernel/blk_drv/hd.c
+struct hd_i_struct {
+    int head, sect, cyl, wpcom, lzone, ctl;
+};
+
+struct hd_i_struct hd_info[2] = { {0,0,0,0,0,0}, {0,0,0,0,0,0} };</code></pre>
+
+        <p>数组的两个元素分别对应<strong>主盘</strong>（第一个IDE接口上的master设备）和<strong>从盘</strong>（slave设备）。每个硬盘的信息包括：</p>
+
+        <table>
+            <thead>
+                <tr><th>字段</th><th>含义</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>head</td><td>磁头数</td><td>每个盘面上的读写磁头数量，通常为2-16</td></tr>
+                <tr><td>sect</td><td>每磁道扇区数</td><td>每个磁道上的扇区数，通常为17-63</td></tr>
+                <tr><td>cyl</td><td>柱面数</td><td>硬盘的柱面总数</td></tr>
+                <tr><td>wpcom</td><td>写预补偿起始柱面</td><td>用于磁场特性补偿（现代硬盘忽略此字段）</td></tr>
+                <tr><td>lzone</td><td>着陆区柱面</td><td>磁头停放位置（关机时磁头移到此柱面）</td></tr>
+                <tr><td>ctl</td><td>控制字节</td><td>用于控制寄存器的特殊设置</td></tr>
+            </tbody>
+        </table>
+
+        <p>这些参数从哪里来？在早期PC中，硬盘参数存储在CMOS中，BIOS在启动时读取并传递给操作系统。Linus 0.11的<code>setup.s</code>会通过BIOS中断<code>int 0x13</code>获取这些信息，然后放在内存的固定位置，供内核的<code>hd_init()</code>函数读取。</p>
+
+        <h2>do_hd_request()源码分析</h2>
+
+        <p>现在是最关键的部分——<code>do_hd_request()</code>是<strong>实际操作IDE控制器</strong>的函数。每次当请求队列中有待处理的请求时，这个函数就会被调用：</p>
+
+        <pre><code>// kernel/blk_drv/hd.c — do_hd_request 核心逻辑
+void do_hd_request(void)
+{
+    int dev = CURRENT->dev;
+    int block = CURRENT->sector;
+    int nsect = CURRENT->nr_sectors;
+    int head, cyl, sect;
+
+    // 1. 计算CHS地址（从LBA转换为柱面/磁头/扇区）
+    // hd_info[dev] 包含硬盘的几何参数
+    head = block / (hd_info[dev].sect * hd_info[dev].head);
+    cyl  = (block / hd_info[dev].sect) % hd_info[dev].head;
+    sect = (block % hd_info[dev].sect) + 1;  // 扇区号从1开始
+
+    // 2. 设置IDE控制器寄存器
+    outb(nsect, HD_NSECTOR);       // 扇区数
+    outb(sect,  HD_SECTOR);        // 起始扇区号
+    outb(cyl,   HD_LCYL);          // 柱面低字节
+    outb(cyl>>8, HD_HCYL);         // 柱面高字节
+    outb(0xA0 | (dev<<4) | head, HD_CURRENT); // 驱动器+磁头
+
+    // 3. 发送命令
+    if (CURRENT->cmd == READ)
+        outb(0x20, HD_STATUS);     // 读命令
+    else
+        outb(0x30, HD_STATUS);     // 写命令
+
+    // 4. 返回，等待中断
+    // 中断处理程序会读取数据并完成请求
+}</code></pre>
+
+        <p>这段代码看起来不多，但每一步都精确对应IDE协议规范。注意扇区号加1的操作——LBA（逻辑块地址）是从0开始计数的，而CHS寻址中的扇区号是从1开始的，这是一个非常容易踩坑的地方。</p>
+
+        <p>函数执行完<code>outb()</code>写命令后，硬盘就开始执行操作了。CPU不必等待——硬盘完成后会触发中断<code>IRQ14</code>（中断向量<code>0x2E</code>），内核在<code>hd_interrupt()</code>中继续处理。</p>
+
+        <h2>hd_interrupt()——中断处理</h2>
+
+        <p>当中断到来时，<code>hd_interrupt()</code>被调用。它的工作是根据刚才发送的命令类型，做相应的数据搬运：</p>
+
+        <pre><code>// kernel/blk_drv/hd.c — hd_interrupt 核心逻辑
+void hd_interrupt(void)
+{
+    // 1. 读取状态寄存器，检查错误
+    int stat = inb(HD_STATUS);
+    if (stat & ERROR) {
+        // 错误处理：重试或放弃
+        end_request(0);  // 标记请求失败
+        do_hd_request(); // 处理下一个请求
+        return;
+    }
+
+    // 2. 如果是读操作，从数据端口读取数据到缓冲区
+    if (CURRENT->cmd == READ) {
+        // 以16位为单位从0x1F0端口读取数据
+        int nr_words = CURRENT->nr_sectors * 256;  // 每扇区512字节=256字
+        // 实际代码使用rep insw指令批量读取
+        // ... 数据传输到CURRENT->buffer ...
+    }
+
+    // 3. 标记请求完成
+    end_request(1);  // 1表示成功
+
+    // 4. 处理队列中的下一个请求
+    do_hd_request();
+}</code></pre>
+
+        <p><code>end_request()</code>做的事情很关键：</p>
+
+        <p><strong>第一</strong>，唤醒等待该请求的进程——调用<code>wake_up(CURRENT->waiting)</code>，让之前在<code>wait_on_buffer()</code>上睡眠的进程重新进入就绪队列。</p>
+
+        <p><strong>第二</strong>，释放当前的request槽——将<code>dev</code>字段设为-1，表示该槽位可用。</p>
+
+        <p><strong>第三</strong>，将请求队列头指针后移——<code>dev->current_request = CURRENT->next</code>，让下一个请求成为新的当前请求。</p>
+
+        <p>最后再调用<code>do_hd_request()</code>处理链表中下一个请求——这就是<strong>中断驱动的工作循环</strong>：处理完一个请求，立刻发起下一个，直到请求队列为空。</p>
+
+        <div class="highlight">
+            <strong>思考题</strong>：为什么读操作在中断处理中传输数据，而写操作不需要？因为读操作是"硬盘有数据要交给CPU"，必须在中断中及时取走，否则数据会被覆盖。而写操作是"CPU有数据要交给硬盘"，在发送写命令之前数据已经传给了控制器，中断只是通知"写完了"。
+        </div>
+
+        <h2>RAM虚拟盘(rd.c)——不需要硬件的块设备</h2>
+
+        <p>在<code>kernel/blk_drv/</code>目录下，还有一个非常有趣的模块——<code>ramdisk.c</code>（RAM虚拟盘）。它的代码量不到100行，但完美地展示了"块设备驱动"的最小模型。</p>
+
+        <p>RAM盘的工作原理极其简单：在物理内存中分配一块区域，然后假装它是一个块设备。对这个"设备"的读写操作，实际上就是内存的读写操作——没有任何真正的I/O延迟。</p>
+
+        <pre><code>// kernel/blk_drv/ramdisk.c — RAM盘核心逻辑
+#define RAMDISK_SIZE  (2 * 1024 * 1024)  // 2MB的RAM盘
+
+static char *ramdisk;  // 指向RAM盘内存区域的指针
+
+// rd_open — "打开"RAM盘
+void rd_open(void)
+{
+    // 第一次使用时分配内存
+    if (ramdisk == NULL)
+        ramdisk = (char *)malloc(RAMDISK_SIZE);
+}
+
+// rd_ioctl — 设置RAM盘大小等
+int rd_ioctl(struct inode *inode, struct file *file, ...)
+{
+    // 处理设备控制命令
+}
+
+// do_rd_request — RAM盘请求处理
+void do_rd_request(void)
+{
+    // 从请求队列取请求
+    int dev   = CURRENT->dev;
+    int block = CURRENT->sector;
+    int nsect = CURRENT->nr_sectors;
+    char *buf = CURRENT->buffer;
+
+    // 计算内存偏移：扇区号 * 512
+    char *src = ramdisk + (block << 9);  // block * 512
+
+    if (CURRENT->cmd == READ)
+        memcpy(buf, src, nsect << 9);    // 从RAM盘读到缓冲区
+    else
+        memcpy(src, buf, nsect << 9);    // 从缓冲区写到RAM盘
+
+    end_request(1);  // 标记完成，唤醒等待进程
+    do_rd_request(); // 处理下一个请求
+}</code></pre>
+
+        <p>看到了吗？整个"设备驱动"的核心就是两个<code>memcpy()</code>操作。但它的接口——通过<code>do_rd_request()</code>从请求队列取请求、处理、调用<code>end_request()</code>——与真实的硬盘驱动完全一致。这意味着<strong>文件系统可以挂载一个RAM盘作为根文件系统</strong>，完全不需要真实的磁盘硬件。</p>
+
+        <p>这也是为什么我强烈建议你阅读RAM盘的源代码——它是理解块设备驱动架构的"最小可工作示例"。如果你能理解<code>rd.c</code>的完整逻辑，那么<code>hd.c</code>中90%的代码对你来说就不再有神秘感了。</p>
+
+        <div class="warning">
+            <strong>性能差异的启示</strong>：RAM盘的读写速度完全取决于内存带宽（在1991年大约是几十MB/s），而真实硬盘的PIO传输速度大约是1-2MB/s。这个数量级的差距解释了为什么操作系统要花那么大力气做缓存和预读——内存比磁盘快两个数量级。
+        </div>
+
+        <h2>踩坑故事——硬盘中断丢失的恐怖</h2>
+
+        <p>我想分享一个自己亲身经历的、堪称"最恐怖"的调试经历。这个故事发生在我在一个嵌入式Linux项目上开发块设备驱动的时候——但它的问题根源，在Linux 0.11时代就已经被反复讨论过了。</p>
+
+        <p>现象是这样的：系统启动后，文件系统挂载正常，但一旦开始读写磁盘，系统就会<strong>完全卡死</strong>。没有错误信息，没有任何输出，就像有人按了暂停键一样。反复复位测试，每次都在同一个位置卡死。</p>
+
+        <p>经过三天的排查，终于定位到问题所在：<strong>硬盘中断丢失了</strong>。</p>
+
+        <p>具体来说，内核通过<code>do_hd_request()</code>向硬盘发送了读命令，硬盘也成功接收了命令并开始寻道读数据。读操作完成后，硬盘通过中断线IRQ14向CPU发送中断信号。但问题在于——<strong>中断控制器（8259A PIC）没有正确初始化</strong>。</p>
+
+        <p>在x86体系中，中断控制器负责将硬件中断映射到CPU的中断向量。8259A需要通过I/O端口<code>0x20</code>和<code>0xA0</code>进行初始化编程，设置中断向量偏移、触发方式等参数。负责初始化中断控制器的函数是<code>init_IRQ()</code>，在<code>kernel/sched.c</code>中被调用。</p>
+
+        <p>我们遇到的问题是这样的：系统中某个外设的驱动在初始化时意外修改了8259A的IMR（Interrupt Mask Register，中断屏蔽寄存器），把IRQ14对应的位（第6位，对应中断屏蔽寄存器的bit 6）<strong>错误地设置为1</strong>。这意味着所有来自硬盘的中断都被屏蔽了！</p>
+
+        <p>结果就是：硬碟完成了数据读取，触发了中断信号——但8259A直接丢弃了这个信号。CPU永远不知道硬盘已经准备好了。而发起读请求的进程正安稳地睡在<code>wait_on_buffer()</code>上，等待永远等不到的中断来唤醒它。整个系统就这样完全卡死。</p>
+
+        <div class="highlight">
+            <strong>调试启示</strong>：这类Bug之所以恐怖，是因为你完全看不到任何错误信息——没有日志、没有Crash、没有Oops。系统就像"冻住"了一样。排查方法是在<code>do_hd_request()</code>之后加一个超时机制：如果请求在N秒内没有完成，就打印中断控制器的状态寄存器和中断屏蔽寄存器——你很快会发现中断根本没有到达。
+        </div>
+
+        <p>这个故事告诉我们：在驱动开发中，依赖中断的异步操作是最容易出问题的环节。任何一环出错——中断控制器配置错误、中断向量注册错误、中断标志位清除遗漏——都会导致"永久阻塞"这个最隐蔽也最致命的后果。而这也是为什么Linux 0.11的代码中，中断相关的初始化代码都写得格外小心，每一步都用宏和注释反复强调。</p>
+
+        <p>好了，这一章我们深入了硬盘驱动的内部——从IDE控制器的寄存器编程，到CHS地址转换，再到中断处理的数据搬运。下一章，我们将转向另一个大类——<strong>字符设备驱动</strong>，看看终端和控制台是如何与用户交互的。</p>
+
+        <p><strong>下一章预告：字符设备驱动(上)</strong> —— 走进tty子系统的三队列模型，分析console.c中控制台显示的实现，理解行规程是如何处理退格和信号生成的。</p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

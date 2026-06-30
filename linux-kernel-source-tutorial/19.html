@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 块设备驱动(上)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html" class="active">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。在上一章中，我们分析了管道与exec的实现——那是进程之间传递数据的第一个通道。但从这一章开始，我们要面对计算机存储体系中最核心的硬件模块：<strong>块设备驱动</strong>。</p>
+
+        <p>块设备是什么？简单来说，就是那些以"数据块"为最小读写单位的设备——硬盘、软盘、光驱、SSD。它们的共同点是：随机访问、数据块大小固定、经常作为文件系统的底层载体。在Linux 0.11中，块设备驱动层是连接文件系统和实际硬件之间的桥梁，它的设计质量直接决定了整个系统的I/O性能。</p>
+
+        <h2>引言——块设备是存储的基石</h2>
+
+        <p>如果你回顾前几章的内容，会发现文件系统的所有操作——读取文件、写入目录、同步inode——最终都会落到一种操作上：<strong>读写磁盘上的某个数据块</strong>。文件系统负责把这些逻辑操作翻译成"在设备XX的扇区YY上读写ZZ字节"，然后它自己并不亲自操作硬件，而是把任务交给块设备驱动层。</p>
+
+        <p>Linux 0.11中的块设备驱动位于<code>kernel/blk_drv/</code>目录下，主要包括三个文件：<code>ll_rw_blk.c</code>（块设备请求管理层）、<code>hd.c</code>（硬盘驱动）和<code>floppy.c</code>（软盘驱动）。这一章我们聚焦于<code>ll_rw_blk.c</code>——这是块设备驱动的<strong>大脑</strong>，而具体的硬盘和软盘驱动则是<strong>手和脚</strong>。</p>
+
+        <div class="tip">
+            <strong>设计哲学</strong>：Linux 0.11的块设备子系统采用"请求队列"模型——上层只负责提交请求，下层只负责处理请求。这种分层解耦的设计即便在今天也是块设备驱动的标准范式。
+        </div>
+
+        <h2>块设备抽象层——ll_rw_blk.c的设计</h2>
+
+        <p>打开<code>kernel/blk_drv/ll_rw_blk.c</code>，你会发现这段代码的精髓在于一句话：<strong>请求与完成分离</strong>。上层（文件系统、缓冲区管理）发出"我想读设备X的第Y块数据"的请求，然后就可以去睡觉了。下层（硬盘中断处理程序）在数据就绪后，通过中断通知内核，把数据放到该放的地方，然后唤醒等待的进程。</p>
+
+        <p>这个异步模型让CPU和磁盘可以<strong>并行工作</strong>。CPU提交一个磁盘读写请求后，不必忙等待，而是可以调度其他进程运行。磁盘完成操作后通过中断通知CPU，这才是真正高效的使用方式。</p>
+
+        <p>ll_rw_blk.c对外暴露的核心接口是<code>ll_rw_block()</code>函数。它的签名很直接：</p>
+
+        <pre><code>// ll_rw_block — 块设备读写统一入口
+// rw: READ=0 或 WRITE=1
+// dev: 设备号（主设备号+次设备号）
+// bh: buffer_head指针，描述要读/写的数据缓冲区
+void ll_rw_block(int rw, struct buffer_head *bh);</code></pre>
+
+        <p>函数内部的流程可以分为三步：</p>
+
+        <p><strong>第一步</strong>：检查参数合法性——设备号是否有效、buffer_head是否锁定、读写方向是否正确。如果参数有问题，直接返回错误。</p>
+
+        <p><strong>第二步</strong>：调用<code>make_request()</code>，将本次读写请求封装成一个<code>request</code>结构体。</p>
+
+        <p><strong>第三步</strong>：调用<code>add_request()</code>，将request插入到对应设备的请求队列中，并调用电梯调度算法寻找最优插入位置。</p>
+
+        <p>就是这么简单。文件系统用不到这些事情是怎么在硬件上完成的——它只关心"我的请求提交了，数据准备好了叫我"。</p>
+
+        <h2>request结构与请求队列</h2>
+
+        <p>现在让我们来看看这个贯穿整个块设备层的核心数据结构——<code>struct request</code>：</p>
+
+        <pre><code>// kernel/blk_drv/blk.h 中的 request 结构定义
+struct request {
+    int dev;           // 设备号（-1 表示该请求槽空闲）
+    int cmd;           // 命令：READ=0 或 WRITE=1
+    int errors;        // 操作失败的次数
+    unsigned long sector;     // 起始扇区号
+    unsigned long nr_sectors; // 扇区数
+    char *buffer;      // 内存中的缓冲区地址
+    struct task_struct *waiting;  // 等待该请求完成的进程
+    struct buffer_head *bh;      // 关联的buffer_head
+    struct request *next;        // 指向下一个请求（单向链表）
+};</code></pre>
+
+        <p>这个结构体只有9个字段，但每个字段都至关重要。<code>dev</code>字段为-1表示这个请求槽是空闲的；<code>sector</code>和<code>nr_sectors</code>描述要操作的磁盘区域；<code>buffer</code>指向内存中的数据缓冲区；<code>waiting</code>指向等待该请求完成的进程——请求完成时，驱动会唤醒这个进程。</p>
+
+        <p>最神奇的是<code>next</code>指针。所有等待处理的request通过它连成一个<strong>单向链表</strong>，每个设备有自己的请求链表头。这样磁盘驱动每次只需要从链表头部取出一个请求进行处理，处理完成后再取下一条——这就是经典的"先来先服务"调度框架。</p>
+
+        <p>系统中使用了一个全局数组来管理所有请求：</p>
+
+        <pre><code>// kernel/blk_drv/blk.h
+#define NR_REQUEST 32
+
+struct request request[NR_REQUEST];  // 全局请求数组，共32个槽</code></pre>
+
+        <p>为什么是32个？这是Linus在0.11中做的一个折中。请求槽太少会导致上层阻塞等待空闲槽位；太多则浪费宝贵的内存（1991年的机器内存通常只有4-8MB）。32个槽位在当时的典型负载下足够了。</p>
+
+        <table>
+            <thead>
+                <tr><th>字段</th><th>含义</th><th>关键值</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>dev</td><td>设备号</td><td>主设备号(高8位) + 次设备号(低8位)，-1表示空闲</td></tr>
+                <tr><td>cmd</td><td>读写命令</td><td>READ=0, WRITE=1</td></tr>
+                <tr><td>sector</td><td>起始扇区号</td><td>LBA逻辑块地址</td></tr>
+                <tr><td>nr_sectors</td><td>要传输的扇区数</td><td>一次请求最多传输多个扇区</td></tr>
+                <tr><td>buffer</td><td>内存缓冲区地址</td><td>数据在RAM中的目标/源地址</td></tr>
+                <tr><td>waiting</td><td>等待进程</td><td>请求完成时被唤醒</td></tr>
+                <tr><td>next</td><td>链表指针</td><td>连接下一个待处理请求</td></tr>
+            </tbody>
+        </table>
+
+        <h2>make_request() / add_request()——电梯调度算法</h2>
+
+        <p>当<code>ll_rw_block()</code>调用<code>make_request()</code>后，首先会扫描全局<code>request[]</code>数组，找到一个空闲槽（<code>dev==-1</code>）来存放新的请求。然后关键的一步来了——<code>add_request()</code>负责把这个请求插入到设备请求链表的正确位置。</p>
+
+        <p>插入算法不是简单地把新请求放在链表尾部——它实现了一个<strong>电梯调度算法</strong>（elevator algorithm）：</p>
+
+        <pre><code>// add_request — 将请求插入队列（电梯调度）
+// 用 C 语言描述的算法逻辑
+static void add_request(struct blk_dev_struct *dev, struct request *req)
+{
+    struct request *tmp = dev->current_request;
+    struct request *prev = NULL;
+
+    // 电梯算法：查找插入位置
+    // 如果新请求的扇区号大于当前请求，继续向后扫描
+    // 同时检查是否可以与相邻请求合并
+    while (tmp != NULL) {
+        if (tmp->sector > req->sector)
+            break;  // 找到了插入位置
+        // 检查是否可以与tmp合并（相邻扇区）
+        if ((tmp->sector + tmp->nr_sectors) == req->sector) {
+            tmp->nr_sectors += req->nr_sectors;  // 合并扩展
+            return;  // 无需插入新请求
+        }
+        prev = tmp;
+        tmp = tmp->next;
+    }
+    // 插入到prev和tmp之间
+    req->next = tmp;
+    if (prev)
+        prev->next = req;
+    else
+        dev->current_request = req;
+}</code></pre>
+
+        <p>算法的核心思想很直观：<strong>按照扇区号递增的顺序维护请求链表</strong>。这样磁盘磁头在顺序处理请求时，移动距离最短——从低扇区到高扇区一路扫描过去，尽量减少磁头来回移动。</p>
+
+        <p>更巧妙的是，算法在扫描过程中还会检查相邻扇区合并：如果新请求要读的扇区刚好跟在某个已排队请求的最后一个扇区后面，就直接把新请求"吞并"到那个请求里——两个小请求变成一个更大的顺序请求，减少中断次数，提高吞吐量。</p>
+
+        <div class="warning">
+            <strong>注意</strong>：电梯算法对磁盘I/O性能的提升是惊人的。在没有电梯算法的系统中，随机读写会导致磁头疯狂寻道，性能下降数倍甚至数十倍。这个看似简单的排序+合并策略，是块设备驱动中最有价值的优化之一。
+        </div>
+
+        <h2>ll_rw_block()——块设备读写入口</h2>
+
+        <p>现在让我们把整个调用链串起来。当文件系统需要读写磁盘上的某个块时，会调用<code>ll_rw_block()</code>。这个函数位于<code>kernel/blk_drv/ll_rw_blk.c</code>中，是所有块设备操作的统一入口：</p>
+
+        <pre><code>// ll_rw_block 简化源码逻辑
+void ll_rw_block(int rw, struct buffer_head *bh)
+{
+    // 1. 参数检查
+    if (rw != READ && rw != WRITE)
+        panic("Bad block dev cmd");
+    if (bh->b_lock)
+        panic("Buffer already locked");
+
+    // 2. 标记buffer为锁定状态
+    bh->b_lock = 1;
+
+    // 3. 根据读写方向设置uptodate标志
+    if (rw == WRITE)
+        bh->b_uptodate = 0;  // 写操作使cache失效
+    else if (rw == READ)
+        bh->b_uptodate = 0;  // 读操作尚未完成
+
+    // 4. 调用make_request提交请求
+    make_request(bh->b_dev, rw, bh);
+}</code></pre>
+
+        <p>注意<code>ll_rw_block()</code>在操作之前先锁定了buffer_head。这是保证<strong>同一个缓冲区不会同时被两个请求操作</strong>的关键机制。如果一个buffer已经提交了读请求但尚未完成，另一个进程也想读它，就会在<code>wait_on_buffer()</code>上睡眠，直到第一个请求完成并释放锁。</p>
+
+        <p>根据设备类型的不同，<code>ll_rw_block()</code>提交的请求最终会被不同的底层函数处理：硬盘请求走<code>do_hd_request()</code>，软盘请求走<code>do_floppy_request()</code>。这些底层函数才是真正操作硬件寄存器的地方——下一章我们会深入分析它们。</p>
+
+        <h2>块设备读写全流程</h2>
+
+        <p>理论说了这么多，让我们用<strong>一个完整的场景</strong>把整个过程串起来。假设用户程序执行<code>read(fd, buf, 1024)</code>要读取一个文件：</p>
+
+        <pre><code>块设备读操作完整流程图
+
+用户进程                         内核                           硬件
+   |                              |                              |
+   |-- sys_read() --------------->|                              |
+   |   (系统调用入口)              |                              |
+   |                              |                              |
+   |<-- file_read() --------------|                              |
+   |   (根据inode找到文件数据块)    |                              |
+   |                              |                              |
+   |<-- bread() ------------------|                              |
+   |   (检查buffer cache是否有缓存) |                              |
+   |   如果有缓存 → 直接返回        |                              |
+   |   如果没有缓存 → 继续         |                              |
+   |                              |                              |
+   |<-- ll_rw_block() ------------|                              |
+   |    (设置buffer锁定, 提交请求)  |                              |
+   |                              |                              |
+   |<-- make_request() -----------|                              |
+   |    (分配request[ ]槽位)       |                              |
+   |                              |                              |
+   |<-- add_request() ------------|                              |
+   |    (电梯调度算法插入链表中)    |                              |
+   |                              |                              |
+   |   请求加入队列后返回          |                              |
+   |   进程进入sleep_on()睡眠      |                              |
+   |                              |                              |
+   |                 do_hd_request() 取出请求                    |
+   |                              |--- 写IDE命令寄存器 --------->| 硬盘开始旋转
+   |                              |--- 写LBA地址 --------------->| 磁头寻道
+   |                              |                              |
+   |                              |                   硬盘完成操作
+   |                              |<-- 触发中断 0x2E ------------|
+   |                              |                              |
+   |                 hd_interrupt()                              |
+   |                   读状态寄存器检查错误                        |
+   |                   从数据端口读取数据到请求的buffer             |
+   |                   end_request()                             |
+   |                     唤醒等待的进程                           |
+   |                              |                              |
+   |   进程被唤醒, bread()返回     |                              |
+   |   buffer已包含磁盘数据        |                              |
+   |                              |                              |
+   |   file_read()将数据拷贝到     |                              |
+   |   用户空间buf中               |                              |
+   |                              |                              |
+   |   read()返回, 大功告成        |                              |
+</code></pre>
+
+        <p>这个流程揭示了一个非常重要的设计模式：所有I/O操作都是<strong>异步提交 + 同步等待</strong>。请求提交阶段（ll_rw_block到add_request）是同步执行的，但只做"登记"工作，不涉及实际的I/O等待。真正的I/O操作由硬件在后台完成，完成后通过中断通知内核。提交请求的进程在等待期间可以睡眠，把CPU让给其他进程。</p>
+
+        <div class="highlight">
+            <strong>深入思考</strong>：这个设计在单核CPU上尤为重要。如果没有异步模型，进程在等待磁盘I/O时CPU就只能空转——而磁盘I/O的延迟是纳秒级CPU延迟的百万倍级别（毫秒 vs. 纳秒）。通过进程睡眠和切换，CPU可以在一个进程等待磁盘时，为另一个进程提供计算服务。
+        </div>
+
+        <h2>踩坑故事——电梯算法的饥饿问题</h2>
+
+        <p>讲到电梯调度算法，我必须分享一个真实的踩坑经历。这个Bug我在自己的一个嵌入式项目中遇到过，而在Linux 0.11的电梯算法中同样存在这个隐患。</p>
+
+        <p>故事是这样的：一个数据采集系统需要频繁地往磁盘上写日志，同时偶尔读取一些配置文件。系统运行几个小时后，突然变得极其缓慢，甚至完全卡死。经过反复排查，发现罪魁祸首正是——<strong>电梯算法的饥饿问题</strong>。</p>
+
+        <p>什么意思呢？电梯算法按照扇区号递增的顺序插入请求。假设请求队列当前的分布是这样的：</p>
+
+        <pre><code>请求链表（按扇区号排序）：
+  [扇区100] → [扇区200] → [扇区300] → [扇区900] → [扇区1000]
+
+新来的请求是 [扇区400]，插入位置在 [扇区300] 和 [扇区900] 之间：
+  [扇区100] → [扇区200] → [扇区300] → [扇区400] → [扇区900] → [扇区1000]</code></pre>
+
+        <p>看起来没问题，对吗？但是如果持续有扇区号在300到900之间的请求到达（比如扇区350、420、500……），它们总是被插入到[扇区900]之前。而磁盘驱动每次只从链表头部取请求处理——[扇区900]和[扇区1000]排在靠后的位置。</p>
+
+        <p>如果新请求到达的速度≥磁盘处理请求的速度，<strong>排在队尾的请求永远得不到服务</strong>。这就是"饥饿"问题。那个日志采集系统的场景就是：持续的写日志请求（扇区范围集中）不断地插入到偶尔的配置文件读取请求（扇区范围偏远）之前，导致读配置文件的请求永远排不上队。</p>
+
+        <div class="tip">
+            <strong>解决方案</strong>：现代电梯算法引入了"老化"（aging）机制——每个请求等待的时间越长，优先级越高。如果某个请求在队列中等待超过一定时间，它会被提升到队列头部。Linux 2.6以后的CFQ（完全公平队列）调度器则采用了更精细的时间片轮转策略，彻底解决了饥饿问题。
+        </div>
+
+        <p>理解了这个故事，你就明白了为什么电梯算法虽然简单高效，但并不是完美的——任何不加"老化"机制的排队系统都会面临饥饿风险。这也是为什么后来的Linux块设备层引入了越来越复杂的I/O调度器（Deadline、CFQ、BFQ等）。</p>
+
+        <p>好了，这一章我们主要讨论了块设备驱动的<strong>上层框架</strong>——请求队列、电梯调度算法、以及读写流程的宏观全景。在下一章中，我们将深入到具体的硬件层面，看看<code>do_hd_request()</code>是如何操作IDE控制器寄存器的，以及硬盘中断处理程序是如何完成数据搬运的。</p>
+
+        <p><strong>下一章预告：块设备驱动(下)</strong> —— 深入IDE硬盘控制器，分析do_hd_request()的CHS地址转换、hd_interrupt()的中断处理流程，以及RAM虚拟盘的实现。</p>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

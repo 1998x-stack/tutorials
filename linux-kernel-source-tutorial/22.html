@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 字符设备驱动(下)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html" class="active">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们揭开了tty子系统的面纱——三队列模型、行规程、控制台驱动。但tty架构中还有两个至关重要的"输入门神"我们没有触及：<strong>键盘</strong>和<strong>串口</strong>。</p>
+
+        <p>键盘是用户最常见的输入设备，串口则是嵌入式开发和网络设备中最古老的通信接口。它们一内一外，分别是操作系统数据输入的"本地源头"和"远程源头"。这一章，我们就分别深入这两个驱动，看看物理层面的按键和电平信号是如何变成操作系统中的字符流的。</p>
+
+        <h2>引言——输入来源的两大门神</h2>
+
+        <p>在Linux 0.11中，键盘驱动位于<code>kernel/chr_drv/keyboard.S</code>（没错，它是用汇编写的），串口驱动位于<code>kernel/chr_drv/serial.c</code>。两者都需要处理中断、读取硬件寄存器、并将数据放入tty的输入队列中。</p>
+
+        <p>有意思的是，键盘和串口虽然物理原理完全不同，但在tty架构中它们扮演的角色是相同的——都是<strong>数据的生产者</strong>，把外部数据转换为字符流，交给tty核心层处理。在tty核心层看来，从键盘来的字符和从串口来的字符没有本质区别。</p>
+
+        <div class="tip">
+            <strong>设计启示</strong>：这种"统一抽象"的思想贯穿整个操作系统。不管输入来源是什么——键盘、鼠标、触摸屏、网络包——一旦进入系统的抽象层，它们都被统一处理。你只需要写一个底层驱动把物理信号转成标准格式，上层代码不需要关心具体的硬件。
+        </div>
+
+        <h2>keyboard.S——扫描码处理</h2>
+
+        <p>在IBM PC兼容机上，键盘通过<strong>8042键盘控制器</strong>与CPU通信。每个按键操作（按下或释放）都会产生一个<strong>扫描码</strong>（scan code）。键盘中断<code>IRQ1</code>（中断向量<code>0x21</code>）在每次按键事件发生时被触发。</p>
+
+        <p>Linux 0.11的<code>keyboard.S</code>用汇编语言编写，原因很简单：它需要快速响应中断，而汇编可以直接操作I/O端口，无需经过函数调用开销。它的核心流程是：</p>
+
+        <pre><code>; keyboard.S — 键盘中断处理核心逻辑
+;
+; 流程:
+;   1. 读取端口 0x60 获取扫描码
+;   2. 判断是按下(make)还是释放(break)
+;   3. 查表将扫描码转换为ASCII字符
+;   4. 处理修饰键(Shift/Ctrl/Alt)状态
+;   5. 将字符放入tty读队列
+
+_keyboard_interrupt:
+    inb $0x60, %al          ; 从键盘数据端口读取扫描码
+    movb %al, scan_code     ; 保存扫描码
+
+    testb $0x80, %al        ; 检查最高位: 0=按下, 1=释放
+    jnz break_code          ; 释放事件 → 单独处理
+
+    ; 按下事件: 查表转换
+    movl key_map(,%eax,4), %ebx  ; 根据key_map表获取ASCII码
+    testb %ebx, %ebx
+    jz no_ascii             ; 非ASCII键（Shift等）→ 设置修饰键状态
+
+    ; 将ASCII字符放入tty读队列
+    call put_char_into_tty_queue
+    jmp end_keyboard_int
+
+break_code:
+    ; 释放键 → 更新修饰键状态
+    ; ...
+
+end_keyboard_int:
+    ; 发送EOI给中断控制器
+    movb $0x20, %al
+    outb %al, $0x20
+    iret</code></pre>
+
+        <p>扫描码到ASCII字符的转换通过<code>key_map</code>表完成。这个表有128个条目，对应128个基本扫描码。每个条目存储该键对应的ASCII字符值。对于没有对应ASCII的键（如Shift、Ctrl、F1-F12），表中对应值为0或特殊标记。</p>
+
+        <table>
+            <thead>
+                <tr><th>按键</th><th>扫描码(十六进制)</th><th>按下事件</th><th>释放事件(=按下+0x80)</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Esc</td><td>0x01</td><td>0x01</td><td>0x81</td></tr>
+                <tr><td>A</td><td>0x1E</td><td>0x1E</td><td>0x9E</td></tr>
+                <tr><td>B</td><td>0x30</td><td>0x30</td><td>0xB0</td></tr>
+                <tr><td>左Shift</td><td>0x2A</td><td>0x2A</td><td>0xAA</td></tr>
+                <tr><td>右Shift</td><td>0x36</td><td>0x36</td><td>0xB6</td></tr>
+                <tr><td>Ctrl</td><td>0x1D</td><td>0x1D</td><td>0x9D</td></tr>
+                <tr><td>Alt</td><td>0x38</td><td>0x38</td><td>0xB8</td></tr>
+                <tr><td>Enter</td><td>0x1C</td><td>0x1C</td><td>0x9C</td></tr>
+                <tr><td>Backspace</td><td>0x0E</td><td>0x0E</td><td>0x8E</td></tr>
+                <tr><td>空格</td><td>0x39</td><td>0x39</td><td>0xB9</td></tr>
+            </tbody>
+        </table>
+
+        <h2>扫描码到ASCII——组合键的转换逻辑</h2>
+
+        <p>键盘驱动最巧妙的部分是<strong>组合键</strong>的处理。当用户按下<code>Shift + A</code>时，键盘产生的是两个扫描码事件：左Shift按下(0x2A)，然后A按下(0x1E)。内核需要根据当前修饰键的状态来决定最终输出的字符——Shift按下时A输出<code>'A'</code>（65），Shift未按下时输出<code>'a'</code>（97）。</p>
+
+        <p>Linux 0.11通过维护<strong>修饰键状态标志</strong>来实现这个逻辑：</p>
+
+        <pre><code>// keyboard.S 中的修饰键状态变量
+// 每个修饰键的按下/释放状态用一个bit表示
+
+mode:   .byte 0  ; 状态标志位
+; bit 0: 右Shift
+; bit 1: 左Shift
+; bit 2: Ctrl
+; bit 3: Alt
+; bit 4: CapsLock (toggle)
+; bit 5: NumLock (toggle)</code></pre>
+
+        <p>当检测到修饰键的按下/释放事件时，相应的状态位被设置或清除。然后在查表转换时，根据当前状态选择不同的映射表：</p>
+
+        <pre><code>; 键盘映射表（简化逻辑）
+;
+; 无修饰键: key_map 表
+;   'a'=0x1E → 0x61 (小写a)
+;   '1'=0x02 → 0x31 (数字1)
+;
+; Shift按下: shift_key_map 表
+;   'A'=0x1E → 0x41 (大写A)
+;   '!'=0x02 → 0x21 (感叹号)
+;
+; CapsLock激活: 对字母键, 反转大小写
+
+; 转换时的处理逻辑
+process_scan_code:
+    testb $0x06, mode       ; 检查Shift位(左或右)
+    jnz use_shift_map       ; Shift按下 → 用大写映射表
+    testb $0x10, mode       ; 检查CapsLock
+    jnz use_caps_map        ; CapsLock激活 → 用大小写反转表
+    movl key_map(,%eax,4), %ebx  ; 默认用小写映射表
+    jmp char_ready</code></pre>
+
+        <p>转换后的ASCII字符通过<code>put_char_into_tty_queue</code>放入对应tty设备的<code>read_q</code>中，然后行规程会从中取出数据做进一步加工（回显、行编辑等），最终放入<code>secondary</code>队列等待用户进程读取。</p>
+
+        <h2>串口驱动(serial.c)——RS-232基础</h2>
+
+        <p>如果说键盘是"本地输入"，那么串口就是"远程输入"的始祖。在互联网普及之前，通过串口连接终端是访问UNIX服务器的标准方式。</p>
+
+        <p>串口通信基于<strong>RS-232</strong>标准，数据按位传输。发送方和接收方需要约定好以下参数才能正确通信：</p>
+
+        <ul>
+            <li><strong>波特率</strong>（Baud Rate）：每秒传输的符号数，常见值9600、19200、115200</li>
+            <li><strong>数据位</strong>（Data Bits）：每个字符的位数，通常为7或8</li>
+            <li><strong>停止位</strong>（Stop Bits）：字符结束的标志位，通常为1或2</li>
+            <li><strong>奇偶校验</strong>（Parity）：检错方式，可选无校验、奇校验、偶校验</li>
+        </ul>
+
+        <p>Linux 0.11串口驱动操作的是<strong>16550 UART</strong>芯片（或其兼容的早期型号NS16450）。这是IBM PC/AT标准配备的串行通信控制器。每个串口对应一组I/O端口：</p>
+
+        <pre><code>// serial.c — 16550 UART 寄存器定义（COM1, 基地址 0x3F8）
+#define COM1_BASE   0x3F8
+
+// 偏移量     寄存器（读）        寄存器（写）
+// 0          RBR（接收缓冲）       THR（发送保持）
+// 1          IER（中断使能）       IER（中断使能）
+// 2          IIR（中断标识）        FCR（FIFO控制）
+// 3          LCR（线路控制）        LCR（线路控制）
+// 4          MCR（调制解调器控制）  MCR（调制解调器控制）
+// 5          LSR（线路状态）        （无）
+// 6          MSR（调制解调器状态）  （无）
+// 7          （无）                （无）
+
+// LSR — 线路状态寄存器（关键位）
+#define LSR_DR   0x01   // 接收数据就绪（Data Ready）
+#define LSR_THRE 0x20   // 发送保持寄存器空（THR Empty）
+
+// IER — 中断使能寄存器
+#define IER_RDA  0x01   // 接收数据可用中断
+#define IER_THRE 0x02   // 发送保持寄存器空中断
+
+// LCR — 线路控制寄存器（波特率分频因子锁存位）
+#define LCR_DLAB 0x80   // Divisor Latch Access Bit</code></pre>
+
+        <p>UART的编程模型有一个经典的双寄存器问题：为了节省I/O端口地址空间，同一个I/O端口在不同上下文中对应不同的寄存器。比如端口<code>0x3F8</code>在正常模式下是<code>RBR</code>（读）或<code>THR</code>（写），但当<code>LCR</code>寄存器的<code>DLAB</code>位被置位时，它变成了波特率分频因子的低字节。</p>
+
+        <h2>rs_interrupt()——串口中断处理</h2>
+
+        <p>串口中断处理函数<code>rs_interrupt()</code>是串口驱动的核心，它处理两种事件：<strong>数据到达</strong>和<strong>发送就绪</strong>。</p>
+
+        <pre><code>// serial.c — rs_interrupt 核心逻辑
+void rs_interrupt(void)
+{
+    char c;
+    struct tty_struct *tty;
+
+    // 读取中断标识寄存器，判断中断类型
+    int iir = inb(COM1_BASE + 2);
+
+    if (iir & IIR_RDA) {  // 接收数据中断
+        // 从RBR寄存器读取接收到的字符
+        c = inb(COM1_BASE + 0);
+
+        // 放入对应tty设备的读队列
+        tty = &tty_table[T_TTY];  // 主控台对应的tty
+        tty->read_q.data[tty->read_q.head] = c;
+        tty->read_q.head = (tty->read_q.head + 1) & 127;
+
+        // 唤醒行规程处理函数
+        // 行规程会将字符放入secondary队列并做回显
+    }
+
+    if (iir & IIR_THRE) {  // 发送保持寄存器空中断
+        // 检查写队列中是否还有数据要发送
+        if (tty->write_q.head != tty->write_q.tail) {
+            // 从写队列取一个字符写入THR
+            c = tty->write_q.data[tty->write_q.tail];
+            tty->write_q.tail = (tty->write_q.tail + 1) & 127;
+            outb(c, COM1_BASE + 0);  // 写入THR发送
+        }
+        // 如果写队列空了，禁止THRE中断（避免空中断）
+        else {
+            outb(inb(COM1_BASE + 1) & ~IER_THRE, COM1_BASE + 1);
+        }
+    }
+}</code></pre>
+
+        <p>注意这里的<strong>中断驱动输出</strong>模式：当用户进程调用<code>write()</code>向串口写入数据时，数据先放入<code>write_q</code>。然后驱动会先手动写入第一个字符到THR寄存器——这立刻触发"发送保持寄存器空"条件，如果启用了THRE中断，就会不断触发中断处理函数从队列中取下一个字符发送。这样，<strong>只需要一次系统调用，就能在中断的驱动下把一个数据块完整发送出去</strong>，CPU不需要忙等待每个字符发送。</p>
+
+        <div class="highlight">
+            <strong>中断驱动输出的原理</strong>：UART发送每个字符需要时间（在9600波特率下大约1ms）。如果CPU每次发送一个字符后忙等待，一个1024字节的缓冲区就需要1秒的CPU时间。通过THRE中断，CPU在发送间隔中可以处理其他任务，中断处理程序在字符发送完成后再发送下一个——这才是"中断驱动"的真正意义。
+        </div>
+
+        <h2>串口初始化与配置</h2>
+
+        <p>串口初始化在<code>init/main.c</code>中的<code>rs_init()</code>函数被调用。它负责配置UART芯片的工作模式、设置波特率、注册中断处理程序：</p>
+
+        <pre><code>// main.c → rs_init() 串口初始化
+void rs_init(void)
+{
+    // 1. 设置中断处理程序
+    set_trap_gate(0x24, &rs1_interrupt);  // COM1 → IRQ4 → 向量0x24
+    set_trap_gate(0x25, &rs2_interrupt);  // COM2 → IRQ3 → 向量0x25
+
+    // 2. 初始化UART芯片
+    outb(inb(COM1_BASE + 3) | LCR_DLAB, COM1_BASE + 3); // 设置DLAB位
+    outb(12, COM1_BASE + 0);  // 波特率分频因子低字节 (9600波特率)
+    outb(0,  COM1_BASE + 1);  // 波特率分频因子高字节
+    outb(inb(COM1_BASE + 3) & ~LCR_DLAB, COM1_BASE + 3); // 清除DLAB位
+
+    // 3. 配置线路参数
+    outb(0x03, COM1_BASE + 3);  // 8位数据, 1位停止位, 无校验
+
+    // 4. 使能中断
+    outb(0x0D, COM1_BASE + 4);  // MCR: 使能中断输出
+    outb(IER_RDA | IER_THRE, COM1_BASE + 1);  // IER: 使能接收+发送中断
+
+    // 5. 清空接收缓冲（避免干扰）
+    inb(COM1_BASE + 0);  // 读取并丢弃任何残留字符
+}</code></pre>
+
+        <p>波特率设置是一个经典的分频计算过程：UART的基准时钟频率通常是1.8432MHz，需要设置分频因子来得到目标波特率。公式为：<code>分频因子 = 115200 / 波特率</code>。所以对于9600波特率：<code>115200 / 9600 = 12</code>——这就是上面代码中<code>outb(12, COM1_BASE + 0)</code>的来源。</p>
+
+        <p>除了在<code>rs_init()</code>中设置默认参数外，应用程序也可以通过<code>sys_setup()</code>系统调用的<code>ioctl</code>命令动态修改串口参数——比如用<code>stty</code>命令设置波特率：</p>
+
+        <pre><code># shell中设置串口参数
+stty -F /dev/ttyS0 115200 cs8 -cstopb -parenb</code></pre>
+
+        <p>这个命令会触发<code>tty_ioctl.c</code>中的处理逻辑，最终通过<code>change_speed()</code>函数重新计算分频因子并写入UART寄存器。</p>
+
+        <h2>踩坑故事——串口波特率不匹配</h2>
+
+        <p>最后，让我们用一个经典的、几乎所有嵌入式开发者都踩过的坑来结束这一章。</p>
+
+        <p>那是我第一次做嵌入式Linux开发，需要用串口连接一块开发板进行调试。硬件连接完成后，启动开发板，打开串口终端软件（当时用的是minicom），预期的输出应该是内核启动日志刷刷地显示出来。但屏幕上出现的——<strong>全是乱码</strong>。各种奇形怪状的符号、不认识的汉字、问号、菱形——就是没有一行能看懂的英文。</p>
+
+        <p>第一反应：排线接错了？检查了TX/RX/GND——连线正确。</p>
+
+        <p>第二反应：串口终端软件的配置有问题？检查了minicom的波特率设置——设置为115200，没错啊。</p>
+
+        <p>第三反应：电压不匹配？用示波器看了串口线上的波形——确实有数据在传输，但脉冲宽度看起来不太对劲。</p>
+
+        <p>经过两天的排查（是的，整整两天），终于发现了问题所在。开发板的UART时钟频率与标准值有差异——它的基准时钟是<strong>1.8432MHz的变体</strong>：1.6MHz。我用的波特率分频系数是<code>115200 / 115200 = 1</code>（看起来简单粗暴），但正确的计算应该是：</p>
+
+        <pre><code>// 正确的分频计算方式
+// UART通常使用16倍过采样，所以：
+// 分频因子 = 基准时钟 / (16 * 目标波特率)
+
+// 基准时钟 1.8432 MHz:
+分频因子 = 1843200 / (16 * 115200) = 1843200 / 1843200 = 1   ✓
+
+// 但开发板的基准时钟是 1.6 MHz:
+分频因子 = 1600000 / (16 * 115200) = 1600000 / 1843200 = 0.868  → 应该是1还是0？
+// 如果写1，实际波特率 = 1600000 / (16 * 1) = 100000 (100K)
+// 接收端用115200接收，对不上！</code></pre>
+
+        <div class="warning">
+            <strong>关键教训</strong>：UART通信要求双方的波特率误差在±2%以内，否则就会产生采样偏移导致误码。我犯的错误是<strong>默认了开发板的UART基准时钟是标准值</strong>，没有去读开发板的硬件手册确认。最终开发板厂商的技术支持告诉我：这个板子的UART时钟确实是1.6MHz，正确的方法是设置分频系数为1，然后在终端软件中把波特率设为100000。
+        </div>
+
+        <p>这个Bug最坑人的地方在于：系统并非完全不能通信——偶尔有几个字符能正确显示，给了你"快好了"的错觉。实际上波特率误差在8%左右，正确的字符只是偶然碰对了采样点。如果你看到串口输出"大部分乱码但偶尔有正确字符"，第一个应该怀疑的就是<strong>波特率不匹配</strong>。</p>
+
+        <p>从这次经历中，我学到了一条黄金法则：<strong>永远不要假设硬件参数是"标准的"</strong>。时钟频率、分频系数、基准频率——这些值必须去查硬件手册确认，而不是想当然地用常见值。</p>
+
+        <p>好了，这一章是字符设备驱动的收尾篇。至此，我们已经覆盖了Linux 0.11中的两大类设备驱动——块设备（硬盘、RAM盘）和字符设备（tty、键盘、串口、控制台）。在下一章中，我们将进入一个全新的主题——<strong>内核调试技术</strong>，学习如何用手中的工具去定位和修复内核代码中的Bug。</p>
+
+        <p><strong>下一章预告：内核调试技术</strong> —— 从printk到QEMU/GDB，掌握在内核开发中定位和修复Bug的实战技巧。</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

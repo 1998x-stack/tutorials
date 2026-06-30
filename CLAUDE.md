@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 49 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 50 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
@@ -95,6 +95,11 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `data-structures-tutorial/` | 数据结构与算法 | 28 | `https://1998x-stack.github.io/data-structures-tutorial/` |
 | `path-planning-algorithms-tutorial/` | 路径规划算法 | 28 | `https://1998x-stack.github.io/path-planning-algorithms-tutorial/` |
 | `combinatorial-optimization-tutorial/` | 组合优化 | 28 | `https://1998x-stack.github.io/combinatorial-optimization-tutorial/` |
+
+### 编程语言 (1)
+| Directory | Topic | Chapters | URL |
+|-----------|-------|----------|-----|
+| `rust-tutorial/` | Rust编程语言 | 28 | `https://1998x-stack.github.io/rust-tutorial/` |
 
 ## Tutorial Structure
 

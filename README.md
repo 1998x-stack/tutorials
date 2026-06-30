@@ -1,6 +1,6 @@
 # 1998x-stack Tutorials
 
-A collection of 49 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 50 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
@@ -58,6 +58,12 @@ A collection of 49 free, comprehensive technical tutorials in Chinese — from f
 | 🔧 | FPGA/Verilog 嵌入式开发 · 从入门到精通 | 28 | [fpga-verilog-tutorial](https://1998x-stack.github.io/fpga-verilog-tutorial/) |
 | 🗄️ | SQLite源码分析 · 从入门到精通 | 28 | [sqlite-source-analysis-tutorial](https://1998x-stack.github.io/sqlite-source-analysis-tutorial/) |
 | 🔧 | Redis源码分析 · 从入门到精通 | 28 | [redis-source-analysis-tutorial](https://1998x-stack.github.io/redis-source-analysis-tutorial/) |
+
+### 编程语言 (1 course)
+
+| | Topic | Chapters | URL |
+|---|-------|----------|-----|
+| 🦀 | Rust编程语言 · 从入门到精通 | 28 | [rust-tutorial](https://1998x-stack.github.io/rust-tutorial/) |
 
 ### 网络 / 通信 (5 courses)
 

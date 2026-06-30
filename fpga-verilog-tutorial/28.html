@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第28章 综合项目：FPGA图像采集与处理系统</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 课程导论与FPGA发展史</a></li>
+            <li><a href="02.html">第2章 数字电路基础回顾</a></li>
+            <li><a href="03.html">第3章 Verilog HDL语法精要（上）</a></li>
+            <li><a href="04.html">第4章 Verilog HDL语法精要（下）</a></li>
+            <li><a href="05.html">第5章 组合逻辑设计实战</a></li>
+            <li><a href="06.html">第6章 时序逻辑设计实战</a></li>
+            <li><a href="07.html">第7章 有限状态机（FSM）设计</a></li>
+            <li><a href="08.html">第8章 Testbench编写与仿真验证</a></li>
+            <li><a href="09.html">第9章 常用通信接口实现（一）：UART与SPI</a></li>
+            <li><a href="10.html">第10章 常用通信接口实现（二）：I2C</a></li>
+            <li><a href="11.html">第11章 存储器设计与Block RAM</a></li>
+            <li><a href="12.html">第12章 流水线设计技术</a></li>
+            <li><a href="13.html">第13章 跨时钟域（CDC）处理</a></li>
+            <li><a href="14.html">第14章 时序约束与分析基础</a></li>
+            <li><a href="15.html">第15章 Vivado工程实战全流程</a></li>
+            <li><a href="16.html">第16章 Quartus Prime与ModelSim</a></li>
+            <li><a href="17.html">第17章 常用IP核集成与应用</a></li>
+            <li><a href="18.html">第18章 工程目录规范与版本管理</a></li>
+            <li><a href="19.html">第19章 AXI4总线协议深度解析</a></li>
+            <li><a href="20.html">第20章 软核处理器集成</a></li>
+            <li><a href="21.html">第21章 RISC-V处理器FPGA实现</a></li>
+            <li><a href="22.html">第22章 高速串行接口设计</a></li>
+            <li><a href="23.html">第23章 硬件调试方法论</a></li>
+            <li><a href="24.html">第24章 开源工具链实战</a></li>
+            <li><a href="25.html">第25章 时序收敛与功耗优化</a></li>
+            <li><a href="26.html">第26章 高层次综合（HLS）入门</a></li>
+            <li><a href="27.html">第27章 AI时代的FPGA开发</a></li>
+            <li><a href="28.html" class="active">第28章 综合项目：FPGA图像采集与处理系统</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第28章 综合项目：FPGA图像采集与处理系统</h2>
+
+        <p>欢迎来到本教程的最后一章。前 27 章我们学习了 Verilog 语法、数字电路设计、仿真验证、总线协议、时序分析、HLS、AI 辅助开发——现在是把这一切串起来的时候了。本章我们要亲手打造一个完整的嵌入式视觉系统：通过摄像头采集实时视频，在 FPGA 中进行图像处理，然后显示在显示器上。</p>
+
+        <p>这不是一个"玩具项目"。这个系统中融合了通信接口（DVP/SCCB）、存储子系统（DDR3）、数据流架构（AXI4-Stream）、图像算法管道（定点卷积）、时序控制（VGA/HDMI）、跨时钟域同步——覆盖了本书全部核心知识点。</p>
+
+        <h3>28.1 项目概述</h3>
+
+        <p>系统的数据流是这样走的：</p>
+
+        <p><strong>OV5640 摄像头 → DVP 8-bit 并行接口 → 帧缓存写入 DDR3（MIG IP 核）→ 图像处理流水线（灰度转换 + Sobel 边缘检测）→ 帧缓存读出 → VGA/HDMI 显示输出</strong></p>
+
+        <p>对应的硬件平台推荐：Xilinx Artix-7 (XC7A35T) 或 Zynq-7010 开发板（带 HDMI 输出 + 至少 256 MB DDR3 + OV5640 摄像头接口）。如果使用其他平台，需要相应调整 MIG 配置和显示时序参数。</p>
+
+        <div class="highlight">
+            <strong>系统性能目标（640x480@60fps）：</strong>像素时钟 25.175 MHz，每帧 307,200 像素，每像素 16 位（RGB565），每秒 18.4 MB 数据吞吐。Sobel 处理流水线要求在 1 个像素时钟周期内完成 3×3 卷积计算。DDR3 读写带宽要求（读 + 写同时进行）至少 36.8 MB/s——对于 533 MHz DDR3 的 64-bit 接口来说，绰绰有余。
+        </div>
+
+        <h3>28.2 系统架构设计</h3>
+
+        <p>顶层划分为四个功能模块，通过 AXI4-Stream 互联：</p>
+
+        <table>
+            <tr><th>模块</th><th>输入</th><th>输出</th><th>时钟域</th><th>资源估算</th></tr>
+            <tr><td>camera_capture</td><td>DVP 8-bit (PCLK, HSYNC, VSYNC, DATA[7:0])</td><td>AXI4-Stream (pixel_data, valid, ready, last)</td><td>PCLK (~24 MHz)</td><td>~120 LUT + ~80 FF + 2 BRAM (line buffer)</td></tr>
+            <tr><td>frame_buffer</td><td>AXI4-Stream (写入), AXI4 Read Master (读回)</td><td>AXI4-MM ↔ DDR3 (MIG IP 核)</td><td>clk_200MHz (MIG), pixel_clk</td><td>MIG IP 核 ~3 BRAM + 1500 LUT</td></tr>
+            <tr><td>image_processor</td><td>AXI4-Stream (RGB565)</td><td>AXI4-Stream (二值化边缘图)</td><td>pixel_clk</td><td>~350 LUT + ~200 FF + 3 BRAM (行缓存)</td></tr>
+            <tr><td>vga_display</td><td>AXI4-Stream (像素数据 + tlast)</td><td>VGA (R[3:0], G[3:0], B[3:0], HSYNC, VSYNC)</td><td>pixel_clk</td><td>~80 LUT + ~50 FF</td></tr>
+        </table>
+
+        <h3>28.3 摄像头采集模块</h3>
+
+        <p>OV5640 支持 DVP 8-bit 并行接口和 SCCB（类似 I2C）配置总线。上电后，我们需要通过 SCCB 写寄存器来配置输出格式为 RGB565、分辨率 640x480、帧率 60 fps。</p>
+
+        <table>
+            <tr><th>寄存器地址</th><th>值</th><th>功能</th></tr>
+            <tr><td>0x3103</td><td>0x03</td><td>系统时钟使能</td></tr>
+            <tr><td>0x3035</td><td>0x21</td><td>PLL 分频配置</td></tr>
+            <tr><td>0x3036</td><td>0x46</td><td>PLL 倍频配置</td></tr>
+            <tr><td>0x3820</td><td>0x40</td><td>垂直翻转关闭</td></tr>
+            <tr><td>0x3821</td><td>0x00</td><td>水平镜像关闭</td></tr>
+            <tr><td>0x4300</td><td>0x61</td><td>输出格式 — RGB565</td></tr>
+            <tr><td>0x501F</td><td>0x01</td><td>ISP 格式选择 — RGB</td></tr>
+            <tr><td>0x4408</td><td>0x02</td><td>VSYNC 极性设置</td></tr>
+        </table>
+
+        <p>采集模块的核心是 DVP 时序解码：VSYNC 上升沿表示一帧开始，HSYNC 高电平期间每个 PCLK 上升沿传输一个字节数据（两个 PCLK = 一个 RGB565 像素）。我们需要实例化一个行缓存（Line Buffer），暂存一行像素数据，组装成 AXI4-Stream 包发送。</p>
+
+        <h3>28.4 图像处理流水线</h3>
+
+        <p>图像处理分为三步：RGB565 → 灰度图 → Sobel 边缘检测 → 二值化输出。</p>
+
+        <p><strong>RGB → 灰度：</strong>使用定点加权平均 <code>Gray = (77*R + 150*G + 29*B) &gt;&gt; 8</code>，转换为 8-bit 灰度值。权重来自 ITU-R BT.601 标准，用整数定点实现避免浮点运算。</p>
+
+        <p><strong>Sobel 边缘检测：</strong>3×3 卷积窗口通过两个 Line Buffer + 一级 Shift Register 生成。Sobel 算子分为水平方向 Gx 和垂直方向 Gy，梯度幅值近似为 <code>|Gx| + |Gy|</code>（绝对值之和，避免开方运算）。</p>
+
+        <pre><code>// Sobel 边缘检测模块 — 核心卷积逻辑
+module sobel_edge_detect #(
+    parameter DATA_WIDTH = 8
+)(
+    input  wire clk,
+    input  wire rst_n,
+    input  wire [DATA_WIDTH-1:0] pixel_in,    // 灰度像素输入
+    input  wire pixel_valid,
+    output reg  pixel_ready,
+    output reg  edge_out,                      // 二值化边缘输出
+    output reg  edge_valid,
+    input  wire edge_ready
+);
+
+    // 行缓存 — 3 行数据同时可用
+    // line_buf[0] = 当前行, line_buf[1] = 上一行, line_buf[2] = 上上行
+    reg [DATA_WIDTH-1:0] line_buf [0:2][0:639];
+    reg [DATA_WIDTH-1:0] p [0:2][0:2];         // 3x3 窗口
+
+    integer row, col;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (row = 0; row &lt; 3; row++)
+                for (col = 0; col &lt; 3; col++)
+                    p[row][col] &lt;= 0;
+        end else if (pixel_valid &amp;&amp; pixel_ready) begin
+            // 移位窗口
+            p[0][0] &lt;= pixel_in;                // 新像素进入窗口左上
+            p[0][1] &lt;= p[0][0];
+            p[0][2] &lt;= p[0][1];
+            p[1][0] &lt;= line_buf[1][0];          // 上一行对应位置
+            p[1][1] &lt;= p[1][0];
+            p[1][2] &lt;= p[1][1];
+            p[2][0] &lt;= line_buf[2][0];          // 上上行对应位置
+            p[2][1] &lt;= p[2][0];
+            p[2][2] &lt;= p[2][1];
+        end
+    end
+
+    // Sobel 算子 — 梯度计算（组合逻辑）
+    // Gx = (p[0][2]+2*p[1][2]+p[2][2]) - (p[0][0]+2*p[1][0]+p[2][0])
+    // Gy = (p[2][0]+2*p[2][1]+p[2][2]) - (p[0][0]+2*p[0][1]+p[0][2])
+    wire signed [10:0] Gx, Gy;
+    assign Gx = (p[0][2] + {p[1][2], 1'b0} + p[2][2])
+              - (p[0][0] + {p[1][0], 1'b0} + p[2][0]);
+    assign Gy = (p[2][0] + {p[2][1], 1'b0} + p[2][2])
+              - (p[0][0] + {p[0][1], 1'b0} + p[0][2]);
+
+    // 梯度幅值近似：|Gx| + |Gy|
+    wire [10:0] grad_mag;
+    assign grad_mag = (Gx[10] ? (~Gx + 1'b1) : Gx)
+                    + (Gy[10] ? (~Gy + 1'b1) : Gy);
+
+    // 阈值二值化 — 输出 0/1 边缘标志
+    localparam THRESHOLD = 11'd80;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            edge_out &lt;= 0;
+        end else begin
+            edge_out &lt;= (grad_mag &gt; THRESHOLD) ? 1'b1 : 1'b0;
+        end
+    end
+
+endmodule</code></pre>
+
+        <h3>28.5 DDR3 帧缓存与乒乓缓冲</h3>
+
+        <p>DDR3 帧缓存通过 MIG IP 核实现。配置要点：时钟频率 200 MHz（DDR3 等效 533 MHz）、数据宽度 32 位（4 bytes/cycle）、突发长度 8。我们使用 AXI4 接口与 MIG 连接。</p>
+
+        <p><strong>乒乓缓冲策略：</strong>在 DDR3 中划分两个帧缓冲区（Frame Buffer A 和 B）。写入模块和读取模块各自指向不同的缓冲区——写模块写入 A 时，读模块从 B 读取；完成一帧后交换指针。这样避免了"写一半读"造成的画面撕裂（tearing）。</p>
+
+        <div class="tip">
+            <strong>实现细节：</strong>指针交换由一个简单的标志寄存器控制。当 camera_capture 模块检测到 VSYNC 上升沿（一帧结束），写入当前帧计数加一，读指针自动指向刚刚写入完毕的帧。这个寄存器用两级同步器跨到像素时钟域和数据时钟域，确保指针切换安全。
+        </div>
+
+        <h3>28.6 VGA 显示时序</h3>
+
+        <p>以 640x480@60Hz 为例，像素时钟为 25.175 MHz。VGA 时序分为行同步和场同步：</p>
+
+        <pre><code>// VGA 时序发生器 — 640x480@60Hz
+module vga_timing_gen #(
+    parameter  H_VISIBLE  = 640,
+    parameter  H_FP       = 16,    // Front Porch
+    parameter  H_SYNC     = 96,    // Sync Pulse
+    parameter  H_BP       = 48,    // Back Porch
+    parameter  V_VISIBLE  = 480,
+    parameter  V_FP       = 10,
+    parameter  V_SYNC     = 2,
+    parameter  V_BP       = 33
+)(
+    input  wire clk_25m,           // 25.175 MHz 像素时钟
+    input  wire rst_n,
+    output reg  hsync,
+    output reg  vsync,
+    output reg  de,                // Data Enable
+    output reg  [9:0] hcount,      // 当前列 (0 ~ H_TOTAL-1)
+    output reg  [9:0] vcount       // 当前行 (0 ~ V_TOTAL-1)
+);
+
+    localparam H_TOTAL = H_VISIBLE + H_FP + H_SYNC + H_BP; // 800
+    localparam V_TOTAL = V_VISIBLE + V_FP + V_SYNC + V_BP; // 525
+
+    // 行/场计数器
+    always @(posedge clk_25m or negedge rst_n) begin
+        if (!rst_n) begin
+            hcount &lt;= 0;
+            vcount &lt;= 0;
+        end else begin
+            if (hcount == H_TOTAL - 1) begin
+                hcount &lt;= 0;
+                vcount &lt;= (vcount == V_TOTAL - 1) ? 0 : vcount + 1;
+            end else begin
+                hcount &lt;= hcount + 1;
+            end
+        end
+    end
+
+    // HSYNC — 在同步脉冲区间拉低
+    always @(posedge clk_25m or negedge rst_n) begin
+        if (!rst_n) hsync &lt;= 1;
+        else hsync &lt;= ~((hcount &gt;= H_VISIBLE + H_FP) &amp;&amp;
+                        (hcount &lt; H_VISIBLE + H_FP + H_SYNC));
+    end
+
+    // VSYNC — 在同步脉冲区间拉低
+    always @(posedge clk_25m or negedge rst_n) begin
+        if (!rst_n) vsync &lt;= 1;
+        else vsync &lt;= ~((vcount &gt;= V_VISIBLE + V_FP) &amp;&amp;
+                        (vcount &lt; V_VISIBLE + V_FP + V_SYNC));
+    end
+
+    // DE — 在有效显示区间为高
+    always @(posedge clk_25m or negedge rst_n) begin
+        if (!rst_n) de &lt;= 0;
+        else de &lt;= (hcount &lt; H_VISIBLE) &amp;&amp; (vcount &lt; V_VISIBLE);
+    end
+
+endmodule</code></pre>
+
+        <div class="highlight">
+            <strong>关于 HDMI 替代方案：</strong>如果开发板有 HDMI 输出而不是 VGA，可以使用 TMDS 编码器（如 Sil 1136 或 ADV7511）将 RGB + HSYNC/VSYNC/DE 转换为 HDMI 差分信号。RGB 数据通道只需将上述 VGA 模块输出的 12-bit RGB（4:4:4）送入 TMDS 编码器即可。
+        </div>
+
+        <h3>28.7 集成与调试</h3>
+
+        <p>在 Vivado Block Design 中，将 camera_capture、image_processor、vga_display 作为 RTL 模块添加，MIG IP 核通过 Block Design 的 AXI SmartConnect 连接到 frame_buffer 模块的 AXI Full Master 接口。</p>
+
+        <p>调试分三个阶段进行：</p>
+
+        <p><strong>第一阶段：</strong>ILA 抓取 camera_capture 模块输出端的 AXI4-Stream 信号。验证 HSYNC/VSYNC 时序正确、每个帧的像素计数等于 640×480。如果摄像头配置失败，检查 SCCB（I2C）初始化时序——这是最常见的失败点。</p>
+
+        <p><strong>第二阶段：</strong>ILA 抓取 DDR3 写入前后的数据。写入前（原始摄像头数据）和写入后（从 DDR3 读回）做一个像素级对比——确保 MIG 读写正确。常见问题是 AXI 地址对齐错误导致的数据错位。</p>
+
+        <p><strong>第三阶段：</strong>ILA 抓取 Sobel 模块输出端的边缘二值化结果。输入一组已知模式的测试图像（棋盘格、条纹），观察边缘是否正确。调整 THRESHOLD 参数以适应不同光照条件。</p>
+
+        <div class="warning">
+            <strong>踩坑故事——跨时钟域导致的撕裂帧：</strong>第一个版本中，我将摄像头 PCLK 域的输出直接连到了 MIG 的写接口（运行在 200 MHz 的 clk_200 域），中间没有加异步 FIFO。结果第一帧显示出来是撕裂的——上面三分之二是正确的画面，下面三分之一是上一帧的残留数据。原因很简单：写指针跨时钟域没有同步，DDR3 写控制器在摄像头域和 MIG 域之间按错误的地址持续写入。解决方案是在 camera_capture 和 MIG 写接口之间插入一个 AXI4-Stream 异步 FIFO，深度至少为一行像素的 2 倍（1280 个 16-bit 像素）。教训：<strong>只要接口跨越不同时钟源——哪怕看起来频率接近——也一定要用异步 FIFO 或双时钟域握手电路。</strong>
+        </div>
+
+        <h3>28.8 结语：一段学习之旅的终点，也是工程之路的起点</h3>
+
+        <p>二十八章。从 1985 年 XC2064 的 64 个逻辑单元，到 2026 年用 AI 辅助生成 AXI4-Stream FIFO，再到今天 OV5640 + DDR3 + Sobel 边缘检测的完整系统——你走过了一条相当完整的 FPGA 工程师成长之路。</p>
+
+        <p>回顾一下我们学会的东西：Verilog 的可综合语法和仿真验证（第 3-8 章）、UART/SPI/I2C 通信协议在 FPGA 上的实现细节（第 9-10 章）、跨时钟域处理和时序收敛（第 13-14 章）、Vivado 和 Quartus 的工程实践（第 15-16 章）、AXI4 全线协议的深度理解（第 19 章）、软核和 RISC-V 硬核的集成与定制（第 20-21 章）、硬件调试方法论的体系化掌握（第 23 章）、开源工具链的独立使用能力（第 24 章）、HLS 的合理使用和 AI 辅助开发的协作模式（第 26-27 章）。</p>
+
+        <p>这些知识就像是工具箱里的不同螺丝刀——你不需要每次都用全部，但当特定的问题出现时，你知道该用哪一把。</p>
+
+        <div class="tip">
+            <strong>下一步的建议：</strong>如果你希望在 FPGA 这条路上继续深入，我推荐三个阶段性的方向——<br>
+            <strong>短期（1-3 个月）：</strong>把你的开发板上的外设全驱动一遍。摄像头、HDMI、以太网、SD 卡——每驱动一个新外设，都在加深你对"真实硬件是如何工作的"的理解。<br>
+            <strong>中期（3-12 个月）：</strong>参与一个开源 FPGA 项目。OpenCPI、LiteX、FuseSoC 都是很好的起点。在开源项目里，你能看到真正的工程代码是如何组织的，也能接触到多人协作的代码评审流程。<br>
+            <strong>长期（1-3 年）：</strong>选择一个细分方向深度耕耘——要么走向系统架构（SoC 设计、NoC、异构计算），要么走向算法加速（AI 推理引擎、视频编解码器、5G LDPC 编码），要么走向 EDA 工具链（Yosys 插件开发、布局布线算法优化）。
+        </div>
+
+        <p>最后，记住 1.7 节的那个故事——仿真不是万能的，硬件调试需要一整套方法论。保持怀疑、保持实验、保持对"为什么这个波形长这样"的好奇心。一个成功的 FPGA 工程师，不是"什么都会写"的人，而是"什么都能 debug"的人。</p>
+
+        <p>感谢你陪伴我走完这 28 章。现在——关掉教程，打开 Vivado，开始搭建你自己的系统吧。</p>
+
+        <div class="footer-nav">
+            <a href="27.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="javascript:void(0)">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

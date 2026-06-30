@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 分布式事务 — 分布式系统教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 什么是分布式系统</a></li>
+            <li><a href="02.html">02 系统模型与时间</a></li>
+            <li><a href="03.html">03 CAP定理与取舍</a></li>
+            <li><a href="04.html">04 一致性模型</a></li>
+            <li><a href="05.html">05 通信基础</a></li>
+            <li><a href="06.html">06 序列化与编解码</a></li>
+            <li><a href="07.html">07 分布式系统设计模式</a></li>
+            <li><a href="08.html">08 RPC远程过程调用</a></li>
+            <li><a href="09.html">09 消息队列与事件驱动</a></li>
+            <li><a href="10.html">10 P2P与Gossip协议</a></li>
+            <li><a href="11.html">11 服务网格</a></li>
+            <li><a href="12.html">12 网络协议栈深度</a></li>
+            <li><a href="13.html">13 组通信与广播</a></li>
+            <li><a href="14.html">14 2026通信前沿</a></li>
+            <li><a href="15.html">15 复制与一致性</a></li>
+            <li><a href="16.html" class="active">16 分布式事务</a></li>
+            <li><a href="17.html">17 Raft共识算法</a></li>
+            <li><a href="18.html">18 Paxos与BFT</a></li>
+            <li><a href="19.html">19 并行计算模型</a></li>
+            <li><a href="20.html">20 数据并行</a></li>
+            <li><a href="21.html">21 模型与流水线并行</a></li>
+            <li><a href="22.html">22 分布式训练实战</a></li>
+            <li><a href="23.html">23 Docker与K8s编排</a></li>
+            <li><a href="24.html">24 可观测性</a></li>
+            <li><a href="25.html">25 调试与压测</a></li>
+            <li><a href="26.html">26 AI训练基础设施</a></li>
+            <li><a href="27.html">27 边缘计算与IoT</a></li>
+            <li><a href="28.html">28 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第16章 分布式事务</h2>
+
+        <p>关掉手机 App 重新打开，为什么刚才"支付成功"的订单变成了"待支付"？为什么扣了钱却显示没扣？在单体应用里，这些事几乎不可能发生——数据库 ACID 事务替你扛了一切。但在分布式系统中，ACID 不再免费，你需要亲手构建分布式事务。</p>
+
+        <p>分布式事务（Distributed Transaction）是指跨越多个独立节点（数据库、服务、消息队列）的事务操作。它的艰难源于一个核心矛盾：<strong>ACID 假设了原子性和隔离性在单节点上是便宜的，但在分布式环境下，协调多个节点达成"全做或全不做"的共识，代价极其昂贵</strong>。本章我们从最经典的 2PC 讲起，一路走到现代的 Saga 模式，看清每种方案的优劣与陷阱。</p>
+
+        <h2>16.1 2PC（两阶段提交）</h2>
+
+        <p>2PC（Two-Phase Commit）是最经典的分布式事务协议。它引入了一个<strong>协调者（Coordinator）</strong>角色来协调多个参与者（Participants）的提交决策。</p>
+
+        <h3>第一阶段：Prepare</h3>
+        <p>协调者向所有参与者发送 Prepare 请求。每个参与者检查自身条件（资源是否充足、锁是否可获取），如果可以提交就回复 "Yes" 并记录 prepare 日志到磁盘；否则回复 "No"。参与者一旦回复 Yes，就不能单方面反悔——它承诺只要收到 Commit 指令就一定提交。</p>
+
+        <h3>第二阶段：Commit</h3>
+        <p>如果所有参与者都回复 Yes，协调者广播 Commit 指令；每个参与者收到后提交本地事务并释放资源。如果有任何一个参与者回复 No（或超时未响应），协调者广播 Abort 指令，所有参与者回滚。</p>
+
+        <p>时序上大致是这样的：</p>
+        <pre><code>Coordinator          Participant A       Participant B
+    |                      |                   |
+    |--- Prepare --------&gt;|                   |
+    |--- Prepare ---------------------------&gt; |
+    |                      |                   |
+    |&lt;--- Yes ------------|                   |
+    |&lt;--- Yes -------------------------------| |
+    |                      |                   |
+    |--- Commit ---------&gt;|                   |
+    |--- Commit ----------------------------&gt; |
+    |                      |                   |
+    |&lt;--- Ack ------------|                   |
+    |&lt;--- Ack -------------------------------| |
+</code></pre>
+
+        <div class="warning">
+            <strong>2PC 的阿克琉斯之踵：协调者阻塞。</strong>如果说协调者在第一阶段收到 Yes 后突然崩溃，参与者已经准备好了资源（比如数据库锁），只能一直等待协调者恢复——因为谁也不知道协调者是准备 Commit 还是 Abort。这种"阻塞"在极端情况下可能持续数小时甚至数天，严重时引发连锁故障。
+        </div>
+
+        <h2>16.2 3PC 与超时机制</h2>
+
+        <p>3PC（Three-Phase Commit）在 2PC 的基础上增加了一个"PreCommit"中间阶段，并引入了超时机制。其核心思想是：即使协调者故障，参与者也能通过超时和互相协商达成一致，避免无限阻塞。</p>
+
+        <p>流程为：CanCommit -> PreCommit -> DoCommit。如果协调者在 PreCommit 阶段超时，参与者可以主动 Abort。但问题是，<strong>3PC 依然解决不了网络分区</strong>——分区发生后，一部分参与者收到了 PreCommit，另一部分没有，两边的决策就分裂了。</p>
+
+        <div class="highlight">
+            <strong>FLP 不可能定理：</strong>在异步网络中，即使只有一个进程可能崩溃，也不存在一个确定性协议能让所有非故障进程就某个值达成一致。2PC 和 3PC 都无法突破这个理论天花板——它们在特定条件下都可能永远无法终止。这个结论由 Fischer、Lynch、Patterson 在 1985 年证明，是分布式系统理论的基石之一。
+        </div>
+
+        <h2>16.3 TCC（Try-Confirm-Cancel）</h2>
+
+        <p>TCC 是业务层面实现分布式事务的一种模式，由支付宝/蚂蚁金服的工程师在实践中总结推广。它将一个分布式事务拆分为三个阶段：</p>
+
+        <ul>
+            <li><strong>Try</strong>：资源预留。比如预订机票时，先锁定座位但不扣款。对应用层来说，这一阶段要预留所有需要的资源。</li>
+            <li><strong>Confirm</strong>：确认提交。如果所有 Try 都成功，执行 Confirm——真正扣款、减库存。Confirm 操作要求幂等（可以重复执行多次而不产生副作用）。</li>
+            <li><strong>Cancel</strong>：取消回滚。如果有任何一个 Try 失败，已成功的 Try 需要执行 Cancel——释放预留的资源。</li>
+        </ul>
+
+        <p>与 2PC 的主要区别在于：TCC 没有全局协调者锁定资源，Try 阶段的"预留"是业务层面的——比如"冻结账户余额"而不是"锁定整行记录"。这避免了 2PC 的数据库锁持有问题。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>对比维度</th>
+                    <th>2PC</th>
+                    <th>TCC</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>资源锁定</td>
+                    <td>数据库锁（行级/页级）</td>
+                    <td>业务预留（冻结余额/锁定库存）</td>
+                </tr>
+                <tr>
+                    <td>阻塞</td>
+                    <td>协调者故障→参与者阻塞</td>
+                    <td>无阻塞，超时自动 Cancel</td>
+                </tr>
+                <tr>
+                    <td>性能</td>
+                    <td>锁持有时间长，低并发</td>
+                    <td>锁粒度粗但时间短，高并发</td>
+                </tr>
+                <tr>
+                    <td>复杂度</td>
+                    <td>中间件层处理</td>
+                    <td>需要业务代码实现反向操作</td>
+                </tr>
+                <tr>
+                    <td>适用场景</td>
+                    <td>传统金融、短事务</td>
+                    <td>互联网高并发、长事务</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>蚂蚁金服的 TCC 实践：</strong>蚂蚁的分布式事务框架（DTX）大量使用 TCC 模式。一个典型场景是"转账+发送通知"：Try 阶段冻结转出方余额并预留短信通道；Confirm 阶段实际扣款并发送短信；如果短信服务超时则 Cancel 解冻余额。通过精心设计 Cancel 操作的幂等性，蚂蚁能在数百个微服务之间保证最终一致性。
+        </div>
+
+        <h2>16.4 Saga 模式</h2>
+
+        <p>Saga 是处理长时间运行事务（Long-Running Transaction）的经典模式，由 Hector Garcia-Molina 在 1987 年提出。它的核心思想是：<strong>将一个分布式事务拆分为一系列本地事务，每个本地事务都有对应的补偿操作（Compensation）</strong>。</p>
+
+        <p>Saga 有两种协调方式：</p>
+
+        <ul>
+            <li><strong>编排（Choreography）</strong>：没有中央协调者，每个服务完成本地事务后发出事件，触发下一个服务。轻量但事件流难追踪。</li>
+            <li><strong>控制（Orchestration）</strong>：一个协调者（Orchestrator）负责告诉每个服务该做什么、出了错该补偿什么。中心化但易于管理。</li>
+        </ul>
+
+        <p>Saga 不提供隔离性——一个 Saga 执行过程中，其他事务可以看到中间结果。这需要应用层处理这种不完全隔离带来的问题（比如"脏读"）。作为回报，Saga 支持长时间运行、高吞吐，且不会被死锁困扰。</p>
+
+        <div class="highlight">
+            <strong>踩坑故事：</strong>某大厂在做订单拆分服务时，使用编排式 Saga 处理"下单→扣库存→支付→发货"的流程。一切正常。直到某次扣库存成功但支付超时，补偿操作执行"加回库存"。但加回的代码忘了处理并发情况——刚好同时有另一个订单也扣了同款库存，结果补偿操作把别人的库存也加回去了。库存数字变成了 300%，而真实库存只有 100%。教训是：<strong>Saga 的补偿操作必须是幂等的，且要考虑并发补偿的冲突</strong>。
+        </div>
+
+        <h2>16.5 XA 事务的陷阱</h2>
+
+        <p>XA 是 X/Open 组织定义的分布式事务规范，Java 的 JTA 和很多数据库都支持它。XA 事务本质上是标准化的 2PC，有明确的 prepare/commit/rollback API。但我们很少在现代互联网系统中看到 XA——因为它的陷阱太多了。</p>
+
+        <ul>
+            <li><strong>数据库锁保持时间过长</strong>：Prepare 阶段到 Commit 阶段的间隔中，数据库的行级锁一直保持着。如果第二阶段延迟大（网络抖动、协调者 GC STW），锁持有时间可能从微秒级升到秒级，引发大量锁等待和死锁。</li>
+            <li><strong>死锁风险</strong>：多个 XA 事务交叉访问同一批资源时，2PC 的协调者顺序不一致可能导致全局死锁。</li>
+            <li><strong>不适合高并发</strong>：XA 事务的吞吐通常不超过数千 TPS。对支付宝双十一那种数十万 TPS 的场景，XA 是绝对不可行的。</li>
+            <li><strong>协调者单点</strong>：XA 协调者崩溃时，所有未决事务阻塞到协调者恢复。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>什么时候该用 XA？</strong>实话实说：<strong>很少</strong>。以下情况可以考虑：短事务（毫秒级）、低并发（百 TPS 级别）、跨数据库但场景简单、且团队有足够的 DBA 和中间件能力兜底。其他场景——特别是高并发微服务——请优先考虑 TCC、Saga 或下一章要学的共识算法（Raft/Paxos）。XA 就像一把青龙偃月刀，不是一般人能挥得动的。
+        </div>
+
+        <p>分布式事务走完这一圈，你会发现：<strong>2PC 太慢，3PC 靠不住，TCC 需要业务改代码，Saga 不隔离，XA 过时了</strong>。没有银弹。那有没有比分布式事务更底层的协调手段？有——<strong>共识算法</strong>。下一章我们进入分布式系统最璀璨的明珠：Raft 共识算法。它在一个更低的层次解决了"几个节点如何就一个值达成一致"的问题，是构建强一致性系统的基石。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

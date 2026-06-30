@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 Paxos与BFT — 分布式系统教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 什么是分布式系统</a></li>
+            <li><a href="02.html">02 系统模型与时间</a></li>
+            <li><a href="03.html">03 CAP定理与取舍</a></li>
+            <li><a href="04.html">04 一致性模型</a></li>
+            <li><a href="05.html">05 通信基础</a></li>
+            <li><a href="06.html">06 序列化与编解码</a></li>
+            <li><a href="07.html">07 分布式系统设计模式</a></li>
+            <li><a href="08.html">08 RPC远程过程调用</a></li>
+            <li><a href="09.html">09 消息队列与事件驱动</a></li>
+            <li><a href="10.html">10 P2P与Gossip协议</a></li>
+            <li><a href="11.html">11 服务网格</a></li>
+            <li><a href="12.html">12 网络协议栈深度</a></li>
+            <li><a href="13.html">13 组通信与广播</a></li>
+            <li><a href="14.html">14 2026通信前沿</a></li>
+            <li><a href="15.html">15 复制与一致性</a></li>
+            <li><a href="16.html">16 分布式事务</a></li>
+            <li><a href="17.html">17 Raft共识算法</a></li>
+            <li><a href="18.html" class="active">18 Paxos与BFT</a></li>
+            <li><a href="19.html">19 并行计算模型</a></li>
+            <li><a href="20.html">20 数据并行</a></li>
+            <li><a href="21.html">21 模型与流水线并行</a></li>
+            <li><a href="22.html">22 分布式训练实战</a></li>
+            <li><a href="23.html">23 Docker与K8s编排</a></li>
+            <li><a href="24.html">24 可观测性</a></li>
+            <li><a href="25.html">25 调试与压测</a></li>
+            <li><a href="26.html">26 AI训练基础设施</a></li>
+            <li><a href="27.html">27 边缘计算与IoT</a></li>
+            <li><a href="28.html">28 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第18章 Paxos与BFT</h2>
+
+        <p>Leslie Lamport 在 1989 年写了一篇论文，用一个虚构的"兼职议会"（The Part-Time Parliament）的寓言故事来讲解共识算法。这篇论文以古希腊小岛 Paxos 上的议会如何通过法定人数、投票、日志登记来通过决议为隐喻，完整阐述了 Paxos 共识算法。然而，这篇论文的寓言形式让审稿人直呼看不懂——Lamport 花了十几年"推销"自己的算法，直到 2001 年才发表简化版《Paxos Made Simple》。而讽刺的是，"Paxos Made Simple"仍然是很多人眼中"一点都不 Simple"的算法。</p>
+
+        <p>从 Basic Paxos 到今天的并行共识，这一章我们走一条从理论到前沿的路线。先深入 Paxos 的核心机制，再延伸到拜占庭容错（BFT）体系，最后展望 2026 年突破性的并行共识方案。</p>
+
+        <h2>18.1 Basic Paxos</h2>
+
+        <p>Basic Paxos 定义了三个角色：<strong>Proposer</strong>（提议者）、<strong>Acceptor</strong>（接受者）、<strong>Learner</strong>（学习者）。算法分为两个阶段：</p>
+
+        <h3>第一阶段：Prepare + Promise</h3>
+        <p>Proposer 选择一个提案编号 N，向 Acceptors 发送 Prepare(N) 请求。每个 Acceptor 收到后：如果 N 大于它之前响应过的任何提案编号，则 Promise 不再接受编号小于 N 的提案，并返回它已经接受的最高编号的提案（如果有的话）；否则拒绝。</p>
+
+        <h3>第二阶段：Accept + Learned</h3>
+        <p>Proposer 收到多数 Acceptors 的 Promise 后，从返回的提案中选择 value（如果 Acceptor 返回了之前接受的提案，则 Proposer 必须使用其中编号最高的那个 value；否则可以自由选择自己的 value）。然后向 Acceptors 发送 Accept(N, value) 请求。Acceptor 收到后，如果 N 不小于其承诺号，则接受该提案。Learner 观察哪些提案被多数接受者接受，然后学习最终的值。</p>
+
+        <pre><code>// Basic Paxos 核心流程（伪代码）
+// 阶段一：Prepare
+Proposer:
+  n = newBallotNumber()       // 生成唯一且递增的提案号
+  send(PREPARE, n) to Acceptors
+
+Acceptor:
+  on PREPARE(n):
+    if n > promisedBallot:
+      promisedBallot = n
+      return PROMISE(n, acceptedBallot, acceptedValue)
+    else:
+      return REJECT
+
+// 阶段二：Accept
+Proposer:
+  on majority PROMISE(n, ...):
+    // 使用返回的最高编号提案的 value，或自己的 value
+    v = maxAcceptedValue() ?? myValue
+    send(ACCEPT, n, v) to Acceptors
+
+Acceptor:
+  on ACCEPT(n, v):
+    if n >= promisedBallot:
+      acceptedBallot = n
+      acceptedValue = v
+      return ACCEPTED(n, v)
+    else:
+      return REJECT
+</code></pre>
+
+        <div class="highlight">
+            <strong>Paxos 的精髓：</strong>为什么 Paxos 能保证一致性而不死锁？核心在于 <strong>Quorum 的交叠性质</strong>——两个多数派必然至少有一个重叠的 Acceptor。这个重叠的 Acceptor 会因为承诺（Promise）而记住旧提案的 value，从而强迫后续提案使用相同的 value。这就是"一旦达成一致，永不改变"的数学保证。
+        </div>
+
+        <h2>18.2 Multi-Paxos 与优化</h2>
+
+        <p>Basic Paxos 每达成一次共识需要两轮 RPC（Prepare + Accept），延迟高且吞吐低。实际系统几乎从不使用 Basic Paxos，而是使用 <strong>Multi-Paxos</strong>——在稳定的 Leader 下，跳过 Prepare 阶段，只执行 Accept 阶段。</p>
+
+        <p>Multi-Paxos 的关键优化包括：</p>
+        <ul>
+            <li><strong>Leader 租约（Leader Lease）</strong>：选出一个稳定的 Leader，在租约有效期内它可以直接 Accept，无需 Prepare。这相当于 Raft 的 Leader 角色。</li>
+            <li><strong>日志空洞填充</strong>：Multi-Paxos 的实例是独立的，实例间可能有空洞（某个实例未达成共识）。算法需要检测并填充空洞才能按序提交。</li>
+            <li><strong>状态机复制</strong>：将每个 Paxos 实例绑定到复制状态机的一个日志槽位，最终实现确定性的指令执行。</li>
+        </ul>
+
+        <p>事实上，Google 的 Chubby 锁服务（2006）使用的就是 Multi-Paxos。ZooKeeper 的 Zab 协议和 Raft 也都是 Multi-Paxos 的变体——Raft 的贡献在于把 Multi-Paxos 的各种"隐藏细节"（租约、日志匹配、安全性）明确化、工程化。</p>
+
+        <h2>18.3 PBFT（实用拜占庭容错）</h2>
+
+        <p>Paxos 和 Raft 都假设节点是"非拜占庭"的——即节点可能崩溃，但不会恶意篡改数据。但在区块链、航天、金融清算等场景中，我们需要容忍节点<strong>故意作恶</strong>（拜占庭错误）。</p>
+
+        <p>PBFT（Practical Byzantine Fault Tolerance）是 Miguel Castro 和 Barbara Liskov 在 1999 年提出的实用拜占庭容错算法。它的核心约束是 <strong>3f+1</strong>——要容忍 f 个拜占庭节点，至少需要 3f+1 个总节点（因为恶意的节点可以发送矛盾信息，需要额外一轮投票来消除歧义）。</p>
+
+        <p>PBFT 的三阶段流程（以客户端发送请求到主节点为起点）：</p>
+
+        <ol>
+            <li><strong>Pre-Prepare</strong>：主节点（Primary）为请求分配序列号，广播 Pre-Prepare 消息给所有副本。</li>
+            <li><strong>Prepare</strong>：副本收到 Pre-Prepare 后，广播 Prepare 消息。当节点收集到 2f+1 个 Prepare（包括自己的）后，进入 Prepared 状态。</li>
+            <li><strong>Commit</strong>：节点广播 Commit 消息，收集到 2f+1 个 Commit 后执行请求并返回给客户端。</li>
+        </ol>
+
+        <p>PBFT 的<strong>视图切换（View Change）</strong>是复杂度最高的部分：当主节点被怀疑为拜占庭故障时，所有副本发起视图切换协议选出新主节点。由于拜占庭节点可能发送虚假的视图切换请求，协议需要额外的投票轮次来确认新视图的合法性。</p>
+
+        <div class="warning">
+            <strong>PBFT 的性能瓶颈：</strong>O(n²) 的通信复杂度！PBFT 的每个阶段都需要所有节点相互广播消息，节点数从 4 增长到 10 时，网络消息量增长约 6 倍。这限制了 PBFT 在公链等大规模网络中的使用。当有 100 个节点时，PBFT 的三阶段需要大约 10000 条消息——这不包括视图切换。这也是为什么像 Hyperledger Fabric 这样的联盟链只在 7-15 个节点的范围内使用 PBFT。
+        </div>
+
+        <h2>18.4 HotStuff 与链式共识</h2>
+
+        <p>2018 年，VMware Research 的团队提出了 HotStuff，它是第一个将 BFT 共识的通信复杂度从 O(n²) 降到 <strong>O(n)</strong> 的协议。HotStuff 的核心创新是<strong>链式共识（Chained Consensus）</strong>：提案者收集签名形成"QC（Quorum Certificate）"，QC 本身作为下一个提案的证明，串联成一条链。</p>
+
+        <p>在 HotStuff 中，Leader 只需向所有副本广播一个提案，收集签名后形成 QC，然后进入下一轮。每轮只有 Leader → 所有节点 的单向通信，避免了 PBFT 的全连接受限。Facebook 的 <strong>LibraBFT</strong>（Diem）就是基于 HotStuff 的变体实现的。</p>
+
+        <p>HotStuff 还有一个隐藏属性：<strong>乐观响应性（Optimistic Responsiveness）</strong>——如果当前 Leader 是诚实的，协议可以在一个网络往返内完成确认，无需等待超时。</p>
+
+        <h2>18.5 2026 前沿：Gatling 并行共识</h2>
+
+        <p>2025-2026 年间，分布式共识领域出现了一个令人兴奋的突破——<strong>并行共识</strong>。传统的共识算法（无论是 Paxos、Raft 还是 HotStuff）都是<strong>串行</strong>的：每个实例必须等前一个实例确认后才能开始下一个。这意味着一轮共识的延迟至少是一个网络往返时间（RTT），即使吞吐可以靠批量打包提升，延迟也无法突破 RTT 下限。</p>
+
+        <p><strong>Gatling</strong> 是并行共识的代表方案。它的核心思想是：<strong>并行组合多个共识实例</strong>，让不同实例可以同时在不同的提案上达成共识。Gatling 提出了<strong>确定性交错规则（Deterministic Interleaving）</strong>——将多个提案按某种全局确定的顺序并行提交，互不干扰。</p>
+
+        <p>更具体地说：Gatling 将一个宽分配周期中收集到的多个提案打包到同一个"超级块"中，然后用一个批次共识来确认整个超级块。这样，多个提案的共识延迟被平均分摊——如果在一个 RTT 中收集了 1000 个提案，单个提案的有效确认延迟降低到 RTT/1000。</p>
+
+        <p>Gatling 的实验数据表明，在 64 节点的广域网环境下，它的吞吐达到了 Raft 的 <strong>18 倍</strong>，而延迟几乎与单实例共识持平。这种"突破单网络延迟下限"的特性，在跨洲数据复制和 DeFi（去中心化金融）中具有极大的应用前景。</p>
+
+        <h2>18.6 共识算法全景对比</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>算法</th>
+                    <th>容错类型</th>
+                    <th>通信复杂度</th>
+                    <th>延迟</th>
+                    <th>Leader 模式</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Basic Paxos</td>
+                    <td>崩溃（Crash）</td>
+                    <td>O(n²)</td>
+                    <td>2 RTT</td>
+                    <td>无固定 Leader</td>
+                    <td>理论基石</td>
+                </tr>
+                <tr>
+                    <td>Multi-Paxos</td>
+                    <td>崩溃</td>
+                    <td>O(n)</td>
+                    <td>1 RTT（稳定态）</td>
+                    <td>有 Leader</td>
+                    <td>Chubby、分布式锁</td>
+                </tr>
+                <tr>
+                    <td>Raft</td>
+                    <td>崩溃</td>
+                    <td>O(n)</td>
+                    <td>1 RTT（稳定态）</td>
+                    <td>强 Leader</td>
+                    <td>etcd、K8s、TiKV</td>
+                </tr>
+                <tr>
+                    <td>PBFT</td>
+                    <td>拜占庭</td>
+                    <td>O(n²)</td>
+                    <td>3 RTT</td>
+                    <td>有主节点</td>
+                    <td>联盟链、航天</td>
+                </tr>
+                <tr>
+                    <td>HotStuff</td>
+                    <td>拜占庭</td>
+                    <td>O(n)</td>
+                    <td>2 RTT</td>
+                    <td>Leader 轮换</td>
+                    <td>LibraBFT、Diem</td>
+                </tr>
+                <tr>
+                    <td>Gatling</td>
+                    <td>崩溃 / 拜占庭扩展</td>
+                    <td>O(n)（批次）</td>
+                    <td>≈1 RTT / 批次大小</td>
+                    <td>并行 Leader</td>
+                    <td>跨洲复制、DeFi</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>选型指南：</strong>做内部基础设施（如配置中心、服务发现）→ Raft 是最稳妥的选择，生态成熟、实现简单。做金融跨行清算或联盟链 → PBFT 或 HotStuff。做跨洲际数据同步或 DeFi 高频交易 → 2026 年的并行共识（Gatling / Narwhal & Tusk）是前瞻性的方向。共识算法的选择本质上是一个<strong>信任假设 + 性能需求 + 工程成本</strong>的三方博弈。
+        </div>
+
+        <p>从 Paxos 的"兼职议会"到 Gatling 的并行共识，我们花了 30 多年才真正理解了"如何让多台机器就一个值达成一致"。共识算法是所有分布式一致性的基石——从底层的共识层往上，我们可以构建复制状态机、分布式数据库、甚至全球规模的金融服务。下一章开始，我们将进入分布式系统的另一个重要维度——<strong>并行计算模型</strong>，探讨如何让多台机器协同处理一个计算任务而非仅仅存储一份数据。</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

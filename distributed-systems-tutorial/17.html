@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 Raft共识算法 — 分布式系统教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 什么是分布式系统</a></li>
+            <li><a href="02.html">02 系统模型与时间</a></li>
+            <li><a href="03.html">03 CAP定理与取舍</a></li>
+            <li><a href="04.html">04 一致性模型</a></li>
+            <li><a href="05.html">05 通信基础</a></li>
+            <li><a href="06.html">06 序列化与编解码</a></li>
+            <li><a href="07.html">07 分布式系统设计模式</a></li>
+            <li><a href="08.html">08 RPC远程过程调用</a></li>
+            <li><a href="09.html">09 消息队列与事件驱动</a></li>
+            <li><a href="10.html">10 P2P与Gossip协议</a></li>
+            <li><a href="11.html">11 服务网格</a></li>
+            <li><a href="12.html">12 网络协议栈深度</a></li>
+            <li><a href="13.html">13 组通信与广播</a></li>
+            <li><a href="14.html">14 2026通信前沿</a></li>
+            <li><a href="15.html">15 复制与一致性</a></li>
+            <li><a href="16.html">16 分布式事务</a></li>
+            <li><a href="17.html" class="active">17 Raft共识算法</a></li>
+            <li><a href="18.html">18 Paxos与BFT</a></li>
+            <li><a href="19.html">19 并行计算模型</a></li>
+            <li><a href="20.html">20 数据并行</a></li>
+            <li><a href="21.html">21 模型与流水线并行</a></li>
+            <li><a href="22.html">22 分布式训练实战</a></li>
+            <li><a href="23.html">23 Docker与K8s编排</a></li>
+            <li><a href="24.html">24 可观测性</a></li>
+            <li><a href="25.html">25 调试与压测</a></li>
+            <li><a href="26.html">26 AI训练基础设施</a></li>
+            <li><a href="27.html">27 边缘计算与IoT</a></li>
+            <li><a href="28.html">28 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第17章 Raft共识算法</h2>
+
+        <p>如果你用过 etcd、Consul 或 TiKV，那你已经在和 Raft "共事"了。Raft 已经成为分布式一致性存储的事实标准——从 Kubernetes 到 Ceph，从 MongoDB 到 YugabyteDB，无数系统都在用它驱动复制状态机。</p>
+
+        <p>Raft 的设计哲学有一句名言：<strong>"Understandability" over "Optimal Performance"</strong>（可理解性比最优性能更重要）。在 Raft 之前，Paxos 是共识算法的事实标准，但 Lamport 的论文对大多数人来说像天书。Diego Ongaro 在 Stanford 读博期间设计了 Raft，核心目标就是让每个工程师都能读懂它。这个选择改变了分布式系统的生态——Raft 的引用量在发布后十年内超过了 Paxos。</p>
+
+        <h2>17.1 Raft 的核心组件</h2>
+
+        <p>Raft 的节点在任意时刻处于三种角色之一：</p>
+
+        <ul>
+            <li><strong>Leader</strong>：处理所有客户端写入请求，负责日志复制到 Follower。一个 Term 内至多一个 Leader。</li>
+            <li><strong>Follower</strong>：被动响应 Leader 和 Candidate 的 RPC 请求。如果收不到 Leader 的心跳，它会主动变为 Candidate。</li>
+            <li><strong>Candidate</strong>：用于选举新 Leader 的临时角色。Candidate 向其他节点发起投票请求，赢得多数票后成为 Leader。</li>
+        </ul>
+
+        <p>Raft 将时间划分为一个个<strong>Term（任期）</strong>，每个 Term 最多只有一个 Leader。Term 是一个单调递增的整数，在每次选举时递增。如果 Candidate 发现自己的 Term 比别人的低，它立即退化为 Follower——这保证了新旧 Leader 不会同时做决策。</p>
+
+        <p>Leader 通过定期发送<strong>心跳（Heartbeat）</strong>（空的 AppendEntries RPC）来维持权威。Follower 如果在一个 Election Timeout 时间内没收到心跳，就认为 Leader 挂了，发起新的选举。</p>
+
+        <h2>17.2 Leader 选举</h2>
+
+        <p>当 Follower 的 Election Timeout 超时时（通常在 150-300ms 之间的随机值），它执行以下步骤：</p>
+
+        <ol>
+            <li>将自己的 Term 加 1，转为 Candidate 状态。</li>
+            <li>投票给自己，并向所有其他节点发送 RequestVote RPC。</li>
+            <li>等待三种结果之一：(a) 赢得多数选票 → 成为 Leader；(b) 另一个 Candidate 成为 Leader → 转为 Follower；(c) 超时无人胜出 → 开始新一轮选举。</li>
+        </ol>
+
+        <div class="highlight">
+            <strong>Split Vote（选票分裂）：</strong>如果两个 Follower 同时超时成为 Candidate，且各自获得了集群一半的选票（比如 3 节点集群中，A 拿到自己的票+B 的票 = 2 票，C 拿到自己的票 = 1 票），那么没有人能获得多数。如果没有随机超时，这种平局会无限重复。Raft 的精妙设计是用<strong>随机 Election Timeout</strong> 解决这个问题——两个 Candidate 的超时时间几乎不可能完全相同，先超时的抢先发起选举，通常能在另一个 Candidate 超时前赢得足够票数。
+        </div>
+
+        <p>选举的随机超时机制是一个典型的"用概率保证确定性"的范例。在工程实践中，150-300ms 的随机区间配合 10 节点以下的集群，选举几乎总是在第一次就成功。</p>
+
+        <h2>17.3 日志复制</h2>
+
+        <p>一旦 Leader 被选出，它开始接收客户端请求。每个请求被封装为一个<strong>Log Entry</strong>（日志条目），包含命令和 Term 编号。Leader 将条目通过 AppendEntries RPC 并行发送给所有 Follower。</p>
+
+        <p>日志复制的最强大特性是<strong>日志匹配属性（Log Matching Property）</strong>：</p>
+        <ul>
+            <li>如果两个日志条目有相同的 (index, term)，那么它们存储的是同一条命令。</li>
+            <li>如果两个日志条目有相同的 (index, term)，那么它们之前的所有日志条目也完全相同。</li>
+        </ul>
+        <p>Leader 在 AppendEntries RPC 中会包含前一个日志条目的 index 和 term，Follower 检查本地日志是否匹配。如果不匹配，Follower 拒绝该请求，Leader 逐步回退找到双方一致的 index——这个机制叫<strong>一致性检查</strong>。</p>
+
+        <p>日志的<strong>Committed（已提交）</strong>意味着该条目已被复制到多数节点，可以在状态机上执行（Applied）。Leader 提交的决策通过下一个 AppendEntries RPC 广播给 Follower——Follower 知道："哦，原来 index 5 已经在多数节点上持久化了，我也可以 apply 了。"</p>
+
+        <pre><code>// Raft 核心循环 — Go 语言伪代码框架
+func (rf *Raft) Run() {
+    for {
+        switch rf.state {
+        case Follower:
+            select {
+            case heartbeat := &lt;-rf.heartbeatChan:
+                // 收到 Leader 心跳，重置超时计时器
+            case &lt;-time.After(rf.electionTimeout()):
+                // 超时未收到 Leader 心跳，转为 Candidate
+                rf.state = Candidate
+            }
+
+        case Candidate:
+            rf.currentTerm++
+            rf.votedFor = rf.me
+            go rf.sendRequestVoteToPeers()
+
+            select {
+            case &lt;-rf.wonElection:
+                rf.state = Leader
+            case &lt;-rf.steppedDown:
+                rf.state = Follower
+            case &lt;-time.After(rf.electionTimeout()):
+                // 超时重新选举
+            }
+
+        case Leader:
+            // 定期发送心跳（空的 AppendEntries）
+            go rf.broadcastHeartbeat()
+
+            // 处理客户端请求
+            select {
+            case req := &lt;-rf.clientReqChan:
+                entry := LogEntry{Term: rf.currentTerm, Command: req.Command}
+                rf.log = append(rf.log, entry)
+                // 并行复制到 Follower
+                go rf.replicateToPeers(entry)
+            case &lt;-rf.steppedDown:
+                rf.state = Follower
+            }
+        }
+    }
+}
+</code></pre>
+
+        <div class="tip">
+            <strong>关于 Applied vs Committed 的区分：</strong>初学者常混淆这两个概念。Committed 意味着日志条目已经安全地存在于多数节点的持久化存储中——即使 Leader 崩溃，新 Leader 也能保证该条目不会丢失。Applied 意味着该条目的命令已经被状态机执行（比如修改了数据库表中的值）。Raft 保证了日志提交顺序和 apply 顺序一致。
+        </div>
+
+        <h2>17.4 安全性保证</h2>
+
+        <p>Raft 的安全性由几个精心设计的不变量保证：</p>
+
+        <h3>Leader Completeness（Leader 完整性）</h3>
+        <p>如果一个日志条目在某个 Term 中被提交，那么它在所有更高 Term 的 Leader 的日志中一定也存在。这是 Raft 安全性的最核心属性。它通过<strong>选举限制</strong>实现：</p>
+
+        <h3>选举限制（Election Restriction）</h3>
+        <p>一个 Candidate 想要赢得选举，它必须在 RequestVote RPC 中证明自己的日志至少与投票者一样"新"（比较最后一个日志的 term 和 index）。这保证了一个没有最新日志的节点不可能成为 Leader，从而保证了已提交的日志永远不会丢失。</p>
+
+        <h3>提交前一个任期的日志的限制</h3>
+        <p>Leader 不能直接提交前一个 Term 的日志条目，即使它已经被复制到多数节点。Leader 必须等到自己 Term 内至少有一个新的日志条目被提交，然后通过<strong>committed 间接传递</strong>来确认前一个 Term 的日志也已经被提交。这个设计防止了旧 Leader 的未提交日志在新 Leader 的引导下被错误提交。</p>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>早期实现 Raft 的团队常被这个问题绊倒。某公司在实现 Raft 时没有遵守"不能直接提交旧 Term 日志"的限制，导致在 Leader 切换场景下出现了数据不一致。具体情况是：A 是 Term 1 的 Leader，复制了日志条目到多数节点但尚未提交；A 崩溃，B 当选 Term 2 的 Leader，B 看到 Term 1 的条目已经在多数节点上，就直接提交了它。但实际上，这条日志可能不在 B 的日志中（因为 B 是 Term 2 当选的，Term 1 的旧 Leader 可能只复制到了部分 Follower 而没复制到 B）——这样提交的操作就丢失了。这个 Bug 在压力测试下才暴露出来，修复很简单：严格执行 Raft 论文 5.4.2 节的规定。
+        </div>
+
+        <h2>17.5 成员变更</h2>
+
+        <p>分布式系统不是静态的——你需要加机器、踢故障节点、换硬件。Raft 的成员变更（Membership Change）是最容易出 Bug 的地方之一。</p>
+
+        <p>Raft 论文提出的标准方案是 <strong>Joint Consensus</strong>（联合共识）两阶段方法：<br>
+        第一阶段：Leader 将 C_old_new（新旧集群配置的组合）日志条目复制到新旧集群的多数节点。该阶段中，任何决策需要新旧集群同时多数同意。<br>
+        第二阶段：一旦 C_old_new 提交，Leader 再复制 C_new（新集群配置）到新集群的多数节点，此后完全使用新配置。</p>
+
+        <div class="highlight">
+            <strong>单服务器变更的风险：</strong>一次只加/踢一台机器（Single-Server Change）是更简单的方法，看起来比 Joint Consensus 好理解。但它有一个微妙的竞态条件：当你从一个 3 节点集群变更为 5 节点集群时，如果你一次加一台机器，期间可能出现"集群同时使用旧配置和新配置"的时间窗口，导致两个多数派不重叠——双方都可能选出自己的 Leader，造成脑裂。Joint Consensus 通过"两个多数派同时同意"避免了这个问题。
+        </div>
+
+        <p>Raft 不仅是一个共识算法——它是分布式系统工程实践的一座里程碑。它为无数系统提供了确信：在不可靠的网络中，可靠的共识是可能的。算法本身并不复杂（核心代码约 2000 行），但它的安全性证明经过了严格的数学推导——这是少数几个既有实用价值又有理论完备性的算法之一。</p>
+
+        <p>从 Raft 往前看一步：Raft 假设所有节点都是"诚实"的——它们不会恶意篡改数据或撒谎。但如果某些节点<strong>故意作恶</strong>呢？如果在有"拜占庭错误"的环境下也需要达成共识呢？这就是我们下一章的主题——<strong>Paxos 与 BFT（拜占庭容错）</strong>，一个更宏大也更复杂的故事。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

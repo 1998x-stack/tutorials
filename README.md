@@ -1,6 +1,6 @@
 # 1998x-stack Tutorials
 
-A collection of 39 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 40 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
@@ -32,7 +32,7 @@ A collection of 39 free, comprehensive technical tutorials in Chinese — from f
 | ⚡ | 电磁学 · 从入门到精通 | 28 | [electromagnetism-tutorial](https://1998x-stack.github.io/electromagnetism-tutorial/) |
 | 📐 | 运筹学与调度理论 · 从入门到精通 | 28 | [operations-research-scheduling-tutorial](https://1998x-stack.github.io/operations-research-scheduling-tutorial/) |
 
-### 系统 / 基础设施 (11 courses)
+### 系统 / 基础设施 (12 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -47,6 +47,7 @@ A collection of 39 free, comprehensive technical tutorials in Chinese — from f
 | 🖥️ | 后端开发实战 | 28 | [backend-development-tutorial](https://1998x-stack.github.io/backend-development-tutorial/) |
 | 🔧 | 编译原理 · 从入门到精通 | 28 | [compiler-principles-tutorial](https://1998x-stack.github.io/compiler-principles-tutorial/) |
 | 🖥️ | 计算机体系结构 · 从入门到精通 | 28 | [computer-architecture-tutorial](https://1998x-stack.github.io/computer-architecture-tutorial/) |
+| 🔧 | 集成电路设计 · 从入门到精通 | 28 | [integrated-circuit-design-tutorial](https://1998x-stack.github.io/integrated-circuit-design-tutorial/) |
 
 ### 网络 / 通信 (3 courses)
 

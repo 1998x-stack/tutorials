@@ -34,7 +34,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `electromagnetism-tutorial/` | 电磁学 | 28 | `https://1998x-stack.github.io/electromagnetism-tutorial/` |
 | `operations-research-scheduling-tutorial/` | 运筹学与调度理论 | 28 | `https://1998x-stack.github.io/operations-research-scheduling-tutorial/` |
 
-### 系统 / 基础设施 (11)
+### 系统 / 基础设施 (12)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `vllm-tutorial/` | vLLM推理引擎 | 28 | `https://1998x-stack.github.io/vllm-tutorial/` |
@@ -48,6 +48,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `backend-development-tutorial/` | 后端开发实战 | 28 | `https://1998x-stack.github.io/backend-development-tutorial/` |
 | `compiler-principles-tutorial/` | 编译原理 | 28 | `https://1998x-stack.github.io/compiler-principles-tutorial/` |
 | `computer-architecture-tutorial/` | 计算机体系结构 | 28 | `https://1998x-stack.github.io/computer-architecture-tutorial/` |
+| `integrated-circuit-design-tutorial/` | 集成电路设计 | 28 | `https://1998x-stack.github.io/integrated-circuit-design-tutorial/` |
 
 ### 网络 / 通信 (3)
 | Directory | Topic | Chapters | URL |

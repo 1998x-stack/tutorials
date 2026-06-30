@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 监督微调(SFT)原理与实践</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html" class="active">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第15章 监督微调(SFT)原理与实践</h2>
+
+        <p>大家好，我是你们的讲师。在之前的章节中，我们花了大量篇幅讨论预训练——模型在万亿token级别的数据上学习语言规律和世界知识。但预训练产出的base model就像一个读了万卷书但从不开口的天才——你问它"请用Python写一个快速排序"，它大概率会继续往下写一篇关于排序算法的论文，而不是直接给你一段可运行的代码。这种从"续写"到"回答"的转变，就是SFT要解决的问题。</p>
+
+        <p>SFT（Supervised Fine-Tuning），也叫监督微调或指令微调，是让base model学会遵循指令的关键步骤。可以说没有SFT就没有ChatGPT，没有当前所有好用的对话模型。SFT的概念听起来很简单——给模型看一些问答对就行了——但真正做过的人都明白，里头的门道多到可以再写一本书。数据怎么构建、对话模板怎么设、训多久才不会过拟合、loss mask有没有加对——每一个细节都能让你翻车。这一章我们把这些环节一个个掰开揉碎讲清楚。</p>
+
+        <h3>15.1 SFT的核心目标</h3>
+
+        <p>SFT最朴素的理解就是"给模型看一堆高质量的问答对，让它跟着学"——这个说法没错，但太粗糙了。我们需要从模型训练的本质来理解SFT到底在改变什么。</p>
+
+        <p>预训练阶段，模型学习的是<strong>条件语言建模</strong>：给定上文，预测下一个token。它的输出空间是所有符合统计规律的文本延续。你问它"法国的首都是"，模型可能继续写"法国是一个欧洲国家，位于西欧"而不是直接回答"巴黎"。因为从训练数据的统计分布看，"法国是一个欧洲国家"这类百科式续写出现的频率远高于问答。预训练目标的本质是<strong>模仿互联网文档的续写模式</strong>，而不是"回答问题"。</p>
+
+        <p>SFT改变的就是这个目标函数的作用范围。SFT数据的形式是<strong>指令 + 回答</strong>，训练时只对回答部分的token计算loss。通过这种"选择性学习"，模型被迫从"自由续写模式"切换到"指令响应模式"。这个切换是整个对齐过程的基础，后续的RLHF、DPO、RLVR都建立在SFT产出的chat model之上。</p>
+
+        <p>这里有一个常见的误解：很多人以为SFT能"注入新知识"。这是不对的。SFT的数据量通常只有几千到几十万条，而预训练数据是万亿token级别。SFT能做的不是教模型新知识，而是<strong>教模型如何组织和表达它已经具备的知识</strong>。它调整的是输出行为和格式，不是世界观。如果你的模型不知道"量子纠错码"是什么——因为这个词在预训练数据中根本没出现——那么你在SFT中放一千条关于量子纠错的问答都没用。模型会尝试编造，但编出来的东西大概率是错的。</p>
+
+        <div class="highlight">
+            <p><strong>核心认知</strong>：SFT不是在教模型"知道什么"，而是在教模型"怎么回答"。如果模型某个领域的知识缺失，你应该去做mid-training（领域继续预训练）或者上RAG。SFT只能"激活"模型已经潜在具备的知识，激活不了的，它也没法无中生有。这条认知帮你省下的试错成本，可能比整章内容都值钱。</p>
+        </div>
+
+        <h3>15.2 SFT数据质量金字塔</h3>
+
+        <p>SFT数据界有一个经典命题：<strong>质量 vs 数量</strong>。Alpaca用GPT-4生成的52K条数据训出了一个在当时表现惊艳的模型，而有人用百万级别的网络爬虫问答数据训出来的模型反而更差了。这个现象引出了"SFT数据质量金字塔"的概念。</p>
+
+        <table>
+            <tr>
+                <th>层级</th>
+                <th>数据量</th>
+                <th>数据来源</th>
+                <th>质量特征</th>
+                <th>场景效果</th>
+            </tr>
+            <tr>
+                <td>金标</td>
+                <td>1K - 5K</td>
+                <td>领域专家手工标注</td>
+                <td>每条精雕细琢，含思维链推理</td>
+                <td>特定领域极佳</td>
+            </tr>
+            <tr>
+                <td>银标</td>
+                <td>10K - 50K</td>
+                <td>人工标注 + 专家审核</td>
+                <td>多轮质量审查，高一致性</td>
+                <td>通用场景很好</td>
+            </tr>
+            <tr>
+                <td>铜标</td>
+                <td>100K - 500K</td>
+                <td>强模型合成 + 规则筛选</td>
+                <td>去重、去噪声、格式统一</td>
+                <td>良好，有少量噪声</td>
+            </tr>
+            <tr>
+                <td>铁标</td>
+                <td>1M+</td>
+                <td>网络爬取或弱模型合成</td>
+                <td>基本过滤，大量模式重复</td>
+                <td>较差，容易过拟合</td>
+            </tr>
+        </table>
+
+        <p>每次提到质量金字塔，我都会想起著名的LIMA论文（Less Is More for Alignment）。LIMA仅用1000条高质量SFT数据就训出了一个远超预期效果的对齐模型。这个发现让整个行业开始重新审视一个根本性问题：<strong>我们真的需要那么多SFT数据吗？</strong></p>
+
+        <p>答案取决于你的场景。如果你想让模型学会一个非常具体的能力——比如"从非结构化文本中提取JSON格式的结构化信息"——可能200条高质量示例就够了。但如果你想提升模型在开放域对话中的综合表现，覆盖各种边缘case，确实需要更多的数据来拓宽覆盖的指令空间。关键不是你"有多少数据"，而是<strong>这些数据覆盖了多少有意义的、不重复的指令模式</strong>。</p>
+
+        <p>讲一个亲身经历的案例。我们团队早期接过一个项目，对方兴致勃勃地收集了200万条客服对话记录准备做SFT。结果训练之后模型在测试集上的表现反而比base model还差。排查下来发现：这些客服记录里"亲，这边建议您重启试试呢"这种模板占了将近35%。模型深度overfit在了这些高频句式上，对于稍微偏离标准模板的问题完全失去泛化能力。后来我们把数据压缩到2万条——经过语义去重、聚类采样、人工审核——效果反而大幅提升。</p>
+
+        <div class="warning">
+            <p><strong>踩坑案例</strong>：200万条数据训出一个更差的模型，这个教训告诉我们：SFT数据的"毒化"往往来自低多样性的重复模式。建议在SFT数据构建完成后，先用embedding模型对用户指令部分做聚类分析。如果某个cluster占比超过20%，说明这一类指令过采样了，需要降采样。理想的数据分布应该是各cluster分布相对均匀——这比绝对数量重要得多。</p>
+        </div>
+
+        <h3>15.3 对话模板设计</h3>
+
+        <p>SFT中一个看似琐碎但极其关键的细节是<strong>Chat Template（对话模板）</strong>。不同模型家族使用不同的模板格式来区分"用户消息""系统消息"和"助手回复"。模板设计错了，模型可能完全学不会正常的对话结构——这不是危言耸听，我见过不止一个团队在这个问题上栽跟头。</p>
+
+        <p>下面是目前最主流的三种对话模板格式：</p>
+
+        <p><strong>ChatML格式</strong>（OpenAI推广使用）。使用<code>&lt;|im_start|&gt;</code>和<code>&lt;|im_end|&gt;</code>标签明确标识每轮消息的role（system/user/assistant/tool），格式清晰，扩展性好，支持多轮对话和工具调用。</p>
+
+        <p><strong>Llama格式</strong>（Meta Llama 2/3使用）。使用<code>[INST]</code>和<code>[/INST]</code>标签包裹用户消息，结构紧凑，token利用率高，但对多角色扩展的支持不如ChatML灵活。</p>
+
+        <p><strong>DeepSeek格式</strong>。在ChatML基础上做了自家tokenizer级别的优化，对代码和数学内容的分词效率更高。DeepSeek-V2和V3使用自定义模板来配合MoE架构的分词策略。</p>
+
+        <pre><code># 各格式对比示例：同一个对话
+
+# ChatML格式
+&lt;|im_start|&gt;system
+你是一个Python编程助手。&lt;|im_end|&gt;
+&lt;|im_start|&gt;user
+写一个函数判断回文数&lt;|im_end|&gt;
+&lt;|im_start|&gt;assistant
+def is_palindrome(x: int) -> bool:
+    s = str(x)
+    return s == s[::-1]
+&lt;|im_end|&gt;
+
+# Llama格式
+[INST] &lt;&lt;SYS&gt;&gt;
+你是一个Python编程助手。
+&lt;&lt;/SYS&gt;&gt;
+
+写一个函数判断回文数 [/INST]
+def is_palindrome(x: int) -> bool:
+    s = str(x)
+    return s == s[::-1]
+
+# DeepSeek格式
+&lt;|system|&gt;
+你是一个Python编程助手。
+&lt;|user|&gt;
+写一个函数判断回文数
+&lt;|assistant|&gt;
+def is_palindrome(x: int) -> bool:
+    s = str(x)
+    return s == s[::-1]</code></pre>
+
+        <p>对话模板设计中最关键的技术点是<strong>Loss Masking</strong>。在SFT训练中，我们只希望模型学习"助手回复"的生成模式，而"用户消息"和"系统提示"部分不应该参与loss计算——因为模型不应该被训练去预测用户的输入。具体做法是在计算cross-entropy loss时，将用户和系统部分的token对应的loss置为0，只保留助手部分的梯度。</p>
+
+        <p>不加loss mask的后果是什么？我们团队早期亲身踩过这个坑。有一次模型训完后出现了一个奇怪的现象：对话时模型经常把用户的输入先复述一遍，再接自己的回答。比如用户问"今天天气怎么样"，模型回答"用户问：今天天气怎么样。答：今天天气晴朗，气温25度。"排查了半天才发现是loss mask没有正确应用——模型被训练去"预测所有文本"，包括用户输入部分。它学会了"把用户输入抄一遍再作答"的模式。纠正loss mask后，这个现象就消失了。</p>
+
+        <div class="tip">
+            <p><strong>实践建议</strong>：使用Hugging Face的<code>apply_chat_template</code>方法时，务必检查tokenize阶段的<code>add_special_tokens</code>参数和loss mask是否正确。一个实用的验证方法是：用一小批数据运行一次训练step，然后将attention mask可视化——用户部分的mask值应该是0（被忽略），助手部分才是1（参与训练）。肉眼确认无误再开始全量训练。</p>
+        </div>
+
+        <h3>15.4 SFT训练配方</h3>
+
+        <p>SFT虽然不如预训练"重"，但超参的选择直接影响模型效果。下面是一套经过大量实战验证的训练配方，对7B到70B的模型都适用。</p>
+
+        <p><strong>学习率（Learning Rate）</strong>。SFT的学习率通常比预训练低1-2个数量级。对于full fine-tuning，推荐范围是1e-5到5e-5。使用LoRA等PEFT方法时，学习率可以稍高，通常为1e-4到5e-4。实用经验：以原预训练学习率的十分之一为起点，观察loss下降速度。如果前5步loss就骤降超过10%，说明学习率太高了，需要降低。</p>
+
+        <p><strong>Epoch数</strong>。SFT的epoch数通常非常少，1到3个epoch就足够。LIMA用1000条数据只训了1个epoch。记住：SFT的目的是让模型学会"行为模式"，而不是"记住训练数据"。多轮过拟合的典型信号是train loss持续下降而eval loss在某个点开始反弹，同时模型回复变得"机械"——比如总是以"好的，我来回答你的问题"开头。</p>
+
+        <p><strong>Batch Size</strong>。推荐使用较大的有效batch size（128-512个样本），通过gradient accumulation实现。大batch提供更稳定的梯度估计，这对SFT尤其重要——因为我们用的数据量小，梯度波动大。稳定比速度更重要。</p>
+
+        <p>过拟合的识别有一个实用方法：在训练过程中定期用一组固定的测试prompt（20个左右）手动评估模型回答。如果你发现模型回答开始出现"背诵感"——使用特定于训练数据的措辞和句式——那就是过拟合的明确信号。这时应该立即停止训练，即使eval loss还在下降。</p>
+
+        <pre><code># SFT训练配置（基于Hugging Face Trainer）
+training_args = TrainingArguments(
+    output_dir="./sft_output",
+    learning_rate=2e-5,
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=4,
+    gradient_accumulation_steps=8,
+    num_train_epochs=2,
+    warmup_ratio=0.03,
+    lr_scheduler_type="cosine",
+    logging_steps=10,
+    eval_strategy="steps",
+    eval_steps=50,
+    save_strategy="steps",
+    save_steps=50,
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    remove_unused_columns=False,
+    report_to="wandb",
+    fp16=True,
+    gradient_checkpointing=True,
+)</code></pre>
+
+        <div class="highlight">
+            <p><strong>关键提醒</strong>：一个反直觉的经验是——eval loss的最低点通常不是最佳checkpoint。因为当eval loss降到最低时，模型往往已经开始过拟合了。我建议取eval loss最低点之前1-2个checkpoint的模型，效果反而更好。这个规律我们在7B、13B、70B规模的多个模型上都验证过。</p>
+        </div>
+
+        <h3>15.5 SFT数据构建实践</h3>
+
+        <p>最后我们来聊SFT数据的来源和构建流程。这是整个SFT环节中投入时间最多的部分——你可能花一周收集和清洗数据，两小时就跑完了训练。但恰恰是这一周决定了最终效果的上限。</p>
+
+        <p><strong>方式一：人工标注</strong>。效果最好但成本最高。找领域专家编写高质量的指令-回答对，每条数据需要经过双重审核（编写者 + 审核者）。在医疗、法律等专业领域，人工标注几乎是唯一可靠的选择。推荐的实践是"种子策略"：先由专家标注500-1000条高质量种子数据，微调一个初始模型，再用这个模型辅助生成更多候选数据，最后由人工审核筛选。这样既保证了核心数据的质量，又降低了总体标注成本。</p>
+
+        <p><strong>方式二：合成数据</strong>。使用GPT-4、Claude等强模型生成SFT数据。优点是成本低、速度快，缺点是需要严格的质量控制。核心实践是"背靠背生成"——让多个强模型独立生成同一问题的回答，通过投票或质量评分选择最佳答案。另外一定用规则过滤和分类器过滤掉低质量、有毒、格式错误的样本。</p>
+
+        <p><strong>方式三：从日志挖掘</strong>。如果你的产品已经在用某个LLM API，用户真实使用日志是SFT数据的金矿。从日志中提取"用户给了正面反馈的对话"作为SFT正例，比任何人工构造的数据都更贴近真实场景。但有两个前提：隐私脱敏（去掉所有个人信息）和权限合规（确认数据使用协议允许）。</p>
+
+        <p><strong>数据配比的学问</strong>。即使每条数据都质量很高，不同来源的数据以什么比例混合也是一个值得反复实验的问题。下面是一个推荐的通用配比基线，你可以根据需求调整：</p>
+
+        <table>
+            <tr>
+                <th>数据类别</th>
+                <th>推荐占比</th>
+                <th>说明</th>
+            </tr>
+            <tr>
+                <td>通用对话</td>
+                <td>30%</td>
+                <td>覆盖日常问答、开放域闲聊</td>
+            </tr>
+            <tr>
+                <td>专业领域</td>
+                <td>25%</td>
+                <td>根据你的业务场景定制</td>
+            </tr>
+            <tr>
+                <td>推理任务</td>
+                <td>20%</td>
+                <td>数学、逻辑、代码编写</td>
+            </tr>
+            <tr>
+                <td>格式控制</td>
+                <td>15%</td>
+                <td>JSON输出、表格、摘要、翻译</td>
+            </tr>
+            <tr>
+                <td>安全对抗</td>
+                <td>10%</td>
+                <td>拒绝不当请求、敏感内容处理</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <p><strong>经验之谈</strong>：数据配比需要通过"leave-one-out实验"来验证——每次去掉一个类别的数据，评估模型在对应能力上的表现。如果去掉安全类数据后模型安全评分大幅下降，说明安全数据占比偏低或质量有问题。反过来，如果去掉某个类别后模型表现基本不变，说明这部分数据是冗余的，可以缩减配比。这个方法比凭感觉调整配比要可靠得多。</p>
+        </div>
+
+        <p>好了，第15章的内容就到这里。这一章我们深入拆解了SFT的方方面面：SFT的核心目标是改变模型的输出行为而非注入知识，数据质量金字塔揭示了质量和多样性的辩证关系，对话模板和loss masking是防不胜防的细节陷阱，训练配方需要用心调参来防止过拟合，数据的来源和配比则决定了模型能力的覆盖范围。SFT是做对齐的第一步，也是最基础的一步。但要让模型真正理解"什么样的回答对人类更有价值"，单靠SFT还不够——这就是RLHF出场的理由。<strong>第16章「RLHF与奖励模型」</strong>，我们来揭开强化学习对齐的神秘面纱。下章见。</p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

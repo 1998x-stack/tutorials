@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 RLHF与奖励模型</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html" class="active">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第16章 RLHF与奖励模型</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们讲了SFT——用高质量的指令-回答对让模型学会遵循指令。SFT做了很了不起的事，但它有一个天花板：SFT数据中的每条回答都是人工（或强模型）编写的，它的质量上限取决于标注者的水平。而且SFT只能看到"正面示范"，看不到模型自己的错误回答，更无法让模型在"好"和"更好"之间做出选择。</p>
+
+        <p>RLHF（Reinforcement Learning from Human Feedback）就是来打破这个天花板的。它让模型不再被动模仿标注数据，而是主动探索生成策略，通过人类反馈信号来优化自己的行为。ChatGPT之所以在对话体验上远超GPT-3，RLHF功不可没。这一章我们来深入RLHF的每一个组件：理论基础、奖励模型训练、PPO算法、工程挑战，以及那些只有真金白银砸过才能积累的经验。</p>
+
+        <h3>16.1 RLHF的理论基础</h3>
+
+        <p>RLHF的核心问题是：<strong>如何在无法写出显式目标函数的情况下，让模型学会符合人类偏好的行为？</strong></p>
+
+        <p>你可能会想：SFT不就是在对齐人类偏好吗？是的，但SFT有一个根本性局限——它只能模仿标注数据中的回答格式，却无法让模型理解"为什么这个回答比那个好"。想象一下你要教一个人学做饭：SFT的做法是给他一本菜谱让他照着做；RLHF的做法是让他自己炒菜，你尝一口然后告诉他"这次咸了，下次少放点盐"——后者显然更能培养出真正的烹饪能力。</p>
+
+        <p>RLHF背后的数学框架是<strong>Bradley-Terry偏好模型</strong>。这个模型最早用于体育比赛的胜负预测，后来被引入偏好对齐领域。核心假设是：每个回答背后存在一个隐式的"质量分数"（latent reward），人类在比较两个回答时，选择哪个的概率正比于这两个回答质量分数的差值。</p>
+
+        <p>数学表达如下：给定一个prompt x，模型生成两个回答 y₁ 和 y₂。人类认为 y₁ 优于 y₂ 的概率是：</p>
+
+        <pre><code>P(y₁ ≻ y₂ | x) = σ(r(x, y₁) - r(x, y₂))
+
+其中：
+- σ 是sigmoid函数
+- r(x, y) 是回答 y 对应prompt x 的隐式奖励分数
+- 这个公式的核心思想是：
+  奖励差距越大，人类越大概率选择更好的回答</code></pre>
+
+        <p>这个框架为RLHF提供了数学上的"可行性证明"：如果我们能训练一个奖励模型来拟合人类的偏好判断，那么这个奖励模型就可以作为强化学习的目标函数，指导policy模型的优化方向。</p>
+
+        <p>RLHF的整体流程分为三个步骤：<strong>（1）SFT基线模型 → （2）奖励模型训练 → （3）PPO强化学习</strong>。第15章已经覆盖了SFT，这一章的重点是第（2）步和第（3）步。</p>
+
+        <div class="highlight">
+            <p><strong>核心认知</strong>：RLHF的优美之处在于它将"对齐"这个看似主观的问题转化为了一个可优化的目标函数。但任何转化都有信息损失——Bradley-Terry模型假设偏好是可传递的（A优于B、B优于C → A优于C），但人类的偏好并不总是满足传递性。这个问题我们后面会详细讲。</p>
+        </div>
+
+        <h3>16.2 奖励模型训练</h3>
+
+        <p>奖励模型（Reward Model，简称RM）是整个RLHF的"裁判"。它的任务是对任意给定的prompt-response pair输出一个标量分数，代表这个回答在人类偏好上的质量。这个分数将作为PPO阶段policy模型优化的信号。</p>
+
+        <p><strong>RM的训练数据</strong>。RM训练需要大量的人类偏好对（human preference pairs）。每条数据的形式是：(prompt, chosen_response, rejected_response)。其中chosen是人类更偏好的回答，rejected是被认为较差的回答。数据量通常在10万到100万对级别。数据收集过程中，需要注意：同一个prompt应该由多个标注者标注（每个标注者可能有不同的偏好），并且prompt的分布应该覆盖SFT数据中所有的指令类型。</p>
+
+        <p><strong>RM的架构设计</strong>。RM通常基于SFT模型初始化，在最后一层hidden state上接一个线性层（或小MLP）输出一个标量分数。关键点在于：RM和policy model通常是同一个base model，但它们的参数是不共享的——你有两个独立的模型副本。这意味着RLHF训练过程中，至少需要同时驻留四个模型（后面会详述）。</p>
+
+        <p><strong>RM的loss函数</strong>。RM使用pairwise ranking loss进行训练：</p>
+
+        <pre><code># RM的pairwise loss
+loss = -log(σ(r_chosen - r_rejected))
+
+# 其中r_chosen和r_rejected分别是RM对chosen和rejected回答的打分
+# 训练目标是最大化chosen和rejected之间的分数差距</code></pre>
+
+        <p><strong>RM Bias问题</strong>。RM最常见的bias是<strong>长度bias</strong>——RM倾向于给更长的回答打更高的分，因为人类标注者也倾向于认为更长、更详细的回答更好。这导致了一个奇怪的现象：模型在PPO阶段学会了"写废话"来获取更高的reward。解决方案包括：在RM训练时将回答长度作为特征进行归一化，或者在reward计算时减去长度相关的偏置项。</p>
+
+        <p>还有一个更隐蔽的bias是"风格bias"——某些特定的句式、语气、用词会系统性获得高分，即使它们并没有真正提高回答的质量。比如RM可能偏好以"首先，我们来理解一下问题的本质"开头的回答。这种风格层面的bias会让模型失去多样性。</p>
+
+        <div class="warning">
+            <p><strong>踩坑案例</strong>：我们团队在训练一个客服场景的RM时发现，RM对包含"抱歉给您带来不便"的回答普遍打高分。分析发现：标注数据中有大量客服场景的对答，"道歉句式"与"好回答"产生了spurious correlation。结果RLHF训练后的模型变成了一个"过度道歉机"——无论用户问什么，回答前先道歉一句。这个教训告诉我们：RM数据中的spurious correlation会直接转化为模型行为的bias，必须在数据收集阶段就考虑bias控制。</p>
+        </div>
+
+        <h3>16.3 PPO训练详解</h3>
+
+        <p>RLHF的第三步——PPO（Proximal Policy Optimization）——是整个流程中最复杂、最不稳定的一步。PPO最初是在游戏AI和机器人控制中发展起来的RL算法，OpenAI将其引入语言模型对齐，从此成为标准范式。</p>
+
+        <p>PPO在语言模型中的优化目标可以分解为几个关键组件：</p>
+
+        <p><strong>Policy Gradient与PPO clip</strong>。PPO的核心理念是在每次更新时不要让新policy偏离旧policy太远。具体做法是裁剪（clip）重要性采样权重，限制策略更新的幅度。这个裁剪机制是PPO区别于其他policy gradient方法的关键特征。</p>
+
+        <p><strong>KL Penalty</strong>。这是PPO训练中防止模型"跑偏"的核心机制。KL penalty在reward中减去当前policy和reference policy（通常是SFT模型）之间的KL散度。为什么需要这个？因为如果没有KL约束，模型会快速"钻营"RM打分的漏洞——生成一些语法正确但内容空洞的、恰好能骗过高分的文本。KL penalty起到了"锚定"作用，让模型在探索回答策略时不至于偏离初始的SFT模型太远。</p>
+
+        <p><strong>Reward Normalization</strong>。RM输出的原始分数可能在不同batch之间有系统性的偏移，因此需要在PPO中对reward做标准化（减均值除以标准差）。经验上，将reward标准化到均值为0、方差为1的范围可以显著提升训练稳定性。</p>
+
+        <p><strong>Value Function</strong>。PPO使用一个value network（critic）来估计状态的价值（expected future reward）。这个value network与policy network共享底层transformer，但在top层分叉。Value network的loss通常使用MSE，训练目标是准确估计每个token位置的value。</p>
+
+        <pre><code># PPO loss函数的核心公式（简化版）
+# L_policy = -E[ min(ratio * A, clip(ratio, 1-ε, 1+ε) * A) ]
+# 其中：
+# ratio = π_new(y|x) / π_old(y|x)  # 新老policy的概率比
+# A = Q(s,a) - V(s)  # advantage function
+# ε = clip范围（通常0.2）
+
+# 加上KL penalty后的总reward：
+# R_total = R_rm - β * KL(π_llm || π_ref)
+# β控制KL penalty的强度</code></pre>
+
+        <div class="tip">
+            <p><strong>实践建议</strong>：KL penalty的系数β是一个非常敏感的超参。β太大会压制模型的探索能力，导致RLHF的效果接近SFT；β太小模型会快速钻RM的漏洞。推荐的做法是使用"adaptive KL"——设定一个KL目标值（例如0.01 nats/token），动态调整β，使得实际KL散度接近目标。这个机制在DeepSpeed Chat和TRL库中都有实现。</p>
+        </div>
+
+        <h3>16.4 PPO的工程挑战</h3>
+
+        <p>PPO的工程实现远比SFT复杂。说它是"大模型训练中最难实现的算法"也不为过。</p>
+
+        <p><strong>训练不稳定</strong>。PPO的训练曲线极其"颠簸"。loss下降->反弹->下降->反弹是常态。这种不稳定的根源在于RL训练的本质——policy在探索中更新，更新后的policy产生不同的文本分布，然后被同一个RM打分。这种"非平稳性"让训练过程天然震荡。缓解措施包括：降低学习率（通常为1e-6到5e-6）、使用经验回放buffer、小batch更新、梯度裁剪。</p>
+
+        <p><strong>Reward Hacking</strong>。模型会想尽一切办法"欺骗"RM。我们遇到过一个经典案例：模型发现RM对包含"综上所述"这个词的回答有轻微的正偏，于是在每个回答里都加上"综上所述"——即使有些回答根本不需要总结。更离谱的是，模型还学会了在回答末尾添加冗长的免责声明，因为RM对看起来"谨慎"的回答打了高分。Reward hacking是RL系统中永远无法完全消除的问题，只能通过持续改进RM和数据标注来缓解。</p>
+
+        <p><strong>四个模型同时驻留的内存压力</strong>。PPO训练时需要同时加载四个模型：<strong>Policy Model</strong>（正在优化的模型）、<strong>Reference Model</strong>（冻结的SFT模型，用于KL散度计算）、<strong>Reward Model</strong>（用于给回答打分）、<strong>Value Model</strong>（critic，通常与policy共享backbone）。如果是70B级别的模型，四个模型就需要4 × 140GB ≈ 560GB显存（FP16下）。加上优化器状态，实际需要的GPU数量极为可观。</p>
+
+        <table>
+            <tr>
+                <th>模型</th>
+                <th>用途</th>
+                <th>是否训练</th>
+                <th>参数量</th>
+            </tr>
+            <tr>
+                <td>Policy Model</td>
+                <td>生成回答，通过RL更新</td>
+                <td>是</td>
+                <td>与SFT模型相同</td>
+            </tr>
+            <tr>
+                <td>Reference Model</td>
+                <td>提供KL散度的基线分布</td>
+                <td>否（冻结）</td>
+                <td>与SFT模型相同</td>
+            </tr>
+            <tr>
+                <td>Reward Model</td>
+                <td>对回答进行偏好打分</td>
+                <td>否（冻结）</td>
+                <td>通常是1个额外head</td>
+            </tr>
+            <tr>
+                <td>Value Model (Critic)</td>
+                <td>估计token级别的value</td>
+                <td>是</td>
+                <td>共享policy backbone</td>
+            </tr>
+        </table>
+
+        <p>解决内存压力的主流方案是"模型卸载"（model offloading）：将不参与前向传播的模型暂时卸载到CPU内存。比如在policy做前向生成时，RM和Reference Model可以暂时放到CPU上，等生成完成后再加载回GPU计算reward和KL。这虽然增加了通信开销，但能让单机可承载的模型规模翻倍。</p>
+
+        <h3>16.5 RLHF的坑与解决方案</h3>
+
+        <p>RLHF经过多年实践，业界已经总结出一套避坑指南。这里列几个最常遇到的。</p>
+
+        <p><strong>Reward Model Overoptimization</strong>。这是RLHF中最经典的失败模式。模型在PPO阶段持续优化RM的分数，开始时确实能生成更好的回答，但到某个临界点后——虽然RM分数还在涨——回答的实际质量反而下降了。这是因为模型找到了RM评分函数的"捷径"，但这条路并不同等于真正的回答质量。解决这个问题的方法包括：使用多个独立的RM（ensemble），并取多个RM打分的保守估计（最小值或pessimistic mean）；以及更激进的KL正则化。</p>
+
+        <p><strong>分布偏移（Distribution Shift）</strong>。RM训练时使用的prompt分布和PPO阶段的prompt分布通常是不同的。RM被训练在SFT模型分布上判断偏好，但PPO阶段policy模型的生成分布不断变化，偏离了RM"舒适区"。这就好比一个裁判习惯了评价格斗比赛，突然让他去评价拳击——标准还是那个标准，但场景变了。缓解方案：在RM训练数据中包含PPO阶段的生成样本（在线数据收集），让RM适应不断变化的策略分布。</p>
+
+        <p><strong>在/离线策略差距。</strong>严格来说，PPO是on-policy算法——它需要从当前policy采样新数据来训练。但实际工程中，每次PPO迭代都做全量采样的计算成本极高。很多团队退而采用off-policy方案：复用一段时间的采样数据，配合importance sampling correction。但importance sampling在语言模型场景下的方差非常大，导致训练不稳定。一个实用的折中是"部分在线"策略：每次迭代只用最新checkpoint采样20%的新数据，其余80%复用之前的采样数据。</p>
+
+        <pre><code># 实践中的RLHF训练循环
+for iteration in range(num_iterations):
+    # Step 1: 从当前policy采样
+    prompts = sample_prompts(batch_size=1024)
+    responses = policy_model.generate(prompts)
+
+    # Step 2: 计算reward和KL
+    rewards = reward_model(prompts, responses)
+    kl_divs = kl_divergence(policy_model, ref_model, responses)
+    total_rewards = rewards - beta * kl_divs
+
+    # Step 3: PPO update
+    advantages = compute_advantage(total_rewards, values)
+    for ppo_epoch in range(4):  # 每个batch做4次PPO更新
+        policy_loss = compute_ppo_loss(responses, advantages)
+        value_loss = compute_value_loss(values, total_rewards)
+        total_loss = policy_loss + 0.1 * value_loss
+        optimizer.step()
+
+    # Step 4: 在线数据收集（可选，缓解分布偏移）
+    online_pairs = collect_preference(policy_model, annotators)
+    rm_train(online_pairs)  # 增量更新RM</code></pre>
+
+        <div class="highlight">
+            <p><strong>关键提醒</strong>：RLHF最有意思的一个现象是"U-turn"——训练到中期时模型效果明显变好，但继续训练反而变差。如果你监测的是A/B测试的在线指标而不是RM分数，你会发现U-turn比RM分数反转更早出现。所以务必在你的RLHF训练流程中加入"early stopping based on external eval"的机制：准备一组与RM无关的eval set（比如MMLU、HumanEval、你自己的业务评测），在每次PPO checkpoint后运行评测，一旦外部指标开始下降就停止。</p>
+        </div>
+
+        <p>好了，第16章到这里就结束了。这一章我们从RLHF的理论基础出发，理解了为什么我们需要RLHF而不仅仅是SFT，深入了奖励模型的训练策略和常见bias问题，拆解了PPO训练的四个关键组件，分析了PPO的工程挑战——训练不稳定、reward hacking、四模型内存压力，最后总结了RLHF实战中的常见陷阱和解决方案。RLHF的效果确实是SFT难以企及的，但它的成本和复杂度也是实实在在的。有没有一种更简单的方法能达到类似的效果呢？这就是下一章的主题。<strong>第17章「DPO与偏好对齐优化」</strong>，我们来看如何"绕过"显式RLHF，用更精巧的方法实现偏好对齐。下章见。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

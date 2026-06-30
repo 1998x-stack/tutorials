@@ -25,11 +25,12 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `tts-model-history-tutorial/` | TTS模型发展史 | 28 | `https://1998x-stack.github.io/tts-model-history-tutorial/` |
 | `llm-training-deployment-tutorial/` | 大模型训练与部署 | 28 | `https://1998x-stack.github.io/llm-training-deployment-tutorial/` |
 
-### 数学基础 (2)
+### 数学基础 (3)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `numerical-analysis-tutorial/` | 数值分析 | 28 | `https://1998x-stack.github.io/numerical-analysis-tutorial/` |
 | `advanced-matrix-analysis-tutorial/` | 高级矩阵分析 | 28 | `https://1998x-stack.github.io/advanced-matrix-analysis-tutorial/` |
+| `calculus-tutorial/` | 微积分 | 28 | `https://1998x-stack.github.io/calculus-tutorial/` |
 
 ### 系统 / 基础设施 (9)
 | Directory | Topic | Chapters | URL |

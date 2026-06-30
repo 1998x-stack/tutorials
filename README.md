@@ -1,6 +1,6 @@
 # 1998x-stack Tutorials
 
-A collection of 32 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 33 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
@@ -22,12 +22,13 @@ A collection of 32 free, comprehensive technical tutorials in Chinese — from f
 | 🎙️ | TTS模型发展史 | 28 | [tts-model-history-tutorial](https://1998x-stack.github.io/tts-model-history-tutorial/) |
 | 🤖 | 大模型训练与部署深度分析 | 28 | [llm-training-deployment-tutorial](https://1998x-stack.github.io/llm-training-deployment-tutorial/) |
 
-### 数学基础 (2 courses)
+### 数学基础 (3 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
 | 📐 | 数值分析 | 28 | [numerical-analysis-tutorial](https://1998x-stack.github.io/numerical-analysis-tutorial/) |
 | 📐 | 高级矩阵分析 | 28 | [advanced-matrix-analysis-tutorial](https://1998x-stack.github.io/advanced-matrix-analysis-tutorial/) |
+| 📐 | 微积分 · 从入门到精通 | 28 | [calculus-tutorial](https://1998x-stack.github.io/calculus-tutorial/) |
 
 ### 系统 / 基础设施 (9 courses)
 

@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第26章 Memcached vs Redis/Valkey源码对比</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html" class="active">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第26章 Memcached vs Redis/Valkey源码对比</h1>
+
+        <p>大家好，我是你们的讲师。走到第26章，我们已经深入剖析了 Memcached 源码的每一个核心模块。如果你从第1章一路跟下来，现在应该对 slab allocator、LRU 三级队列、渐进式 rehash、libevent 事件模型这些概念如数家珍了。但一个很自然的问题会浮现在脑海中：同样做缓存，Redis 的源码是怎么处理这些问题的？它们的差异到底在哪？</p>
+
+        <p>这一章，我们来做一个系统的源码级对比。这不仅是为了满足好奇心——当你同时理解两种设计哲学后，你就能在选型时做出更精准的判断，也能从对比中获得更深层的架构洞察。我们还会讨论 Valkey——Redis 在 AGPL 许可证变更后 fork 出来的 BSD 协议分支——看看开源格局的变化如何影响技术选择。</p>
+
+        <h2>整体架构：单线程 vs 多线程</h2>
+
+        <p>Memcached 和 Redis 最根本的架构差异，在于<a href="17.html">第17章</a>我们详细介绍过的 Master-Worker 多线程模型：Memcached 的 main thread 负责 accept 连接，worker threads 各自运行 event loop 处理请求。而 Redis 经典模型是单线程处理所有命令——一个 epoll 循环接收连接，同一个线程执行全部命令。</p>
+
+        <p>为什么两种截然不同的设计都能成功？</p>
+
+        <p>Redis 的设计基于一个关键洞察：<strong>纯 KV 操作在内存中的延迟瓶颈几乎永远是网络 I/O，而不是 CPU</strong>。一个简单的 GET/SET 操作只需要微秒级的 CPU 时间，单线程足以打满万兆网卡。单线程的好处显而易见：没有锁、没有竞争、没有上下文切换、实现简单到令人发指。Redis 的作者 antirez 曾多次强调，<strong>单线程是 Redis 的"超级力量"</strong>。</p>
+
+        <p>Memcached 的情况不同。它的 item size 可以大到 1MB，当你反复存取几百 KB 的二进制数据时，memcpy 的 CPU 开销就不可忽视了。更重要的是，Memcached 的 slab allocator 需要做内存管理——slab rebalance、LRU 维护、item 的引用计数操作——这些都会阻塞事件循环。因此，Memcached 从 1.4 版本开始就引入了多线程 worker 来分摊开销。</p>
+
+        <div class="highlight">
+            <strong>关键洞察：</strong>两种架构都是针对各自的 workload 优化的。Memcached 面向大 value、高并发、内存敏感的场景；Redis 面向小 value、丰富数据结构、持久化场景。不是谁比谁先进，而是谁更适配谁的业务。
+        </div>
+
+        <h2>内存管理：malloc vs slab allocator</h2>
+
+        <p>这是两者源码层面差异最大的地方。</p>
+
+        <p>Redis 使用 <strong>jemalloc</strong>（默认）或 tcmalloc 作为通用内存分配器。Redis 的 zmalloc 模块只是对 malloc 的一层薄封装，加上 OOM 处理和内存统计。当你执行 <code>SET foo bar</code>，Redis 内部调用 <code>zmalloc(sizeof(robj) + 3)</code> 分配一个 3 字节的 sds 字符串——完事了，剩下的全交给 jemalloc 管理。</p>
+
+        <p>Memcached 不走这条路。<a href="07.html">第7章</a>到<a href="09.html">第9章</a>我们花了整整三章来讲解 slab allocator，它预先将内存划分为 slab class，每个 class 固定 chunk size，彻底消灭内存碎片。但代价是内部碎片——当你存一个 100 字节的 value 在 chunk size 为 256 字节的 slab 中时，156 字节被浪费了。</p>
+
+        <pre><code>/* Redis 的内存分配 —— zmalloc.c */
+void *zmalloc(size_t size) {
+    void *ptr = malloc(size + PREFIX_SIZE);
+    if (!ptr) zmalloc_oom_handler(size);
+    *((size_t*)ptr) = size;  // 记录分配大小
+    used_memory += size;     // 更新统计
+    return (char*)ptr + PREFIX_SIZE;
+}
+
+/* Memcached 的 slab 分配 —— slab.c */
+static void *slab_alloc_chunk(slabclass_t *p, const size_t size) {
+    int idx;
+    // 从空闲链表中取
+    if (p->slots) {
+        item *it = p->slots;
+        p->slots = it->sl_next;
+        if (it->sl_next) it->sl_next->sl_prev = 0;
+        p->sl_curr--;
+        return it;
+    }
+    // 没有空闲的，从 slab 中分配新的
+    if (p->end_page_ptr) {
+        void *ptr = p->end_page_ptr;
+        p->end_page_ptr += p->size;
+        if (--p->end_page_free == 0) p->end_page_ptr = 0;
+        return ptr;
+    }
+    // 新分配一个 slab page
+    return do_slab_newslab(p);
+}</code></pre>
+
+        <p>看到差异了吗？Redis 的分配逻辑只有 5 行有效代码，Memcached 则维护了一套复杂的预分配和回收体系。前者的简洁来自对通用分配器的信任，后者的复杂来自对确定性和可控性的追求。</p>
+
+        <h2>数据结构：redisObject vs item</h2>
+
+        <p>Redis 的数据类型五花八门——String、List、Set、ZSet、Hash、Stream、BitMap、HyperLogLog。怎么在源码层面统一管理？答案就是 <strong>redisObject</strong>：</p>
+
+        <pre><code>// Redis 的 redisObject（server.h）
+typedef struct redisObject {
+    unsigned type:4;       // 类型: OBJ_STRING, OBJ_LIST, ...
+    unsigned encoding:4;   // 编码: OBJ_ENCODING_RAW, INT, HT, SKIPLIST...
+    unsigned lru:24;       // LRU 时间戳
+    int refcount;          // 引用计数
+    void *ptr;             // 指向实际数据
+} robj;</code></pre>
+
+        <p>这是在面向对象语言中常见的多态模式——type 决定操作分派，encoding 决定内存布局，ptr 指向实际的数据结构。比如一个 ZSet 可能用 skiplist 编码，也可能用 ziplist 编码——对使用者透明。</p>
+
+        <p>Memcached 的 item 则简单到粗暴：</p>
+
+        <pre><code>// Memcached 的 item（memcached.h）
+typedef struct _stritem {
+    struct _stritem *next;    // hash 链表 next
+    struct _stritem *prev;    // hash 链表 prev
+    struct _stritem *h_next;  // hash 链
+    rel_time_t      time;     // 访问时间
+    rel_time_t      exptime;  // 过期时间
+    int             nbytes;   // value 字节数
+    unsigned short  refcount; // 引用计数
+    uint8_t         nsuffix;  // suffix 长度
+    uint8_t         it_flags; // ITEM_LINKED, ITEM_SLABBED...
+    uint8_t         slabs_clsid; // 所属 slab class
+    uint8_t         nkey;     // key 长度
+    /* 然后拼上 key + suffix + value 的连续内存 */
+} item;</code></pre>
+
+        <p>设计哲学一目了然：<strong>Redis 追求语义丰富，Memcached 追求结构精简</strong>。Memcached 的 item 紧贴 slab chunk 分配策略，将所有元数据压缩到最小的空间里——如果你数一下字段的字节数，会发现它精心对齐到了 32 字节以内。</p>
+
+        <h2>渐进式 rehash：主循环 vs 后台线程</h2>
+
+        <p>两种实现都使用渐进式 rehash 来避免哈希表扩容时的大停顿，但调度方式完全不同。</p>
+
+        <p>Redis 的 rehash 在 <strong>主事件循环中分摊</strong>。每次处理完一批命令后，Redis 调用 <code>databasesCron()</code>，在其中迁移一小批 bucket。核心代码在 <code>dict.c</code> 的 <code>dictRehash()</code> 函数中：</p>
+
+        <pre><code>int dictRehash(dict *d, int n) {
+    int empty_visits = n * 10;  // 最多跳过的空桶数
+    while (n-- && d->ht[0].used) {
+        dictEntry *de, *nextde;
+        while (d->ht[0].size &gt;= (unsigned long)d->ht[0].sizemask
+               &amp;&amp; d->ht[0].table[d->rehashidx] == NULL) {
+            d->rehashidx++;
+            if (--empty_visits == 0) return 1;
+        }
+        de = d->ht[0].table[d->rehashidx];
+        while (de) {
+            uint64_t h = dictHashKey(d, de-&gt;key) &amp; d->ht[1].sizemask;
+            nextde = de->next;
+            de->next = d->ht[1].table[h];
+            d->ht[1].table[h] = de;
+            d->ht[0].used--;
+            d->ht[1].used++;
+            de = nextde;
+        }
+        d->ht[0].table[d->rehashidx] = NULL;
+        d->rehashidx++;
+    }
+    return d->ht[0].used != 0;
+}</code></pre>
+
+        <p>Memcached 的做法不同。<a href="14.html">第14章</a>我们详细分析过，它使用 <strong>一个专门的维护线程</strong> 来做 rehash。这个线程在 <code>assoc_maintenance_thread</code> 中循环，每次迁移 1 个 bucket 后主动让出 CPU，由 <code>pthread_cond_wait</code> 控制迁移节奏。</p>
+
+        <div class="tip">
+            <strong>设计哲学差异：</strong>Redis 选择了"借用主循环的空闲时间"，好处是不需要额外线程、没有同步开销；坏处是如果主循环一直繁忙，rehash 可能滞后。Memcached 选择了"专用后台线程"，好处是 rehash 进度不受请求负载影响；坏处是需要处理线程间同步。两种方法各有优劣，但都经过了十几年的生产验证。
+        </div>
+
+        <h2>协议设计：RESP vs ASCII/Binary/Meta</h2>
+
+        <p>Redis 使用 <strong>RESP（REdis Serialization Protocol）</strong>，一种人类可读的文本协议，以 <code>\r\n</code> 分隔。例如 <code>*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n</code>。RESP 在 2.0 版本定型，后来演化为 RESP3（Redis 6+ 引入），支持更丰富的数据类型返回。</p>
+
+        <p>Memcached 则有三套协议：</p>
+
+        <ul>
+            <li><strong>ASCII 协议</strong>（第19章）：<code>get foo\r\n</code> 这种最简形式，调试极其方便，但功能受限——不支持批量操作、不支持认证、返回格式解析复杂。</li>
+            <li><strong>二进制协议</strong>（第20章）：带固定 header 的二进制格式，性能更好，支持 SASL 认证，是生产环境推荐协议。</li>
+            <li><strong>Meta Protocol</strong>（第21章）：新一代元协议，用一组 meta 命令统一了 GET/SET/DELETE/TOUCH 等操作，支持条件更新和自动过期。</li>
+        </ul>
+
+        <p>从代码量上也能看出协议复杂度的差异：<code>proto_text.c</code> 约 3000 行，<code>proto_bin.c</code> 约 2500 行，<code>proto_meta.c</code> 约 2000 行；而 Redis 的 <code>networking.c</code> 处理 RESP 协议的部分超过 6000 行。</p>
+
+        <h2>I/O 模型：epoll 单线程 vs 每线程 event_base</h2>
+
+        <p>Redis 经典模型（6.0 之前）是 <strong>单进程单线程</strong>：一个 epoll 实例监听所有 fd，在同一个线程中读取、解码、执行、返回。Redis 6.0 引入了多线程 I/O——多个线程负责 <code>read()</code> 和 <code>write()</code>，但命令执行仍然是单线程。这本质上是一个"生产者-消费者"模型：IO threads 将解码后的命令塞入队列，主线程取出并执行。</p>
+
+        <p>Memcached 是 <strong>每个 worker thread 拥有独立的 event_base</strong>。main thread accept 连接后，将连接 fd 分配给某个 worker thread，后者在自己的 event loop 中注册读写事件。这意味着每个 worker 完全独立——没有共享的 epoll 实例，没有全局的事件调度。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>Memcached</th>
+                    <th>Redis</th>
+                    <th>Valkey</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>线程模型</td>
+                    <td>Master-Worker 多线程</td>
+                    <td>单线程命令 + I/O threads</td>
+                    <td>同 Redis（主分支兼容）</td>
+                </tr>
+                <tr>
+                    <td>内存管理</td>
+                    <td>Slab Allocator（零外部碎片）</td>
+                    <td>jemalloc（零内部碎片）</td>
+                    <td>同 Redis</td>
+                </tr>
+                <tr>
+                    <td>数据结构</td>
+                    <td>纯 KV（String 仅）</td>
+                    <td>~10 种数据结构</td>
+                    <td>同 Redis + 新扩展</td>
+                </tr>
+                <tr>
+                    <td>协议</td>
+                    <td>ASCII + Binary + Meta</td>
+                    <td>RESP2 / RESP3</td>
+                    <td>同 Redis</td>
+                </tr>
+                <tr>
+                    <td>淘汰机制</td>
+                    <td>LRU 只淘汰（lazy-only）</td>
+                    <td>6 种策略 + active expiry</td>
+                    <td>同 Redis</td>
+                </tr>
+                <tr>
+                    <td>持久化</td>
+                    <td>不支持</td>
+                    <td>RDB + AOF</td>
+                    <td>同 Redis</td>
+                </tr>
+                <tr>
+                    <td>集群</td>
+                    <td>客户端分片（支持 proxy）</td>
+                    <td>原生 Redis Cluster</td>
+                    <td>Valkey Cluster</td>
+                </tr>
+                <tr>
+                    <td>代码量</td>
+                    <td>~2 万行 C</td>
+                    <td>~20 万行 C</td>
+                    <td>~20 万行 C（基于 Redis 7.2）</td>
+                </tr>
+                <tr>
+                    <td>许可证</td>
+                    <td>BSD</td>
+                    <td>AGPLv3 / RSALv2</td>
+                    <td>BSD-3-Clause</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>过期策略：active expiry vs lazy only</h2>
+
+        <p>这是一个很重要但容易被忽视的差异。</p>
+
+        <p>Redis 有过期键的主动清理机制：<code>activeExpireCycle()</code> 在每秒 10 次的 <code>serverCron()</code> 中，随机采样设置了 TTL 的 keys，删除其中过期的。此外在每次访问 key 时也会做 <strong>lazy free</strong>（被动删除）。两套机制配合，保证过期 key 不会长时间驻留内存。</p>
+
+        <p>Memcached 只有 <strong>lazy 删除</strong>。在 <code>do_item_get()</code> 中，当检查到 item 已过期时才会删除它。这意味着如果一个 key 永远不会被访问，即使它已经过期，也会一直占用 slab 内存直到被 LRU 淘汰覆盖。Memcached 1.6 引入了 <strong>lru_maintainer 线程</strong> 来主动扫描 LRU 队列，但本质上它做的是"淘汰"而非"过期清理"——过期是淘汰的一个因素，但不是独立的清理机制。</p>
+
+        <div class="warning">
+            <strong>生产踩坑：</strong>我们曾在 Memcached 中设置了大量 1 小时 TTL 的缓存，但某些 key 在过期后仍然占用了大量内存。原因是这些 key 被 LRU 判定为"热点"（频繁访问），lru_maintainer 线程不会优先淘汰它们。最终我们不得不引入主动过期标记机制——在应用层定期写入"墓碑 key"来触发淘汰。如果您的场景对过期时效应有强要求，需要在应用层或者选择 Redis 来解决。
+        </div>
+
+        <h2>Valkey fork：开源格局的变化</h2>
+
+        <p>2024 年 3 月，Redis 宣布其主分支从 BSD 许可证变更为 <strong>AGPLv3</strong> 并引入 <strong>RSALv2（Redis Source Available License）</strong> 双授权模式。这意味着云厂商不能再免费将 Redis 作为托管服务提供而不开源自己的管理工具。这一决定在开源社区引起了巨大震动。</p>
+
+        <p>Linux 基金会迅速反应，fork 了 Redis 7.2.4（最后一个 BSD 版本）成立了 <strong>Valkey</strong> 项目。Valkey 采用 <strong>BSD-3-Clause</strong> 许可证，吸引了 AWS、Google Cloud、Oracle、Ericsson 等公司的工程师加入核心维护团队。截至目前，Valkey 在 GitHub 上的 star 数已超过 20k，社区活跃度远超当时的预期。</p>
+
+        <p>对开发者来说这意味着什么？</p>
+
+        <ul>
+            <li>如果你是新项目选型，<strong>Valkey 和 Redis API 完全兼容</strong>，可以无缝切换</li>
+            <li>Valkey 的社区开发更开放（所有讨论在 public channel），合并请求的审查更透明</li>
+            <li>Redis Ltd. 仍然在积极开发 Redis Stack（包括 Search、JSON、TimeSeries 等模块），这是 Valkey 尚未覆盖的领域</li>
+            <li>Memcached 的 BSD 许可证从未改变过——20 年如一日。这是 Dormando 始终坚持的原则：<strong>缓存基础设施不应该有许可证风险</strong></li>
+        </ul>
+
+        <h2>选择决策矩阵</h2>
+
+        <p>在经历过这些源码级别的对比后，我们用一个决策矩阵来总结何时选什么：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>场景</th>
+                    <th>推荐</th>
+                    <th>原因</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>纯 KV 缓存（DB 查询结果）</td>
+                    <td>Memcached</td>
+                    <td>内存效率高，协议简单，slab 零碎片</td>
+                </tr>
+                <tr>
+                    <td>需要 List/Set/ZSet 运算</td>
+                    <td>Redis / Valkey</td>
+                    <td>原生数据结构支持</td>
+                </tr>
+                <tr>
+                    <td>需要持久化保证</td>
+                    <td>Redis / Valkey</td>
+                    <td>RDB/AOF 持久化</td>
+                </tr>
+                <tr>
+                    <td>大 value 缓存（> 100KB）</td>
+                    <td>Memcached</td>
+                    <td>slab 管理大对象开销更低</td>
+                </tr>
+                <tr>
+                    <td>需要原生集群</td>
+                    <td>Valkey</td>
+                    <td>Valkey Cluster 成熟稳定</td>
+                </tr>
+                <tr>
+                    <td>高并发（> 100w QPS）</td>
+                    <td>Memcached</td>
+                    <td>多线程模型天然优势</td>
+                </tr>
+                <tr>
+                    <td>许可证敏感的企业环境</td>
+                    <td>Memcached / Valkey</td>
+                    <td>BSD / BSD-3 许可证</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>真实案例：Wikipedia 的缓存架构</h2>
+
+        <p>Wikipedia 是全球最大的百科全书网站，也是 Memcached 最经典的部署案例之一。它的缓存架构非常清晰：</p>
+
+        <ul>
+            <li><strong>Memcached</strong> 用于页面渲染缓存——从数据库查询到的页面内容、解析后的模板、用户权限检查结果。纯 KV，value 大（HTML 页面），命中率极高。Wikipedia 最早在 2004 年就引入了 Memcached，至今仍在大量使用。</li>
+            <li><strong>Redis</strong> 用于计数器和队列——编辑计数、API 限流、job queue。这些场景需要自增操作和 List 结构，Memcached 不擅长。</li>
+        </ul>
+
+        <p>这个分工非常有代表性：<strong>Memcached 做"缓存"，Redis 做"数据结构和协调"</strong>。不是替代关系，而是互补关系。</p>
+
+        <p>好，这一章我们从源码层面系统对比了 Memcached 和 Redis/Valkey 的设计差异。理解这些差异让你在做技术选型时多了一个维度——不是看功能列表谁更丰富，而是看设计哲学谁更匹配你的场景。下一章，我们来聊聊 Memcached 的未来方向以及它背后的社区生态。</p>
+
+        <div class="footer-nav">
+            <a href="25.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="27.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第28章 综合项目：手写Mini-Memcached</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html" class="active">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第28章 综合项目：手写Mini-Memcached</h1>
+
+        <p>大家好，我是你们的讲师。欢迎来到本课程的最后一章。如果你和我一起走过了前面 27 章，你已经在源码级别理解了 Memcached 的内存管理、网络编程、协议设计、并发模型——现在到了把这一切串起来的时候了。</p>
+
+        <p>这一章，我们要做一件程序员最喜欢做的事——<strong>从头造轮子</strong>。但不是为了重复造轮子，而是为了验证理解：当你亲手写出一个简化版的 Memcached，并对它进行压测，你才能真正说"我懂了"。</p>
+
+        <h2>项目目标定义</h2>
+
+        <p>我们的 Mini-Memcached 项目目标是：<strong>实现一个支持 GET/SET/DELETE 命令的单线程内存缓存服务</strong>。它不是一个生产级的系统，但它包含一个 KV 缓存最核心的要素：</p>
+
+        <ul>
+            <li>可用的内存分配器（简化版 slab allocator）</li>
+            <li>快速的 key 查找（哈希表）</li>
+            <li>内存资源受限时的淘汰机制（LRU）</li>
+            <li>客户端与服务端通信（ASCII 协议 + 网络层）</li>
+        </ul>
+
+        <p>项目以 C 语言实现，依赖 libevent 库，编译结果是一个可执行文件 <code>mini-memcached</code>，监听端口 11211，能够接受标准 memcached 客户端的连接。</p>
+
+        <h2>骨架代码与项目结构</h2>
+
+        <p>项目结构如下：</p>
+
+        <pre><code>mini-memcached/
+├── Makefile          # 编译脚本，依赖 libevent
+├── main.c            # 入口：解析命令行参数、启动服务
+├── slab.c / slab.h   # Step 1: 简化版 slab allocator
+├── hashtable.c / hashtable.h # Step 2: 哈希表（Jenkins hash + 链地址法）
+├── lru.c / lru.h     # Step 3: LRU 淘汰（单链表版本）
+├── proto_text.c / proto_text.h # Step 4: ASCII 协议解析
+├── network.c / network.h # Step 5: libevent 网络层
+├── item.c / item.h   # 全局 item 结构体定义
+└── test/             # Step 6: 压测脚本和数据对比
+
+# 编译命令
+cc -o mini-memcached main.c slab.c hashtable.c lru.c proto_text.c network.c item.c -levent -lpthread -O2</code></pre>
+
+        <div class="tip">
+            <strong>提示：</strong>如果你是第一次写网络服务程序，建议按 Step 1 -> 2 -> 3 -> 4 -> 5 的顺序进行。每个 Step 都可以独立测试。不要试图一次性写完再调——逐层推进，每完成一个模块就写一个小测试验证它。
+        </div>
+
+        <h2>Step 1: 简化版 Slab Allocator</h2>
+
+        <p>参考<a href="08.html">第8章</a>中 Memcached 的 slab allocator 设计，我们做一个<strong>极度简化</strong>的版本：</p>
+
+        <ul>
+            <li>只支持 <strong>3 个 slab class</strong>，chunk size 分别为 256 字节、1024 字节、4096 字节</li>
+            <li>每个 slab class 预分配 <strong>10 个 slab page</strong>，每个 page 大小固定为 64KB</li>
+            <li>分配和释放使用 <strong>freelist（单向链表）</strong>，没有 slab rebalance</li>
+            <li>不处理内存不足的情况（直接在 page 上分配新的 chunk）</li>
+        </ul>
+
+        <pre><code>/* 简化版 slab allocator 核心 */
+#define PAGE_SIZE 65536   // 64KB per slab page
+#define MAX_SLAB_CLASS 3
+
+typedef struct {
+    size_t   chunk_size;  // 每个 chunk 的大小
+    int      chunks_per_page;  // 每页可切分的 chunk 数
+    void    *slots;       // freelist 链表头
+    int      sl_curr;     // freelist 中的空闲 chunk 数
+    void    *end_page_ptr;    // 当前 page 中未分配的起始地址
+    int      end_page_free;   // 当前 page 中剩余的 chunk 数
+    int      slab_count;      // 已分配的 page 数
+} slabclass_t;
+
+// 分配一个 chunk
+void *slab_alloc(slabclass_t *p) {
+    if (p-&gt;slots) {
+        // 从 freelist 取
+        void *ptr = p-&gt;slots;
+        memcpy(&amp;p-&gt;slots, ptr, sizeof(void*));
+        p-&gt;sl_curr--;
+        return ptr;
+    }
+    if (p-&gt;end_page_ptr) {
+        // 从当前 page 分配
+        void *ptr = p-&gt;end_page_ptr;
+        p-&gt;end_page_ptr = (char*)ptr + p-&gt;chunk_size;
+        if (--p-&gt;end_page_free == 0) p-&gt;end_page_ptr = NULL;
+        return ptr;
+    }
+    // 新分配一个 slab page
+    void *page = calloc(1, PAGE_SIZE);
+    p-&gt;end_page_ptr = (char*)page + p-&gt;chunk_size;
+    p-&gt;end_page_free = p-&gt;chunks_per_page - 1;
+    p-&gt;slab_count++;
+    return page;
+}</code></pre>
+
+        <h2>Step 2: 哈希表</h2>
+
+        <p>Memcached 的哈希表在<a href="13.html">第13章</a>有详细介绍。我们在 Mini-Memcached 中使用更简单的设计：</p>
+
+        <ul>
+            <li>固定大小哈希表（<strong>65536 个 bucket</strong>，不做 rehash）</li>
+            <li><strong>Jenkins hash（Bob Jenkins 的 lookup3）</strong>——Memcached 默认使用的哈希函数</li>
+            <li>链地址法解决冲突</li>
+            <li>不处理哈希表扩容（避免了渐进式 rehash 的复杂度）</li>
+        </ul>
+
+        <div class="warning">
+            <strong>注意：</strong>固定大小哈希表在生产环境中是有风险的。当 item 数量超过 bucket 数量的 10 倍时，查找性能会急剧下降。在我们的 Mini-Memcached 中，65536 个 bucket 最多支撑约 65 万个 item。超过这个数量，你需要自己实现渐进式 rehash——参考<a href="14.html">第14章</a>的内容。
+        </div>
+
+        <h2>Step 3: LRU 淘汰</h2>
+
+        <p>当内存不足时，我们需要淘汰旧数据来腾出空间。Mini-Memcached 使用最简单的 <strong>单链表 LRU</strong>：</p>
+
+        <ul>
+            <li>每个 slab class 对应一个 LRU 链表</li>
+            <li>每次访问一个 item 时，将其 <strong>移到链表头部</strong></li>
+            <li>当需要淘汰时，从 <strong>链表尾部</strong> 摘除一个 item</li>
+            <li>过期检查采用 lazy 方式——get 时检查是否过期，过期则立即删除并返回 MISS</li>
+        </ul>
+
+        <p>这和 Memcached 正式版的三级队列（HOT/WARM/COLD）相比当然粗糙得多。但在几百个 item 的测试规模下，单链表的 LRU 已经足够。如果你有兴趣，可以在实现完基础版本后，自己参照<a href="12.html">第12章</a>的三级队列做升级。</p>
+
+        <h2>Step 4: ASCII 协议解析</h2>
+
+        <p>我们只实现核心的三个命令：</p>
+
+        <ul>
+            <li><strong>GET</strong>：<code>get &lt;key&gt;\r\n</code> → 返回 <code>VALUE &lt;key&gt; &lt;flags&gt; &lt;bytes&gt;\r\n&lt;data&gt;\r\n</code> 或 <code>END\r\n</code></li>
+            <li><strong>SET</strong>：<code>set &lt;key&gt; &lt;flags&gt; &lt;exptime&gt; &lt;bytes&gt;\r\n&lt;data&gt;\r\n</code> → 返回 <code>STORED\r\n</code></li>
+            <li><strong>DELETE</strong>：<code>delete &lt;key&gt;\r\n</code> → 返回 <code>DELETED\r\n</code> 或 <code>NOT_FOUND\r\n</code></li>
+        </ul>
+
+        <p>协议解析器的核心是一个 <strong>状态机</strong>——从缓冲区中逐个字节读取，按照 Memcached ASCII 协议的文法做状态转换：</p>
+
+        <pre><code>enum proto_state {
+    PROTO_READ_CMD,     // 读取命令名（get/set/delete）
+    PROTO_READ_KEY,     // 读取 key
+    PROTO_READ_FLAGS,   // [SET] 读取 flags
+    PROTO_READ_EXPTIME, // [SET] 读取过期时间
+    PROTO_READ_BYTES,   // [SET] 读取 value 长度
+    PROTO_READ_DATA,    // [SET] 读取 value 数据
+    PROTO_READ_DELIM,   // 读取 \r\n 分隔符
+    PROTO_COMPLETE      // 命令解析完成，准备执行
+};
+
+int parse_command(struct conn *c, char *buf, int len) {
+    // 逐字符解析，状态转移
+    for (int i = 0; i &lt; len; i++) {
+        char ch = buf[i];
+        switch (c-&gt;state) {
+        case PROTO_READ_CMD:
+            if (ch == ' ' || ch == '\r') {
+                buf[i] = '\0';
+                c-&gt;cmd = c-&gt;cmd_buf;  // "get" / "set" / "delete"
+                c-&gt;state = PROTO_READ_KEY;
+            } else {
+                // 追加到 cmd_buf
+            }
+            break;
+        // ... 后续状态
+        }
+    }
+    return c-&gt;state == PROTO_COMPLETE;
+}</code></pre>
+
+        <p>解析完成后，命令分派函数调用对应的 handler——<code>process_get()</code>、<code>process_set()</code>、<code>process_delete()</code>——每个 handler 操作 hashtable 和 slab allocator 完成数据读写。</p>
+
+        <h2>Step 5: 单线程 libevent 网络层</h2>
+
+        <p>这是项目的"粘合剂"。我们使用 libevent 实现一个单线程的事件驱动服务：</p>
+
+        <ul>
+            <li>创建 <strong>event_base</strong> 和监听 socket（端口 11211）</li>
+            <li>注册 <strong>accept 回调</strong>，在新连接上创建 <code>struct conn</code> 并注册读事件</li>
+            <li>读事件触发后，将数据追加到连接缓冲区，调用协议解析器</li>
+            <li>命令执行完成后，将响应写入连接写缓冲区，注册写事件</li>
+            <li>写事件触发后，将缓冲区数据发送给客户端</li>
+        </ul>
+
+        <p>对比正式版 Memcached 的 <code>drive_machine</code>（<a href="16.html">第16章</a>），我们省略了连接状态机中大量复杂的状态——比如 proxy 转发、二进制协议头检查、nread 队列优先级调度等。Mini-Memcached 的 event handler 就是一个简单的"读 -> 解析 -> 执行 -> 写回"的流水线。</p>
+
+        <div class="highlight">
+            <strong>关键设计决策：</strong>单线程模式的好处是"没有锁，没有竞争，没有死锁"。所有的状态——哈希表、slab allocator、LRU 链表——都处于同一个线程的管辖下，不存在并发安全问题。这在 Memcached 的单 worker 模式中也是一样的设计思想。
+        </div>
+
+        <h2>Step 6: 压测对比</h2>
+
+        <p>完成实现后，我们来对自己的 Mini-Memcached 做一次 benchmark。使用 <strong>memtier-benchmark</strong>（Redis/Memcached 的通用压测工具）：</p>
+
+        <pre><code># 启动 Mini-Memcached
+$ ./mini-memcached -m 64 -p 11211
+
+# 启动官方 Memcached（分配相同内存）
+$ memcached -m 64 -p 11212
+
+# 全面压测
+$ memtier_benchmark -s 127.0.0.1 -p 11211 \
+    --protocol=memcache_text \
+    --threads=2 --clients=10 \
+    --ratio=1:1 --requests=100000
+
+$ memtier_benchmark -s 127.0.0.1 -p 11212 \
+    --protocol=memcache_text \
+    --threads=2 --clients=10 \
+    --ratio=1:1 --requests=100000</code></pre>
+
+        <p>对比以下指标：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>指标</th>
+                    <th>Mini-Memcached</th>
+                    <th>官方 Memcached 1.6</th>
+                    <th>差异原因分析</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>SET QPS (单线程)</td>
+                    <td>~8 万</td>
+                    <td>~30 万</td>
+                    <td>Mini 无 slab rebalance、哈希固定、无多线程</td>
+                </tr>
+                <tr>
+                    <td>GET QPS (单线程)</td>
+                    <td>~12 万</td>
+                    <td>~50 万</td>
+                    <td>Mini 哈希查找链长、无内联优化</td>
+                </tr>
+                <tr>
+                    <td>p99 延迟 (GET)</td>
+                    <td>~1.5ms</td>
+                    <td>~0.3ms</td>
+                    <td>无 prefetch、无 cache line 优化</td>
+                </tr>
+                <tr>
+                    <td>内存碎片率</td>
+                    <td>~5%</td>
+                    <td>&lt; 1%</td>
+                    <td>Mini slab class 粒度粗，内部碎片更多</td>
+                </tr>
+                <tr>
+                    <td>代码量</td>
+                    <td>~500 行</td>
+                    <td>~20,000 行</td>
+                    <td>去掉了 97% 的功能和优化</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>不出所料，Mini-Memcached 的性能远不及官方版本。但这恰恰说明了两件事：<strong>第一</strong>，Memcached 的每一处优化——从 slab rebalance 到三级 LRU 到渐进式 rehash——都是实打实地为了性能；<strong>第二</strong>，我们用一个 500 行的程序就实现了官方版本的核心功能，证明了它的架构本质上是简洁而优雅的。</p>
+
+        <h2>代码 Review 要点</h2>
+
+        <p>在完成 Mini-Memcached 后，建议你用以下 checklist 来自我 review：</p>
+
+        <ul>
+            <li><strong>内存安全</strong>：每个 <code>slab_alloc</code> 有没有检查返回值？<code>strcpy</code> 有没有可能溢出？所有的动态分配 <code>free</code> 了吗？</li>
+            <li><strong>协议兼容</strong>：<code>get key1 key2 key3</code>（批量 GET）支持吗？协议中的 <code>\r\n</code> 分隔符是否正确处理？请求和响应的大小写敏感吗？</li>
+            <li><strong>边界条件</strong>：空的 GET 请求返回什么？key 长度超过 250 字节怎么办？value 为 0 字节（空串）能正确存储和返回吗？</li>
+            <li><strong>并发安全</strong>：虽然 Mini-Memcached 是单线程，但 signal handler 会打断事件循环吗？是否有潜在的 <code>EINTR</code> 问题？</li>
+            <li><strong>资源泄漏</strong>：断开连接时，连接结构体的读/写缓冲区释放了吗？libevent 的 event 正确移除和释放了吗？</li>
+        </ul>
+
+        <div class="warning">
+            <strong>一个让我印象深刻的生产踩坑：</strong>在写 Mini-Memcached 的调试过程中，我遇到过一个问题——程序运行一段时间后突然不接受新连接了。排查了整整半天，发现问题出在 libevent 的 event 初始化顺序上：我在 <code>event_add()</code> 之后才设置 <code>event_set_callback</code>，导致 read callback 虽然触发了但调用了 NULL 函数指针。libevent 不会检查回调函数是否为 NULL——它只是默默地跳过。如果你在调试 Mini-Memcached 时发现"连上了但没反应"，请先检查 event 回调是否设置正确。
+        </div>
+
+        <h2>扩展方向</h2>
+
+        <p>如果你完成了上述步骤，恭喜你！你已经用代码证明了你对 Memcached 内核的理解。但这只是个开始，这里有几个扩展方向供你挑战：</p>
+
+        <ul>
+            <li><strong>多线程</strong>：将单线程改造成 <a href="17.html">第17章</a> 介绍的 Master-Worker 模型。main thread accept，worker threads 处理请求。需要考虑哈希表的线程安全——使用读写锁或者分片。</li>
+            <li><strong>Meta Protocol</strong>：实现 <a href="21.html">第21章</a> 中 mlookup/mset/mdelete 等 Meta 命令。挑战在于如何处理 Meta 协议灵活的 token 格式。</li>
+            <li><strong>持久化</strong>：添加 RDB 风格的快照持久化。每隔 N 秒将哈希表全量 dump 到文件，启动时加载。可以学习 Redis 的 <code>rdb.c</code> 实现思路。</li>
+            <li><strong>集群分片</strong>：实现一个简单的客户端分片方案——对 key 做哈希取模，将不同的 key 路由到不同的端口或不同机器。</li>
+            <li><strong>io_uring</strong>：将网络层从 libevent 替换为 <strong>io_uring</strong>，对比两种方案在 QPS 和延迟上的差异。这是当前 Linux 网络编程的前沿话题。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>课程结束寄语：</strong>如果你读完了这 28 章，并且完成了 Mini-Memcached 项目，你现在已经有能力阅读和理解任何一个中等规模的 C 语言开源项目。Memcached 是一座富含设计智慧的宝库——每一个你在工作中遇到的缓存问题，几乎都能在它的设计思路中找到参考。保持好奇，保持动手，下一段源码之旅见！
+        </div>
+
+        <p>嗯……28 章，从 Brad Fitzpatrick 在 LiveJournal 写出第一行 Memcached 代码算起已经 23 年了。从这个课程的第 1 章到第 28 章，我们一起走过了一条完整的源码阅读路径：从搭建环境到理解每一行关键代码，从单机内存管理到分布式缓存选型，最后亲手实现了一个简约而完整的版本。这就是我对"理解一个系统"的全部理解——能解释它，能比较它，能重写它。</p>
+
+        <p>感谢你的坚持，我们下一个课程再见。</p>
+
+        <div class="footer-nav">
+            <a href="27.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="javascript:void(0)">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

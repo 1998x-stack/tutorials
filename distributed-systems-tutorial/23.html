@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第23章 Docker与K8s编排</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是分布式系统</a></li>
+            <li><a href="02.html">第2章 系统模型与时间</a></li>
+            <li><a href="03.html">第3章 CAP定理与取舍</a></li>
+            <li><a href="04.html">第4章 一致性模型</a></li>
+            <li><a href="05.html">第5章 通信基础</a></li>
+            <li><a href="06.html">第6章 序列化与编解码</a></li>
+            <li><a href="07.html">第7章 分布式系统设计模式</a></li>
+            <li><a href="08.html">第8章 RPC远程过程调用</a></li>
+            <li><a href="09.html">第9章 消息队列与事件驱动</a></li>
+            <li><a href="10.html">第10章 P2P与Gossip协议</a></li>
+            <li><a href="11.html">第11章 服务网格</a></li>
+            <li><a href="12.html">第12章 网络协议栈深度</a></li>
+            <li><a href="13.html">第13章 组通信与广播</a></li>
+            <li><a href="14.html">第14章 2026通信前沿</a></li>
+            <li><a href="15.html">第15章 复制与一致性</a></li>
+            <li><a href="16.html">第16章 分布式事务</a></li>
+            <li><a href="17.html">第17章 Raft共识算法</a></li>
+            <li><a href="18.html">第18章 Paxos与BFT</a></li>
+            <li><a href="19.html">第19章 并行计算模型</a></li>
+            <li><a href="20.html">第20章 数据并行</a></li>
+            <li><a href="21.html">第21章 模型与流水线并行</a></li>
+            <li><a href="22.html">第22章 分布式训练实战</a></li>
+            <li><a href="23.html" class="active">第23章 Docker与K8s编排</a></li>
+            <li><a href="24.html">第24章 可观测性</a></li>
+            <li><a href="25.html">第25章 调试与压测</a></li>
+            <li><a href="26.html">第26章 AI训练基础设施</a></li>
+            <li><a href="27.html">第27章 边缘计算与IoT</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第23章 Docker与K8s编排</h2>
+
+        <p>十年前，部署一个分布式系统意味着你需要在机房里手工配置几十台物理机，跑Ansible脚本、安装依赖、调防火墙规则，一折腾就是好几天。今天，"docker-compose up"加几行YAML，一个多服务架构在本地就能跑起来；"kubectl apply -f deployment.yaml"，几十个Pod就在集群里自动调度了。容器和编排不是锦上添花的工具——它们已经是分布式系统部署的<strong>标准范式</strong>。</p>
+
+        <p>这一章我们不讲单纯的K8s考证内容，而是从分布式系统的视角来看：容器到底解决了什么问题？Kubernetes的核心抽象是如何映射到分布式系统设计中的？以及在实际生产中，你会踩到哪些和资源、网络、状态有关的坑。</p>
+
+        <h2>容器化原理</h2>
+
+        <p>很多人把容器理解成"轻量级虚拟机"，这个类比方便但不准确。容器本质上就是宿主机上的一个普通进程，只不过被操作系统用两套机制做了隔离和限制。</p>
+
+        <h3>Namespace：你看到的世界是假的</h3>
+
+        <p>Linux Namespace是容器隔离的根基。它让进程以为自己是系统里唯一的进程，拥有独立的网络栈、文件系统挂载点、主机名。Docker创建容器时会默认启用以下6种（加上User就是7种）：</p>
+
+        <table>
+            <tr><th>Namespace</th><th>隔离内容</th><th>典型作用</th></tr>
+            <tr><td>PID</td><td>进程编号</td><td>容器内只能看到自己的进程（PID 1），看不到宿主机其他进程</td></tr>
+            <tr><td>Network</td><td>网络栈（网卡、路由、iptables）</td><td>每个容器有自己的lo和eth0，端口不会和宿主机冲突</td></tr>
+            <tr><td>Mount</td><td>文件系统挂载点</td><td>容器只能看到自己的文件系统，宿主机目录通过挂载卷暴露</td></tr>
+            <tr><td>UTS</td><td>主机名和域名</td><td>容器内hostname独立</td></tr>
+            <tr><td>IPC</td><td>进程间通信资源（信号量、消息队列）</td><td>防止容器间通过IPC干扰</td></tr>
+            <tr><td>User</td><td>用户和组ID</td><td>容器内的root可以映射为宿主机普通用户，提升安全性</td></tr>
+        </table>
+
+        <div class="tip">
+            <strong>小贴士：</strong>正因为用了Network Namespace，你才能在同一台机器上跑两个都用80端口的Nginx容器——每个容器有自己的网络栈，互不干扰。默认情况下容器之间甚至不能互相ping通，得靠Docker网桥把它们连起来。
+        </div>
+
+        <h3>Cgroups：别吃太多</h3>
+
+        <p>Namespace让进程"看不见"邻居，Cgroups（Control Groups）则限制它"吃多少"。没有Cgroups，一个容器里的内存泄漏会直接拖死宿主机上的所有其他进程。Docker通过cgroups约束CPU、内存、磁盘IO和网络带宽。最常遇到的就是内存limit过低导致OOMKilled，这个我们后面讲踩坑时会细说。</p>
+
+        <h3>镜像分层与写时复制</h3>
+
+        <p>Docker镜像是分层（Layer）的。每一层就是一个只读的diff，叠在一起构成完整的文件系统。当你docker pull时，已经存在的层会复用硬盘缓存；当你docker build时，只重新编译变化的那几层。</p>
+
+        <p>容器启动时，Docker会在镜像最上层加一个可写层（Container Layer）。写时复制（Copy-on-Write, CoW）的意思是：只有当进程要修改某个文件时，才会把这个文件从只读层复制到可写层。这意味着同一个镜像启动一百个容器，基础层的文件系统在内存里只存一份。这也是容器比虚拟机启动快得多的根本原因之一——不需要拷贝整个操作系统。</p>
+
+        <h2>Docker实战</h2>
+
+        <h3>多阶段构建：又小又安全</h3>
+
+        <p>早期Dockerfile的最大问题是镜像体积。你装gcc编译了一个二进制，但运行时只需要那个二进制，不需要编译器。多阶段构建（Multi-stage Build）解决了这个问题：</p>
+
+        <pre><code># 第一阶段：编译
+FROM golang:1.22 AS builder
+WORKDIR /app
+COPY . .
+RUN CGO_ENABLED=0 go build -o server .
+
+# 第二阶段：运行
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /app/server /server
+EXPOSE 8080
+CMD ["/server"]</code></pre>
+
+        <p>最终镜像只有Alpine的5MB加上你的二进制，而不是Go SDK的几百MB。更重要的是——攻击面也小了，alpine里连shell都没有，想提权都难。</p>
+
+        <h3>docker-compose：本地微服务利器</h3>
+
+        <p>在本地开发阶段，docker-compose可以让你一键拉起依赖的所有服务：数据库、缓存、消息队列、你的应用。以下是一个典型的web+redis+postgres编排：</p>
+
+        <pre><code>version: "3.9"
+services:
+  web:
+    build: .
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+      - db
+  redis:
+    image: redis:7-alpine
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_PASSWORD: devpass
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:</code></pre>
+
+        <h3>常用命令速查</h3>
+
+        <table>
+            <tr><th>操作</th><th>命令</th></tr>
+            <tr><td>实时查看容器日志</td><td><code>docker logs -f &lt;container&gt;</code></td></tr>
+            <tr><td>进入容器调试</td><td><code>docker exec -it &lt;container&gt; sh</code></td></tr>
+            <tr><td>查看资源占用</td><td><code>docker stats</code></td></tr>
+            <tr><td>清理所有停止的容器</td><td><code>docker container prune</code></td></tr>
+            <tr><td>查看镜像分层历史</td><td><code>docker history &lt;image&gt;</code></td></tr>
+            <tr><td>从Dockerfile构建</td><td><code>docker build -t myapp:latest .</code></td></tr>
+        </table>
+
+        <h2>Kubernetes核心概念</h2>
+
+        <p>Kubernetes本质上是一个<strong>分布式系统编排引擎</strong>。它把一台台机器抽象成一个统一的资源池，你告诉它"我要跑3个副本、每个需要0.5核CPU和512MB内存、暴露8080端口"，它就帮你找合适的节点去调度。</p>
+
+        <p>以下这几个概念是你必须彻底理解的，它们构成了K8s的抽象层次：</p>
+
+        <table>
+            <tr><th>资源</th><th>作用</th><th>一句话</th></tr>
+            <tr><td>Pod</td><td>最小调度单元，包含一个或多个容器</td><td>一组共享网络和存储的容器，同生命周期</td></tr>
+            <tr><td>Deployment</td><td>声明式管理Pod副本数和滚动更新</td><td>我要3个Pod一直跑着，版本升级时逐个替换</td></tr>
+            <tr><td>Service</td><td>为一组Pod提供稳定的网络入口</td><td>Pod IP会变，Service IP/域名不变</td></tr>
+            <tr><td>ConfigMap</td><td>挂载配置文件到Pod</td><td>把配置和镜像解耦</td></tr>
+            <tr><td>Secret</td><td>存储敏感信息（密码、Token、证书）</td><td>Base64编码+RBAC保护，不要放镜像里</td></tr>
+            <tr><td>Ingress</td><td>七层HTTP/HTTPS路由到Service</td><td>一个域名入口，背后路由到不同Service</td></tr>
+        </table>
+
+        <p>它们的关系是这样的：Ingress接收外部流量，根据域名/path路由到Service；Service通过Label Selector找到一组Pod；Pod是Deployment创建的；Deployment负责维持Pod副本数；ConfigMap和Secret通过Volume挂载到Pod里。</p>
+
+        <div class="highlight">
+            <strong>关键理解：</strong>Pod是K8s中最核心的抽象。同一个Pod里的容器共享Network Namespace（所以可以用localhost通信）和Volume。Sidecar模式——比如一个容器跑业务逻辑，另一个容器负责日志采集——正是利用了Pod的这一特性。
+        </div>
+
+        <h2>K8s网络模型</h2>
+
+        <p>K8s的网络模型有几个硬性要求：每个Pod都有独立的IP，Pod内所有容器共享这个IP；所有Pod之间不需要NAT就能直接通信；所有节点和Pod之间也不需要NAT。这就需要CNI插件来实现。</p>
+
+        <h3>CNI插件选型</h3>
+
+        <table>
+            <tr><th>插件</th><th>网络模式</th><th>性能</th><th>适用场景</th></tr>
+            <tr><td>Calico</td><td>纯三层BGP路由，无Overlay</td><td>接近原生</td><td>大规模生产环境，性能敏感</td></tr>
+            <tr><td>Flannel</td><td>VXLAN Overlay</td><td>略有损耗</td><td>中小规模，快速上手</td></tr>
+            <tr><td>Cilium</td><td>eBPF技术</td><td>极优</td><td>需要网络策略和可观测性的场景</td></tr>
+        </table>
+
+        <h3>Service类型</h3>
+
+        <p>K8s Service有三种主要类型，解决不同场景的访问需求：</p>
+        <ul>
+            <li><strong>ClusterIP（默认）：</strong>只在集群内部可达，用于服务间调用。CoreDNS会为它注册一个域名，比如 <code>my-service.namespace.svc.cluster.local</code>。</li>
+            <li><strong>NodePort：</strong>在每个节点上开一个端口（30000-32767），外部流量通过 <code>节点IP:NodePort</code> 访问。适合测试和演示。</li>
+            <li><strong>LoadBalancer：</strong>云厂商会自动创建一个负载均衡器，分配公网IP。生产环境最常用。</li>
+        </ul>
+
+        <p>服务发现方面，K8s集群默认跑着CoreDNS Pod。当你创建了一个名为"payment-service"的Service，CoreDNS会自动添加一条A记录——集群内任何Pod都可以通过这个域名访问到它，完全不需要手工维护服务注册表。</p>
+
+        <h2>存储与状态</h2>
+
+        <p>容器是"无状态"的，但大多数应用是有状态的——数据库要持久化数据、消息队列要保留未消费的消息。K8s通过PV/PVC机制来解耦存储的"供应"和"消费"。</p>
+
+        <ul>
+            <li><strong>PV（PersistentVolume）：</strong>集群管理员预先准备好的一块存储，可以是NFS、Ceph、云磁盘（EBS/PD）。</li>
+            <li><strong>PVC（PersistentVolumeClaim）：</strong>用户声明需要的存储大小和访问模式（ReadWriteOnce/ReadOnlyMany/ReadWriteMany），K8s自动绑配合适的PV。</li>
+            <li><strong>StorageClass：</strong>动态供应。用户不需要等管理员创建PV，只需要指定StorageClass，K8s自动调用云厂商API创建磁盘。</li>
+        </ul>
+
+        <p>对于有状态服务（数据库、ZooKeeper、Kafka），使用Deployment会遇到一个问题：所有Pod共享同一个PVC？或者每个Pod需要独立的持久化存储？这就是<strong>StatefulSet</strong>的用武之地。StatefulSet保证每个Pod有固定的序号和稳定的网络标识（<code>pod-0.svc</code>、<code>pod-1.svc</code>），每个Pod绑定自己专属的PVC。扩缩容时按序启停，保障了有状态服务的基本秩序。</p>
+
+        <h2>踩坑：资源管理的雪崩效应</h2>
+
+        <p>讲一个我亲身经历的事故。有一个微服务做图片处理，K8s YAML里requests和limits写得比较随意：requests只写了50m CPU和128Mi内存，但limits设了4核CPU和4Gi内存。实际线上流量一上来，Pod很快就占满了节点的所有内存——因为requests很低，调度器在一个节点上塞了太多Pod。</p>
+
+        <p>结果是什么呢？节点OOM了，kubelet开始驱逐Pod。被驱逐的Pod在其他节点重建，又把其他节点撑爆。连锁反应之下，整个集群90%的Pod都CrashLoopBackOff了。最讽刺的是，我们的监控系统也挂了，连个报警都没收到。</p>
+
+        <p>教训：<strong>requests和limits一定要经过压测后认真设置</strong>。requests不要太低（避免超卖过度），limits不要设得离谱（避免单Pod拖垮节点）。另外，给关键系统组件（kube-system命名空间下的Pod）设置PriorityClass，确保它们不会被业务Pod挤死。</p>
+
+        <div class="warning">
+            <strong>踩坑记录：</strong>另一个常见问题——CrashLoopBackOff。大多数时候不是因为K8s配置错了，而是应用本身启动失败了。先用 <code>kubectl logs &lt;pod&gt; --previous</code> 看上一次退出的日志，或者 <code>kubectl describe pod &lt;pod&gt;</code> 查看Events。很多时候是数据库连接串配错了，跟K8s一点关系都没有。
+        </div>
+
+        <p>这一章我们从Namespace和Cgroups的底层原理讲到了完整的K8s编排体系。容器化让分布式系统的部署变得标准化、可复现，而Kubernetes在此基础上提供了调度、服务发现、存储编排的完整解决方案。下一章我们将进入分布式系统运维中另一个至关重要的话题——<strong>可观测性</strong>：当系统跑起来之后，你怎么知道它内部在发生什么？怎么在微服务迷宫般的调用链中快速定位问题？</p>
+
+        <div class="footer-nav">
+            <a href="22.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="24.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

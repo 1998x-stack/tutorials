@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 多智能体策略梯度</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 智能体革命：从单体到多体</a></li>
+            <li><a href="02.html">第2章 智能体的认知架构</a></li>
+            <li><a href="03.html">第3章 多智能体系统概述</a></li>
+            <li><a href="04.html">第4章 智能体间的博弈论基础</a></li>
+            <li><a href="05.html">第5章 CTDE：集中训练分散执行</a></li>
+            <li><a href="06.html" class="active">第6章 多智能体策略梯度</a></li>
+            <li><a href="07.html">第7章 多智能体通信与协调</a></li>
+            <li><a href="08.html">第8章 LLM智能体的崛起</a></li>
+            <li><a href="09.html">第9章 LangGraph：图状态机编排</a></li>
+            <li><a href="10.html">第10章 CrewAI：角色化智能体团队</a></li>
+            <li><a href="11.html">第11章 AutoGen与Microsoft Agent Framework</a></li>
+            <li><a href="12.html">第12章 MetaGPT：软件公司即智能体社会</a></li>
+            <li><a href="13.html">第13章 框架选型与混合架构</a></li>
+            <li><a href="14.html">第14章 MCP协议：工具层的USB标准</a></li>
+            <li><a href="15.html">第15章 A2A协议：智能体互联网</a></li>
+            <li><a href="16.html">第16章 多智能体安全攻防</a></li>
+            <li><a href="17.html">第17章 智能体免疫系统</a></li>
+            <li><a href="18.html">第18章 生产级多智能体系统</a></li>
+            <li><a href="19.html">第19章 去中心化多智能体拓扑</a></li>
+            <li><a href="20.html">第20章 元认知智能体</a></li>
+            <li><a href="21.html">第21章 多智能体自进化</a></li>
+            <li><a href="22.html">第22章 端到端RL训练智能体系统</a></li>
+            <li><a href="23.html">第23章 LangGraph实战：构建多智能体应用</a></li>
+            <li><a href="24.html">第24章 CrewAI实战：构建内容生产Pipeline</a></li>
+            <li><a href="25.html">第25章 多智能体系统调优与评估</a></li>
+            <li><a href="26.html">第26章 具身集体智能</a></li>
+            <li><a href="27.html">第27章 Agent互联网与开放生态</a></li>
+            <li><a href="28.html">第28章 综合项目：构建自进化研发助手MAS</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第6章 多智能体策略梯度</h2>
+
+        <p>上一章我们详细讨论了CTDE框架下的价值分解方法——VDN、QMIX、QPLEX。这些方法通过学习联合动作价值函数Q<sub>tot</sub>并将其分解为个体Q<sub>i</sub>，来间接得到每个Agent的策略。但价值基方法有一个天然局限：它处理<strong>连续动作空间</strong>非常困难。想象一下，一个机器人Agent的动作是"以0.7m/s的速度向右前方45度移动"——这不是选一个离散动作，而是要从一个连续的高维空间中输出一个向量。价值基方法需要遍历所有动作来计算argmax，这在连续空间中是不可能的。</p>
+
+        <p>这就引出了另一条路线：<strong>策略梯度方法（Policy Gradient Methods）</strong>。策略梯度不通过价值函数间接决定策略，而是<strong>直接学习策略函数</strong>。在多Agent场景中，这类方法通常也采用CTDE框架——集中评论家（Centralized Critic）+ 分散Actor（Decentralized Actor）。</p>
+
+        <p>讲一个我亲历的故事。2022年我们在仿真环境中训练多无人机编队——6架无人机需要保持V字形编队飞行，同时避开障碍物。起初我们用QMIX来尝试，但无人机需要在三维空间连续调整速度和方向——QMIX的离散动作空间完全不够用。后来切换到MADDPG（多Agent DDPG），问题立刻得到了解决：每架无人机输出6维连续动作（线速度3维+角速度3维），编队保持的效果显著提升。但MADDPG的样本效率很低——收集100万步经验只能学到基础编队，而高级避障需要300万步以上。最终我们换成了MAPPO，样本效率是MADDPG的2-3倍。这个故事揭示了三个主要的多Agent策略梯度算法的特点：MADDPG通用但样本效率低，MASAC探索更好，MAPPO最务实。</p>
+
+        <h2>6.1 MADDPG：多智能体深度确定性策略梯度</h2>
+
+        <p>MADDPG（Multi-Agent Deep Deterministic Policy Gradient）可以说是多Agent策略梯度方法中最有影响力的工作，由Lowe等人在2017年提出。它采用CTDE范式，核心设计如下：</p>
+
+        <p><strong>训练阶段（集中评论家）：</strong> 每个Agent有一个<strong>集中的评论家</strong>（Critic）Q<sub>i</sub>(s, a<sub>1</sub>, ..., a<sub>N</sub>)，其输入是所有Agent的观测（或状态）和所有Agent的动作——即全局信息。这意味着评论家知道"所有人正在做什么"。</p>
+
+        <p><strong>执行阶段（分散Actor）：</strong> 每个Agent有一个<strong>分散的Actor</strong>（策略）μ<sub>i</sub>(o<sub>i</sub>)，其输入只有Agent自己的局部观测——不依赖任何其他Agent的信息。</p>
+
+        <p><strong>探索机制：</strong> MADDPG使用<strong>高斯噪声</strong>来鼓励探索——在Actor输出的动作上添加高斯噪声：a<sub>i</sub> = μ<sub>i</sub>(o<sub>i</sub>) + N(0, σ)。σ的衰减策略对训练稳定性影响很大。</p>
+
+        <p>MADDPG的另一个重要贡献是<strong>策略集成</strong>：它维护多个子策略，训练时随机选择一个子策略来收集经验，但优化时用所有子策略的平均梯度。这有效缓解了MAS中策略不收敛的问题。</p>
+
+        <pre><code># MADDPG中的集中评论家训练（简化伪代码）
+def train_maddpg(agents, replay_buffer, batch_size):
+    obs, actions, rewards, next_obs, dones = replay_buffer.sample(batch_size)
+    # obs: [batch, n_agents, obs_dim]
+    # actions: [batch, n_agents, action_dim]
+
+    for i, agent in enumerate(agents):
+        # === 更新评论家（集中式） ===
+        # 预测当前Q值：输入 = 所有Agent的obs + 所有Agent的动作
+        current_q = agent.critic(obs, actions)  # [batch, 1]
+
+        # 计算目标Q值：用目标网络估计下一个状态
+        next_actions = []
+        for j, other_agent in enumerate(agents):
+            next_actions.append(other_agent.actor_target(next_obs[:, j]))
+        next_actions = torch.stack(next_actions, dim=1)  # [batch, n_agents, act_dim]
+
+        target_q = rewards[:, i] + gamma * agent.critic_target(next_obs, next_actions)
+        target_q = target_q * (1 - dones[:, i])
+
+        critic_loss = F.mse_loss(current_q, target_q.detach())
+
+        # === 更新Actor（分散式） ===
+        # Actor只看自己的局部观测
+        predicted_action = agent.actor(obs[:, i])
+        # 但Actor的梯度来自集中评论家（保持其他Agent动作固定）
+        actor_loss = -agent.critic(obs, actions_with_agent_i_replaced).mean()
+
+        agent.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        agent.critic_optimizer.step()
+
+        agent.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        agent.actor_optimizer.step()</code></pre>
+
+        <div class="tip">
+            <strong>学习提示：</strong> MADDPG的一个关键设计细节是：每个Agent拥有<strong>自己的</strong>评论家。这意味着如果有N个Agent，就有N个评论家网络。每个评论家看到的是<strong>所有Agent的全局信息</strong>，但每个评论家服务的对象是<strong>一个特定的Agent</strong>。这比"所有Agent共享一个评论家"更灵活——每个评论家可以学习到不同Agent特有的评价标准。
+        </div>
+
+        <h2>6.2 MASAC：最大熵多智能体SAC</h2>
+
+        <p>SAC（Soft Actor-Critic）在单Agent深度RL中以<strong>优秀的探索能力和训练稳定性</strong>著称。MASAC将这一优势扩展到多Agent场景。</p>
+
+        <p>MASAC的核心创新是引入<strong>熵正则化</strong>——在策略优化目标中加入策略的熵项。这意味着Agent不仅要最大化期望累积奖励，还要尽量保持策略的随机性（避免过早陷入确定性策略）。</p>
+
+        <pre><code># MASAC的目标函数
+J(π_i) = E[ Q_i(s, a_1, ..., a_N)
+         - α * log(π_i(a_i | o_i)) ]
+
+其中：
+- α > 0 是温度系数，控制熵正则化的强度
+- log(π_i(a_i | o_i)) 是策略π_i的熵
+- 高α → 更多探索（策略更随机）
+- 低α → 更注重利用（策略更确定）</code></pre>
+
+        <p>MASAC引入<strong>自动温度调节</strong>来避免手动调α的麻烦——算法会自动学习合适的α值，使得策略的熵维持在目标熵附近。这在MAS中尤其重要：不同Agent可能需要不同的探索程度，手动调整N个α参数是不现实的。</p>
+
+        <p>在实践中，MASAC在需要<strong>持续探索</strong>的MAS场景中表现优异——比如在非平稳环境中，Agent需要不断尝试新策略来适应其他Agent的变化。但MASAC的计算开销比MADDPG大（需要额外维护熵项和α网络），对于Agent数量较多的场景需要谨慎使用。</p>
+
+        <h2>6.3 MAPPO：多智能体PPO</h2>
+
+        <p>MAPPO（Multi-Agent PPO）是近年来最引人注目的MARL算法之一。它的核心思想非常直接：<strong>将单Agent PPO直接扩展到多Agent场景</strong>——所有Agent共享一个集中评论家，每个Agent有自己的分散策略网络，用PPO的裁剪目标（Clipped Objective）和GAE（广义优势估计）来优化。</p>
+
+        <pre><code># MAPPO的损失函数（Python风格伪代码）
+
+def mappo_loss(policy, old_policy, critic, states, actions, rewards, dones):
+    """
+    policy: 当前Agent的策略网络
+    old_policy: 旧策略（用于重要性采样）
+    critic: 集中评论家网络（输入：所有Agent的观测）
+    """
+
+    # 1. 计算GAE优势估计
+    #    评论家基于全局状态估计价值
+    values = critic(states)  # [batch, 1]
+    advantages = compute_gae(values, rewards, dones, gamma=0.99, lam=0.95)
+
+    # 2. 重要性采样比率
+    log_probs = policy.log_prob(actions)
+    old_log_probs = old_policy.log_prob(actions)
+    ratio = exp(log_probs - old_log_probs)  # r_t(θ)
+
+    # 3. PPO裁剪目标
+    clip_epsilon = 0.2
+    clipped_ratio = clip(ratio, 1 - clip_epsilon, 1 + clip_epsilon)
+    policy_loss = -min(ratio * advantages, clipped_ratio * advantages)
+
+    # 4. 价值函数损失
+    value_loss = F.mse_loss(values, rewards + gamma * values_next)
+
+    # 5. 熵奖励（鼓励探索）
+    entropy_bonus = policy.entropy().mean()
+
+    # 总损失
+    total_loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_bonus
+    return total_loss</code></pre>
+
+        <p>为什么MAPPO在实践中往往优于MADDPG？原因有三：</p>
+
+        <ul>
+            <li><strong>样本效率更高：</strong> PPO是on-policy算法，每次更新使用最新的策略收集的数据，避免了off-policy带来的策略滞后问题。虽然on-policy的样本利用率理论上低于off-policy，但PPO通过多epoch更新弥补了这个差距。</li>
+            <li><strong>训练更稳定：</strong> PPO的裁剪目标从根本上限制了策略更新的步长，避免了MADDPG中常见的"策略突然崩溃"现象。在MAS的非平稳环境中，这种稳定性弥足珍贵。</li>
+            <li><strong>实现更简单：</strong> MAPPO的架构非常清晰——一个集中评论家 + 多个分散Actor（通常共享网络结构），不需要MADDPG中的多个评论家和目标网络管理。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>实践经验：</strong> 如果你现在要做一个新的多Agent RL项目，我强烈建议你<strong>先从MAPPO开始</strong>。它在绝大多数基准测试上的表现与MADDPG相当或更好，而且实现和调参的复杂度远低于MADDPG。只有当你的场景需要大量off-policy探索（比如自对弈）时，才考虑MADDPG或MASAC。这个建议来自我跑了上百组MARL实验后的血泪总结。
+        </div>
+
+        <h2>6.4 连续 vs 离散动作空间</h2>
+
+        <p>不同的MAS场景需要不同的动作空间类型，这也直接决定了算法的选择。以下决策表可以帮助你快速确定方向：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>动作空间类型</th>
+                    <th>推荐算法</th>
+                    <th>算法族</th>
+                    <th>典型应用</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>离散（如：左/右/上/下）</td>
+                    <td>QMIX / QPLEX / MAPPO</td>
+                    <td>价值分解 / 策略梯度</td>
+                    <td>星际争霸、网格世界</td>
+                </tr>
+                <tr>
+                    <td>连续（如：速度向量）</td>
+                    <td>MADDPG / MAPPO / MASAC</td>
+                    <td>策略梯度</td>
+                    <td>机器人控制、无人机编队</td>
+                </tr>
+                <tr>
+                    <td>离散+连续混合</td>
+                    <td>MADDPG（离散用Gumbel-Softmax）</td>
+                    <td>策略梯度</td>
+                    <td>自动驾驶（转向连续+换道离散）</td>
+                </tr>
+                <tr>
+                    <td>参数化动作（离散选工具+连续调参）</td>
+                    <td>Hybrid MADDPG / MAPPO</td>
+                    <td>策略梯度</td>
+                    <td>LLM Agent工具调用</td>
+                </tr>
+                <tr>
+                    <td>高维离散（如：1000+动作）</td>
+                    <td>MAPPO + 动作嵌入</td>
+                    <td>策略梯度</td>
+                    <td>推荐系统、调度问题</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong> 一个非常容易忽视的问题——动作空间标准化。在MADDPG中，Actor通常用tanh输出动作（范围[-1, 1]），然后映射到实际的物理范围。如果不做这个标准化，不同Agent的动作尺度差异会让评论家的学习非常困难。我曾在6个Agent的编队任务中犯过这个错误——Agent1的推力范围是0-100N，Agent2的转向角度范围是-30到30度。评论家的输入是这些原始值，结果100N的数值完全压倒了30度的信号，导致评论家"只看推力不管转向"，训练完全不收敛。标准化到[-1, 1]后问题立刻解决。教训：<strong>给评论家喂数据前，务必检查每个输入的数值尺度</strong>。
+        </div>
+
+        <h2>6.5 CTDE算法全景对比</h2>
+
+        <p>为了给你一个完整的画面，让我们把迄今为止讨论过的所有CTDE算法放在同一个框架下对比：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>MADDPG</th>
+                    <th>MASAC</th>
+                    <th>MAPPO</th>
+                    <th>QMIX</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>方法类型</td>
+                    <td>Actor-Critic</td>
+                    <td>Actor-Critic (最大熵)</td>
+                    <td>Actor-Critic (PPO)</td>
+                    <td>Value-Based (Q-learning)</td>
+                </tr>
+                <tr>
+                    <td>动作空间</td>
+                    <td>连续 / 离散</td>
+                    <td>连续 / 离散</td>
+                    <td>连续 / 离散</td>
+                    <td>离散</td>
+                </tr>
+                <tr>
+                    <td>策略类型</td>
+                    <td>确定性策略 (μ(s))</td>
+                    <td>随机策略 (π(a|s))</td>
+                    <td>随机策略 (π(a|s))</td>
+                    <td>由Q值导出的隐式策略</td>
+                </tr>
+                <tr>
+                    <td>样本效率</td>
+                    <td>中等（Off-Policy）</td>
+                    <td>高（Off-Policy + 熵）</td>
+                    <td>中高（On-Policy + 多epoch）</td>
+                    <td>高（Off-Policy + 回放缓存）</td>
+                </tr>
+                <tr>
+                    <td>训练稳定性</td>
+                    <td>中等（有多评论家振荡风险）</td>
+                    <td>好（熵正则化平滑梯度）</td>
+                    <td>好（PPO裁剪避免大更新）</td>
+                    <td>好（TD目标相对稳定）</td>
+                </tr>
+                <tr>
+                    <td>收敛速度</td>
+                    <td>慢</td>
+                    <td>中等</td>
+                    <td>快</td>
+                    <td>中等</td>
+                </tr>
+                <tr>
+                    <td>探索机制</td>
+                    <td>动作噪声</td>
+                    <td>熵正则化（自动调温）</td>
+                    <td>策略随机性 + 熵奖励</td>
+                    <td>ε-贪心</td>
+                </tr>
+                <tr>
+                    <td>超参数敏感性</td>
+                    <td>高（噪声尺度、评论家学习率）</td>
+                    <td>中等（目标熵）</td>
+                    <td>低（clip ε有默认值）</td>
+                    <td>低</td>
+                </tr>
+                <tr>
+                    <td>计算开销</td>
+                    <td>中（每Agent一个评论家）</td>
+                    <td>高</td>
+                    <td>低-中（共享评论家）</td>
+                    <td>低-中</td>
+                </tr>
+                <tr>
+                    <td>异构Agent支持</td>
+                    <td>好（各Agent独立网络）</td>
+                    <td>好</td>
+                    <td>好（参数不共享）</td>
+                    <td>中等（要求同构）</td>
+                </tr>
+                <tr>
+                    <td>代表性论文</td>
+                    <td>Lowe et al. 2017</td>
+                    <td>Wei et al. 2021</td>
+                    <td>Yu et al. 2022</td>
+                    <td>Rashid et al. 2018</td>
+                </tr>
+                <tr>
+                    <td>工程推荐度</td>
+                    <td>不推荐（新手慎用）</td>
+                    <td>推荐（需要调温）</td>
+                    <td>强烈推荐（首选）</td>
+                    <td>推荐（离散场景）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>选型建议：</strong> 如果你真的需要从零开始选择一个MARL算法，我的建议路径是：<br>
+            ① 如果是离散动作+协同场景 → 试QMIX或QPLEX<br>
+            ② 如果是连续动作 → 试MAPPO（大概率够用）<br>
+            ③ 如果MAPPO不稳定 → 试MASAC（熵正则化有帮助）<br>
+            ④ 如果以上都不行 → 再考虑MADDPG（最通用但也最难调）<br>
+            不要一开始就上MADDPG——它的多评论家架构和超参数敏感性会让你欲哭无泪。
+        </div>
+
+        <p>多Agent策略梯度方法将CTDE范式从离散价值基方法扩展到了连续控制领域，使得MAS从"棋盘游戏"进入了"物理世界"。MADDPG、MASAC、MAPPO各有所长，但共同的核心都是"集中评论家，分散Actor"——这个简单而优雅的设计思想。</p>
+
+        <p>但策略梯度方法有一个共同的盲区：它们假定Agent之间要么不通信，要么通过价值函数隐式通信。下一章我们将直面这个问题——<strong>显式通信</strong>。当Agent之间通过专门的通信通道交换信息时，MAS的能力边界会再次被拓展。你会看到，学会"什么时候该说话、该说什么、说给谁听"，本身就构成了一个引人入胜的优化问题。下一站：<strong>多智能体通信与协调</strong>。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

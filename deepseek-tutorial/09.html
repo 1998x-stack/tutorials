@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 DeepSeek-V2</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html" class="active">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第9章 DeepSeek-V2</h2>
+
+        <p>大家好，欢迎来到 DeepSeek 系列教程的第 9 章。如果你一直在跟读这个系列，你一定还记得我们花了 6、7、8 三章分别讲解了 MoE 架构、DeepSeekMoE 和 MLA 注意力机制。现在，是时候看这些技术如何真正合体了。</p>
+
+        <p><strong>DeepSeek-V2</strong> 发布于 2024 年 5 月，是 DeepSeek 的第二个大版本。如果说 V1 是"试水"——验证了 DeepSeek 在大模型领域的基本功，那么 V2 就是真正的"亮剑"。它首次将 MLA 和 DeepSeekMoE 两大创新融合到同一个模型中，236B 总参数、21B 激活参数、128K 上下文——在开源模型中直接登顶。但 V2 最让人记忆深刻的，不是技术本身，而是它引发的<strong>API 价格战</strong>。</p>
+
+        <div class="highlight">
+            <strong>一个标志性的时刻：</strong>2024 年 5 月，DeepSeek-V2 发布后宣布 API 定价——输入 0.14 元/百万 token，输出 0.28 元/百万 token。作为参考，当时 GPT-4 的价格大约是 100 元/百万 token 左右。同等性能，1% 的价格。消息传出后，整个中国大模型圈炸了锅，智谱、百度、阿里、字节等大厂纷纷跟进降价，业界称之为"大模型价格战"。而 DeepSeek 团队的回应很淡然："我们只是把技术的效率红利让利给了用户。"
+        </div>
+
+        <h2>9.1 V2整体架构</h2>
+
+        <p>DeepSeek-V2 基于 Transformer 架构，总共有 <strong>60 层</strong>。但有趣的是，这 60 层并非完全相同——<strong>第一层是 Dense 层（全参数激活），后面 59 层是 MoE 层</strong>。</p>
+
+        <p>为什么第一层要用 Dense？原因很简单：第一层的 FFN 处理的是原始输入 embedding，需要建立起基础的特征表示。如果第一层就用 MoE，路由机制在没有任何特征信息的情况下很容易"盲目选择"，导致训练不稳定。所以 DeepSeek 选择第一层走"稳妥路线"，后面 59 层才上 MoE 来获得稀疏计算的好处。</p>
+
+        <p>模型的隐藏维度（d）为 5120，注意力部分使用我们在第 8 章详细讲解的 MLA 机制，FFN 部分使用第 7 章的 DeepSeekMoE。整体采用 Pre-Norm 架构（RMS Norm），激活函数为 SwiGLU。</p>
+
+        <pre><code>DeepSeek-V2 配置概览：
+- 层数: 60 (1 Dense + 59 MoE)
+- 隐藏维度: 5120
+- 注意力头数: 128, 每头维度: 128
+- KV 压缩维度: 512
+- 总参数量: 236B
+- 每 Token 激活参数: 21B</code></pre>
+
+        <h2>9.2 MLA + DeepSeekMoE双创新</h2>
+
+        <p>V2 的核心理念是"<strong>双管齐下</strong>"：</p>
+
+        <ul>
+            <li><strong>MLA</strong> 解决的是 <strong>推理效率</strong> 问题——超长上下文下的 KV Cache 瓶颈</li>
+            <li><strong>DeepSeekMoE</strong> 解决的是 <strong>训练成本</strong> 问题——稀疏计算降低计算量</li>
+        </ul>
+
+        <p>这两个创新彼此独立，但又完美互补。MLA 节省了显存，意味着同样的硬件可以服务更大的 batch size；DeepSeekMoE 节省了计算量，意味着训练同样规模的模型只需要更少的 GPU 小时。两者叠加的效果是：<strong>DeepSeek-V2 相比同代 dense 模型（如 LLaMA 3 70B），训练成本降低 42.5%，推理吞吐提升 5.76 倍</strong>。</p>
+
+        <div class="tip">
+            <strong>有意思的类比：</strong>如果把大模型比作一家物流公司，MLA 相当于优化了仓库存储方案（减少了 KV Cache 这个"仓储成本"），DeepSeekMoE 相当于优化了运输路线（每次只激活少数专家这个"运输队"）。两个优化叠加，让 DeepSeek-V2 成为了大模型界的"极致效率标杆"。
+        </div>
+
+        <h2>9.3 236B/21B参数配置</h2>
+
+        <p>MoE 架构的核心魅力在于：<strong>你可以拥有一个"巨人"的容量，但每次只支付"侏儒"的账单</strong>。V2 在这方面做到了极致。</p>
+
+        <table>
+            <tr>
+                <th>配置项</th>
+                <th>数值</th>
+            </tr>
+            <tr>
+                <td>总参数</td>
+                <td>236B</td>
+            </tr>
+            <tr>
+                <td>每 Token 激活参数</td>
+                <td>21B</td>
+            </tr>
+            <tr>
+                <td>共享专家数</td>
+                <td>2</td>
+            </tr>
+            <tr>
+                <td>路由专家数</td>
+                <td>160</td>
+            </tr>
+            <tr>
+                <td>每 Token 激活路由专家</td>
+                <td>6</td>
+            </tr>
+            <tr>
+                <td>每个路由专家隐层维度</td>
+                <td>1536</td>
+            </tr>
+        </table>
+
+        <p>2 个共享专家 + 160 个路由专家，每 token 激活 6 个路由专家 + 2 个共享专家——这意味着虽然模型总共有 236B 参数，但处理每个 token 时只激活了 21B 参数（约 9%）。用 21B 的计算量享受 236B 模型的容量，这就是 MoE 的魔力。</p>
+
+        <p>有趣的是，V2 还采用了一种"设备限制路由"（Device-Limited Routing）策略：确保每个 token 的专家只分布在最多 M 台设备上（M=3 时效果已接近无限制路由），从而降低了跨设备通信开销。</p>
+
+        <h2>9.4 双语高质量预训练</h2>
+
+        <p>DeepSeek-V2 在 8.1T token 的高质量、多源语料上进行了预训练。这些数据覆盖了中文、英文以及少量其他语种。按照 DeepSeek 一贯的风格，数据处理管线做了大量工作：去重、质量过滤、安全过滤，以及数据混洗策略。</p>
+
+        <p>值得注意的是，V2 的 tokenizer 与 V1 相同——基于 Byte-level BPE，词表大小 100K。中英文 token 的比例大约是中文比英文多 12%，这反映了 V2 在中文能力上的特别关注。</p>
+
+        <p>V2 在多项 benchmark 上展现了惊人的性能。以 21B 激活参数，它在 MMLU 上达到 78.5，超越了 LLaMA 3 70B（78.9，但后者激活了全部 70B 参数）。在中文评测 C-Eval 上，V2 以 81.7 遥遥领先于所有同代开源模型。在数学方面，MATH 得分为 43.6（4-shot），代码 HumanEval 为 48.8（Pass@1）。用 21B 的激活参数达到甚至超越 70B dense 模型——这个"性价比"在当时是空前的。</p>
+
+        <h2>9.5 上下文与对齐</h2>
+
+        <p>V2 支持最长 <strong>128K token</strong> 的上下文。这是通过两阶段扩展实现的：预训练阶段在 4K 上下文中完成，然后通过 YaRN 位置插值扩展到 128K，再额外训练 1000 步（序列长度 32K，batch size 576）来适应长上下文。</p>
+
+        <p>在对齐方面，V2 采用了 SFT + RL 两阶段流程。特别值得一提的是 <strong>GRPO（Group Relative Policy Optimization）</strong>——DeepSeek 自研的强化学习算法，它去掉了传统 PPO 中的 critic 模型，只靠组内相对得分来估计优势函数，大幅降低了 RL 训练的成本。</p>
+
+        <p>对齐后的 V2 Chat 版本在 AlpacaEval 2.0 上达到 38.9% 的 length-controlled win rate，在 MT-Bench 上获得 8.97 分，都是当时开源模型中的顶级水平。在中文对齐评测 AlignBench 上，V2 Chat 甚至超越了所有闭源模型（包括 GPT-4）。</p>
+
+        <pre><code># GRPO 简化理解
+# 传统 PPO: 需要 policy model + critic model（几乎一样大）
+# GRPO: 只需要 policy model，通过分组采样估计优势
+for question in batch:
+    outputs = sample_group(policy_model, question, G=8)  # 采样 G 个回答
+    rewards = reward_model(outputs)
+    advantages = (rewards - mean(rewards)) / std(rewards)  # 组内归一化
+    update_policy(advantages)</code></pre>
+
+        <div class="warning">
+            <strong>踩坑经验：</strong>在 V2 的对齐阶段，DeepSeek 团队发现一个反直觉的现象——让模型做数学和代码推理任务时，RL 训练可以持续很多步，性能持续提升。但做通用偏好对齐时，过早的 RL 反而会损害推理能力。因此他们设计了两阶段 RL：先做推理对齐（Reasoning Alignment），再做人类偏好对齐（Human Preference Alignment）。这个"先能力，后偏好"的顺序被证明非常关键。
+        </div>
+
+        <h2>9.6 API价格战</h2>
+
+        <p>2024 年 5 月 6 日，DeepSeek-V2 正式发布。不到一周，国内 AI 大模型市场掀起了一场前所未有的价格战。</p>
+
+        <p>DeepSeek-V2 的 API 定价是：输入 0.14 元/百万 token，输出 0.28 元/百万 token。而当时 GPT-4 的价格大约是输入 30 元/百万 token，输出 60 元/百万 token。DeepSeek 以不到 GPT-4 1% 的价格，提供了匹敌 GPT-4 的性能（至少在多个中文评测基准上）。</p>
+
+        <p>这一举动直接打破了国内大模型市场的价格体系。5 月 11 日，智谱 GLM 宣布降价；5 月 13 日，百度文心宣布 FREE；5 月 15 日，阿里通义千问降价 97%；5 月 17 日，字节豆包宣布 FREE……到月底，几乎所有国内大模型厂商都大幅降价或免费。</p>
+
+        <p>但 DeepSeek 的底气和别人不一样。其他厂商的降价更多是"烧钱抢用户"，而 DeepSeek 的降价是因为 <strong>技术红利</strong>——MLA 和 MoE 让推理成本本身就比同行低一个数量级。换句话说，别人降价是亏本赚吆喝，DeepSeek 降价是真的有利可图。</p>
+
+        <div class="highlight">
+            <strong>一个值得记住的数字：</strong>DeepSeek-V2 在 8 张 H800 的单机上，可以达到超过 50K tokens/s 的生成吞吐。这是什么概念？按照当时的价格，一张 H800 每小时的成本约 2 美元，也就是 1 美元可以生成 3M 以上的 token。所以即使定价为 0.28 元/百万 token，DeepSeek 仍然有可观的利润率。这就是<strong>架构创新的力量</strong>——它不是靠烧钱补贴，而是靠技术创新把成本物理意义上地降低了。
+        </div>
+
+        <h2>9.7 V2的影响</h2>
+
+        <p>DeepSeek-V2 的影响远不止一场价格战。它从根本上改变了开源大模型社区的游戏规则。</p>
+
+        <p>首先，V2 证明了 <strong>MoE + 创新注意力</strong> 才是大模型效率的正确方向。在 V2 发布后，全球大量开源模型开始"抄作业"——Qwen2 系列在 72B 版本中引入了 GQA，Llama 3 从 8B 到 70B 都采用了 GQA，甚至连 Mixtral 8x22B 也受到了 DeepSeekMoE 细粒度专家思路的影响。MLA 虽然还有许多细节没有公开，但"KV 压缩"这个方向迅速成为研究热点。</p>
+
+        <p>其次，V2 完全确立了 DeepSeek 在开源大模型领域的地位。从 V1 的"还不错"到 V2 的"世界一流"，DeepSeek 仅用了 4 个月。业界开始认真关注这家中国 AI 公司，不再只是把它看作"幻方量化做的大模型"，而是一个真正有原创技术实力的研究机构。</p>
+
+        <p>最后，V2 为 V3 的爆发铺平了道路。MLA 和 DeepSeekMoE 在经过 V2 千万级步数的验证后已经非常成熟。V3 只需要在这两个架构上做进一步的工程优化和训练规模扩展，就能达到一个全新的高度。</p>
+
+        <p>DeepSeek-V2 是 DeepSeek 技术路线上的一个关键分水岭。它让团队和社区都确信了一条信念：<strong>效率创新，而非规模堆砌，才是通向 AGI 的可持续路径。</strong></p>
+
+        <p>下一章，我们将深入 V3 的独门绝技之一——<strong>无辅助损失负载均衡</strong>，看看 DeepSeek 如何巧妙地解决了 MoE 训练中一个长期困扰业界的难题。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

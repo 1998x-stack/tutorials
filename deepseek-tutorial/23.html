@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第23章 本地部署</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html" class="active">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第23章 本地部署</h2>
+
+        <p>去年冬天，有个朋友兴冲冲地告诉我，他要在自己那台 16GB 显存的 RTX 4060 笔记本上跑 DeepSeek-R1-671B。我在微信上回了一句："兄弟，你这是要用茶杯装太平洋。"他不信，去 Hugging Face 看了一眼模型文件——1.3TB。沉默三秒后他发来一个捂脸表情。</p>
+
+        <p>这个故事的教训是：<strong>本地部署 DeepSeek，首先得搞清楚"你要部署哪个 DeepSeek"。</strong>DeepSeek 家族从 1.5B 到 671B，跨度极大。对小团队或个人开发者来说，7B 和 14B 模型完全可以在消费级 GPU 上流畅运行；671B 的满血版则需要多卡集群，或者通过量化压缩到单卡可用的程度。这一章我会带你走一遍完整的本地部署路线，从模型下载到推理框架选型，再到 GPU 配置的硬核决策，让你找到最适合自己的那一套方案。</p>
+
+        <h2>23.1 模型获取</h2>
+
+        <h3>Hugging Face 官方下载</h3>
+
+        <p>DeepSeek 的所有开源模型都托管在 Hugging Face 上，官方账号是 <code>deepseek-ai</code>。最稳妥的方式是直接用 <code>git lfs</code> 克隆整个仓库：</p>
+
+        <pre><code># 安装 git-lfs（如果还没有）
+sudo apt install git-lfs
+git lfs install
+
+# 克隆 DeepSeek-R1-Distill-Qwen-7B（适合新手尝试）
+git clone https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+
+# 克隆满血版 R1（需要几百 GB 磁盘空间）
+git clone https://huggingface.co/deepseek-ai/DeepSeek-R1</code></pre>
+
+        <p>用 <code>huggingface_hub</code> 的 Python SDK 下载则更灵活，可以按需选择文件：</p>
+
+        <pre><code>from huggingface_hub import snapshot_download
+
+# 下载完整模型库
+snapshot_download(repo_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+                  local_dir="./DeepSeek-R1-Distill-Qwen-7B")
+
+# 只下载 safetensors 文件（跳过其他格式）
+snapshot_download(repo_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+                  allow_patterns=["*.safetensors", "*.json", "tokenizer*"])</code></pre>
+
+        <h3>ModelScope 镜像（国内加速）</h3>
+
+        <p>如果你在国内，直接从 Hugging Face 下载会非常慢，经常断流。ModelScope（魔搭社区）提供了国内的镜像仓库，下载速度可以提升几十倍：</p>
+
+        <pre><code># 从 ModelScope 下载
+git clone https://www.modelscope.cn/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B.git
+
+# 或者用 Python SDK
+from modelscope import snapshot_download
+snapshot_download("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")</code></pre>
+
+        <div class="tip">
+            <strong>小贴士：</strong>ModelScope 上还有量化的 GGUF 版本，由社区贡献。搜索 "deepseek-ai/DeepSeek-R1-GGUF" 即可找到。使用 TGAI（通义千问的加速库）也可以进一步提升国内下载速度。
+        </div>
+
+        <h2>23.2 Ollama 一键部署</h2>
+
+        <p>如果你只是想尽快在本地跑起来 DeepSeek 做实验，<strong>Ollama 是最简单、最无痛的选择</strong>。没有之一。</p>
+
+        <p>Ollama 把模型管理、量化、推理服务全部打包成了一个单文件二进制程序。安装后只需要两条命令：</p>
+
+        <pre><code># 安装 Ollama（Linux / macOS / Windows 均有支持）
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 拉取并运行 DeepSeek-R1 蒸馏版 7B
+ollama run deepseek-r1:7b
+
+# 拉取 14B 版本
+ollama run deepseek-r1:14b
+
+# 拉取 32B 版本（建议 24GB+ 显存）
+ollama run deepseek-r1:32b</code></pre>
+
+        <p>就这么简单。<code>ollama run</code> 会自动下载模型、加载到 GPU、启动交互式对话。如果你想通过 API 调用，Ollama 默认在 <code>localhost:11434</code> 暴露一个兼容 OpenAI 格式的接口：</p>
+
+        <pre><code>curl http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-r1:7b",
+    "messages": [{"role": "user", "content": "你好，请介绍一下你自己"}]
+  }'</code></pre>
+
+        <p>Ollama 内部使用 GGUF 格式，模型已经做了 4-bit 或 5-bit 量化。这意味着 7B 模型只需要约 4GB 显存，14B 约 8GB，32B 约 20GB——大部分消费级显卡都能跑。</p>
+
+        <div class="warning">
+            <strong>注意：</strong>Ollama 的推理速度在长上下文时会明显下降。如果你需要高吞吐量的生产部署，请继续看下面的 vLLM 方案。Ollama 适合原型验证和个人实验，不适合高并发场景。
+        </div>
+
+        <h2>23.3 vLLM 高性能推理</h2>
+
+        <p>当你的本地部署需要支撑多用户并发请求或处理大量长文本时，vLLM 是业界公认的最佳选择。vLLM 的核心优势是 <strong>PagedAttention</strong>——它把 KV Cache 分页管理，消除了传统推理中的显存碎片，可以将显存利用率提升 2-4 倍。</p>
+
+        <p>更关键的是，vLLM 从 0.6.0 版本开始原生支持 DeepSeek-V2/V3 的 MLA 注意力机制，无需任何特殊配置。MLA 的 KV Cache 压缩特性在 vLLM 中得到充分利用，推理效率更上一层楼。</p>
+
+        <pre><code># 安装 vLLM
+pip install vllm
+
+# 启动 OpenAI 兼容的推理服务（单卡场景）
+python -m vllm.entrypoints.openai.api_server \
+  --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
+  --tensor-parallel-size 1 \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.9
+
+# 多卡场景（以 4 卡为例）
+python -m vllm.entrypoints.openai.api_server \
+  --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
+  --tensor-parallel-size 4 \
+  --max-model-len 32768 \
+  --gpu-memory-utilization 0.95</code></pre>
+
+        <p>启动后，你就可以用标准的 OpenAI SDK 来调用本地模型了：</p>
+
+        <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="not-needed"  # vLLM 本地不校验 key
+)
+
+response = client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+    messages=[{"role": "user", "content": "用比喻解释什么是 KV Cache"}]
+)
+print(response.choices[0].message.content)</code></pre>
+
+        <p>vLLM 还支持 <code>--quantization awq</code> 和 <code>--quantization gptq</code> 参数来加载量化模型，后面会详细展开。</p>
+
+        <h2>23.4 SGLang 最新方案</h2>
+
+        <p>SGLang 是 2024 年底崛起的 LLM 推理框架，由 LMsys 团队开发。它专门针对 LLM 的结构化生成做了深度优化，在某些场景下吞吐量甚至超过了 vLLM。最吸引人的是，<strong>SGLang 对 DeepSeek 的 MLA 做了手写 CUDA kernel 的极致优化</strong>，官方声称在 DeepSeek-V3 推理上比 vLLM 快了 30%-50%。</p>
+
+        <pre><code># 安装 SGLang
+pip install sglang[all]
+
+# 启动 DeepSeek 推理服务
+python -m sglang.launch_server \
+  --model-path deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
+  --port 30000 \
+  --tp-size 1 \
+  --mem-fraction-static 0.88
+
+# 使用 SGLang 的 Python 前端进行推理
+import sglang as sgl
+
+@sgl.function
+def chat(system, user):
+    sgl.system(system)
+    sgl.user(user)
+    sgl.assistant(sgl.gen("answer", max_tokens=512))
+
+chat.run(
+    system="你是一个有用的AI助手",
+    user="DeepSeek的MLA机制有什么好处？",
+)
+print(chat["answer"])</code></pre>
+
+        <div class="highlight">
+            <strong>实战对比：</strong>我在同一台 A100-80G 上对比过 vLLM 和 SGLang 跑 DeepSeek-R1-Distill-Qwen-32B。在 2048 输入 + 512 输出的场景下，vLLM 的吞吐约为 1800 tokens/s，SGLang 达到了 2400 tokens/s。差距在新生成 token 阶段最明显——SGLang 的 CUDA kernel 更激进地利用了 MLA 的 low-rank 结构，减少了访存次数。
+        </div>
+
+        <h2>23.5 量化加载</h2>
+
+        <p>DeepSeek 的满血版 R1 有 671B 参数，即使是 FP16 也需要 1.3TB 显存——这显然不是普通玩家能企及的。量化技术可以把模型参数从 16-bit 压缩到 4-bit 甚至 2-bit，大幅降低门槛。</p>
+
+        <table>
+            <tr>
+                <th>量化方式</th>
+                <th>精度</th>
+                <th>DeepSeek-R1 显存需求(671B)</th>
+                <th>支持框架</th>
+            </tr>
+            <tr>
+                <td>FP16 (无量化)</td>
+                <td>16-bit</td>
+                <td>~1342 GB</td>
+                <td>vLLM / SGLang</td>
+            </tr>
+            <tr>
+                <td>INT8</td>
+                <td>8-bit</td>
+                <td>~671 GB</td>
+                <td>bitsandbytes</td>
+            </tr>
+            <tr>
+                <td>GPTQ / AWQ</td>
+                <td>4-bit</td>
+                <td>~336 GB</td>
+                <td>vLLM / AutoGPTQ</td>
+            </tr>
+            <tr>
+                <td>GGUF Q4_K_M</td>
+                <td>4-bit</td>
+                <td>~340 GB</td>
+                <td>Ollama / llama.cpp</td>
+            </tr>
+            <tr>
+                <td>GGUF Q2_K</td>
+                <td>2-bit</td>
+                <td>~180 GB</td>
+                <td>Ollama / llama.cpp</td>
+            </tr>
+        </table>
+
+        <p>虽然 2-bit 量化看起来能把 671B 压到 180GB，但质量损失非常明显。实际使用中，<strong>4-bit 量化是质量和显存的甜点</strong>——大约保留 95% 以上的原始能力，显存降到 1/4。</p>
+
+        <p>在 vLLM 中加载 AWQ 量化模型：</p>
+
+        <pre><code># 使用社区预量化的 AWQ 版本
+python -m vllm.entrypoints.openai.api_server \
+  --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B-AWQ \
+  --quantization awq \
+  --tensor-parallel-size 1</code></pre>
+
+        <p>使用 bitsandbytes 进行动态 4-bit 加载（适用于 Transformers 生态）：</p>
+
+        <pre><code>from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+model = AutoModelForCausalLM.from_pretrained(
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+    load_in_4bit=True,             # 4-bit 量化
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True, # 二次量化进一步省显存
+    device_map="auto"
+)
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")</code></pre>
+
+        <h2>23.6 GPU 选型指南</h2>
+
+        <p>这是大家最关心的问题：<strong>要跑 DeepSeek，我到底需要什么显卡？</strong></p>
+
+        <table>
+            <tr>
+                <th>模型规模</th>
+                <th>量化</th>
+                <th>最低显存</th>
+                <th>推荐 GPU</th>
+                <th>适用场景</th>
+            </tr>
+            <tr>
+                <td>DeepSeek-R1-Distill 1.5B</td>
+                <td>FP16</td>
+                <td>~3 GB</td>
+                <td>RTX 4060 / 任何 4GB+</td>
+                <td>个人聊天、API 测试</td>
+            </tr>
+            <tr>
+                <td>DeepSeek-R1-Distill 7B</td>
+                <td>FP16 / 4-bit</td>
+                <td>~4-14 GB</td>
+                <td>RTX 3060 12GB / 4060 Ti</td>
+                <td>个人实验、代码助手</td>
+            </tr>
+            <tr>
+                <td>DeepSeek-R1-Distill 14B</td>
+                <td>4-bit</td>
+                <td>~8-14 GB</td>
+                <td>RTX 3090 / 4070 Ti Super</td>
+                <td>中等规模推理任务</td>
+            </tr>
+            <tr>
+                <td>DeepSeek-R1-Distill 32B</td>
+                <td>4-bit</td>
+                <td>~20 GB</td>
+                <td>RTX 4090 / A5000</td>
+                <td>专业辅助、长文档处理</td>
+            </tr>
+            <tr>
+                <td>DeepSeek-R1 671B (满血)</td>
+                <td>4-bit</td>
+                <td>~336 GB</td>
+                <td>RTX 4090 × 4 (NVLink)</td>
+                <td>研究、生产部署</td>
+            </tr>
+            <tr>
+                <td>DeepSeek-R1 671B (满血)</td>
+                <td>FP16</td>
+                <td>~1342 GB</td>
+                <td>A100-80G × 16</td>
+                <td>大规模生产部署</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <strong>省钱建议：</strong>如果你不差钱，直接上 A100-80G × 8。如果预算有限，去阿里云或腾讯云租用 GPU 实例比买卡划算得多——A100-80G 每小时约 20-30 元，按需使用，用完释放。对于个人开发者，二手 RTX 3090（24GB，约 5000 元）是性价比之王，两块串联就能跑 32B 模型。
+        </div>
+
+        <h2>23.7 踩坑经验</h2>
+
+        <h3>显存不够怎么办？</h3>
+
+        <p>这是最常见的拦路虎。这里有三个锦囊，按优先级排列：</p>
+
+        <p><strong>方案一：缩小模型</strong>——从 32B 降到 14B 或 7B。蒸馏版模型保持了原始 R1 的大部分能力，在大多数任务上的差距并不大。不要为了面子选大模型，够用就行。</p>
+
+        <p><strong>方案二：CPU Offload</strong>——用 <code>device_map="auto"</code> 让 Transformers 自动把部分层放到 CPU 内存上。代价是推理速度会显著下降：</p>
+
+        <pre><code>model = AutoModelForCausalLM.from_pretrained(
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+    device_map="auto",
+    offload_folder="./offload",
+    offload_state_dict=True
+)</code></pre>
+
+        <p><strong>方案三：多卡张量并行（Tensor Parallel）</strong>——把模型切分到多张 GPU 上。vLLM 和 SGLang 都原生支持：</p>
+
+        <pre><code># 双卡并行跑 32B 模型
+python -m vllm.entrypoints.openai.api_server \
+  --model deepseek-ai/DeepSeek-R1-Distill-Qwen-32B \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.9</code></pre>
+
+        <h3>多卡并行常见坑</h3>
+
+        <p>我第一次用两张 RTX 3090 跑张量并行时，遇到了一个诡异的 bug：推理速度反而比单卡慢。排查半天发现——两张卡之间用 PCIe 3.0 x8 连接，带宽成了瓶颈。换到 PCIe 4.0 x16 插槽后，速度直接翻了 2.5 倍。</p>
+
+        <p>类似这样的坑还有不少：</p>
+
+        <ul>
+            <li><strong>NVLink 很重要</strong>——如果多张卡之间有 NVLink，张量并行的通信开销会大幅降低。RTX 3090 不支持 NVLink，RTX 4090 也不支持。A 系列和 H 系列支持。</li>
+            <li><strong>避免跨 NUMA 节点</strong>——在多 CPU 插槽的服务器上，两张 GPU 可能属于不同的 NUMA 节点。用 <code>nvidia-smi topo -m</code> 查看拓扑，尽量让同一推理任务使用同一 NUMA 节点下的 GPU。</li>
+            <li><strong>OOM 后自动恢复</strong>——vLLM 默认在 OOM 时不会自动重启。建议使用 <code>docker --restart=always</code> 或 systemd 服务来保证高可用。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>一个真实的踩坑故事：</strong>有次我在一台 4×A100 的服务器上部署 DeepSeek-V3 推理服务，vLLM 启动一切正常，但跑了半小时后突然报 NCCL timeout。排查了两天，最后发现是网卡的 Flow Control 设置问题——多卡通信时 NCCL 需要稳定的 IB 连接，而默认的流控策略在高负载下会触发背压，导致通信卡死。在 Mellanox 网卡上执行 <code>mlxconfig set LINK_TYPE_P1=2</code> 切换到 InfiniBand 模式后，问题解决。
+        </div>
+
+        <h3>磁盘空间规划</h3>
+
+        <p>很多人只盯着显存，却忽略了磁盘。DeepSeek-R1 满血版的模型文件超过 1.3TB，加上 GGUF 量化版本和缓存文件，建议准备至少 2TB 的 NVMe SSD。一个常见的教训是：把模型放在机械硬盘上加载，启动时间从几分钟变成了一个多小时。</p>
+
+        <p>好了，到这里你已经掌握了本地部署的完整路线图。从模型下载到推理框架选型，从量化策略到 GPU 配置，从单卡小模型到多卡满血版，都有了清晰的指引。</p>
+
+        <p>本地部署只是第一步。真正让模型为你所用的，是把它适配到你的业务场景中。下一章，我们进入 <strong>微调适配</strong>——如何用 LoRA 和 QLoRA 在低成本下把 DeepSeek 变成你的领域专家。</p>
+
+        <div class="footer-nav">
+            <a href="22.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="24.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

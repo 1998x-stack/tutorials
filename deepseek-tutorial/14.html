@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 128K上下文扩展</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html" class="active">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第14章 128K上下文扩展</h2>
+
+        <p>大家好！今天我们来讲一个大模型能力中的重要维度——<strong>长上下文</strong>。</p>
+
+        <p>2024 年初，如果你问一个 LLM 开发者："你最希望模型支持多长的上下文？"答案大概率是"越长越好"。原因很简单：大部分实际应用场景都需要处理长文本。写一篇 10 页的报告、分析一份合同、理解整个 GitHub 仓库的代码——这些都远远超过了 4K 或 8K 上下文的范围。</p>
+
+        <p>但长上下文不是免费的午餐。它涉及三个技术难题：<strong>位置编码的外推</strong>（模型能不能理解比训练时更长的距离关系）、<strong>注意力计算的 O(n²) 复杂度</strong>（上下文翻倍，注意力计算量翻两倍）、以及 <strong>KV Cache 的显存爆炸</strong>（最后一个问题我们已经在第 8 章用 MLA 解决了）。今天重点讲前两个。</p>
+
+        <p>DeepSeek-V2 和 V3 都支持 <strong>128K</strong> 的上下文窗口。V4 更是扩展到了 1M。达到这个能力靠的是 <strong>YaRN 位置插值 + 两阶段渐进式训练</strong>的组合方案。</p>
+
+        <h2>14.1 RoPE的外推能力</h2>
+
+        <p>回顾一下 <strong>RoPE（旋转位置编码）</strong> 的工作原理。RoPE 通过对 Query 和 Key 向量施加旋转（角度与位置成比例）来编码位置信息。两个 token 之间的相对距离决定了它们旋转角度的差值。</p>
+
+        <p>RoPE 的一个关键特性是 <strong>外推能力</strong>——由于旋转角度是连续增长的，如果模型在最大长度 L 的位置上训练过，它理论上可以理解大于 L 的位置长度，因为"旋转"这一操作本身没有边界。这就好比一个人学会了爬 10 级台阶，你让他爬 20 级——虽然没爬过，但动作模式是一样的。</p>
+
+        <p>但实践告诉我们：<strong>RoPE 的外推能力有限</strong>。当上下文长度超出训练长度的 2-4 倍时，注意力分数开始失真，模型的困惑度急剧上升。原因是：RoPE 的旋转频率是一个预定义的值。当位置差距很大时，高频分量旋转过快，导致注意力熵分布失真（太均匀或太极端）。</p>
+
+        <div class="warning">
+            <strong>踩坑经验：</strong>早期 DeepSeek 团队尝试过直接在 4K 训练的模型上外推到 32K，结果发现模型的困惑度从 4K 处开始就急剧恶化，到 10K 时几乎不可用。模型对"谁是主语？"这种简单问题都答不对。这个教训让他们意识到——外推只能解决"一小部分"问题，想要真正的长上下文能力，必须让模型在长序列上继续训练。
+        </div>
+
+        <h2>14.2 YaRN位置插值</h2>
+
+        <p><strong>YaRN</strong>（Yet another RoPE extensioN method）是一种高效扩展上下文的方法。它的核心思想是：<strong>不要直接外推，而是把位置"压缩"到模型熟悉的范围内</strong>。</p>
+
+        <p>具体来说，YaRN 做了两件事：</p>
+
+        <ul>
+            <li><strong>位置插值</strong>：将位置索引乘以一个缩放因子 s（s = 训练长度 / 目标长度）。例如从 4K 扩展到 128K，s = 128/4 = 32。这意味着位置 100 的新位置编码等价于位置 100/32 ≈ 3 的原始编码。模型在这个"压缩"后的位置上更容易理解</li>
+            <li><strong>频率调整</strong>：对 RoPE 的旋转频率做分组处理——高频分量（捕捉局部关系）基本保持原样，低频分量（捕捉长距离关系）做插值。这种"有选择地调整"比其他方法（如 PI、NTK-aware）更精细</li>
+        </ul>
+
+        <pre><code># YaRN 位置插值简化理解
+原始 RoPE:
+θ_i = 10000^(-2i/d)              # 第 i 个频率维度
+pos_encoding = [sin(pos * θ_i), cos(pos * θ_i)]
+
+YaRN 后的 RoPE:
+θ_i = 10000^(-2i/d) * s^(-2i/d)  # 乘上频率缩放因子
+# 其中 s = 目标长度 / 训练长度
+# 高频分量 (i 小) → 接近原始值（几乎不插值）
+# 低频分量 (i 大) → 大幅插值（主要做位置压缩）</code></pre>
+
+        <p>DeepSeek-V2 和 V3 的 YaRN 配置：</p>
+        <table>
+            <tr>
+                <th>参数</th>
+                <th>含义</th>
+                <th>DeepSeek 配置</th>
+            </tr>
+            <tr>
+                <td>s</td>
+                <td>缩放因子</td>
+                <td>40</td>
+            </tr>
+            <tr>
+                <td>α</td>
+                <td>高频保留比例</td>
+                <td>1</td>
+            </tr>
+            <tr>
+                <td>β</td>
+                <td>插值频率范围</td>
+                <td>32</td>
+            </tr>
+            <tr>
+                <td>最大目标长度</td>
+                <td>预期支持的上下文</td>
+                <td>160K</td>
+            </tr>
+        </table>
+
+        <p>注意到 s=40 而非 32（128/4 的理论值）。这是因为 DeepSeek 把目标长度设为了 160K（留出余量），以确保 128K 范围内的稳定表现。</p>
+
+        <div class="tip">
+            <strong>直觉理解：</strong>可以把位置编码想象成一个钟表。RoPE 的每个频率维度代表了不同速度的指针。高频是秒针（走很快，表示局部位置），低频是时针（走很慢，表示全局位置）。YaRN 的做法是：让秒针几乎保持原速（高频分量不变），但把时针的速度降低了（低频分量插值）。这样模型既能保持对局部上下文的敏感度，又能理解更长的全局范围。
+        </div>
+
+        <h2>14.3 两阶段扩展</h2>
+
+        <p>仅仅改变位置编码是不够的——模型还需要在长序列上"适应"新的位置表示。DeepSeek 采用了<strong>两阶段渐进式扩展</strong>策略：</p>
+
+        <p><strong>第一阶段：4K → 32K</strong></p>
+        <ul>
+            <li>在预训练完成后，应用 YaRN 重新参数化位置编码</li>
+            <li>训练 1000 步，序列长度为 32K，batch size 为 576 条序列</li>
+            <li>学习率设为预训练尾声的较低水平</li>
+        </ul>
+
+        <p><strong>第二阶段：32K → 128K</strong></p>
+        <ul>
+            <li>从第一阶段的 checkpoint 继续</li>
+            <li>再次应用 YaRN（调整缩放因子）</li>
+            <li>再训练 1000 步，序列长度增加到 128K</li>
+            <li>同样的 batch size 和学习率设置</li>
+        </ul>
+
+        <p>为什么不是一步到位从 4K 直接到 128K？因为<strong>渐进式训练可以避免灾难性遗忘</strong>。如果一步跳到 128K，模型看到的序列中大部分是"填充"内容，位置编码被极端压缩，可能会让模型对短距离的位置感知能力退化。通过先扩展到 32K 再扩展到 128K，每一步的"位压缩"幅度更小，模型更容易适应。</p>
+
+        <pre><code># 两阶段上下文扩展流程
+Stage 1: 4K → 32K
+  - 应用 YaRN: scale=40, target=160K（实际只用到 32K 训练）
+  - 训练: 1000 steps, seq_len=32K, batch=576
+  - 验证: 困惑度在 32K 范围内正常下降
+
+Stage 2: 32K → 128K
+  - 重复应用 YaRN（配置相同）
+  - 训练: 1000 steps, seq_len=128K, batch=576
+  - 验证: 困惑度在 128K 范围内正常下降
+  - 最终测试: "大海捞针"测试通过</code></pre>
+
+        <p>额外的 119K GPU 小时和 $0.238M 的成本——这部分开销相对于预训练不到 5%。DeepSeek 用很小的代价获得了 128K 的上下文能力。</p>
+
+        <h2>14.4 大海捞针测试</h2>
+
+        <p>"<strong>大海捞针</strong>"（Needle In A Haystack, NIAH）是评估长上下文能力的经典方法。思路很简单：把一条特定的"事实"（如"The passcode is 849103"）插入到一段长文本的某个位置，然后问模型这个事实是什么。</p>
+
+        <p>测试集覆盖了不同上下文长度（从 1K 到 128K）和不同插入深度（从开头到结尾）。理想情况下，模型在所有位置和所有长度下都能找到那根"针"。</p>
+
+        <p>DeepSeek-V3 的 NIAH 评测结果非常亮眼：</p>
+        <ul>
+            <li>在所有上下文长度（1K 到 128K）上，得分接近满分</li>
+            <li>在"针"位于文章中间位置时（通常最难），表现依然出色</li>
+            <li>即使上下文接近 128K 上限，retrieval 准确率也没有明显下降</li>
+        </ul>
+
+        <p>这个结果说明：<strong>DeepSeek-V3 的长上下文不是"凑合用"的，而是真正有效的</strong>。128K 以内的任意位置信息都能可靠地检索到。</p>
+
+        <div class="highlight">
+            <strong>一个有趣的发现：</strong>在 NIAH 测试中，有时模型在超长上下文（如 120K+）上的表现反而比中等长度（如 32K）更好。DeepSeek 团队分析后发现，这可能是因为超长上下文中"海草"（干扰文本）的密度相对较低，模型反而更容易锁定位到关键信息。此外，MLA 的低秩 KV Cache 在长上下文场景下展现出了特别强的抗干扰能力——因为压缩后的潜在表示自然地过滤掉了部分噪声。
+        </div>
+
+        <h2>14.5 应用场景</h2>
+
+        <p>128K 上下文意味着模型可以"一口气读完整本书的三分之一"。这打开了哪些应用场景？</p>
+
+        <ul>
+            <li><strong>代码仓库理解</strong>：128K token 足以覆盖一个中大型项目的完整代码库。开发者可以把整个项目文件拼成一个上下文，让模型直接理解项目结构和代码逻辑</li>
+            <li><strong>长文档分析</strong>：法律合同、学术论文、招股书——这些 100+ 页的文档可以直接喂给模型做问答、摘要和对比分析。传统上这需要 RAG（检索增强生成），现在可以直接端到端处理</li>
+            <li><strong>多轮对话</strong>：长时间的历史对话记录可以被完整保留。客服机器人可以"记住"用户三个月前的所有互动记录</li>
+            <li><strong>Agent 长期记忆</strong>：128K 的上下文窗口可以存储 agent 完整的思维链和执行日志，避免"做完上一步就忘了之前计划"的问题</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>一个实际案例：</strong>有开发者尝试用 DeepSeek-V3 分析一个 60K token 的 Python 项目，让模型找出所有潜在的 bug。模型不仅准确地指出了每个文件中可能的问题，还注意到了跨文件调用中的参数不匹配——这在 4K 上下文的模型中几乎不可能，因为它根本看不到完整的调用链。这种"全局视角"是长上下文模型最核心的价值。
+        </div>
+
+        <h2>14.6 V4的1M上下文</h2>
+
+        <p>128K 只是 DeepSeek 路线图上的一个里程碑。DeepSeek-V4 已经将上下文窗口扩展到了 <strong>1M token</strong>——是 V3 的 8 倍。</p>
+
+        <p>从 128K 到 1M，不只是"8 倍更长"那么简单。它涉及以下几个挑战：</p>
+        <ul>
+            <li><strong>位置编码</strong>：YaRN 的插值因子 s 从 40 扩大到 320，插值带来的信息损失需要更好的补偿策略</li>
+            <li><strong>注意力计算</strong>：O(n²) 的复杂度在 1M 时变得极其昂贵，需要稀疏注意力或局部注意力等近似方案</li>
+            <li><strong>KV Cache</strong>：即使有 MLA 压缩，1M 的 KV Cache 仍然很大，需要进一步压缩或分层检索</li>
+        </ul>
+
+        <p>V4 的 1M 上下文具体用了哪些新技术，我们会在第 27 章详细介绍。但你已经在第 8 章学到的 MLA——这个"KV Cache 缩到 7%"的底层能力——正是支撑 1M 上下文的关键基础。</p>
+
+        <p>从 4K 到 128K 再到 1M，DeepSeek 在上下文扩展上的每一步都走得扎实且高效。与那些"塞更多 GPU 硬算"的方案不同，DeepSeek 始终坚持"用更聪明的算法，做更少但更有效的工作"。</p>
+
+        <p>到这里，我们已经学完了 DeepSeek-V3 的所有核心技术：MLA 压缩注意力、DeepSeekMoE 稀疏架构、MTP 多步预测、FP8 混合精度训练、DualPipe 算通重叠、无辅助损失负载均衡、以及今天的长上下文扩展。下一章，我们将把这些技术整合起来，看它们如何协同工作，用 <strong>$5.6M 训练出 671B 的 SOTA 模型</strong>——并揭示这背后更多不为人知的工程细节。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

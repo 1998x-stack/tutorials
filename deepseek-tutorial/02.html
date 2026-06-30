@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第2章 DeepSeek LLM (V1)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html" class="active">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第2章 DeepSeek LLM (V1)</h2>
+
+        <p>大家好，欢迎回到 DeepSeek 系列教程。上一章我们聊了大模型效率困境的全局图景——Scaling Law 的局限性、成本鸿沟的严峻性，以及 DeepSeek 选择的三条技术路径。现在，让我们把时钟拨回到 2024 年初，看看 DeepSeek 的第一篇正式论文 <em>"DeepSeek LLM: Scaling Open-Source Language Models with Longtermism"</em>。</p>
+
+        <p>这一章我们会深度拆解 DeepSeek LLM（后来也被称为 V1）的架构设计、训练策略和实验发现。你可能觉得——一个 7B/67B 的稠密模型有什么好学的？但正是在这个"初代目"上，DeepSeek 完成了三项对未来极其重要的积累：<strong>双语 Scaling Law 的系统性验证、GQA 注意力机制的工程落地、以及两阶段微调 + DPO 对齐的方法论沉淀。</strong>没有 V1 的扎实基础，就没有后来 V2/V3 的惊艳表现。</p>
+
+        <h2>2.1 从 LLaMA 到 DeepSeek</h2>
+
+        <p>2023 年是大模型开源生态爆发的一年。Meta 年初发布的 LLaMA 系列——尤其是 LLaMA 1 的 7B/13B/33B/65B——为开源社区提供了高质量的基座模型选择。相比于 GPT-3 的架构，LLaMA 做了几个关键改进：使用 RoPE（旋转位置编码）、SwiGLU 激活函数、以及 Pre-Norm 结构。</p>
+
+        <p>DeepSeek LLM 在架构层面沿袭了 LLaMA 的核心设计——Decoder-only Transformer、Pre-RMSNorm、SwiGLU、RoPE。但 DeepSeek 在两个关键维度上做了自己的选择：</p>
+
+        <ul>
+            <li><strong>参数量分档</strong>：发布 7B 和 67B 两个版本，覆盖轻量研究和旗舰性能两个场景</li>
+            <li><strong>词表规模</strong>：采用 10 万 BPE 词表（远大于 LLaMA 的 3.2 万），这个选择影响深远，我们下一章单独讲</li>
+            <li><strong>注意力机制</strong>：从 LLaMA 的 MHA（Multi-Head Attention）升级为 GQA（Grouped Query Attention）</li>
+        </ul>
+
+        <p>DeepSeek LLM 7B 和 67B 的核心配置对比如下：</p>
+
+        <table>
+            <tr>
+                <th>配置项</th>
+                <th>DeepSeek 7B</th>
+                <th>DeepSeek 67B</th>
+                <th>LLaMA 2 7B</th>
+                <th>LLaMA 2 70B</th>
+            </tr>
+            <tr>
+                <td>Transformer 层数</td>
+                <td>30</td>
+                <td>95</td>
+                <td>32</td>
+                <td>80</td>
+            </tr>
+            <tr>
+                <td>隐藏层维度</td>
+                <td>4096</td>
+                <td>8192</td>
+                <td>4096</td>
+                <td>8192</td>
+            </tr>
+            <tr>
+                <td>注意力头数</td>
+                <td>32</td>
+                <td>64</td>
+                <td>32</td>
+                <td>64</td>
+            </tr>
+            <tr>
+                <td>GQA 分组 (K/V)</td>
+                <td>4</td>
+                <td>8</td>
+                <td>— (MHA)</td>
+                <td>— (MHA)</td>
+            </tr>
+            <tr>
+                <td>FFN 中间维度</td>
+                <td>11008</td>
+                <td>22016</td>
+                <td>11008</td>
+                <td>28672</td>
+            </tr>
+            <tr>
+                <td>词表大小</td>
+                <td>102400</td>
+                <td>102400</td>
+                <td>32000</td>
+                <td>32000</td>
+            </tr>
+            <tr>
+                <td>训练数据 (token)</td>
+                <td>~2T</td>
+                <td>~2T</td>
+                <td>2T</td>
+                <td>2T</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <strong>设计哲学：</strong>DeepSeek 选择 7B 和 67B 两个版本而非 LLaMA 的 7B/13B/33B/65B 四档，体现了一种"务实主义"——7B 用小成本验证想法，67B 直冲 SOTA 基线。中间尺寸的实验结果可以通过 Scaling Law 插值推断，不需要每个尺寸都训练一个完整模型。
+        </div>
+
+        <h2>2.2 GQA 分组查询注意力</h2>
+
+        <p>GQA（Grouped Query Attention）是 DeepSeek LLM 在注意力机制上的核心升级。要理解 GQA 的价值，我们需要先回顾一下传统 MHA（Multi-Head Attention）的痛点。</p>
+
+        <p>在标准 MHA 中，每个注意力头都有自己独立的 Q、K、V 投影矩阵。对于 32 头注意力的 7B 模型，推理时需要缓存 32 组 K 和 V 矩阵作为 KV Cache。当上下文长度从 2K 扩展到 32K 甚至 128K 时——KV Cache 的显存占用会线性增长。对于一个 67B 模型处理 32K 上下文，KV Cache 可能吃掉 30-40GB 显存，比模型权重本身还要多。</p>
+
+        <p>GQA 的解决方案很巧妙：<strong>让多个 Query 头共享同一组 Key 和 Value 头。</strong>具体来说，DeepSeek 的 7B 模型有 32 个 Query 头，但 K/V 头只有 4 个——每 8 个 Query 头共享 1 组 K/V。</p>
+
+        <pre><code>标准 MHA（以 32 头为例）:
+Query: [H1, H2, H3, ..., H32]   → 每个头独立 K/V
+Key:   [H1, H2, H3, ..., H32]
+Value: [H1, H2, H3, ..., H32]
+KV Cache 组数 = 32
+
+GQA 分组注意力（32 Q头, 4 K/V组）:
+Query: [H1, H2, ..., H32]   → 8个Query头共享1组K/V
+Key:   [G1, G2, G3, G4]
+Value: [G1, G2, G3, G4]
+KV Cache 组数 = 4  → 减少 87.5%</code></pre>
+
+        <p>这带来的收益是巨大的：</p>
+        <ul>
+            <li><strong>KV Cache 减少 8 倍</strong>——同样显存可以支持更长的上下文或更大的 batch size</li>
+            <li><strong>推理吞吐量提升</strong>——更少的内存带宽压力意味着更高的 token 生成速度</li>
+            <li><strong>性能损失极小</strong>——DeepSeek 的实验表明，GQA 在多数评测任务上的性能退化不足 1%</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>一个有趣的背景：</strong>GQA 最早由 Google 在 2023 年的论文 <em>"GQA: Training Generalized Multi-Query Transformer"</em> 中提出，但真正将其大规模工程化落地的，DeepSeek 是先行者之一。Meta 后来在 LLaMA 2 70B 上仍然使用 MHA，直到 LLaMA 3 才引入 GQA。DeepSeek 在 V1 阶段就果断采用 GQA，说明团队对推理效率的重视从一开始就刻在了基因里。
+        </div>
+
+        <h2>2.3 多步学习率调度器</h2>
+
+        <p>训练大模型的成本极高，一个关键问题是如何高效地探索超参数空间。传统的做法是先在小规模实验中找到最佳学习率，然后用这个学习率完整训练大模型。但问题在于——小模型的最优学习率和大模型的最优学习率往往不一样。</p>
+
+        <p>DeepSeek 提出了一个实用的解法：<strong>多步学习率调度器（Multi-step LR Scheduler）。</strong>核心思想是：将整个训练过程分成多个 step，每个 step 采用独立的学习率衰减计划。前 80% 的训练权重可以被复用为后续实验的起点。</p>
+
+        <pre><code>Multi-step LR Scheduler 示意图:
+
+Step 1 (0% - 20%): 预热 + 余弦衰减到初始 LR 的 30%
+Step 2 (20% - 40%): 从 30% LR 重新预热 + 继续衰减
+Step 3 (40% - 60%): 同理，进一步降低峰值 LR
+Step 4 (60% - 80%): 同上
+Step 5 (80% - 100%): 最后微调阶段
+
+关键收益: 如果在 Step 3 发现某个超参数不合适，
+可以回到 Step 2 结束时的 checkpoints 重新开始，
+只需补充训练 20%，而非从头训练 60%</code></pre>
+
+        <p>这个策略的实际效果非常显著：</p>
+        <ul>
+            <li><strong>前 80% 的权重 checkpoint 可复用</strong>——做消融实验时，只需要从最近的 step 继续训练</li>
+            <li><strong>后续实验成本降至 20%</strong>——对比传统单步调度器，多步调度的累积实验成本大幅降低</li>
+            <li><strong>不影响最终性能</strong>——分步衰减的最终 loss 与单步衰减完全可比</li>
+        </ul>
+
+        <p>这种设计看似只是一个工程技巧，但背后反映的是 DeepSeek 的核心方法论：<strong>把实验效率作为第一性原理来优化。</strong>在大模型研发中，一次完整的训练可能花费数百万美元，如果能将实验成本降低 5 倍，就意味着同样预算下可以做 5 倍的实验——迭代速度就是核心竞争力。</p>
+
+        <h2>2.4 超参数 Scaling Laws 修正</h2>
+
+        <p>我们在第 1 章提到过，DeepSeek 发现经典的 C = 6ND 公式在小模型上存在约 50% 的偏差。现在让我们更深入地看看这个发现。</p>
+
+        <p>DeepSeek 团队训练了从 100M 到 1B 参数的 50 多个小模型，覆盖不同的数据量和架构配置，然后统计了实际测量到的 FLOPs。结果如下：</p>
+
+        <pre><code>经典公式: C = 6 × N × D
+
+实测偏差（以 100M 参数模型为例）:
+- 公式预测 C_pred = 6 × 100M × D
+- 实测 C_actual ≈ 4 × 100M × D
+- 偏差 ≈ 50%（公式高估了 50%）
+
+修正后公式: C = (α × N + β) × D
+其中 α ≈ 4.5, β 为与注意力计算相关的修正项</code></pre>
+
+        <p>这个偏差的来源是什么？DeepSeek 的分析指出：</p>
+        <ul>
+            <li>常数 6 假设每个参数在前向 + 后向中恰好贡献 2 次乘加 + 4 次加法，但实际的计算效率受硬件利用率、算子融合度等因素影响</li>
+            <li>对于小模型，计算瓶颈不在参数乘法，而在注意力层的计算和内存访问</li>
+            <li>激活值的内存占用和通信开销在总计算量中的占比随模型变大而变化</li>
+        </ul>
+
+        <div class="warning">
+            <strong>实践教训：</strong>很多研究团队直接套用 C = 6ND 来估算训练成本，导致预算严重偏离实际。如果按公式算出来需要 1000 块 GPU，实际可能只需要 600-700 块。反之，如果你直接用公式反推最优数据量，也可能因为偏差选择了次优的训练配置。DeepSeek 的修正提醒我们——<strong>Scaling Law 是经验规律，不是物理学定律。</strong>具体架构和实现细节会显著影响其形态。
+        </div>
+
+        <p>更深远的意义在于：修正后的公式表明，<strong>模型效率仍有巨大的未被探索的空间。</strong>如果常数 6 可以被压缩到 4.5，那为什么不能再压缩到 3 或者更低？这正是 MoE 架构和 MLA 注意力后来解决的问题——它们从根本上改变了"计算量-参数量-数据量"三者的关系。</p>
+
+        <h2>2.5 两阶段微调</h2>
+
+        <p>预训练完成后的模型只是一个"语言模型"——它知道语法、知识和推理，但不会像一个有用的助手那样与人类对话。从基座模型到聊天助手，中间需要经过精心的对齐微调。</p>
+
+        <p>DeepSeek 提出了<strong>两阶段微调</strong>策略：</p>
+
+        <p><strong>第一阶段：全科学习。</strong>在这个阶段，模型在各种类型的指令数据上进行微调——包括数学推理、代码生成、翻译、问答、摘要、创意写作等。目标是让模型掌握"理解指令并生成符合要求的输出"这个通用能力。这一阶段使用的数据覆盖范围广，但每条数据的质量要求极高。</p>
+
+        <p><strong>第二阶段：对话精调。</strong>在第一阶段的基础上，使用高质量的多轮对话数据进行第二阶段的微调。这一阶段的数据更加聚焦于多轮对话、角色扮演、安全性约束等场景。目标是把模型从"能回答单个问题"升级为"能进行自然的多轮对话"。</p>
+
+        <p>为什么需要两个阶段而不是直接做一次？DeepSeek 在实验中有一个关键的发现：如果将数学推理和通用对话数据混合在一起直接微调，<strong>数学数据的高推理密度会导致模型输出出现重复性问题。</strong>简单来说，模型在通用对话中也会不自觉地"过度推理"，生成冗余的、啰嗦的回复。</p>
+
+        <div class="highlight">
+            <strong>真实踩坑经历：</strong>DeepSeek 团队早期的聊天模型在回答"今天天气怎么样"这种简单问题时，会先列出牛顿力学方程，再论证大气压强，最后才说"晴天"。这种"杀鸡用牛刀"的行为就是全科混合微调的副作用。两阶段微调通过先学能力、后学风格的渐进式策略，有效地解决了这个问题。
+        </div>
+
+        <p>SFT（Supervised Fine-Tuning）阶段的数据规模和构成如下：</p>
+
+        <table>
+            <tr>
+                <th>数据类别</th>
+                <th>第一阶段占比</th>
+                <th>第二阶段占比</th>
+                <th>示例</th>
+            </tr>
+            <tr>
+                <td>数学推理</td>
+                <td>25%</td>
+                <td>10%</td>
+                <td>数学问题 + 详细推导步骤</td>
+            </tr>
+            <tr>
+                <td>代码</td>
+                <td>20%</td>
+                <td>10%</td>
+                <td>编程题 + 代码实现 + 解释</td>
+            </tr>
+            <tr>
+                <td>通用 QA</td>
+                <td>30%</td>
+                <td>35%</td>
+                <td>百科问答、常识推理</td>
+            </tr>
+            <tr>
+                <td>多轮对话</td>
+                <td>10%</td>
+                <td>30%</td>
+                <td>持续性对话、上下文理解</td>
+            </tr>
+            <tr>
+                <td>安全 / 对齐</td>
+                <td>5%</td>
+                <td>10%</td>
+                <td>拒绝有害请求、价值观对齐</td>
+            </tr>
+            <tr>
+                <td>创意写作</td>
+                <td>10%</td>
+                <td>5%</td>
+                <td>故事、文案、诗歌</td>
+            </tr>
+        </table>
+
+        <h2>2.6 DPO 对齐</h2>
+
+        <p>SFT 之后，模型已经具备了基本的对话能力，但它还不够"聪明"——它不知道什么样的回答是人类更偏好的。传统方法是用 RLHF（Reinforcement Learning from Human Feedback），即先训练一个奖励模型，然后用 PPO 算法优化策略模型。但 RLHF 的流程非常复杂：需要训练和维护 4 个模型（策略模型、参考模型、奖励模型、价值模型），训练不稳定，超参数敏感。</p>
+
+        <p>DeepSeek 选择了更新、更简洁的方案：<strong>DPO（Direct Preference Optimization）</strong>。DPO 的核心洞察是：奖励函数可以隐式地表达为策略模型和参考模型的比值，不需要显式地训练一个奖励模型。</p>
+
+        <pre><code>DPO 损失函数的核心形式:
+
+L = -E[ log σ(β * (log(π_θ(y_w|x) / π_ref(y_w|x)) - log(π_θ(y_l|x) / π_ref(y_l|x)))) ]
+
+其中:
+- π_θ: 当前策略模型
+- π_ref: 参考模型（SFT 完成后固定）
+- y_w: 人类偏好的回答
+- y_l: 人类不偏好的回答
+- β: 控制偏离参考模型程度的超参数
+- σ: sigmoid 函数</code></pre>
+
+        <p>这个公式的直觉是：<strong>让模型更倾向于生成人类偏好的回复（y_w），同时远离人类不偏好的回复（y_l）。</strong>约束条件是模型不能偏离 SFT 基座太远——β 参数就是控制这个"安全距离"的。</p>
+
+        <p>DPO 相比 RLHF 的优势非常明显：</p>
+
+        <table>
+            <tr>
+                <th>维度</th>
+                <th>RLHF (PPO)</th>
+                <th>DPO</th>
+            </tr>
+            <tr>
+                <td>需要训练的模型数</td>
+                <td>策略 + 奖励 + 价值 (3 个)</td>
+                <td>仅策略模型 (1 个)</td>
+            </tr>
+            <tr>
+                <td>训练稳定性</td>
+                <td>容易崩溃，需要大量超参调优</td>
+                <td>稳定，接近标准微调</td>
+            </tr>
+            <tr>
+                <td>内存占用</td>
+                <td>4 倍模型权重</td>
+                <td>2 倍模型权重</td>
+            </tr>
+            <tr>
+                <td>实现复杂度</td>
+                <td>奖励模型 + PPO 管线</td>
+                <td>简单的分类式损失</td>
+            </tr>
+            <tr>
+                <td>偏好数据利用率</td>
+                <td>间接（通过奖励模型学习）</td>
+                <td>直接（偏好对直接优化）</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <strong>需要注意：</strong>DPO 虽然简洁，但它对偏好数据的质量要求比 RLHF 更高。在 RLHF 中，奖励模型可以泛化到未标注的样本；而 DPO 直接优化每个偏好对，如果数据集里有噪声（标注错误的偏好），DPO 更容易学到错误的方向。DeepSeek 团队花了大量精力做偏好数据的质量清洗和一致性校验。
+        </div>
+
+        <h2>2.7 性能与启示</h2>
+
+        <p>经过了上述技术栈的打磨，DeepSeek LLM 67B 在发布时的表现如何？一句话总结：<strong>全面超越 LLaMA 2 70B，接近 GPT-3.5 的水平。</strong></p>
+
+        <p>在标准评测集上，DeepSeek 67B 的成绩令人印象深刻：</p>
+
+        <table>
+            <tr>
+                <th>评测集</th>
+                <th>领域</th>
+                <th>DeepSeek 67B</th>
+                <th>LLaMA 2 70B</th>
+                <th>GPT-3.5</th>
+            </tr>
+            <tr>
+                <td>MMLU</td>
+                <td>通用知识</td>
+                <td>76.9</td>
+                <td>68.9</td>
+                <td>70.0</td>
+            </tr>
+            <tr>
+                <td>GSM8K</td>
+                <td>数学推理</td>
+                <td>66.3</td>
+                <td>56.4</td>
+                <td>57.1</td>
+            </tr>
+            <tr>
+                <td>HumanEval</td>
+                <td>代码生成</td>
+                <td>42.1</td>
+                <td>29.9</td>
+                <td>48.1</td>
+            </tr>
+            <tr>
+                <td>BBH</td>
+                <td>复杂推理</td>
+                <td>58.2</td>
+                <td>51.2</td>
+                <td>55.6</td>
+            </tr>
+        </table>
+
+        <p>特别值得关注的是中文评测——DeepSeek 作为中国团队训练的模型，在中文任务上的优势非常显著。这得益于大词表策略和双语数据的精心配比，我们会在后续章节详细展开。</p>
+
+        <p>但 DeepSeek LLM 67B 的优异表现也暴露了一个问题：<strong>稠密模型的天花板。</strong>67B 参数全部被激活，一次前向传播的计算量已经很高。如果想继续 Scale 到 200B、500B、1T 参数，稠密架构的训练和推理成本会以二次方的速度增长，迅速变得不可承受。</p>
+
+        <p>正是这个洞察，促使 DeepSeek 在 V1 发布后立刻转向了 MoE 稀疏架构的研发。他们意识到：与其在稠密架构上跟 LLaMA/GPT 拼参数量和算力投入，不如换一条路——用稀疏激活的方式，用更少的计算量撬动更多的参数容量。</p>
+
+        <div class="highlight">
+            <strong>V1 留下的遗产：</strong>DeepSeek LLM 虽然很快被后续的 MoE 版本超越，但它完成了三项奠基性的工作：① 双语 Scaling Law 的系统验证为后续模型提供了训练策略的理论基础；② GQA 注意力的工程实现被继承到所有后续版本；③ 两阶段微调 + DPO 的对齐方法论成为 DeepSeek 聊天模型的标配。可以说，没有 V1 的"磨刀"，就没有后来 V2/V3 "砍柴"的效率。
+        </div>
+
+        <p>回顾这一章，我们从 LLaMA 架构出发，深入了解了 DeepSeek LLM 的 GQA 注意力机制、多步学习率调度器、Scaling Law 修正、两阶段微调和 DPO 对齐。这些都是 DeepSeek 技术大厦的地基。</p>
+
+        <p>下一章，我们要聊一个看似细微但影响深远的设计决策——<strong>10 万 BPE 词表</strong>。为什么 DeepSeek 选择了一个远超同行的词表大小？超大词表如何降低推理成本？中文 tokenization 有哪些特殊的挑战？我们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="01.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="03.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

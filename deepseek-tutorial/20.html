@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 R1-Zero → R1</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html" class="active">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第20章 R1-Zero → R1</h2>
+
+        <p>2024 年秋天的一个深夜，DeepSeek 的训练集群上，一个实验正在悄悄地运行。研究员们在 Kick 了两天的 GRPO 训练后，打开日志查看——MATH 基准的分数停在了令人失望的 15.6%。这个结果让他们有些沮丧。</p>
+
+        <p>但别急——这不是最终结果，这只是第一次尝试。团队很快发现，问题出在基座模型本身。V3-Base 虽然在通用任务上很强，但它一开始并不知道"推理"是什么意思——它不会使用 CoT 标记，不知道要先思考再回答。于是团队做了一项在当时看来相当激进的实验：<strong>直接用纯强化学习训练模型学会推理，不依赖任何监督数据</strong>。结果，他们见证了一个令人震撼的现象——模型竟然自己"学会"了怎么思考。</p>
+
+        <h2>20.1 R1-Zero 实验：纯 RL 无 SFT 数据</h2>
+
+        <p>R1-Zero 的实验设计出奇地简单：</p>
+        <ul>
+            <li><strong>基座模型</strong>：DeepSeek-V3-Base（未经 SFT 对齐的原始预训练模型）</li>
+            <li><strong>训练算法</strong>：GRPO（第 19 章详细介绍）</li>
+            <li><strong>奖励信号</strong>：纯规则奖励——只有准确性奖励（答案匹配）和格式奖励（格式标记）</li>
+            <li><strong>训练数据</strong>：纯数学和编程问题，每个问题有标准答案</li>
+            <li><strong>零 SFT 数据</strong>：没有任何人工标注的推理链数据</li>
+        </ul>
+
+        <p>换句话说，R1-Zero 的整个训练流程中，模型从未见过任何"推理示例"。它只知道两件事：问题是什么，以及正确的答案是什么。至于怎么从问题推导出答案——全靠自己摸索。</p>
+
+        <div class="highlight">
+            <strong>为什么会有效？</strong>这就像让一个从没下过棋的人直接上场对弈，只告诉他"赢了得一分，输了扣一分"。他不会开局套路、不会中局战术，但通过反复试错，他会自己发现"把马跳到这个位置能形成威胁"——这就是 RL 的力量。模型在探索中发现了推理的策略。
+        </div>
+
+        <p>训练持续了数千步。在前几百步中，模型的输出是混乱的——语言不连贯，推理链跳跃，常常答非所问。但到了 1000 步左右，一个有趣的现象开始出现：输出的结构变得越来越清晰，CoT 标记开始稳定地出现在输出中。</p>
+
+        <h2>20.2 推理能力涌现</h2>
+
+        <p>经过约 2000 步的 GRPO 训练后，R1-Zero 的表现让团队震惊了。</p>
+
+        <p>在 <strong>MATH-500 基准</strong> 上，模型从基线的约 40% 一路飙升到了 78% 以上。更重要的是，在训练日志中观察到了<strong>推理能力的涌现现象</strong>——随着训练持续，模型的平均响应长度（思考步数）同步增长，而不仅仅是准确率在提升。</p>
+
+        <p>观察 R1-Zero 的输出样例时，研究人员发现了一些让人激动的东西：</p>
+
+        <ul>
+            <li><strong>自我反思（Self-reflection）</strong>——模型会在中途停下来检查自己的推理，比如："等等，我上一步的计算好像有问题，让我重新检查一遍……"</li>
+            <li><strong>纠错能力（Self-correction）</strong>——发现错误后，模型会主动回溯并修正推理路径："嗯，我不应该用这个公式，因为条件 A 不满足，改用公式 B……"</li>
+            <li><strong>多路径探索（Multi-path exploration）</strong>——模型会尝试多种解题方案："方法一：用余弦定理……方法二：用向量法……嗯，方法二更简洁，我们用它"</li>
+        </ul>
+
+        <p>这些行为在训练数据中从未被教过——模型是完全通过 RL 的试错过程"自发地"学会了这些策略。</p>
+
+        <div class="tip">
+            <strong>关键洞察：</strong>R1-Zero 实验证明了"推理能力可以是涌现的"——只要你给模型足够的探索空间和正确的奖励信号，它就能自己学会如何进行多步推理、自我纠错和策略选择。这打破了"推理必须通过监督数据来教"的传统认知。
+        </div>
+
+        <p>最终，R1-Zero 在 MATH-500 上达到了 <strong>82%</strong> 的准确率，接近当时最先进的闭源模型。对于纯 RL、零 SFT 数据的结果来说，这个数字堪称惊艳。</p>
+
+        <h2>20.3 R1-Zero 的问题</h2>
+
+        <p>然而，R1-Zero 并不是一个可以上线使用的模型。它有两个致命问题：</p>
+
+        <h3>问题一：可控性差</h3>
+
+        <p>RL 训练让模型学会了推理，但也带来了一些"副作用"。因为没有对人类偏好进行对齐，R1-Zero 的输出在以下方面表现不佳：</p>
+
+        <ul>
+            <li><strong>毒性（Toxicity）</strong>：在开放域对话中，模型的输出有 15% 的概率包含不当言论。这是因为在纯数学/编程数据上训练的模型，没有学习过"什么话不该说"。</li>
+            <li><strong>语言混乱</strong>：模型会在同一个输出中混合多种语言，或者出现语义不连贯的段落。</li>
+            <li><strong>过度思考</strong>：对于简单问题（比如"2+3=?"），模型也会写上一大段推理过程，显得非常不自然。</li>
+        </ul>
+
+        <h3>问题二：开放域对话偏离</h3>
+
+        <p>R1-Zero 的训练数据全部都是数学和编程题。这让它变成了一个"偏科生"——数学能力顶尖，但在开放域对话中表现很差。用户问"推荐一部好看的电影"，它可能给你列出概率公式来分析用户偏好。这就尴尬了。</p>
+
+        <table>
+            <tr>
+                <th>评估维度</th>
+                <th>R1-Zero</th>
+                <th>需求目标</th>
+                <th>差距</th>
+            </tr>
+            <tr>
+                <td>MATH-500</td>
+                <td>82%</td>
+                <td>85%+</td>
+                <td>接近目标</td>
+            </tr>
+            <tr>
+                <td>毒性比例</td>
+                <td>15%</td>
+                <td>&lt; 5%</td>
+                <td>❌ 严重超标</td>
+            </tr>
+            <tr>
+                <td>多语言混合</td>
+                <td>经常出现</td>
+                <td>几乎不出现</td>
+                <td>❌ 需要修复</td>
+            </tr>
+            <tr>
+                <td>开放域对话质量</td>
+                <td>差（偏科严重）</td>
+                <td>好</td>
+                <td>❌ 需要大量改进</td>
+            </tr>
+        </table>
+
+        <p>R1-Zero 证明了纯 RL 路线的可行性，但也暴露了它的局限性。要让模型既有强大的推理能力，又安全可控、适配开放域对话，还需要更多的"教育"。</p>
+
+        <h2>20.4 冷启动 SFT</h2>
+
+        <p>DeepSeek 解决 R1-Zero 问题的方法，是引入 <strong>冷启动 SFT（Cold-start SFT）</strong>——在 RL 训练之前，先用高质量的长链推理数据对模型做一轮监督微调。</p>
+
+        <p>冷启动数据集的构建方法如下：</p>
+
+        <ul>
+            <li><strong>来源</strong>：从 R1-Zero 的 RL 训练过程中收集表现最好的输出（奖励得分最高的），筛选出推理链清晰、格式规范的样本</li>
+            <li><strong>人工精炼</strong>：请人类标注员对这些 RL 生成的最佳输出进行修正和润色，修正语言错误、补充缺失的推理步骤</li>
+            <li><strong>规模</strong>：约 <strong>数千条</strong> 高质量长链推理数据——这个规模远远小于传统 SFT 的数十万条级别</li>
+            <li><strong>覆盖范围</strong>：除数学/编程外，也加入了通用对话场景的数据，以确保模型在全领域的基础能力</li>
+        </ul>
+
+        <p>冷启动数据的格式示例如下：</p>
+
+        <pre><code>{
+  "prompt": "解方程 3x + 7 = 22",
+  "response": "&lt;think&gt;这是一个一元一次方程。
+目标是求出 x 的值。
+第一步，将常数项移到等号右边：
+3x = 22 - 7
+3x = 15
+第二步，两边同时除以系数 3：
+x = 15 / 3
+x = 5
+所以方程的解是 x = 5。
+&lt;/think&gt;
+&lt;answer&gt;x = 5&lt;/answer&gt;",
+  "reward_score": 0.95
+}</code></pre>
+
+        <p>为什么需要冷启动 SFT？原因有两个：</p>
+
+        <p>第一，<strong>RL 初始化</strong>。如果模型在 RL 训练开始前就掌握了基本的推理格式和行为模式，RL 可以专注于优化推理质量，而不是同时学习"怎么输出"和"输出什么"两件事。这大大加速了 RL 收敛。</p>
+
+        <p>第二，<strong>安全性基础</strong>。在冷启动阶段就加入安全对齐数据，模型从一开始就学会"什么话不能说"，后续 RL 训练中不会偏离太远。</p>
+
+        <div class="warning">
+            <strong>注意：</strong>冷启动 SFT 和 R1-Zero 的纯 RL 思路并不矛盾。R1-Zero 证明了"纯 RL 可行"，但实践中"SFT + RL"的组合方案更优。纯 RL 是方向验证，SFT + RL 是工程实现。这就像学开车——你可以自己摸索（纯 RL），但先跟教练学基本操作（SFT），再去路上练习（RL），效率要高得多。
+        </div>
+
+        <h2>20.5 多阶段强化学习</h2>
+
+        <p>冷启动 SFT 之后，R1 的训练进入了多阶段 RL 环节：</p>
+
+        <p><strong>第一阶段：推理强化</strong></p>
+        <p>这一阶段的任务就是提升推理能力。训练数据以数学、编程等有确定性答案的任务为主，使用 GRPO + 规则奖励。训练步数约 200K 步，学习率逐渐衰减。</p>
+
+        <p><strong>第二阶段：全领域 RL</strong></p>
+        <p>在推理能力达标后，将训练数据扩展到全领域——包括通用对话、写作、翻译、创意生成等。奖励信号从规则奖励切换为模型奖励（训练好的 Reward Model），用 PPO + KL 惩罚来约束模型行为。</p>
+
+        <p><strong>第三阶段：安全对齐</strong></p>
+        <p>最后一个阶段专注于安全对齐。使用 RLHF 方法，奖励信号来自安全偏好 Reward Model。同时加入强 KL 惩罚，确保模型在开源对话中的安全性。经过这一阶段，毒性比例从 R1-Zero 的 15% 降至 <strong>3.2%</strong>，达到了可上线标准。</p>
+
+        <table>
+            <tr>
+                <th>阶段</th>
+                <th>训练数据</th>
+                <th>算法</th>
+                <th>奖励信号</th>
+                <th>训练步数</th>
+                <th>KL 惩罚</th>
+            </tr>
+            <tr>
+                <td>冷启动 SFT</td>
+                <td>数千条推理 + 对话</td>
+                <td>SFT</td>
+                <td>交叉熵损失</td>
+                <td>少量</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>推理强化</td>
+                <td>数学 / 编程 / 逻辑</td>
+                <td>GRPO</td>
+                <td>规则奖励</td>
+                <td>200K</td>
+                <td>β × KL</td>
+            </tr>
+            <tr>
+                <td>全领域 RL</td>
+                <td>全领域对话</td>
+                <td>PPO + KL</td>
+                <td>模型奖励</td>
+                <td>100K</td>
+                <td>强 KL</td>
+            </tr>
+            <tr>
+                <td>安全对齐</td>
+                <td>安全偏好数据</td>
+                <td>RLHF</td>
+                <td>安全 Reward</td>
+                <td>50K</td>
+                <td>强 KL</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <strong>训练策略的演进：</strong>从 R1-Zero 到 R1，训练策略经历了从"野蛮生长"到"精心栽培"的转变。R1-Zero 是"放养"——给模型极大的自由度去探索推理，能涌现出自我反思等高级能力但可控性差。R1 是"引导式栽培"——先 SFT 打基础、再分阶段 RL 逐步优化、最后安全对齐收尾。两者结合，既有 R1-Zero 的推理能力涌现，又有 SFT 的稳定性和可控性。
+        </div>
+
+        <h2>20.6 蒸馏 800K 样本</h2>
+
+        <p>R1 训练完成之后，DeepSeek 团队面临一个新问题：R1 本身是一个 671B 参数的 MoE 大模型，推理成本高，部署门槛高。不是每个团队都能用得起的。</p>
+
+        <p>解决方案是<strong>知识蒸馏（Knowledge Distillation）</strong>——用 R1 这个"老师"生成高质量的推理数据，用来训练更小的"学生"模型。</p>
+
+        <p>具体流程：</p>
+        <ul>
+            <li>用 R1 在大量推理任务上生成输出，收集约 <strong>800K 条</strong> 推理样本</li>
+            <li>包括数学推理、编程推理、逻辑推理等多种类型</li>
+            <li>过滤掉质量低（奖励得分低）的输出</li>
+            <li>用这些数据对 1.5B 到 70B 的小模型进行 SFT 训练</li>
+        </ul>
+
+        <h2>20.7 蒸馏效果</h2>
+
+        <p>蒸馏的结果令人瞩目。用 R1 数据训练的小模型，在推理任务上的表现甚至超越了一些同样大小的最先进模型：</p>
+
+        <table>
+            <tr>
+                <th>模型</th>
+                <th>参数量</th>
+                <th>MATH-500</th>
+                <th>GSM8K</th>
+                <th>HumanEval</th>
+            </tr>
+            <tr>
+                <td>Qwen-2.5-7B</td>
+                <td>7B</td>
+                <td>58.4%</td>
+                <td>72.1%</td>
+                <td>45.2%</td>
+            </tr>
+            <tr>
+                <td>R1-Distill-Qwen-7B</td>
+                <td>7B</td>
+                <td>81.2%</td>
+                <td>88.4%</td>
+                <td>63.8%</td>
+            </tr>
+            <tr>
+                <td>LLaMA-3.1-8B</td>
+                <td>8B</td>
+                <td>38.5%</td>
+                <td>55.0%</td>
+                <td>34.2%</td>
+            </tr>
+            <tr>
+                <td>R1-Distill-LLaMA-8B</td>
+                <td>8B</td>
+                <td>76.8%</td>
+                <td>84.1%</td>
+                <td>59.8%</td>
+            </tr>
+            <tr>
+                <td>GPT-4o-mini</td>
+                <td>未知</td>
+                <td>78.2%</td>
+                <td>85.3%</td>
+                <td>61.4%</td>
+            </tr>
+            <tr>
+                <td>R1-Distill-Qwen-32B</td>
+                <td>32B</td>
+                <td>89.3%</td>
+                <td>93.2%</td>
+                <td>74.1%</td>
+            </tr>
+            <tr>
+                <td>R1-Distill-LLaMA-70B</td>
+                <td>70B</td>
+                <td>91.8%</td>
+                <td>95.0%</td>
+                <td>78.9%</td>
+            </tr>
+        </table>
+
+        <p>最令人惊讶的是，7B 的蒸馏模型在 MATH-500 上达到了 81.2%，甚至超过了 GPT-4o-mini。这意味着 <strong>一个可以在手机上运行的 7B 模型，其数学推理能力超过了 OpenAI 的官方小模型</strong>。这就是蒸馏的巨大威力——把大模型通过 RL 学会的推理能力，压缩到小模型中。</p>
+
+        <div class="tip">
+            <strong>思考：</strong>为什么 R1 的蒸馏效果这么好？关键在于 R1 的推理过程包含了丰富的"思维链"——自我反思、多路径探索、纠错等。当小模型学习这些长链推理过程时，它不仅仅是"记住答案"，而是学会了一种"思考方法"。这比单纯用标准答案训练的效果要好得多。
+        </div>
+
+        <p>R1 的故事告诉我们，强化学习可以让模型自发涌现推理能力，而多阶段训练策略和知识蒸馏则将这些能力固化和传播。DeepSeek 不仅在研发层面实现了突破，还让这些能力以极低的成本惠及了每一个开发者。</p>
+
+        <p>下一章，我们把目光从通用推理转向一个特定的垂直领域——<strong>代码生成</strong>。DeepSeek-Coder 是如何通过对代码语料的特殊处理、仓库级上下文理解和 FIM 训练，成为开源代码模型的新标杆的？我们接着聊。</p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

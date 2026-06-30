@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 FP8混合精度训练</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html" class="active">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第11章 FP8混合精度训练</h2>
+
+        <p>大家好！在上一章我们讲到无辅助损失负载均衡如何让 MoE 训练更稳定。今天的话题更加硬核——<strong>FP8 混合精度训练</strong>。</p>
+
+        <p>如果你做过深度学习，一定用过 <strong>FP16/BF16 混合精度训练</strong>。它的核心思想是：前向和反向传播用半精度计算（速度快、省显存），优化器状态和主权重用全精度保存（保持精度）。这套打法已经非常成熟，几乎是所有大模型训练的标配。但 DeepSeek-V3 走得更远——它把 FP8 用在了千亿参数模型的训练中。这是 <strong>FP8 训练首次在超大规模 MoE 模型上得到完整验证</strong>，直接让训练成本降低了一半。</p>
+
+        <p>你可能会问：从 FP32 到 FP16 再到 FP8，精度真的够用吗？答案是：<strong>精度够不够，取决于你怎么用</strong>。</p>
+
+        <h2>11.1 混合精度训练演进</h2>
+
+        <p>先回顾一下精度格式的进化史。</p>
+
+        <table>
+            <tr>
+                <th>精度格式</th>
+                <th>指数位</th>
+                <th>尾数位</th>
+                <th>相对 FP32 显存</th>
+                <th>适用范围</th>
+            </tr>
+            <tr>
+                <td>FP32</td>
+                <td>8</td>
+                <td>23</td>
+                <td>1×</td>
+                <td>主权重、优化器状态</td>
+            </tr>
+            <tr>
+                <td>BF16</td>
+                <td>8</td>
+                <td>7</td>
+                <td>0.5×</td>
+                <td>前向/反向传播（主流）</td>
+            </tr>
+            <tr>
+                <td>FP16</td>
+                <td>5</td>
+                <td>10</td>
+                <td>0.5×</td>
+                <td>前向/反向传播（旧式）</td>
+            </tr>
+            <tr>
+                <td>FP8 E4M3</td>
+                <td>4</td>
+                <td>3</td>
+                <td>0.25×</td>
+                <td>前向激活、权重</td>
+            </tr>
+            <tr>
+                <td>FP8 E5M2</td>
+                <td>5</td>
+                <td>2</td>
+                <td>0.25×</td>
+                <td>反向梯度</td>
+            </tr>
+        </table>
+
+        <p>从 FP32 到 BF16，显存占用和计算带宽需求降低 50%。理论上，从 BF16 到 FP8 再砍一半。但关键在于——<strong>FP8 的动态范围太窄了</strong>。</p>
+
+        <p>FP32 有 8 位指数（范围约 ±10³⁸），BF16 继承了 8 位指数（范围差不多），FP16 有 5 位指数（范围约 ±65504）。而 FP8 的 E4M3 格式只有 4 位指数——最大能表示的值是 448，最小值（正常数）是 2⁻⁶。这个"窄窗口"使得 FP8 对大模型中常见的激活值异常非常敏感。</p>
+
+        <div class="tip">
+            <strong>一个形象的比喻：</strong>FP32 像一个 24 位精度的巨幅尺子，可以量从原子到星系的所有东西；BF16 像一把同样长度但刻度更粗的尺子，量程一样但精度差一些；FP8 则像一把很小的短尺，只能量 0 到 448 之间的东西，超出就爆表了。大模型中经常出现几百上千的激活值，FP8 很容易"爆表"溢出。
+        </div>
+
+        <h2>11.2 FP8的挑战</h2>
+
+        <p>FP8 是 NVIDIA Hopper 架构（H100/H800）引入的新特性。它有两种变体：</p>
+
+        <ul>
+            <li><strong>E4M3</strong>（4 指数 3 尾数）：更高的精度（约 3-4 位有效数字），但范围窄（最大 448）</li>
+            <li><strong>E5M2</strong>（5 指数 2 尾数）：更宽的范围（最大 57344），但精度低（约 2-3 位有效数字）</li>
+        </ul>
+
+        <p>在 DeepSeek-V3 的训练中，<strong>前向传播</strong>使用 E4M3 来保持高精度计算，<strong>反向传播的梯度</strong>使用 E5M2 来避免梯度消失（梯度的范围通常更大）。</p>
+
+        <p>但即使这样，FP8 训练面临的核心挑战仍然是：<strong>如何在有限的表示精度下，不对训练收敛造成显著影响。</strong></p>
+
+        <p>DeepSeek 的答案是——<strong>极其精细的量化策略</strong>。</p>
+
+        <h2>11.3 Block/Tile-wise量化策略</h2>
+
+        <p>传统的量化做法是 per-tensor（按整个张量）缩放：统计整个张量的最大值，然后将整个张量除以这个最大值，映射到 FP8 的表示范围。这种粗粒度的量化方法在遇到异常值（outliers）时效果很差——一个特别大的异常值会导致整个张量的缩放因子过大，其他正常值被压缩到很低的精度。</p>
+
+        <p>DeepSeek-V3 的解决方案是 <strong>分块量化</strong>（Block/Tile-wise Quantization）：</p>
+
+        <pre><code># 细粒度量化策略
+# 激活值: 按 1×128 tile 分组，每组独立缩放
+# 权重:  按 128×128 block 分组，每组独立缩放
+
+def quantize_activation(act_tensor):
+    # act_tensor shape: [batch, seq_len, d_model]
+    tiles = act_tensor.view(-1, 128)  # 每 128 个通道为一组
+    scales = tiles.abs().max(dim=-1).values / FP8_MAX
+    quantized = (tiles / scales.unsqueeze(-1)).round().to(fp8_e4m3)
+    return quantized, scales
+
+def quantize_weight(weight):
+    # weight shape: [d_in, d_out]
+    blocks = weight.view(-1, 128, 128)  # 128×128 block
+    scales = blocks.abs().amax(dim=(1,2)) / FP8_MAX
+    quantized = (blocks / scales.unsqueeze(-1).unsqueeze(-1)).round().to(fp8_e4m3)
+    return quantized, scales</code></pre>
+
+        <p>这种细粒度的量化策略，把缩放因子的粒度从"整个张量"降到了"128 个元素"。虽然需要额外存储缩放因子（每 128 个元素多存一个 FP32 值，开销仅 0.4%），但量化精度的提升非常明显。</p>
+
+        <h2>11.4 分层精度分配</h2>
+
+        <p>不是所有的层都对精度要求相同。DeepSeek-V3 对不同类型的层分配了不同的精度：</p>
+
+        <ul>
+            <li><strong>核心 GEMM 运算</strong>（线性层的前向/反向矩阵乘法）：在 FP8 中执行，由 Tensor Core 加速</li>
+            <li><strong>注意力运算</strong>：在 BF16 中执行，因为注意力对数值精度特别敏感</li>
+            <li><strong>Embedding 层</strong>：在 BF16 中执行，词汇量太大，FP8 精度不够</li>
+            <li><strong>RMS Norm</strong>：在 BF16 中执行，归一化操作本身计算量小，精度敏感</li>
+        </ul>
+
+        <p>另外，对于 MoE 中的 <strong>SwiGLU 激活函数</strong>，DeepSeek 选择缓存其输入并在反向传播时重算（recompute），而非直接缓存其 FP8 输出。这是因为 SwiGLU 的中间结果对精度的要求非常苛刻。</p>
+
+        <div class="highlight">
+            <strong>一个技术干货：</strong>DeepSeek-V3 的 FP8 训练中还有一个关键细节——累加精度提升。NVIDIA H800 GPU 的 Tensor Core 在做 FP8 GEMM 时，内部累加精度只保留了 14 位左右，远低于 FP32 的 23 位精度。当内维度 K 很大时（大模型中经常 K=4096 或更大），这种低精度累加会导致高达 2% 的相对误差。DeepSeek 的解决方案是：每累加 128 个元素后，将部分结果拷回 CUDA Core 用 FP32 重新累加。这虽然增加了少量开销，但将误差控制在了可接受范围内。
+        </div>
+
+        <h2>11.5 梯度累积与缩放</h2>
+
+        <p>FP8 训练中还有一个棘手的问题——<strong>梯度缩放</strong>。</p>
+
+        <p>在 FP16 混合精度训练中，我们通常会使用 loss scaling 来防止梯度下溢（梯度的值太小，被 FP16 表示成 0）。FP8 同样需要梯度缩放，但策略更复杂。</p>
+
+        <p>DeepSeek-V3 的做法是：反向传播计算出的梯度先用 FP8（E5M2）累加，然后定期转换为 BF16 存储在优化器状态中。这样做的好处是，反向传播时的 FP8 GEMM 可以利用 Tensor Core 加速，而优化器更新时使用高精度避免累积误差。</p>
+
+        <pre><code># FP8 训练流水线（简化版）
+1. 前向传播（FP8 E4M3）：
+   - 对输入激活进行 tile-wise 量化 → FP8
+   - 权重以 block-wise 量化 → FP8
+   - GEMM 在 Tensor Core 上执行（FP8 × FP8 → FP32 中间累加）
+   - 结果反量化 → BF16 → 传入下一层（或激活函数）
+
+2. 反向传播（FP8 + FP32）：
+   - 梯度计算使用 FP8 E5M2（范围更大）
+   - Wgrad 在 FP8 中执行
+   - Dgrad 在 FP8 中执行（输入激活梯度）
+   - 所有梯度最终累加到 FP32 缓冲区
+
+3. 优化器更新（FP32/BF16）：
+   - 主权重：FP32
+   - Adam 一阶/二阶动量：BF16（大幅省内存）
+   - 更新时：FP32 主权重 → BF16 动量 → FP32 更新 → 新的 FP32 主权重</code></pre>
+
+        <div class="warning">
+            <strong>踩坑记录：</strong>DeepSeek 团队在 FP8 训练验证阶段做了一个有趣的测试——他们用 FP8 和 BF16 分别训练了两个相同配置的 16B 模型，各训练约 1T token。对比发现，FP8 模型与 BF16 模型的相对 loss 误差始终低于 0.25%，完全在训练随机性（不同随机种子之间的差异）的可接受范围内。这个结果让团队确信：FP8 训练不会对最终模型质量造成可观测的损害。
+        </div>
+
+        <h2>11.6 首次千亿验证的意义</h2>
+
+        <p>DeepSeek-V3 的 FP8 训练是整个 AI 训练基础设施历史上的一个重要里程碑。它的意义不仅在于 DeepSeek 自己省下了多少成本，更在于它为整个行业树立了一个新的标杆：</p>
+
+        <ul>
+            <li><strong>证明可行性</strong>：FP8 训练在万亿 token、千亿参数规模下可行，精度损失几乎不可观测</li>
+            <li><strong>提供方法论</strong>：tile-wise 量化、分层精度分配、CUDA Core 高精度累加等一套完整的工程方案</li>
+            <li><strong>降低门槛</strong>：FP8 训练直接减少了 50% 的显存占用和 40% 以上的训练时间</li>
+        </ul>
+
+        <p>在今天，FP8 训练已经成为大模型训练的"新常态"。作为首个在千亿 MoE 模型上完整验证 FP8 训练的工作，DeepSeek-V3 引领了这个趋势。可以说，<strong>FP8 训练是 DeepSeek-V3 用 557 万美元训出 671B SOTA 模型的关键支柱之一</strong>。</p>
+
+        <p>下一章，我们将继续深入 DeepSeek-V3 的创新训练目标——<strong>MTP 多 Token 预测</strong>，看看它是如何通过预测多个未来 token 来提供更丰富的训练信号的。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

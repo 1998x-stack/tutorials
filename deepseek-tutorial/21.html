@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 DeepSeek-Coder</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html" class="active">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第21章 DeepSeek-Coder</h2>
+
+        <p>在 2023 年底的一个技术分享会上，GitHub Copilot 的团队展示了一个有趣的数据：开发者平均每天写 200 行代码，但其中超过 60% 是"样板代码"——重复的 import、getter/setter、数据格式转换。而 GPT-4 等通用大模型虽然在代码生成上表现不错，但它们对代码的"理解"往往停留在函数级别——挑一个函数出来，它能补全，但放到整个代码库的上下文里，常常出现调用不存在的函数、引用错误的变量名、或者完全不考虑项目结构的问题。</p>
+
+        <p>一个 DeepSeek 的工程师回忆起他们的早期实验：用通用基座模型生成一个 Python 的 Web 服务，模型确实生成了代码，但导入的模块名不存在，函数签名用的是过时的格式，甚至连文件之间的依赖关系都搞错了。这让他们意识到：<strong>代码生成和通用文本生成有本质的不同，必须为代码设计专门的训练方案。</strong>于是，DeepSeek-Coder 诞生了。</p>
+
+        <h2>21.1 代码大模型的特殊性</h2>
+
+        <p>代码和自然语言的差异很大。自然语言是"模糊的正确"，代码是"精确的错误"——一个语法错误就让整个程序无法运行。这种精确性要求对代码大模型提出了独特挑战：</p>
+
+        <ul>
+            <li><strong>结构化约束</strong>——代码有严格的语法规则、类型系统、作用域规则。模型需要学会变量作用域、类型匹配、函数签名的正确使用，而不能像自然语言那样"大致对"就行。</li>
+            <li><strong>编译验证</strong>——自然语言没有"编译错误"这回事，但代码有。一个正确率 90% 的模型在代码生成任务上可能毫无价值——因为那 10% 的错误可能是语法错误。</li>
+            <li><strong>工程依赖</strong>——真实项目不是一堆独立函数的集合，而是一个复杂的依赖网络。一个函数调用了另一个文件中的工具函数，这个工具函数又依赖了第三方库。理解这些跨文件、跨库的依赖关系，对代码补全和生成至关重要。</li>
+            <li><strong>长尾语言</strong>——代码的语言分布更复杂：主流语言（Python、JavaScript）数据丰富，但像 Julia、Racket、Verilog 这类"小众但重要"的语言数据很少</li>
+        </ul>
+
+        <p>DeepSeek 团队在研发 Code 系列时，围绕这些特殊性设计了针对性的解决方案。</p>
+
+        <h2>21.2 仓库级代码语料</h2>
+
+        <p>之前的代码大模型大多在"文件级"数据上训练——把每个代码文件当作独立的文本块。但真实开发中，一个项目是一个<strong>仓库（repository）</strong>，包含了几十个到几百个文件，文件之间通过 import、include、require 等方式相互连接。</p>
+
+        <p>DeepSeek-Coder 的一个关键创新是构建了 <strong>仓库级代码语料（Repository-level Code Corpus）</strong>。具体做法是：</p>
+
+        <ul>
+            <li>从 GitHub 上爬取完整的公开仓库，不只是单个文件</li>
+            <li>保留仓库的目录结构，让模型看到文件之间的组织关系</li>
+            <li>在训练时，将同一仓库的所有文件打包成一个训练样本（或连续样本），而不是随机打乱</li>
+            <li>在分词阶段加入特殊标记来分隔文件和路径，比如 <code>&lt;repo_path&gt;src/main.py&lt;/repo_path&gt;</code></li>
+        </ul>
+
+        <div class="highlight">
+            <strong>具体效果：</strong>仓库级训练让模型学会了"跨文件推理"。如果 A.py 中 import 了 B.py 中的函数，模型在生成 A.py 的代码时，能够根据 B.py 中的函数签名和文档来生成正确的调用方式。这在文件级训练中是不可能做到的。
+        </div>
+
+        <p>仓库级数据的构建也带来了工程挑战——大型仓库可能包含数千个文件、数百万行代码。DeepSeek 使用了一个基于依赖图的采样策略：优先采样同一个项目中紧密耦合的文件对，确保每个训练 batch 中包含足够的跨文件上下文。</p>
+
+        <h2>21.3 FIM 填充中间模式</h2>
+
+        <p>代码补全是 IDE 中最常用的功能。但传统的从左到右的因果语言模型天然适合"续写"——给你前面的代码，生成后面的代码。但真实的编码场景中，用户经常需要在<strong>中间插入</strong>代码：在函数的中间添加一个新的条件分支，或者在一个已有的类中增加一个新方法。</p>
+
+        <p>DeepSeek-Coder 引入了 <strong>FIM（Fill-in-the-Middle）</strong> 训练模式。FIM 的核心思想是：将一段代码拆分成前缀（prefix）和后缀（suffix），让模型根据前缀+后缀来生成中间的代码块。</p>
+
+        <pre><code># FIM 训练示例
+原始代码：
+def calculate_total(items, tax_rate):
+    subtotal = sum(items)
+    tax = subtotal * tax_rate
+    return subtotal + tax
+
+FIM 变换后：
+前缀：def calculate_total(items, tax_rate):\n    subtotal = sum(items)
+后缀：\n    return subtotal + tax
+目标填充：\n    tax = subtotal * tax_rate
+
+# 模型输入：
+# <fim_prefix>def calculate_total(items, tax_rate):\n    subtotal = sum(items)
+# <fim_suffix>\n    return subtotal + tax
+# <fim_middle>
+# 模型输出：
+# \n    tax = subtotal * tax_rate</code></pre>
+
+        <p>FIM 训练中，大约 50% 的训练数据会被随机选择 FIM 变换。变换方式包括 PSM（前缀-后缀-中间）和 SPM（后缀-前缀-中间）等多种排列，让模型学会在各种上下文中填充代码。</p>
+
+        <p>这种训练方式的直接效果是：DeepSeek-Coder 在 IDE 插件中的"代码补全"功能表现极佳。当用户在函数体中间加一行代码时，模型能够准确理解"前面写的是什么"和"后面要衔接什么"，然后生成合适的内容。</p>
+
+        <div class="tip">
+            <strong>FIM 的应用场景：</strong>除了代码补全，FIM 对代码修复也有帮助。如果你把一段包含 bug 的代码作为"中间"部分，把正确的上下文作为前缀和后缀，模型可以学会如何替换有问题的代码段落。DeepSeek 的实验显示，FIM 训练的模型在 bug 定位和修复任务上比纯因果模型好 15-20%。
+        </div>
+
+        <h2>21.4 87 种语言覆盖</h2>
+
+        <p>DeepSeek-Coder 的训练数据覆盖了 <strong>87 种编程语言</strong>。数据分布遵循"自然出现频率"，既包含了主流语言，也保留了长尾语言。</p>
+
+        <p>训练数据的语言分布大致如下：</p>
+
+        <table>
+            <tr>
+                <th>等级</th>
+                <th>语言举例</th>
+                <th>数据占比</th>
+                <th>策略</th>
+            </tr>
+            <tr>
+                <td>Tier 1（主流）</td>
+                <td>Python, JavaScript, Java, TypeScript, Go, Rust</td>
+                <td>~60%</td>
+                <td>充分训练，覆盖所有语法和框架</td>
+            </tr>
+            <tr>
+                <td>Tier 2（常用）</td>
+                <td>C++, C#, PHP, Ruby, Swift, Kotlin, Shell</td>
+                <td>~25%</td>
+                <td>完整语法覆盖，核心库训练</td>
+            </tr>
+            <tr>
+                <td>Tier 3（小众）</td>
+                <td>Julia, Racket, Verilog, Fortran, COBOL, Elixir</td>
+                <td>~10%</td>
+                <td>语法覆盖，防止遗忘</td>
+            </tr>
+            <tr>
+                <td>Tier 4（极长尾）</td>
+                <td>Pascal, Ada, Prolog, Scratch, SAS</td>
+                <td>~5%</td>
+                <td>保持基本认知能力</td>
+            </tr>
+        </table>
+
+        <p>覆盖 87 种语言的意义不仅在于"多"。更重要的是，<strong>多语言训练提升了模型的抽象能力</strong>。一个同时训练了 Python 和 Java 的模型，能更好地理解"类"和"对象"的概念，因为它在两种语法实现上都见过。这种跨语言的共性理解，在模型处理不熟悉的语言时尤其有帮助。</p>
+
+        <p>DeepSeek 在数据处理中还有一个有趣的发现：保留极端长尾语言（甚至包括 DSL 和配置文件格式如 YAML、TOML）有助于提升模型对代码结构的整体理解。它们虽然占比很小，但贡献了宝贵的"代码结构多样性"。</p>
+
+        <h2>21.5 16K → 128K 上下文</h2>
+
+        <p>DeepSeek-Coder V1 支持 16K 的上下文长度。这个长度对于大多数单文件代码补全场景是够用的——一个典型的 Python 文件约 200-500 行，16K tokens 足以覆盖。</p>
+
+        <p>但到了 <strong>DeepSeek-Coder V2</strong>，团队做了重大升级：<strong>将上下文长度扩展到了 128K</strong>。这背后的驱动力来自几个方向：</p>
+
+        <ul>
+            <li><strong>大型代码库</strong>——很多企业级项目有数千行甚至上万行的源代码，16K 远远不够</li>
+            <li><strong>项目级重构</strong>——要对整个项目做大规模重构，需要同时理解几十个文件的上下文</li>
+            <li><strong>代码审查</strong>——审查一个 PR（Pull Request），需要同时查看 diff、相关文件、测试代码等</li>
+        </ul>
+
+        <p>上下文扩展到 128K 的技术基础是什么？核心是 DeepSeek-V2 中的 <strong>MLA（Multi-head Latent Attention）</strong> 架构。MLA 通过低秩压缩大幅减少了 KV Cache 的大小，使得长上下文推理的显存占用在可控范围内。同时，DeepSeek 在训练中也使用了渐进式上下文扩展策略——先在 16K 数据上训练，再逐步增加到 32K、64K、128K。</p>
+
+        <div class="warning">
+            <strong>挑战：</strong>从 16K 扩展到 128K 不仅仅是改一个参数那么简单。128K 上下文意味着模型需要学习在超长序列中保持注意力分布的有效性。DeepSeek 在 RoPE（旋转位置编码）上做了细致的调整，确保模型不会在超长上下文中丢失位置信息。同时，训练数据中加入了大量长代码文件——一些大型 Java 项目的单文件可以达到 8000 行以上——让模型有充足的"长上下文实践"机会。
+        </div>
+
+        <h2>21.6 HumanEval 表现</h2>
+
+        <p>在代码生成的标准基准 <strong>HumanEval</strong> 上，DeepSeek-Coder 交出了亮眼的成绩单。HumanEval 包含 164 道编程题，要求模型根据函数签名和文档字符串生成函数体，然后通过单元测试验证。</p>
+
+        <p>DeepSeek-Coder 1.3B、6.7B、33B 三个尺寸的模型在 HumanEval 上的 pass@1 分数分别为：</p>
+
+        <table>
+            <tr>
+                <th>模型</th>
+                <th>参数量</th>
+                <th>HumanEval pass@1</th>
+                <th>MBPP pass@1</th>
+            </tr>
+            <tr>
+                <td>CodeLLaMA-7B</td>
+                <td>7B</td>
+                <td>33.5%</td>
+                <td>49.2%</td>
+            </tr>
+            <tr>
+                <td>DeepSeek-Coder-1.3B</td>
+                <td>1.3B</td>
+                <td>42.7%</td>
+                <td>55.4%</td>
+            </tr>
+            <tr>
+                <td>DeepSeek-Coder-6.7B</td>
+                <td>6.7B</td>
+                <td>65.2%</td>
+                <td>70.8%</td>
+            </tr>
+            <tr>
+                <td>CodeLLaMA-13B</td>
+                <td>13B</td>
+                <td>44.5%</td>
+                <td>56.2%</td>
+            </tr>
+            <tr>
+                <td>DeepSeek-Coder-33B</td>
+                <td>33B</td>
+                <td>74.4%</td>
+                <td>78.7%</td>
+            </tr>
+            <tr>
+                <td>GPT-3.5-Turbo</td>
+                <td>未知</td>
+                <td>72.5%</td>
+                <td>75.8%</td>
+            </tr>
+        </table>
+
+        <p>最令人印象深刻的是：6.7B 的 DeepSeek-Coder 在 HumanEval 上已经接近 GPT-3.5-Turbo 的水平，而 33B 版本更是超过了 GPT-3.5-Turbo。考虑到 DeepSeek-Coder 的训练成本远低于 GPT-3.5，这个成绩确立了它作为<strong>开源代码模型新标杆</strong>的地位。</p>
+
+        <div class="highlight">
+            <strong>一个 1.3B 模型的传奇：</strong>注意看 DeepSeek-Coder-1.3B——只有 1.3B 参数，却在 HumanEval 上达到了 42.7%，超过 7B 的 CodeLLaMA（33.5%）。这意味着什么？你的笔记本电脑甚至手机都能跑得动的模型，在代码生成质量上超越了一个比它大 5 倍的模型。这就是数据质量、训练策略和架构设计共同作用的结果。
+        </div>
+
+        <h2>21.7 Coder-V2 升级</h2>
+
+        <p>2024 年中，DeepSeek 发布了 <strong>DeepSeek-Coder-V2</strong>，这是一个基于 DeepSeek-V2 MoE 架构的重大升级。Coder-V2 的变化包括：</p>
+
+        <ul>
+            <li><strong>MoE 架构</strong>——从 Dense 架构切换到 MoE（Mixture of Experts），使用 DeepSeek-V2 的 fine-grained expert 分割 + 共享专家机制</li>
+            <li><strong>128K 上下文</strong>——原生支持 128K 上下文，无需额外调整</li>
+            <li><strong>更强的基准成绩</strong>——在 HumanEval 上达到 85%+，接近 GPT-4 水平</li>
+            <li><strong>多模态支持</strong>——除了纯代码，还支持代码相关的自然语言理解（如根据 PR 描述生成代码）</li>
+        </ul>
+
+        <p>Coder-V2 的推出标志着代码大模型进入了"MoE 时代"。更大的总参数 + 更小的推理计算量，让代码生成模型在保持高性能的同时，也能在资源受限的环境中部署。</p>
+
+        <div class="tip">
+            <strong>实践建议：</strong>如果你计划在项目中集成代码补全功能，可以这样选择：对于轻量级场景（IDE 插件、Web IDE），使用 1.3B 或 6.7B 的 DeepSeek-Coder 即可；对于需要理解大型代码库的场景（代码审查、项目重构），使用 Coder-V2 的 128K 上下文版本。DeepSeek-Coder 是 Apache 2.0 许可证，可以免费用于商业项目。
+        </div>
+
+        <p>代码生成是 DeepSeek 在垂直领域的一次成功实践。但还有一个数学推理的领域也值得深入探讨。下一章，我们将走进 <strong>DeepSeek-Math</strong>——看看 DeepSeek 是如何通过百万级推理语料和多阶段预训练，在 GSM8K 和 MATH 基准上刷新开源模型的纪录。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

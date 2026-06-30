@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第25章 API最佳实践</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html" class="active">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第25章 API最佳实践</h2>
+
+        <p>2025 年初，我接手了一个自动化客服项目。团队之前用其他模型 API，每月的成本高得吓人——光一个知识库问答功能，月消耗就超过 2000 美元。我看了看他们的调用日志，发现大部分请求都是重复的文档查询，而且他们每次都在用满血版的 R1 做最简单的分类任务——就像开着法拉利去买菜。</p>
+
+        <p>切换到 DeepSeek API 后，通过一系列优化——上下文缓存、模型分级调用、Function Calling 重构——我们把月成本从 2000 美元降到了不到 200 美元，同时响应速度还提高了 3 倍。这个故事说明：<strong>用好 API 并不只是调一个接口那么简单，它是一整套工程实践</strong>。</p>
+
+        <p>这一章我会带你掌握 DeepSeek API 的核心技巧，从基础调用到高级特性，从成本优化到产品落地，让你花的每一分钱都物有所值。</p>
+
+        <h2>25.1 DeepSeek API 概览</h2>
+
+        <p>DeepSeek 提供了完全兼容 OpenAI 格式的 API，这意味着你可以在<strong>不修改任何代码</strong>的情况下，把调用的 base_url 从 <code>https://api.openai.com</code> 改成 DeepSeek 的地址即可。如果你用过 OpenAI API，上手 DeepSeek 只需要 30 秒。</p>
+
+        <pre><code>import openai  # 或者用 httpx 直接请求
+
+client = openai.OpenAI(
+    api_key="sk-your-deepseek-api-key",
+    base_url="https://api.deepseek.com/v1"
+)
+
+response = client.chat.completions.create(
+    model="deepseek-chat",  # DeepSeek-V3/V3.1
+    messages=[
+        {"role": "system", "content": "你是一个有用的助手"},
+        {"role": "user", "content": "DeepSeek 的 MLA 机制有什么优势？"}
+    ],
+    temperature=0.7,
+    max_tokens=1024
+)
+
+print(response.choices[0].message.content)</code></pre>
+
+        <p>DeepSeek 目前提供多个模型端点，各自适合不同的场景：</p>
+
+        <table>
+            <tr>
+                <th>API 模型名</th>
+                <th>对应模型</th>
+                <th>适合场景</th>
+                <th>价格（每百万 token）</th>
+            </tr>
+            <tr>
+                <td><code>deepseek-chat</code></td>
+                <td>DeepSeek-V3 / V3.1</td>
+                <td>通用对话、内容生成、代码</td>
+                <td>输入 $0.27 / 输出 $1.10</td>
+            </tr>
+            <tr>
+                <td><code>deepseek-reasoner</code></td>
+                <td>DeepSeek-R1</td>
+                <td>数学推理、逻辑分析、复杂问答</td>
+                <td>输入 $0.55 / 输出 $2.19</td>
+            </tr>
+            <tr>
+                <td><code>deepseek-coder</code></td>
+                <td>DeepSeek-Coder-V2</td>
+                <td>代码生成、代码补全、审查</td>
+                <td>输入 $0.27 / 输出 $1.10</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <strong>模型选择策略：</strong>对于 80% 的日常任务，<code>deepseek-chat</code> 就足够了。只有当任务涉及复杂推理（数学证明、多步逻辑、竞赛题）时，才切换到 <code>deepseek-reasoner</code>。合理分级调用可以让你的 API 成本降低 50%-70%。
+        </div>
+
+        <h2>25.2 Function Calling</h2>
+
+        <p>Function Calling（函数调用）是让大模型与外部系统交互的桥梁。它允许模型在需要时输出一个结构化的函数调用指令，你的代码接收这个指令后执行对应的操作（比如查数据库、调用第三方 API、发送邮件），然后把结果返回给模型继续生成回复。</p>
+
+        <p>DeepSeek 的 Function Calling 支持与 OpenAI 完全兼容。下面是一个查询实时天气的示例：</p>
+
+        <pre><code>functions = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "获取指定城市的实时天气信息",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "城市名称，如北京、上海、深圳"
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "日期，格式为 YYYY-MM-DD"
+                    }
+                },
+                "required": ["city"]
+            }
+        }
+    }
+]
+
+response = client.chat.completions.create(
+    model="deepseek-chat",
+    messages=[
+        {"role": "user", "content": "北京今天天气怎么样？"}
+    ],
+    tools=functions,
+    tool_choice="auto"
+)
+
+# 检查模型是否调用了函数
+if response.choices[0].message.tool_calls:
+    tool_call = response.choices[0].message.tool_calls[0]
+    func_name = tool_call.function.name
+    func_args = json.loads(tool_call.function.arguments)
+    print(f"调用函数: {func_name}, 参数: {func_args}")
+
+    # 执行函数并返回结果
+    weather_data = get_weather(func_args["city"], func_args.get("date"))
+
+    # 把结果送回模型，生成最终回复
+    second_response = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "user", "content": "北京今天天气怎么样？"},
+            response.choices[0].message,
+            {
+                "role": "tool",
+                "content": json.dumps(weather_data),
+                "tool_call_id": tool_call.id
+            }
+        ],
+        tools=functions
+    )
+    print(second_response.choices[0].message.content)
+else:
+    print(response.choices[0].message.content)</code></pre>
+
+        <div class="highlight">
+            <strong>实战经验：</strong>Function Calling 最容易出问题的点是参数解析。DeepSeek 模型的 JSON 输出有时会包含 Markdown 标记（比如在 JSON 外面包了 ```json ```），导致 <code>json.loads</code> 失败。建议写一个健壮的解析函数，用正则提取 JSON 块，并加上 <code>try-except</code> 兜底。另外，<code>tool_choice="required"</code> 可以强制模型每次调用一个函数，适合数据提取类任务。
+        </div>
+
+        <p>Function Calling 的典型应用场景包括：</p>
+
+        <ul>
+            <li><strong>结构化数据提取</strong>——从非结构化文本中提取姓名、日期、金额等字段</li>
+            <li><strong>数据库查询</strong>——用户用自然语言提问，模型转换为 SQL 查询参数</li>
+            <li><strong>多工具编排</strong>——串联多个 API，实现"查天气→规划行程→预订酒店"的复杂工作流</li>
+            <li><strong>权限敏感操作</strong>——模型只生成函数调用参数，由后端做鉴权和执行</li>
+        </ul>
+
+        <h2>25.3 Prompt 工程技巧</h2>
+
+        <p>虽然 DeepSeek 模型对中文的理解能力已经非常强，但好的 Prompt 设计仍然能显著提升输出质量和稳定性。以下是我在实际项目中验证过的最佳实践：</p>
+
+        <h3>结构化系统提示词</h3>
+
+        <p>用清晰的层次结构组织 system prompt，比一大段自然语言描述有效得多：</p>
+
+        <pre><code>system_prompt = """
+# 角色
+你是一名资深技术文档写手，负责将复杂的技术概念转化为易于理解的教程。
+
+# 能力边界
+- 你可以解释 ML/AI 领域的技术概念
+- 你不具备实时信息查询能力
+- 你不提供投资或法律建议
+
+# 输出规范
+- 使用 Markdown 格式
+- 每个概念先用一句话概括，再展开细节
+- 包含至少一个具体代码示例
+- 控制在 500 字以内
+
+# 语气
+- 专业但不晦涩
+- 使用"我们"而不是"你"
+- 避免过度使用感叹号
+"""</code></pre>
+
+        <h3>Few-shot 示例的力量</h3>
+
+        <p>对于格式要求高的任务，给出 2-3 个完整的输入-输出示例（few-shot）可以大幅提升一致性。注意示例要覆盖边界情况：</p>
+
+        <pre><code>messages = [
+    {"role": "system", "content": "你将用户的问题分类到以下类别：技术咨询、账单问题、产品建议、其他。输出格式：仅输出类别名称。"},
+    {"role": "user", "content": "我的 API 返回 500 错误了"},
+    {"role": "assistant", "content": "技术咨询"},
+    {"role": "user", "content": "我想退款"},
+    {"role": "assistant", "content": "账单问题"},
+    {"role": "user", "content": "能不能加一个暗黑模式"},
+    {"role": "assistant", "content": "产品建议"},
+    # 实际输入
+    {"role": "user", "content": "请问你们支持哪种付款方式"}
+]</code></pre>
+
+        <h3>Chain-of-Thought 提示</h3>
+
+        <p>对于多步推理任务，在 Prompt 中加入"请一步一步思考"能显著提升准确率。DeepSeek-R1 本身已经内置了 CoT 能力，但对于 deepseek-chat 模型，显式引导仍然有效：</p>
+
+        <pre><code>prompt = """请解决以下问题。在给出最终答案前，先一步一步推理解题过程。
+
+问题：一个水池，甲管单独注水需要 3 小时注满，乙管单独注水需要 6 小时注满。如果两管同时打开，需要多长时间注满？
+
+推理过程：
+"""</code></pre>
+
+        <h2>25.4 上下文缓存（Context Caching）</h2>
+
+        <p>这是 DeepSeek API 最实用的省钱功能之一。当你在多个请求中使用相同的前缀内容（比如系统提示词 + 文档上下文）时，上下文缓存可以<strong>避免重复处理相同的 token</strong>，显著降低延迟和成本。</p>
+
+        <p>上下文缓存的典型场景是<strong>知识库问答</strong>——你把一份 50 页的企业文档作为系统上下文，用户针对这份文档提各种问题。如果不使用缓存，每次请求都要重新处理这 50 页的 token，非常浪费。</p>
+
+        <pre><code>import hashlib
+import diskcache as dc
+
+# 使用本地磁盘缓存
+cache = dc.Cache("./deepseek_cache")
+
+def get_response_with_cache(messages, model="deepseek-chat", ttl=3600):
+    # 生成缓存键
+    cache_key = hashlib.md5(str(messages).encode()).hexdigest()
+
+    # 检查缓存
+    if cache_key in cache:
+        print("缓存命中！")
+        return cache[cache_key]
+
+    # 调用 API
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.3
+    )
+
+    result = response.choices[0].message.content
+
+    # 存入缓存（带过期时间）
+    cache.set(cache_key, result, expire=ttl)
+    print("缓存未命中，调用 API")
+    return result</code></pre>
+
+        <div class="warning">
+            <strong>缓存策略的坑：</strong>不是所有场景都适合缓存。对于需要实时性的查询（如股票价格、天气），缓存时间要设得很短甚至不用缓存。另外，缓存键的设计很重要——我的经验是将 system prompt + 前 N 轮对话的 hash 作为 key，而不是整条 messages，这样不同用户的短问题也能复用缓存。<strong>一个设计良好的缓存系统，可以把 API 成本降低 40%-60%</strong>。
+        </div>
+
+        <p>DeepSeek 官方也提供了服务端缓存功能（需联系商务开通），适合企业级场景。对于个人开发者，用本地 <code>diskcache</code> 或者 Redis 做缓存就是最实用的方案。</p>
+
+        <h2>25.5 JSON Mode</h2>
+
+        <p>JSON Mode 让模型<strong>强制输出合法 JSON</strong>，是结构化数据提取的利器。DeepSeek 的 JSON Mode 通过在 system prompt 中加入特定指令来触发：</p>
+
+        <pre><code>response = client.chat.completions.create(
+    model="deepseek-chat",
+    messages=[
+        {
+            "role": "system",
+            "content": "你是一个信息提取助手。请以 JSON 格式输出，不要包含其他内容。"
+        },
+        {
+            "role": "user",
+            "content": "从以下文本中提取信息：'张三在2024年3月15日购买了价值888元的智能手表，订单号是ORD-2024-03921。'\n\n"
+                       "提取字段：name（姓名）, date（购买日期）, product（商品）, amount（金额）, order_id（订单号）"
+        }
+    ],
+    response_format={"type": "json_object"}
+)
+
+result = json.loads(response.choices[0].message.content)
+print(result)
+# 输出：{'name': '张三', 'date': '2024-03-15', 'product': '智能手表', 'amount': 888, 'order_id': 'ORD-2024-03921'}</code></pre>
+
+        <p>结合 Function Calling 或 JSON Mode，你可以构建可靠的<strong>数据流水线</strong>：从非结构化文本中提取结构化数据，存入数据库，供下游系统使用。这是目前 AI 在企业场景中最广泛的应用模式。</p>
+
+        <div class="tip">
+            <strong>JSON Mode 注意事项：</strong>第一，在 system prompt 中明确指定所有可能的字段名和类型，避免模型随机生成字段。第二，如果字段可能为空，在 prompt 中说明 "如果找不到对应信息，使用 null"。第三，始终在外层代码做 JSON 解析的异常处理——虽然 JSON Mode 大大提高了成功率，但不能保证 100% 合法。
+        </div>
+
+        <h2>25.6 API 成本优化</h2>
+
+        <p>最后来算一笔账。假设你的应用每天处理 10 万次请求，每次请求平均输入 2000 token、输出 500 token：</p>
+
+        <table>
+            <tr>
+                <th>策略</th>
+                <th>日消耗 token</th>
+                <th>日成本</th>
+                <th>月成本</th>
+            </tr>
+            <tr>
+                <td>全部使用 R1（无优化）</td>
+                <td>2.5 亿 token</td>
+                <td>~$78</td>
+                <td>~$2,340</td>
+            </tr>
+            <tr>
+                <td>分级调用（V3 为主，R1 为辅）</td>
+                <td>2.5 亿 token</td>
+                <td>~$40</td>
+                <td>~$1,200</td>
+            </tr>
+            <tr>
+                <td>分级 + 上下文缓存</td>
+                <td>~1.2 亿 token</td>
+                <td>~$20</td>
+                <td>~$600</td>
+            </tr>
+            <tr>
+                <td>分级 + 缓存 + Batch API</td>
+                <td>~0.8 亿 token</td>
+                <td>~$10</td>
+                <td>~$300</td>
+            </tr>
+        </table>
+
+        <p>这是一套"组合拳"的优化方案，具体来说：</p>
+
+        <ul>
+            <li><strong>分级调用</strong>：简单任务（分类、抽取）用 <code>deepseek-chat</code>，复杂推理用 <code>deepseek-reasoner</code>。可以在代码中做一个 <code>route_to_model(task_type)</code> 函数来判断用哪个模型。</li>
+            <li><strong>上下文缓存</strong>：对系统提示词和固定文档前缀做缓存，减少重复处理的 token。实测在知识库场景可节省 50% 以上的输入 token。</li>
+            <li><strong>Batch API</strong>：DeepSeek 支持批量请求（Batch API），将多个非实时请求打包发送，可获得 50% 的价格折扣。适合离线数据处理、日志分析等异步场景。</li>
+            <li><strong>缩短输出长度</strong>：合理设置 <code>max_tokens</code>，避免模型生成多余的废话。对于分类任务，设置 <code>max_tokens=10</code> 就够了。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>我踩过的一个坑：</strong>在某次优化中，我自信满满地部署了分级调用策略。上线后发现成本没降反升——原因是我的判断逻辑过于简单，导致很多本应用 V3 的任务被错误地路由到了 R1。更糟的是，R1 的 reasoning token 也计费，所以一次 R1 调用的费用是 V3 的 5-10 倍。教训是：<strong>分级路由要有明确的规则和回退机制</strong>，先用 V3 试一次，如果不满足置信度阈值再切换到 R1，而不是反过来。
+        </div>
+
+        <p>到此为止，我们从 API 的基础调用到高级特性，从 Prompt 工程到成本优化，已经把 DeepSeek API 的上手指南完整走了一遍。API 是连接模型和产品的桥梁，用好它能让你的 AI 应用既高效又经济。</p>
+
+        <p>下一章，我们将目光转向未来，看看 DeepSeek 在 V3.1 和 V3.2 中的渐进式演进，了解这个模型家族是如何在短短一年内从惊艳走向成熟的。</p>
+
+        <div class="footer-nav">
+            <a href="24.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="26.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

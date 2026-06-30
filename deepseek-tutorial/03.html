@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 10万BPE词表</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html" class="active">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第3章 10万BPE词表</h2>
+
+        <p>大家好，欢迎回到 DeepSeek 系列教程。上一章我们详细拆解了 DeepSeek LLM (V1) 的架构和训练策略。你可能注意到了——DeepSeek 7B 的词表大小是 102,400，而 LLaMA 只有 32,000。三倍多的差距，意味着 embedding 层的参数量是 LLaMA 的三倍还多。为什么 DeepSeek 要做这个看似"浪费"的选择？</p>
+
+        <p>本章我们就来深入探讨这个至关重要却经常被忽视的话题——<strong>Tokenization（分词）</strong>。词表设计虽然不是模型架构的核心，但它对模型的中文表现、推理成本、甚至训练效率都有深远影响。DeepSeek 的 10 万超大 BPE 词表，是其在中文优化上最具辨识度的设计决策之一。</p>
+
+        <h2>3.1 BPE 词表原理</h2>
+
+        <p>在深入了解 DeepSeek 的选择之前，我们需要先理解 BPE（Byte-Pair Encoding）是怎么工作的。</p>
+
+        <p>BPE 最初是一种数据压缩算法，由 Philip Gage 在 1994 年提出。2016 年，Neural Machine Translation 领域的研究者将其引入 NLP，作为处理未登录词（OOV）问题的方案。2018 年，GPT-2 和 BERT 将其发扬光大，从此 BPE 成为大模型分词的事实标准。</p>
+
+        <p>BPE 的核心思想很简单：<strong>从字符（byte）开始，反复合并出现频率最高的相邻字符对，直到达到预设的词表大小。</strong></p>
+
+        <pre><code>BPE 训练过程示例（简化版）:
+
+初始词表：{'a', 'b', 'c', 'd', 'e', 't', 'h', 'i', 's', 'n', ' '}
+
+训练语料："the cat and the hat"
+
+Step 1: 统计相邻对频率
+  "th": 2次, "he": 2次, "e ": 2次, ...
+  合并 "th" → "th" 加入词表
+
+Step 2: 重新统计
+  "the": 2次, "he": 2次, ...
+  合并 "the" → "the" 加入词表
+
+... 重复直到词表达到目标大小
+
+最终词表包含常见子词：
+{'a', 'b', ..., 'the', 'cat', 'and', 'hat', 'th', 'he', ...}
+
+编码过程: 对输入文本，贪心地匹配词表中的最长子词
+"the cat" → ["the", " ", "cat"] (3个token)</code></pre>
+
+        <p>BPE 的优雅之处在于：它不需要任何语言知识，纯粹从统计频率出发就能自动学到有意义的子词单元。常见的单词（如 "the"）会作为一个整体出现在词表中，而不常见的单词则会被拆分为更小的子词（如 "unbelievable" → "un" + "believe" + "able"）。</p>
+
+        <div class="tip">
+            <strong>理解 BPE 的直觉：</strong>词表大小决定了"颗粒度"。词表越小，每个 token 包含的信息越少，但 token 序列越长（更多 token 数量）。词表越大，每个 token 包含的信息越多，token 序列越短，但 embedding 矩阵（查找表）越大。这是一个 trade-off，而 DeepSeek 选择了偏向"长 token、短序列"的一端。
+        </div>
+
+        <h2>3.2 中文分词的特殊挑战</h2>
+
+        <p>BPE 在英文上表现很好，因为英文天然有空格作为单词边界。但中文的 tokenization 面临着几个特殊的挑战。</p>
+
+        <p><strong>挑战一：没有空格。</strong>中文文本是连续的字符序列，没有空格来标记单词边界。"我是一个学生" 在 BPE 看来是一串字符："我" + "是" + "一" + "个" + "学" + "生"。如果一个中文字符在语料中出现的频率不够高，它可能会被 BPE 合并到其他字符中，导致分词结果不合理。</p>
+
+        <p><strong>挑战二：单字信息的密度。</strong>中文的每一个字本身就携带有语义信息（"学" = study/learn，"生" = life/student），而在英文中单个字母（如 'a'、's'）几乎不携带语义。如果用英文优化的方式训练 BPE，中文文本的 token 数会远多于英文——同样一段文本，中文可能需要 1.5-2 倍的 token 数。</p>
+
+        <p><strong>挑战三：多词组合的歧义。</strong>"研究生命科学"中的"研究生"是一个词还是"研究"+"生命"的边界？BPE 完全依赖统计频率，可能做出与人类直觉不一致的分词决策。</p>
+
+        <div class="highlight">
+            <strong>真实案例：</strong>在 LLaMA 的 32K 词表中，"神经网络"这个常见的中文技术词汇被编码为 4 个 token：["神", "经", "网", "络"]。但在 DeepSeek 的 100K 词表中，它被编码为 1 个 token "神经网络"。这意味着在 DeepSeek 模型中，模型在理解"神经网络"这个概念时只需要做 1 次注意力计算，而在 LLaMA 中需要 4 次。这不仅是效率问题——当 token 数更多时，模型需要更长距离的注意力连接来捕获同一概念的语义，增加了学习难度。
+        </div>
+
+        <h2>3.3 10 万超大词表设计</h2>
+
+        <p>面对这些挑战，DeepSeek 的选择是：<strong>把词表做大，做到 10 万（102,400）。</strong>这是一个大胆的决定——当时主流的开源模型词表大小在 32K 到 50K 之间。</p>
+
+        <p>为什么是 10 万？DeepSeek 的论文给出了系统性的分析。</p>
+
+        <p>首先，更大的词表意味着更少的分词数量，直接降低推理成本：</p>
+
+        <table>
+            <tr>
+                <th>词表大小</th>
+                <th>英文 token/字符比</th>
+                <th>中文 token/字符比</th>
+                <th>平均 token 长度</th>
+                <th>Embedding 参数量 (d=4096)</th>
+            </tr>
+            <tr>
+                <td>32K (LLaMA)</td>
+                <td>~0.25</td>
+                <td>~0.65</td>
+                <td>~4.0 字符</td>
+                <td>134M</td>
+            </tr>
+            <tr>
+                <td>50K</td>
+                <td>~0.22</td>
+                <td>~0.55</td>
+                <td>~5.2 字符</td>
+                <td>210M</td>
+            </tr>
+            <tr>
+                <td>100K (DeepSeek)</td>
+                <td>~0.19</td>
+                <td>~0.45</td>
+                <td>~6.8 字符</td>
+                <td>419M</td>
+            </tr>
+        </table>
+
+        <p>从数据中我们可以看到一个清晰趋势：<strong>词表从 32K 扩大到 100K 后，中文文本的 token 数减少了约 31%。</strong>对于需要处理大量中文的场景（如中文客服、中文文档生成），这就意味着推理成本直接降低了近三分之一。</p>
+
+        <p>但代价也很直接：embedding 层的参数量从 134M 增加到 419M。不过，embedding 层的计算主要是查表操作，实际计算量占比很小——对于 7B 参数的总模型，419M 只占总参数的 6%。作为对比，FFN 和注意力层占 90% 以上。</p>
+
+        <div class="warning">
+            <strong>计算细节：</strong>你可能觉得增大词表会让 softmax 输出层更昂贵。没错，LM Head（将 hidden state 映射到词表概率）是一个 [d_model, vocab_size] 的矩阵乘法。当 vocab_size=100K、d_model=4096 时，这个矩阵是 4096 x 102400，约 419M 参数。在训练时每个 token 都要做一次这个矩阵乘法——但现代实现（如 Megatron 的张量并行）可以有效分摊这个开销。推理时，LM Head 通常用 GPU 的高并行矩阵乘完成，对延迟的影响很小。
+        </div>
+
+        <h2>3.4 编码效率对比</h2>
+
+        <p>让我们用实际的中文和英文文本来对比不同词表的编码效果：</p>
+
+        <pre><code>输入文本: "DeepSeek 是一家专注于人工智能研究和开发的公司"
+
+LLaMA 32K 词表编码:
+["Deep", "Se", "ek", " 是", "一", "家", "专", "注", "于", "人", "工",
+ "智", "能", "研", "究", "和", "开", "发", "的", "公", "司"]
+→ 21 个 token
+
+DeepSeek 100K 词表编码:
+["DeepSeek", " 是", "一家", "专注于", "人工智能", "研究和", "开发", "的", "公司"]
+→ 9 个 token
+
+token 数减少: 57%</code></pre>
+
+        <p>这个对比非常直观——在 DeepSeek 的词表中，"DeepSeek"、"人工智能"、"专注于"等常见的中英文词汇都作为完整的 token 存在。模型不需要通过注意力机制将分散的字符拼凑起来理解这些概念，它的学习负担大大降低了。</p>
+
+        <p>我再来测一段纯英文：</p>
+
+        <pre><code>输入文本: "The Transformer architecture has revolutionized natural language processing"
+
+LLaMA 32K 词表编码:
+["The", " Transformer", " architecture", " has", " revolutionized",
+ " natural", " language", " processing"]
+→ 8 个 token
+
+DeepSeek 100K 词表编码:
+["The", " Transformer", " architecture", " has", " revolutionized",
+ " natural", " language", " processing"]
+→ 8 个 token（完全一样）</code></pre>
+
+        <p>对于英文，100K 词表在英文上的表现与 32K 差异不大。这说明超大词表的主要受益方是中文和其他非英语语言。对于中英双语的 DeepSeek 来说，这是一个"稳赚不赔"的选择——英文不受影响，中文大幅受益。</p>
+
+        <h2>3.5 对训练 / 推理的影响</h2>
+
+        <p>超大词表在多个维度上影响着模型的行为和成本。我们来做一个全面的分析：</p>
+
+        <p><strong>训练阶段：</strong></p>
+        <ul>
+            <li><strong>嵌入层更大</strong>——但嵌入层的梯度计算是稀疏的（只有被查到的 token 才有梯度），实际额外开销可控</li>
+            <li><strong>LM Head 计算量增加</strong>——但可以通过张量并行切分，在分布式训练中分摊</li>
+            <li><strong>训练速度更慢</strong>——因为序列变短，每个 batch 的并行度降低？不，恰恰相反：序列变短意味着每个样本用更少的 token 表达同样信息，在固定序列长度限制下，每个 batch 可以塞入更多样本信息</li>
+        </ul>
+
+        <p><strong>推理阶段：</strong></p>
+        <ul>
+            <li><strong>生成 token 数减少 30%</strong>——对于中文场景，直接意味着推理速度提升 30% 以上</li>
+            <li><strong>KV Cache 更小</strong>——序列变短，KV Cache 的 tokens 维度降低 30%，显存需求同步下降</li>
+            <li><strong>首 token 延迟略高</strong>——LM Head 计算稍大，但 Prefill 阶段是 compute-bound，影响有限</li>
+        </ul>
+
+        <table>
+            <tr>
+                <th>指标</th>
+                <th>32K 词表</th>
+                <th>100K 词表</th>
+                <th>差异</th>
+            </tr>
+            <tr>
+                <td>Embedding 参数量</td>
+                <td>134M</td>
+                <td>419M</td>
+                <td>+213%</td>
+            </tr>
+            <tr>
+                <td>LM Head 参数量</td>
+                <td>134M</td>
+                <td>419M</td>
+                <td>+213%</td>
+            </tr>
+            <tr>
+                <td>中文 token/字</td>
+                <td>~0.65</td>
+                <td>~0.45</td>
+                <td>-31%</td>
+            </tr>
+            <tr>
+                <td>推理 KV Cache</td>
+                <td>基准</td>
+                <td>-31%</td>
+                <td>显存节省</td>
+            </tr>
+            <tr>
+                <td>训练 LM Head FLOPs</td>
+                <td>基准</td>
+                <td>+213%</td>
+                <td>但被 tensor parallelism 分摊</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <strong>行业影响：</strong>DeepSeek 的 100K 词表设计在发布后引发了一波效仿潮。Qwen 2.5 将词表从 50K 扩大到 150K，Yi 系列使用了 64K 词表，甚至 LLaMA 3 也将词表从 32K 扩大到 128K。可以说，DeepSeek 用实际效果证明了——对于中文大模型，"大词表"不是可选项，而是必选项。现在业界几乎已经形成共识：面向多语言（尤其是中文）的大模型，词表至少应该在 100K 以上。
+        </div>
+
+        <h2>3.6 词表扩展实验</h2>
+
+        <p>DeepSeek 在论文中报告了一系列关于词表大小的消融实验，这些实验数据非常有价值。</p>
+
+        <p>他们训练了三个版本的小模型，唯一区别是词表大小：</p>
+
+        <ul>
+            <li><strong>实验组 A</strong>：32K 词表（接近 LLaMA 基线）</li>
+            <li><strong>实验组 B</strong>：64K 词表</li>
+            <li><strong>实验组 C</strong>：100K 词表（DeepSeek 最终选择）</li>
+        </ul>
+
+        <p>实验结果的关键发现：</p>
+
+        <p><strong>训练效率方面</strong>——在固定 token 预算（100B tokens）下，100K 词表的模型在训练步数上比 32K 少（因为序列更短），但由于 LM Head 的计算量更大，实际训练时间差异不大。但要注意的是，100K 词表的模型在同样的训练步数下"看到"了更多的原始文本信息——因为每一步中每个样本的信息密度更高。</p>
+
+        <p><strong>下游性能方面</strong>——在 MMLU、C-Eval 等评测中，100K 词表相对于 32K 词表在中文任务上有 1-2 个百分点的提升，在英文任务上持平。这说明超大词表不会损害英文表现，但能显著提升中文理解能力。</p>
+
+        <p><strong>推理速度方面</strong>——这是最直接的收益。在中文长文本生成场景中，100K 词表模型的生成速度比 32K 快约 25-30%。对于一个需要部署大规模中文对话系统的团队，这个速度差异直接决定了服务器成本。</p>
+
+        <div class="tip">
+            <strong>实践建议：</strong>如果你正在训练自己的大模型，词表大小不是一个可以随便选的超参数。它直接影响到模型的中文表现和推理效率。根据 DeepSeek 和其他团队的实验，对于中文为主的模型，100K 左右是一个甜点——再大（如 200K+）收益开始递减，而 embedding 矩阵的内存和通信开销非线性增长。一个实用的方法是：从目标语料的 tokenization 效率出发，用压缩率（原始字符数 / token 数）作为评估指标来选择词表大小。
+        </div>
+
+        <p>总结本章的内容：BPE 词表的设计看似只是一个预处理步骤，但它对模型的中文能力、推理效率、训练成本都有深远影响。DeepSeek 选择 10 万超大 BPE 词表，是其"极致效率"理念在 tokenization 层面的体现——宁愿在 embedding 层多投入一些参数，也要换来序列长度的大幅压缩和推理成本的显著降低。</p>
+
+        <p>词表只是数据管线的第一环。要训练一个高质量的双语模型，除了分词，我们还需要考虑数据的来源、清洗、去重、配比等一系列问题。下一章，我们就来深入探讨 DeepSeek 的<strong>数据管线构建</strong>——如何从海量的互联网数据中筛选出高质量的预训练语料，如何平衡中英文的比例，以及数据质量对模型性能的定量影响。敬请期待。</p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

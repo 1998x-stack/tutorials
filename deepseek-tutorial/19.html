@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 GRPO强化推理</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html" class="active">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第19章 GRPO强化推理</h2>
+
+        <p>2024 年底，DeepSeek 的团队遇到了一个让人头疼的问题：他们发现 V3 在数学和推理任务上表现不错，但距离真正的"推理专家"还有明显差距。模型能写代码、能做翻译、能写诗，但面对一个需要多步推理的数学题，它有时候会"蒙"一个答案，而不是真正地一步一步推理出来。</p>
+
+        <p>传统的做法是收集更多高质量的 Chain-of-Thought（CoT）数据做监督微调。但这里有一个根本性的问题——高质量的推理数据非常昂贵。每一条数据都需要人工标注推理过程，而且推理任务千变万化，靠人工标注永远跟不上需求。DeepSeek 提出了一个大胆的想法：<strong>能不能不用标注数据，只用强化学习让模型自己学会推理？</strong>这个想法最终催生了 <strong>GRPO（Group Relative Policy Optimization）</strong>——一种革命性的强化学习算法，成为 DeepSeek-R1 系列的核心引擎。</p>
+
+        <h2>19.1 RLHF 的复杂度问题</h2>
+
+        <p>在了解 GRPO 之前，我们先看看传统的强化学习方法在做什么。</p>
+
+        <h3>PPO + 价值模型（Critic）的架构</h3>
+
+        <p>大语言模型的强化学习对齐，最经典的方法是 <strong>PPO（Proximal Policy Optimization）</strong>，也就是 ChatGPT 的 RLHF 流程中使用的算法。PPO 包含四个模型：</p>
+
+        <ul>
+            <li><strong>Policy Model（策略模型）</strong>——也就是我们正在训练的大模型，负责生成文本</li>
+            <li><strong>Reward Model（奖励模型）</strong>——给生成的文本打分，评估质量</li>
+            <li><strong>Value Model / Critic（价值模型）</strong>——预估当前状态下"未来能拿到多少奖励"</li>
+            <li><strong>Reference Model（参考模型）</strong>——保存策略模型的旧版本，防止更新太激进</li>
+        </ul>
+
+        <p>其中，<strong>Critic（价值模型）</strong> 的存在是为了解决强化学习中的一个核心问题——<strong>信用分配</strong>。模型生成长度为 T 的序列，但奖励通常只在最后一步给出（比如"这个回答好不好"）。Critic 的作用就是预估每一步的"未来预期奖励"，让模型知道每一步走得好不好，而不是只有最后一刻才知道结果。</p>
+
+        <div class="highlight">
+            <strong>打个比方：</strong>想象你在玩一个迷宫游戏。Reward 只在走出迷宫时才给你 +100 分。PPO 的做法是雇一个"军师"（Critic），帮你预估"当前这个位置，将来走出去的概率有多高"。这样你每走一步都能得到反馈，而不是走到终点才知道对了错了。
+        </div>
+
+        <h3>训练不稳定的根源</h3>
+
+        <p>Critic 看起来很有用，但它引入了一个严重的问题：<strong>Critic 本身也是一个需要训练的神经网络</strong>，而且它和 Policy Model 相互影响。Critic 训练得好不好，直接决定了 PPO 的稳定性。如果 Critic 的预估出现偏差，Policy 就会往错误的方向优化，然后 Critic 的预估变得更差——形成恶性循环。</p>
+
+        <p>具体来说，Critic 带来以下问题：</p>
+
+        <ul>
+            <li><strong>额外训练成本</strong>——Critic 通常和 Policy 差不多大（至少需要一个和 Policy 同等容量的模型），训练和推理都需要额外的显存和计算量</li>
+            <li><strong>收敛困难</strong>——Critic 的损失函数本身就是一个回归任务，拟合价值函数很容易震荡</li>
+            <li><strong>超参数敏感</strong>——GAE lambda、折扣因子 gamma、KL 惩罚系数……PPO 有十几个超参数需要调节，任何一个调不好都会导致训练崩溃</li>
+        </ul>
+
+        <p>这也是为什么很多团队做 RLHF 时叫苦连天——PPO 在大规模模型上的训练，稳定性和复现性都很差。</p>
+
+        <h2>19.2 GRPO 核心思想</h2>
+
+        <p>DeepSeek 团队问了一个看似简单的问题：<strong>我们真的需要 Critic 吗？</strong></p>
+
+        <p>这个问题的灵感来自于一个古老的统计学原理——<strong>大数定理</strong>。Policy 在同一个状态下的多个采样，其平均奖励天然可以作为一个基线。何必再去训练一个 Critic 来预估这个基线呢？</p>
+
+        <p>基于这个想法，DeepSeek 提出了 <strong>Group Relative Policy Optimization（GRPO）</strong>。GRPO 的核心思想是：对每一个 prompt，采样一组（Group）输出，用组内的平均奖励作为基线，替代 Critic 的角色。</p>
+
+        <p>GRPO 不依赖价值模型，大大简化了训练流程。它只需要三个组件：Policy Model、Reward Model 和 Reference Model。Critic 被完全移除。</p>
+
+        <pre><code># GRPO 训练的核心流程（伪代码）
+for each prompt in batch:
+    # 采样多个输出（Group Sampling）
+    outputs = policy_model.generate(prompt, num_samples=G)
+
+    # 用奖励模型打分
+    rewards = reward_model(outputs)
+
+    # 组内标准化：用均值作为基线
+    mean_reward = mean(rewards)
+    std_reward = std(rewards)
+    advantages = (rewards - mean_reward) / (std_reward + eps)
+
+    # 策略梯度更新（带 KL 惩罚）
+    loss = -mean(advantages * log_prob(outputs)) + beta * kl_divergence</code></pre>
+
+        <p>这个伪代码看起来简单，但背后有坚实的理论支撑。我们来拆解每一步。</p>
+
+        <h2>19.3 组内采样 + 平均奖励</h2>
+
+        <p>GRPO 对每个 prompt 采样 G 个输出。G 的典型值在 8 到 64 之间。为什么要采样多个而不是一个？</p>
+
+        <p>答案很简单：<strong>单一的采样结果方差太大</strong>。Policy 在同一个 prompt 下可能产生截然不同的输出——有的好有的坏，单采样的奖励信号噪声极高，没法可靠地指导更新。但如果取 G 个输出的平均奖励，方差就会显著降低。</p>
+
+        <p>具体来说，GRPO 的 advantage 计算方式如下：</p>
+
+        <pre><code>对于 prompt x，采样 G 个输出 {o1, o2, ..., oG}
+每个输出 oi 获得奖励 ri = R(oi)
+组内标准化：
+  μ = (1/G) * Σ ri          # 组平均
+  σ = sqrt((1/G) * Σ(ri-μ)²) # 组标准差
+  Ai = (ri - μ) / (σ + ε)    # 每个输出的 advantage</code></pre>
+
+        <p>这里的 advantage Ai 的含义是："这个输出比组内平均水平好多少（或差多少）"。标准化后的 advantage 零均值、单位方差，天然消除了不同 prompt 之间奖励分布的差异，让训练更加稳定。</p>
+
+        <div class="tip">
+            <strong>直观理解：</strong>GRPO 的组内平均就像在班级考试中，不是用绝对分数（90 分是好是坏取决于试卷难度），而是用相对排名来评价每个学生的表现。你说"我考了 90 分"没有意义，但说"我比全班平均分高 20 分"就很有意义了。
+        </div>
+
+        <h2>19.4 规则奖励设计</h2>
+
+        <p>GRPO 的另一个关键创新是<strong>规则奖励（Rule-based Reward）</strong>。传统 RLHF 依赖一个训练好的 Reward Model 来打分——这本身就需要大量的人工偏好数据来训练。DeepSeek 在推理任务上用了一个更聪明的方法：直接用规则来定义奖励。</p>
+
+        <p>以数学推理为例，规则奖励包含两部分：</p>
+
+        <ul>
+            <li><strong>准确性奖励（Accuracy Reward）</strong>——模型的最终答案是否正确。对于数学题，只需要判断答案是否与标准答案匹配（可以容忍格式差异）</li>
+            <li><strong>格式奖励（Format Reward）</strong>——模型的推理过程是否包含正确的思维链格式（比如是否包含 &lt;think&gt; 和 &lt;answer&gt; 标记）</li>
+        </ul>
+
+        <p>格式奖励不需要训练，用一段简单的字符串匹配代码就能实现：</p>
+
+        <pre><code>def format_reward(output):
+    reward = 0.0
+    # 是否包含推理标记
+    if "<think>" in output and "</think>" in output:
+        reward += 0.5
+    # 是否包含答案标记
+    if "<answer>" in output and "</answer>" in output:
+        reward += 0.5
+    return reward
+
+def accuracy_reward(output, ground_truth):
+    answer = extract_answer(output)
+    if answer == ground_truth:
+        return 1.0
+    return 0.0
+
+def total_reward(output, ground_truth):
+    return accuracy_reward(output, ground_truth) + 0.1 * format_reward(output)</code></pre>
+
+        <div class="warning">
+            <strong>注意：</strong>规则奖励有两个限制。第一，它只适用于有"标准答案"的任务——数学、编程这类。对于开放式的创意写作、对话等任务，规则奖励很难定义。第二，格式奖励的权重需要仔细调节，太轻了模型不遵守格式，太重了模型会"刷格式"而忽视内容质量。DeepSeek 的实践是让格式奖励作为辅助信号（权重 0.1），准确性奖励作为主要信号（权重 1.0）。
+        </div>
+
+        <table>
+            <tr>
+                <th>奖励类型</th>
+                <th>适用场景</th>
+                <th>实现方式</th>
+                <th>是否需要人工标注</th>
+            </tr>
+            <tr>
+                <td>准确性奖励</td>
+                <td>数学、编程、选择题</td>
+                <td>答案精确匹配</td>
+                <td>否（已知正确答案）</td>
+            </tr>
+            <tr>
+                <td>格式奖励</td>
+                <td>结构化输出任务</td>
+                <td>规则/正则匹配</td>
+                <td>否</td>
+            </tr>
+            <tr>
+                <td>模型奖励（传统）</td>
+                <td>开放域对话</td>
+                <td>训练 Reward Model</td>
+                <td>是（偏好标注）</td>
+            </tr>
+            <tr>
+                <td>人工反馈奖励</td>
+                <td>高价值场景</td>
+                <td>人在环打分</td>
+                <td>是（在线标注）</td>
+            </tr>
+        </table>
+
+        <h2>19.5 大数定理保证</h2>
+
+        <p>GRPO 抛弃 Critic 的底气，来自于 <strong>大数定理（Law of Large Numbers）</strong>。</p>
+
+        <p>在传统 PPO 中，Critic 网络 V(s) 的作用是预估"从状态 s 出发的预期总奖励"。GRPO 的做法是直接对同一个 prompt 采样多个输出，用这些输出的实际奖励的平均值来估计这个预期值。当采样数量 G 足够大时，样本均值会收敛到真实预期值。</p>
+
+        <p>你可以这么理解：</p>
+
+        <ul>
+            <li><strong>PPO 的方法</strong>：雇一个专家（Critic）来预测"这个位置好不好"，但专家本身也需要训练，而且可能犯错</li>
+            <li><strong>GRPO 的方法</strong>：亲自试 G 次，取平均。虽然每次试的结果有随机性，但试得越多，平均值就越接近真实水平</li>
+        </ul>
+
+        <p>实际上，G=8 时效果就已经很不错了。随着 G 增大，优势估计的方差持续降低，但采样成本也在增加。DeepSeek 的实验表明，G=16 到 G=32 之间是一个很好的平衡点。</p>
+
+        <div class="highlight">
+            <strong>有趣的对比：</strong>你可以把 GRPO 想象成一个厨师学做菜。PPO 的方法是请一个美食品鉴师（Critic）在旁边指导："这个火候不错，再加点盐"。GRPO 的方法是：做 16 盘同样的菜，每盘做的过程中随机放不同量的盐，然后一起端上桌让大家试吃——哪盘最好吃就按那个配方来。品鉴师虽然专业，但雇品鉴师的成本，够做好多盘菜了。
+        </div>
+
+        <h2>19.6 训练资源对比：GRPO vs PPO</h2>
+
+        <p>GRPO 带来的最大好处是什么？<strong>省钱</strong>。我们来做一个对比：</p>
+
+        <table>
+            <tr>
+                <th>维度</th>
+                <th>PPO（传统 RLHF）</th>
+                <th>GRPO（DeepSeek）</th>
+                <th>节省</th>
+            </tr>
+            <tr>
+                <td>模型数量</td>
+                <td>4（Policy + Reward + Critic + Reference）</td>
+                <td>3（Policy + Reward + Reference）</td>
+                <td>减少 1 个大模型</td>
+            </tr>
+            <tr>
+                <td>Critic 大小</td>
+                <td>与 Policy 相当</td>
+                <td>无</td>
+                <td>显存节省 30-50%</td>
+            </tr>
+            <tr>
+                <td>训练计算量</td>
+                <td>Policy 前向 + 后向 + Critic 前向 + 后向</td>
+                <td>Policy 前向 + 后向（无 Critic）</td>
+                <td>节省约 40%</td>
+            </tr>
+            <tr>
+                <td>训练稳定性</td>
+                <td>低（Critic 易发散）</td>
+                <td>高（无 Critic 依赖）</td>
+                <td>收敛更快</td>
+            </tr>
+            <tr>
+                <td>超参数数量</td>
+                <td>~15 个</td>
+                <td>~8 个</td>
+                <td>调参成本大幅降低</td>
+            </tr>
+            <tr>
+                <td>代码复杂度</td>
+                <td>高（GAE、价值函数拟合）</td>
+                <td>低（组内标准化）</td>
+                <td>更少 bug</td>
+            </tr>
+        </table>
+
+        <p>根据 DeepSeek 团队披露的经验，GRPO 相比 PPO 的训练成本降低幅度在 50% 左右。更重要的是，GRPO 在推理任务上的收敛速度和最终效果都优于 PPO——因为移除 Critic 后，Policy 的更新直接由实际奖励驱动，不再经过 Critic 的"二次翻译"。</p>
+
+        <p>当然，GRPO 也有它的局限性。在没有确定性答案的开放域任务中，规则奖励无法覆盖，仍然需要训练 Reward Model 或者引入人工反馈。但至少对于数学、代码等推理密集型任务，GRPO 提供了一套简洁、高效、可复现的强化学习方案。</p>
+
+        <div class="tip">
+            <strong>小思考：</strong>GRPO 的"组内比较"策略让人联想到学术界的学生评估方式——不是用绝对分数排名，而是根据组内相对表现。这种相对比较天然消除了不同"试卷难度"（prompt 难度）带来的偏差。换句话说，GRPO 关注的是"这个输出相对于同组的其他输出表现如何"，而不是"这个输出的绝对质量如何"。
+        </div>
+
+        <p>GRPO 是 DeepSeek-R1 家族的基础。有了这个强化学习引擎，下一章我们就要看看 DeepSeek 是如何用它来训练出一代推理之王——从 R1-Zero 的纯 RL 实验，到 R1 的多阶段训练方案。这是一个从"野蛮生长"到"精心培育"的精彩故事，我们继续往下走。</p>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

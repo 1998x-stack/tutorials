@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第27章 DeepSeek-V4</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型效率困境</a></li>
+            <li><a href="02.html">第2章 DeepSeek LLM (V1)</a></li>
+            <li><a href="03.html">第3章 10万BPE词表</a></li>
+            <li><a href="04.html">第4章 数据管线</a></li>
+            <li><a href="05.html">第5章 SFT + DPO对齐</a></li>
+            <li><a href="06.html">第6章 MoE架构入门</a></li>
+            <li><a href="07.html">第7章 DeepSeekMoE</a></li>
+            <li><a href="08.html">第8章 MLA注意力机制</a></li>
+            <li><a href="09.html">第9章 DeepSeek-V2</a></li>
+            <li><a href="10.html">第10章 无辅助损失负载均衡</a></li>
+            <li><a href="11.html">第11章 FP8混合精度训练</a></li>
+            <li><a href="12.html">第12章 MTP多Token预测</a></li>
+            <li><a href="13.html">第13章 DualPipe与算通重叠</a></li>
+            <li><a href="14.html">第14章 128K上下文扩展</a></li>
+            <li><a href="15.html">第15章 $5.6M训练671B</a></li>
+            <li><a href="16.html">第16章 推理优化</a></li>
+            <li><a href="17.html">第17章 量化压缩</a></li>
+            <li><a href="18.html">第18章 评测体系</a></li>
+            <li><a href="19.html">第19章 GRPO强化推理</a></li>
+            <li><a href="20.html">第20章 R1-Zero → R1</a></li>
+            <li><a href="21.html">第21章 DeepSeek-Coder</a></li>
+            <li><a href="22.html">第22章 DeepSeek-Math</a></li>
+            <li><a href="23.html">第23章 本地部署</a></li>
+            <li><a href="24.html">第24章 微调适配</a></li>
+            <li><a href="25.html">第25章 API最佳实践</a></li>
+            <li><a href="26.html">第26章 V3.1/V3.2演进</a></li>
+            <li><a href="27.html" class="active">第27章 DeepSeek-V4</a></li>
+            <li><a href="28.html">第28章 开源生态与未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第27章 DeepSeek-V4</h2>
+
+        <p>2026 年 4 月 24 日，DeepSeek 发布了 V4 预览版。消息一出，中文互联网上立刻炸开了锅——不仅仅是因为它 1.6 万亿参数的规模，更因为它的技术路线上写满了"叛逆"：放弃了已经极其成熟的 MLA 注意力机制，换上了全新的 CSA+HCA 混合注意力；放弃了业界标配的 AdamW 优化器，改用了尚在探索期的 Muon；放弃了传统的 FP8 推理，直接压到 FP4。每一项决策单独拿出来都像是在"赌"，但 V4 把它们全部赌赢了。</p>
+
+        <p>这一章，我们来深度拆解 DeepSeek-V4 的每一项技术突破——是什么让团队敢于在 V3 系列大获成功后，几乎推倒重来地设计一套全新架构。</p>
+
+        <h2>27.1 V4 全景：Pro 与 Flash 双变体</h2>
+
+        <p>V4 发布时提供了两种变体，覆盖了"极致性能"和"极致效率"两个极端：</p>
+
+        <table>
+            <tr>
+                <th>规格</th>
+                <th>V4-Pro（旗舰）</th>
+                <th>V4-Flash（高效）</th>
+            </tr>
+            <tr>
+                <td>总参数量</td>
+                <td><strong>1.6 万亿</strong>（1.6T）</td>
+                <td><strong>2,840 亿</strong>（284B）</td>
+            </tr>
+            <tr>
+                <td>激活参数量</td>
+                <td><strong>490 亿</strong>（49B）</td>
+                <td><strong>130 亿</strong>（13B）</td>
+            </tr>
+            <tr>
+                <td>层数</td>
+                <td>61</td>
+                <td>43</td>
+            </tr>
+            <tr>
+                <td>隐层维度</td>
+                <td>7,168</td>
+                <td>4,096</td>
+            </tr>
+            <tr>
+                <td>路由专家数</td>
+                <td>1 共享 + 384 路由</td>
+                <td>1 共享 + 256 路由</td>
+            </tr>
+            <tr>
+                <td>训练 token 数</td>
+                <td>33+ 万亿</td>
+                <td>32+ 万亿</td>
+            </tr>
+            <tr>
+                <td>上下文窗口</td>
+                <td>100 万 token（默认）</td>
+                <td>100 万 token（默认）</td>
+            </tr>
+            <tr>
+                <td>最大输出</td>
+                <td>384K token</td>
+                <td>384K token</td>
+            </tr>
+            <tr>
+                <td>推理模式</td>
+                <td>Non-Think / Think High / Think Max</td>
+                <td>Non-Think / Think High / Think Max</td>
+            </tr>
+            <tr>
+                <td>API 价格（每百万 token）</td>
+                <td>$1.74 输入 / $3.48 输出</td>
+                <td>$0.14 输入 / $0.28 输出</td>
+            </tr>
+        </table>
+
+        <p>注意一个关键数字：V4-Flash 的 API 价格只有 Pro 的十二分之一，但在简单 Agent 任务上表现与 Pro 相差无几。这意味着对于大多数实际应用场景，Flash 已经足够——只有最极致的推理任务才需要调用 Pro。这种"分级服务"的策略，与 OpenAI 的 GPT-4o / GPT-4.5 分层思路类似，但 DeepSeek 的价差更大、选择更灵活。</p>
+
+        <div class="highlight">
+            <strong>战略意义：</strong>V4-Flash 只需要 2-4 张 H100 即可部署推理，而 V4-Pro 需要一个完整的集群。Flash 的 284B/13B 配置恰好卡在了"单机可部署"的临界点上——这对中小型团队来说是一个巨大的利好。
+        </div>
+
+        <p>在评测方面，V4-Pro 的成绩同样令人印象深刻：MMLU-Pro 达到 87.5，LiveCodeBench Pass@1 达到 93.5，Codeforces Rating 达到 3,206（超越 GPT-5.4 的 3,168），GPQA Diamond 达到 90.1，SWE-bench Verified 达到 80.6%。这组数据表明，V4-Pro 在编程和推理能力上已经与全球最顶尖的闭源模型站在了同一水平线上。</p>
+
+        <h2>27.2 CSA+HCA 混合注意力</h2>
+
+        <p>V4 最令人意外的架构决策，就是放弃了在 V2/V3 系列中表现极为出色的 MLA（Multi-head Latent Attention），取而代之的是一套全新的混合注意力机制：<strong>CSA（Compressed Sparse Attention）+ HCA（Heavily Compressed Attention）</strong>。</p>
+
+        <p>为什么要放弃 MLA？答案很简单：<strong>MLA 在 128K 上下文内效率出色，但在百万 token 级别力不从心。</strong>MLA 通过低秩压缩减少了 KV Cache，但注意力计算的复杂度仍然是 O(L²)。当 L 达到 100 万时，即使是 MLA 的 KV Cache 用量也会变得难以承受。</p>
+
+        <p>CSA 的核心创新在于"压缩加稀疏"的双重降维：</p>
+
+        <ul>
+            <li><strong>压缩（Compression）</strong>——将每 m=4 个相邻的 KV token 压缩成一个"块表示"，然后在这些块级别上执行注意力。这相当于在时间维度上做了一次 4 倍的降采样。</li>
+            <li><strong>稀疏（Sparse）</strong>——用一个闪电索引器（Lightning Indexer）为每个查询打分，只保留分数最高的 1,024 个压缩块。加上一个大小为 128 的局部滑动窗口，确保细粒度的局部信息不丢失。</li>
+            <li><strong>重叠压缩</strong>——相邻两个压缩窗口有重叠，防止信息在块边界处断裂。</li>
+        </ul>
+
+        <p>HCA 则是一种更加激进的全局压缩通道：它把每 128 个 token 压缩成一个条目，不做稀疏选择，而是对所有压缩条目执行密集注意力。在 100 万 token 上下文中，HCA 只需处理大约 8,000 个压缩条目——计算量可以忽略不计，但提供了一条全局信息通路。</p>
+
+        <pre><code>CSA 计算流程示意:
+
+输入序列 (L=1M tokens)
+    │
+    ├── CSA 路径:
+    │   窗口压缩 (m=4, 重叠50%) → 约 500K 压缩块
+    │   Lightning Indexer 打分 → Top-1024 选择
+    │   在 1024 个块上执行注意力 + 128 个滑动窗口 token
+    │   输出: 约 1,152 个 token 级别的注意力
+    │
+    ├── HCA 路径:
+    │   全局压缩 (m'=128) → 约 8K 压缩条目
+    │   密集注意力 → 全局信号
+    │
+    └── 拼接 → 最终注意力输出</code></pre>
+
+        <p>效果是惊人的。在 100 万 token 上下文中，V4-Pro 的推理 FLOPs 只有 V3.2 的 <strong>27%</strong>，KV Cache 用量只有 V3.2 的 <strong>10%</strong>。V4-Flash 更是将这两个数字压到了 10% 和 7%。换句话说，如果你在 V3.2 上跑一个 100 万 token 的推理请求需要 100 块钱的电费，V4-Flash 只需要 10 块钱。</p>
+
+        <div class="tip">
+            <strong>技术细节：</strong>V4 还引入了 Partial RoPE（仅对最后 64 维施加位置编码）、Attention Sink（每个注意力头设置一个专门的"注意力汇聚"token）、以及混合精度 KV Cache（BF16 用于 RoPE 维度，FP8 用于其余维度）等辅助技术，共同构成了百万 token 上下文的全栈优化方案。
+        </div>
+
+        <h2>27.3 mHC 流形约束超连接</h2>
+
+        <p>在大模型中，残差连接（Residual Connection）是最基础也是最容易被忽视的组件。它让梯度可以顺利地从输出层"绕过"中间层直接流回输入层，解决了深层网络训练中的梯度消失问题。但传统的残差连接有一个根本性的限制——它只是简单的"加和"操作，缺乏对信息流的精细控制。</p>
+
+        <p>DeepSeek 之前的研究中提出过 Hyper-Connections（HC），通过可学习的投影矩阵来替代简单的残差加和。但在实验中发现，当模型深度增加到一定程度时，Plain HC 的数值训练变得不稳定——投影矩阵的谱范数可能远大于 1，导致信号在前向传播中不断放大，最终爆炸。</p>
+
+        <p>V4 中提出的 <strong>mHC（Manifold-Constrained Hyper-Connections）</strong> 解决了这个问题。关键创新是将残差变换矩阵 <strong>B_l</strong> 约束到一个特殊的数学结构上——<strong>Birkhoff 多面体</strong>（双随机矩阵，即所有元素非负且每行每列之和均为 1）。</p>
+
+        <p>这个约束通过 Sinkhorn-Knopp 迭代（20 步）实现。双随机矩阵的谱范数被严格限制为 1，意味着该变换是"非扩张的"——信息既不会被无端放大，也不会被无端缩小，而是被稳定地传递。再加上将残差流从 d 维"拓宽"到 n_hc × d 维（n_hc=4，相当于 4 条并行通道），模型获得了更强的信息表达能力。</p>
+
+        <table>
+            <tr>
+                <th>残差方法</th>
+                <th>参数量</th>
+                <th>训练稳定性</th>
+                <th>信息容量</th>
+                <th>V4 是否采用</th>
+            </tr>
+            <tr>
+                <td>标准残差连接</td>
+                <td>0（无参数）</td>
+                <td>优秀</td>
+                <td>低（单通道）</td>
+                <td>否</td>
+            </tr>
+            <tr>
+                <td>Pre-LayerNorm</td>
+                <td>2d</td>
+                <td>良好</td>
+                <td>低</td>
+                <td>否</td>
+            </tr>
+            <tr>
+                <td>Hyper-Connections</td>
+                <td>3d²</td>
+                <td>不稳定（深层）</td>
+                <td>高</td>
+                <td>否</td>
+            </tr>
+            <tr>
+                <td>mHC（本方案）</td>
+                <td>3n_hc d²</td>
+                <td><strong>优秀（有界谱范数）</strong></td>
+                <td><strong>高（4 通道）</strong></td>
+                <td><strong>是</strong></td>
+            </tr>
+        </table>
+
+        <p>在 6,144 序列长度的实验中，标准残差连接在 60 层时梯度回传后的信号衰减到初始值的 30% 左右，而 mHC 在 61 层 V4-Pro 上仍然保持了 85% 以上的信号强度。这正是 V4 能够稳定训练 1.6T 参数模型的关键原因之一。</p>
+
+        <h2>27.4 Muon 优化器</h2>
+
+        <p>自从 Adam 优化器在 2014 年提出以来，它几乎成了深度学习训练的事实标准。AdamW 更是在大模型训练中占据了统治地位。V4 打破了这一惯例，首次将 <strong>Muon 优化器</strong> 部署到万亿参数级别的 MoE 模型训练中。</p>
+
+        <p>Muon 的核心思想与 AdamW 截然不同。AdamW 对每个参数计算一阶矩（动量）和二阶矩（自适应学习率），然后进行逐元素的参数更新。Muon 则将参数的梯度矩阵化，通过 <strong>正交化</strong> 操作来更新参数——具体来说，它使用 Newton-Schulz 迭代将动量矩阵"拉"到最接近的正交矩阵。</p>
+
+        <p>V4 中实现的 Muon 采用了"混血" Newton-Schulz 策略：8 步激进迭代（系数: 3.4445, −4.7750, 2.0315）+ 2 步保守迭代（系数: 2, −1.5, 0.5），确保奇异值被稳定地收敛到 1。此外还搭配了 Nesterov 动量、权重衰减和 RMS 重新缩放。</p>
+
+        <p>但工程上的挑战比算法本身更大。Muon 需要完整的梯度矩阵才能做正交化，这与 ZeRO 优化器将参数分片到不同设备的策略直接冲突。DeepSeek 的工程师用了一种巧妙的方法解决：基于背包问题的桶分配算法 + MoE 参数展平，将额外开销控制在 10% 以下。跨数据并行 ranks 的梯度通信使用 BF16 随机舍入 + all-to-all + 本地 FP32 累加。</p>
+
+        <pre><code>Muon vs AdamW 对比:
+
+AdamW 参数更新:
+  m_t = β₁·m_{t-1} + (1-β₁)·g_t
+  v_t = β₂·v_{t-1} + (1-β₂)·g_t²
+  θ_t = θ_{t-1} - η·m_t/(√v_t + ε)
+
+Muon 参数更新:
+  M_t = β·M_{t-1} + (1-β)·g_t         // 动量累积
+  O_t = NewtonSchulz(M_t)              // 正交化!
+  θ_t = θ_{t-1} - η·O_t                // 直接用正交矩阵更新</code></pre>
+
+        <p>实验表明，在相同训练 token 数下，Muon 的收敛速度比 AdamW 快约 15%-20%。这意味着要么在同样的算力下训练出更好的模型，要么用更少的算力达到同样的质量。对于 V4 的训练规模而言，这 15% 的效率提升对应着数千万美元的算力节省。</p>
+
+        <div class="warning">
+            <strong>适用性注意：</strong>Muon 并非对所有参数类型都有效。V4 中，嵌入层、预测头、mHC 的偏置/门控、以及 RMSNorm 仍然使用 AdamW。只有注意力权重和 FFN 权重等"矩阵型"参数才使用 Muon。如果你的项目想尝试 Muon，注意区分参数类型。
+        </div>
+
+        <h2>27.5 FP4 QAT</h2>
+
+        <p>FP8 已经让大模型训练和推理的效率提升了一个台阶。V4 在此基础上再进一步，推出了业界首个超大规模 MoE 模型的 <strong>FP4 量化感知训练（QAT）</strong>方案。</p>
+
+        <p>FP4 采用 E2M1 格式（1 个符号位、2 个指数位、1 个尾数位），每组仅 16 个可表示的值。听起来少得可怜——但通过细粒度的分组缩放因子（group size），FP4 可以在大多数场景下保持与 BF16 接近的精度。</p>
+
+        <p>QAT 的关键在于"让模型学会适应低精度"：</p>
+
+        <ul>
+            <li><strong>混合精度主权重</strong>：优化器维护 BF16 主副本，但前向计算使用 FP4 量化后的权重。反向传播的梯度也基于 FP4 权重计算。</li>
+            <li><strong>分组缩放</strong>：注意力权重矩阵使用 group size 16，FFN 权重使用 group size 32——这背后的直觉是 FFN 权重对量化的鲁棒性更高，可以使用更大的分组。</li>
+            <li><strong>分阶段调度</strong>：训练从高精度开始预热，待权重分布稳定后再逐步过渡到全 FP4。MoE 专家权重先量化，注意力权重后量化。</li>
+        </ul>
+
+        <p>最终效果：FP4 QAT 将内存占用相比 FP8 降低约 2 倍、相比 FP16 降低约 4 倍。在编码任务上与 BF16 基线的精度差距约 1%，数学推理差距约 1-2%——对于绝大多数实际应用来说完全可以接受。更妙的是，V4 也是全球首个深度适配华为昇腾 950 芯片 FP4 推理能力的模型。</p>
+
+        <div class="highlight">
+            <strong>战略意义：</strong>昇腾 950PR 是国内唯一支持 FP4 低精度推理的商用芯片，单卡 FP4 算力达到 1.56 PFLOPs，单卡算力是 H20 的 2.87 倍。DeepSeek 对昇腾的深度适配，不仅仅是技术选择，更是供应链安全的战略布局。
+        </div>
+
+        <h2>27.6 1M 默认上下文</h2>
+
+        <p>V4 的默认上下文窗口从 V3 的 128K 跃升到了 <strong>100 万 token</strong>。这不仅仅是数字的翻倍——百万 token 上下文打开了全新的应用场景：</p>
+
+        <ul>
+            <li>可以直接将整个代码仓库（比如 Linux 内核的某个子系统）输入给模型做分析</li>
+            <li>可以一次性处理数千页的技术文档或法律合同</li>
+            <li>可以在一个会话中完成数小时的复杂多轮 Agent 任务而无需频繁清理上下文</li>
+        </ul>
+
+        <p>百万 token 的训练也并非一步到位。DeepSeek 采用了一种渐进式上下文扩展策略：从 4K 开始训练，逐步扩展到 16K → 64K → 1M。而且只有在 64K 以上的阶段才引入 CSA/HCA 的稀疏化——因为团队发现，在短上下文下稀疏化反而会带来不必要的精度损失。</p>
+
+        <h2>27.7 华为昇腾 950 支持</h2>
+
+        <p>V4 的另一个里程碑意义在于它是首个深度适配国产芯片的万亿参数级开源模型。华为昇腾 950PR 在 V4 发布当日即实现 Day 0 适配：</p>
+
+        <table>
+            <tr>
+                <th>适配项</th>
+                <th>细节</th>
+            </tr>
+            <tr>
+                <td>底层算子</td>
+                <td>基于昇腾 CANN 体系开发定制化融合 Kernel</td>
+            </tr>
+            <tr>
+                <td>MoE 异构并行</td>
+                <td>重新完成专家分片调度和负载均衡调优</td>
+            </tr>
+            <tr>
+                <td>长上下文适配</td>
+                <td>定制 KV Cache 滑窗策略和缓存压缩算法</td>
+            </tr>
+            <tr>
+                <td>TileLang 编译</td>
+                <td>跨硬件平台编译 DSL，降低迁移成本</td>
+            </tr>
+            <tr>
+                <td>MegaMoE2 融合内核</td>
+                <td>DeepSeek 自研，在昇腾平台解决 MoE 通信瓶颈</td>
+            </tr>
+        </table>
+
+        <p>尽管目前 V4-Pro 的推理服务"受限于高端算力，吞吐量有限"，DeepSeek 在官方公告中明确表示 "预计下半年昇腾 950 超节点批量上市后价格将大幅下调"。在中国 AI 芯片出口管制持续收紧的大背景下，V4 + 昇腾的软硬一体化方案，具有深远的战略意义。</p>
+
+        <h2>27.8 MIT 开源</h2>
+
+        <p>最后也是最值得注意的一点：V4 延续了 DeepSeek 的开源传统，以 <strong>MIT 许可证</strong> 发布模型权重。这意味着：</p>
+
+        <ul>
+            <li>任何人可以自由下载、使用、修改模型</li>
+            <li>商用无需授权，无需标注出处</li>
+            <li>可以基于 V4 开发自己的微调版本、应用、或服务</li>
+        </ul>
+
+        <p>在一个越来越多玩家走向闭源的时代——GPT-5 闭源、Claude 系列闭源、Gemini 闭源——DeepSeek 选择在 1.6T 参数这个量级上继续开源，本身就是一种鲜明的表态。而 V4 的代码库（包括推理适配和部分训练框架）也已经同步公开在 GitHub 和 Hugging Face 上。</p>
+
+        <div class="tip">
+            <strong>快速上手 V4-Flash：</strong>
+<pre><code>pip install transformers
+from transformers import AutoModelForCausalLM, AutoTokenizer
+model = AutoModelForCausalLM.from_pretrained(
+    "deepseek-ai/DeepSeek-V4-Flash",
+    trust_remote_code=True,
+    device_map="auto"
+)
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V4-Flash")
+prompt = "用 Python 实现一个快速排序算法"
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+outputs = model.generate(**inputs, max_new_tokens=1024)
+print(tokenizer.decode(outputs[0]))
+</code></pre>
+            只需 2-4 张 H100 就能跑起 V4-Flash 推理！</div>
+
+        <p>V4 是一个承前启后的版本——它继承了 V3 系列"效率优先"的基因，但在注意力机制、参数更新、训练稳定性和量化精度上实现了全面的代际升级。最重要的是，V4 证明了开源模型也能同时做到"最大"（1.6T）和"最省"（百万上下文只需 27% FLOPs）。</p>
+
+        <p>那么，V4 之后呢？DeepSeek 团队在 V4 技术报告的结尾埋了一个伏笔——"在未来的迭代中，我们将进行更全面、更本质的研究，将架构简化到最核心的部分。" 这句话预示着 V5 的方向。下一章，也是全教程的最后一章，我们走出具体的技术细节，从更高的视角审视 DeepSeek 对整个 AI 行业的深远影响，并展望未来的 V5 路线图。</p>
+
+        <div class="footer-nav">
+            <a href="26.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="28.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

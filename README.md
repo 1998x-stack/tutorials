@@ -1,7 +1,7 @@
 # 1998x-stack Tutorials
 
 <p align="center">
-  <strong>77 free, comprehensive technical tutorials in Chinese</strong><br>
+  <strong>78 free, comprehensive technical tutorials in Chinese</strong><br>
   From fundamentals to production-ready skills — spanning AI, mathematics, systems, networks, finance, and more.
 </p>
 
@@ -15,7 +15,7 @@
 
 | Metric | Count |
 |--------|-------|
-| Total courses | **77** |
+| Total courses | **78** |
 | Disciplines | **10** |
 | Typical depth | **28 chapters / course** |
 
@@ -23,7 +23,7 @@ Each course is a self-contained, static HTML tutorial with a two-column layout (
 
 ---
 
-## AI / 数据科学 (26 courses)
+## AI / 数据科学 (27 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -53,6 +53,7 @@ Each course is a self-contained, static HTML tutorial with a two-column layout (
 | 🤖 | 大模型工程实践：Agent框架 | 28 | [llm-agent-engineering-tutorial](https://1998x-stack.github.io/llm-agent-engineering-tutorial/) |
 | 🤖 | BERT模型系列 · 从入门到精通 | 28 | [Bert-tutorial](https://1998x-stack.github.io/Bert-tutorial/) |
 | 🤖 | LLM数据工程 · 从入门到精通 | 28 | [LLM-data-tutorial](https://1998x-stack.github.io/LLM-data-tutorial/) |
+| 🧹 | LLM驱动的应用就绪数据准备 | 28 | [application-ready-data-preparation-tutorial](https://1998x-stack.github.io/application-ready-data-preparation-tutorial/) |
 
 ---
 

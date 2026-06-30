@@ -10,7 +10,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 
 ## Active Tutorials
 
-### AI / 数据科学 (26)
+### AI / 数据科学 (27)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `machine-learning-tutorial/` | 机器学习 | 28 | `https://1998x-stack.github.io/machine-learning-tutorial/` |
@@ -39,6 +39,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `dataset-analysis-tutorial/` | 数据集分析与实战 | 28 | `https://1998x-stack.github.io/dataset-analysis-tutorial/` |
 | `post-training-dataset-tutorial/` | 后训练数据集分析与构建流程 | 28 | `https://1998x-stack.github.io/post-training-dataset-tutorial/` |
 | `LLM-data-tutorial/` | LLM数据工程 | 28 | `https://1998x-stack.github.io/LLM-data-tutorial/` |
+| `application-ready-data-preparation-tutorial/` | LLM应用就绪数据准备 | 28 | `https://1998x-stack.github.io/application-ready-data-preparation-tutorial/` |
 
 ### 数学基础 (12)
 | Directory | Topic | Chapters | URL |

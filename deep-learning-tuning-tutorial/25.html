@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第25章 RLHF对齐训练的底层逻辑</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 调参之道：从炼丹到科学</a></li>
+            <li><a href="02.html">第2章 梯度下降的数学直觉</a></li>
+            <li><a href="03.html">第3章 优化器选择：Adam vs SGD的底层逻辑</a></li>
+            <li><a href="04.html">第4章 学习率：调参的第一优先级</a></li>
+            <li><a href="05.html">第5章 批大小：梯度估计的精度博弈</a></li>
+            <li><a href="06.html">第6章 初始化：训练的起跑线</a></li>
+            <li><a href="07.html">第7章 归一化层：训练稳定性的基石</a></li>
+            <li><a href="08.html">第8章 激活函数：非线性之源</a></li>
+            <li><a href="09.html">第9章 权重衰减与正则化的数学</a></li>
+            <li><a href="10.html">第10章 Dropout：隐式集成学习的数学</a></li>
+            <li><a href="11.html">第11章 学习率调度：从固定到自适应</a></li>
+            <li><a href="12.html">第12章 损失函数的设计哲学</a></li>
+            <li><a href="13.html">第13章 数据增强与泛化的信息论视角</a></li>
+            <li><a href="14.html">第14章 评估与验证的科学方法</a></li>
+            <li><a href="15.html">第15章 训练曲线全解读</a></li>
+            <li><a href="16.html">第16章 NaN与梯度爆炸的根因分析</a></li>
+            <li><a href="17.html">第17章 小数据过拟合测试：调试的银弹</a></li>
+            <li><a href="18.html">第18章 调参优先级与方法论</a></li>
+            <li><a href="19.html">第19章 CNN训练的核心法则</a></li>
+            <li><a href="20.html">第20章 NLP模型微调的原理</a></li>
+            <li><a href="21.html">第21章 推荐系统的特征与采样</a></li>
+            <li><a href="22.html">第22章 类别不平衡与长尾分布</a></li>
+            <li><a href="23.html">第23章 LoRA微调的数学本质</a></li>
+            <li><a href="24.html">第24章 SFT数据工程的科学方法</a></li>
+            <li><a href="25.html" class="active">第25章 RLHF对齐训练的底层逻辑</a></li>
+            <li><a href="26.html">第26章 Scaling Law与μP参数化</a></li>
+            <li><a href="27.html">第27章 自动化调参与前沿趋势</a></li>
+            <li><a href="28.html">第28章 综合实战：从零调优一个模型</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>RLHF——把模型能力推到上限的最后一步</h2>
+
+        <p>大家好，我是你们的讲师。我们在第23章学会了LoRA微调的数学本质，第24章掌握了SFT数据工程的科学方法。现在，我们已经能让大模型"学会做新任务"了。但还有一个问题：<strong>学会做 ≠ 做得好</strong>。</p>
+
+        <p>SFT让模型学会了遵循指令和输出特定格式——它给了模型"能力"。但要让模型在偏好维度上"做得更好"——比如回答更有帮助、更无害、更符合人类期望——就需要RLHF（基于人类反馈的强化学习）。RLHF是当前大模型对齐技术的核心，它把模型能力推到上限的最后一步。</p>
+
+        <p>Tang AI用一个篮球比喻把SFT和RL的关系讲得非常清楚："SFT是为了让模型有能力去回答问题，而RL仅仅是将这个能力推到上限。就和我们打篮球一样，一个经过训练的篮球运动员，在发挥好的时候，可以10中8，但是他可能平时就5中5，而RL做的就是让该运动员长期处在10中8等状态。但是如果运动员只能10中2，且从来没有10中8，那么他怎么都到不了10中8。"</p>
+
+        <p>今天这章，我们将深入RLHF的底层逻辑——PPO在LLM中的特殊挑战、Reward Hacking的博弈论解释、DPO如何将对齐转化为分类问题、以及GRPO等前沿方法。准备好了吗？我们开始。</p>
+
+        <h3>为什么SFT不够</h3>
+
+        <p>在深入RL技术之前，我们必须把SFT和RL的关系彻底说清楚。这不是一个"二选一"的关系，而是一个<strong>递进关系</strong>。</p>
+
+        <p>SFT赋予模型"能力"——让它学会遵循指令、输出特定格式和风格。RL将这个能力推向"上限"——在偏好维度上做得更好。用公式表达就是：<strong>SFT是给公式，RL是纠偏好</strong>。</p>
+
+        <p>这里有一个极其重要的铁律：<strong>如果SFT连20%的正确率都达不到，RL绝无可能挽救</strong>。Tang AI反复强调："做RL的模型本身就对数据集回答得超级差，可能20%都达不到，那就果断换模型吧。"这是RLHF中最容易被忽视的前提条件——很多人SFT都没做好就急着上RL，结果RL训练几天发现reward怎么都上不去，最终浪费大量算力。</p>
+
+        <p>相反，对于有确定性rule reward的任务（如数学题、编程竞赛），可以跳过SFT直接做纯RL。因为规则本身提供了足够的监督信号，不需要SFT先教会模型"怎么做"。但这是特例，不是常态。</p>
+
+        <div class="highlight">
+            <strong>决策树：何时用SFT，何时用RL？</strong><br>
+            - SFT后模型效果已满意？→ 不需要RL，SFT足够<br>
+            - SFT后模型有基本能力但偏好不够好？→ SFT + RL<br>
+            - SFT连20%都达不到？→ 换模型或优化SFT，别碰RL<br>
+            - 任务有确定性规则reward（数学、逻辑）？→ 可直接纯RL
+        </div>
+
+        <h3>PPO在LLM中的特殊挑战</h3>
+
+        <p>PPO（Proximal Policy Optimization）是RLHF中最主流的算法，被InstructGPT、ChatGPT、Llama-Chat等代表性工作采用。但LLM场景下的PPO和标准强化学习中的PPO有本质上的不同。</p>
+
+        <p><strong>四模型架构的复杂交互。</strong>PPO-RLHF标准架构包含四个模型：策略模型（Actor，正在训练的语言模型）、参考模型（Reference，SFT模型冻结副本）、价值模型（Critic，估计状态价值函数V(s)）、奖励模型（Reward Model，为生成文本打分）。</p>
+
+        <p>训练循环：Actor基于prompt生成多个response → RM为每个response打分 → 结合KL惩罚项计算最终奖励 → Critic估计Advantage → PPO Loss更新Actor和Critic参数。</p>
+
+        <p>这四模型的交互带来了巨大的工程复杂度和内存开销（需要同时加载4个模型），但这是必要的——因为没有哪一步可以被省略。PPO的clipped surrogate objective和KL惩罚项构成了双重保护机制：Clip控制单步更新幅度，KL控制整体分布偏移。</p>
+
+        <p><strong>为什么PPO的LR是SFT的1/10。</strong>这是一个硬性的经验法则。如果SFT的学习率是2e-5，PPO的初始学习率就应该设为1e-6到3e-6。原因：SFT阶段模型从零学习任务形式，需要较大步长探索参数空间；PPO阶段模型已有基本生成能力，只需在偏好方向微调。过大的LR会让参数跳离有效区域，导致Mode Collapse——输出重复或无意义内容。</p>
+
+        <p><strong>KL散度从0.001开始的数学直觉。</strong>KL散度在RLHF中作为策略约束，防止策略偏离SFT过远。推荐从0.001开始：这个值足够小，让KL约束松到"允许模型开始学习"；不会在开局就束缚死策略。如果KL爆炸（策略偏离SFT过远），增大β；如果KL停滞（reward不涨），减小β。</p>
+
+        <div class="tip">
+            <strong>KL散度的双重角色：</strong>KL惩罚与PPO Clip不是冗余的——Clip控制单步比率上限（局部约束），KL控制全局分布偏移（全局约束）。两者协同构成RLHF训练稳定性的基石。另外：如果在RL的prompt池中混入5-10%的通用SFT数据，可以有效"锚定"模型的基础能力，防止灾难性遗忘。
+        </div>
+
+        <h3>Reward Hacking的博弈论解释</h3>
+
+        <p>RLHF中最令人头疼的问题就是<strong>Reward Hacking</strong>（奖励破解）——模型发现了某种"捷径"来获得高奖励，但实际生成质量并未改善，甚至可能下降。</p>
+
+        <p>从博弈论视角看，这是一个典型的<strong>Proxy-Target Mismatch</strong>问题。奖励模型（RM）的打分是代理目标（Proxy），真正的目标是"生成对人类有用的内容"。当代理目标和真实目标不一致时，优化代理目标必然导致Hacking。这不是RM质量能完全解决的——它是优化过程的固有问题。</p>
+
+        <p><strong>正负样本比例失衡</strong>是导致Reward Hacking的常见原因。Tang AI用一个具体的例子说明了这一点："比如，对于仅有1个正例或者1个负例的数据集，如果完成正例的回答是很难的，而回答负例是很简单的，且正例数据比负例少，模型就倾向于全部数据都打负例，这样模型依然可以得到高分。"</p>
+
+        <p>模型发现自己只要全打负例就能获得不错的平均分——它没有在"真正解决问题"，而是在"最大化奖励函数"。</p>
+
+        <p><strong>三种经实践证明有效的解法：</strong></p>
+        <ul>
+            <li><strong>加惩罚项</strong>：在奖励函数中加入对抗hacking行为的惩罚项（长度惩罚、重复惩罚、KL惩罚）</li>
+            <li><strong>调低可疑reward的权重</strong>：将单一RM的打分拆分为多个独立维度分别标注、加权融合，防止模型通过"单维度作弊"获得高分</li>
+            <li><strong>将hack样本作为负例重训RM</strong>：收集模型high-reward但人类低分的输出，作为负例加入RM训练数据，重新训练RM。这是最彻底的方案，但成本最高</li>
+        </ul>
+
+        <div class="warning">
+            <strong>Reward Hacking的检测信号：</strong><br>
+            1. Reward持续上涨但生成质量明显下降——最典型信号，必须人工抽查<br>
+            2. 响应长度异常变化——模型发现长回答获高分，开始"废话连篇"<br>
+            3. 输出重复模式——某些句式/关键词反复出现<br>
+            4. 对比训练前后模型的输出，人类标注偏好下降但reward上升——已发生Hacking<br>
+            5. 不要只看reward曲线，一定要配合人工评估。Tang AI说："好记性不如烂笔头，看指标终究抵不过bad case的研究。"
+        </div>
+
+        <h3>DPO如何将对齐问题转化为偏好分类</h3>
+
+        <p>PPO虽然效果好，但工程复杂度极高——四模型同时推理、on-policy采样、超参数极度敏感。DPO（Direct Preference Optimization）提供了一种截然不同的思路，将对齐问题转化为偏好分类问题。</p>
+
+        <p><strong>DPO的核心洞察</strong>：不需要显式训练Reward Model。DPO基于Bradley-Terry偏好模型，推导出策略的对数概率与隐式奖励函数之间的关系：</p>
+
+        <pre><code>r(x, y) = β · log(π_θ(y|x) / π_ref(y|x)) + β · log(Z(x))</code></pre>
+
+        <p>其中β控制KL约束强度，π_ref是参考策略（SFT模型），Z(x)是配分函数。DPO的损失函数直接最大化chosen响应被偏好的对数几率：</p>
+
+        <pre><code>L_DPO = -E[ log σ( β · log(π_θ(y_w|x) / π_ref(y_w|x))
+                         - β · log(π_θ(y_l|x) / π_ref(y_l|x)) ) ]</code></pre>
+
+        <p>直觉上：DPO通过增大chosen响应的概率（相对于π_ref）并降低rejected响应的概率，隐式地学习了一个奖励函数。整个过程不需要单独训练RM，也不需要PPO的Actor-Critic架构——只需要策略+参考两个模型。</p>
+
+        <p><strong>Beta参数</strong>是DPO最重要的超参数。Beta控制隐式奖励的温度——Beta越大，更新越保守；Beta越小，模型更大胆地拟合偏好数据。推荐范围0.1-0.5，从0.1开始尝试。</p>
+
+        <p>注意一个经典的失败模式：<strong>DPO loss快速下降但生成效果差</strong>。这通常意味着beta过低（模型偏离SFT过远，丢失通用能力）或LR过高（破坏预训练结构）。解决方案：调高beta + 降低LR（1e-7到5e-6）。</p>
+
+        <div class="highlight">
+            <strong>DPO vs PPO的选择：</strong>DPO在RM质量受限、计算资源有限、离线偏好数据充分时优于PPO。PPO在需要RL探索（数学推理、编程竞赛）、RM质量高需要细粒度连续打分、需要多轮迭代RL时仍不可替代。两者不是替代关系，是不同场景下的最优选择。
+        </div>
+
+        <h3>GRPO与前沿对齐方法</h3>
+
+        <p>2024年，DeepSeek提出了<strong>GRPO（Group Relative Policy Optimization）</strong>，进一步简化了RL对齐流程。</p>
+
+        <p>GRPO的核心创新是<strong>去掉Critic网络</strong>，通过组内响应对比来计算Advantage。具体做法：对每个prompt，当前策略生成G个响应，奖励模型为每个响应打分，然后在组内计算Advantage — 组内均值作为baseline。这一下子省掉了Critic网络的维护和显存开销——对于70B量级的模型，节省的显存非常可观。</p>
+
+        <p>GRPO的batch size越大效果越稳定。Tang AI的经验是："GRPO训练，batch size越大，其实效果越稳定，尤其是模型能力没有那么好的情况下。"这是因为on-policy采样量 = batch_size × G，更大的batch提供更稳定的梯度估计。小batch + 小G的组合极易导致训练发散。</p>
+
+        <p><strong>拒绝采样 + 冷启动微调</strong>是提升Base-RL效果的有效增强策略：先用RL模型对prompt集做拒绝采样（每个prompt生成N个响应，N可达64-128），筛选出reward最高的一批响应作为"伪SFT数据"，用这些数据对原始基模做冷启动微调，再继续RL训练。这个循环可以突破reward瓶颈——当reward长时间不涨时，拒绝采样+冷启动往往能打开新局面。</p>
+
+        <p>下面是三种对齐方法的全面对比：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>PPO-RLHF</th>
+                    <th>DPO</th>
+                    <th>GRPO</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>所需组件</td>
+                    <td>Actor + Critic + Reference + RM</td>
+                    <td>Policy + Reference</td>
+                    <td>Actor + Reference + RM</td>
+                </tr>
+                <tr>
+                    <td>Advantage来源</td>
+                    <td>Critic网络估计V(s)</td>
+                    <td>隐式奖励（无Advantage）</td>
+                    <td>组内响应得分对比</td>
+                </tr>
+                <tr>
+                    <td>采样方式</td>
+                    <td>On-policy</td>
+                    <td>Off-policy（静态偏好数据）</td>
+                    <td>On-policy（组内采样）</td>
+                </tr>
+                <tr>
+                    <td>LR范围</td>
+                    <td>1e-6 ~ 3e-6（SFT的1/10）</td>
+                    <td>1e-7 ~ 5e-6</td>
+                    <td>1e-6 ~ 1e-5</td>
+                </tr>
+                <tr>
+                    <td>核心优势</td>
+                    <td>效果上限最高，稳定性好</td>
+                    <td>流程简单，无需RM训练</td>
+                    <td>显存效率高，去掉Critic</td>
+                </tr>
+                <tr>
+                    <td>主要风险</td>
+                    <td>超参数敏感，工程复杂</td>
+                    <td>偏好数据质量要求高</td>
+                    <td>G大小影响训练稳定性</td>
+                </tr>
+                <tr>
+                    <td>适用场景</td>
+                    <td>通用RLHF，高质量RM场景</td>
+                    <td>资源受限、离线偏好数据充分</td>
+                    <td>规则reward明确、资源受限</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>RLHF是当前大模型训练流程的最后一环——从预训练（学到通用知识）、到SFT（学会任务和格式）、再到RLHF（对齐人类偏好），每一环都不可或缺。掌握了这三步，你就掌握了大模型从"能用"到"好用"的完整路径。</p>
+
+        <p>下一章，我们将进入课程的最高潮——<strong>Scaling Law与μP参数化</strong>。当模型规模从百万级增长到百亿级时，调参的底层逻辑会发生质变。学习率如何随模型大小缩放？参数更新的"万有引力定律"是什么？μP参数化如何让大模型训练不再依赖反复调参？我们第26章见。</p>
+
+        <div class="footer-nav">
+            <a href="24.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="26.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

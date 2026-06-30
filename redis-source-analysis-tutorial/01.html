@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第1章 Redis源码全景图</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html" class="active">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第1章：Redis 源码全景图</h2>
+
+        <p>大家好，我是你们的讲师。今天开始我们将一起走进 Redis 的源代码世界。很多同学用 Redis 用了好几年，对 SET/GET、缓存雪崩、主从复制这些概念如数家珍，但遇到线上 latency 突然飙升、内存莫名其妙暴涨、或者客户端连接卡死的时候，依然只能靠"重启大法"或者盲目抄别人的配置。原因很简单：你看到的只是黑盒外面的仪表盘，而从今天起，我们要打开这个黑盒。</p>
+
+        <p>Redis 的源码库大约只有 3 万行核心 C 代码，在一众工业级系统中属于极其"苗条"的存在。MySQL 的代码量是百万级，Nginx 是十几万行，而 Redis 的核心部分（<code>src/</code> 目录去掉第三方依赖和测试）仅仅相当于一本中等厚度的技术书。代码量小并不意味着简单——它在简洁性和性能之间达到了惊人的平衡，是学习 C 工程实践不可多得的教材。</p>
+
+        <p>更重要的是，作者 Salvatore Sanfilippo（antirez）在长达十余年的开发历程中，始终秉持一条核心原则：<strong>对抗复杂度</strong>。他宁可重构一个子系统，也绝不让它变得难以理解。这份"代码洁癖"，正是我们阅读源码时最能受益的地方。</p>
+
+        <h3>读源码的三个层次</h3>
+
+        <p>我把读源码的收益分成三个层次，大家可以对照一下自己处在哪个阶段：</p>
+        <ul>
+            <li><strong>第一层：会用</strong>——理解命令的时间复杂度 O(1) 还是 O(N)，知道为什么 KEYS * 不能在生产环境用，为什么 bigkey 会阻塞。这个层次的开发者能写出"不犯错"的代码。</li>
+            <li><strong>第二层：会调优</strong>——能通过分析源码判断内存碎片来源、理解 IO 多路复用的调度策略、看懂 RDB/AOF 的写盘时机。这个层次能定位 90% 的生产问题。</li>
+            <li><strong>第三层：会造轮子</strong>——从 Redis 的 zmalloc、ae 事件循环、skiplist、dict 等模块中提取通用设计模式，应用到自己的中间件或存储系统开发中。antirez 的编码风格和架构决策本身就是最好的范本。</li>
+        </ul>
+
+        <h2>源码版本选择与项目总览</h2>
+
+        <p>本课程以 <strong>Redis 7.2.x</strong>（2023 年发布的 LTS 稳定版）为主线进行讲解。7.x 系列引入了大量现代化改进，包括多线程部分的成熟化、Function 替代 Lua scripts 的尝试、以及新的 listpack 编码方案。同时我们也会在最后一章前瞻 <strong>Redis 8.x</strong> 中的变化。建议大家从 <code>github.com/redis/redis</code> 拉取最新的 7.2 分支进行对照阅读。</p>
+
+        <p>拿到源码后，你首先看到的是这样的目录结构：</p>
+
+        <pre><code>redis-7.2.x/
+├── src/          # 核心源代码，约 64 个 .c 文件 + 头文件
+├── deps/         # 第三方依赖库
+│   ├── jemalloc/ # 内存分配器（生产环境默认）
+│   ├── hiredis/  # C 语言客户端 SDK
+│   ├── lua/      # Lua 5.1 解释器
+│   ├── linenoise/ # 命令行编辑库
+│   ├── lzf/      # LZF 压缩算法
+│   └── fpconv/   # 快速浮点数转换
+├── tests/        # Tcl 集成测试套件
+├── utils/        # 辅助工具脚本
+└── runtest*      # 测试入口脚本</code></pre>
+
+        <p>其中 <code>src/</code> 目录按功能可以划分成几个大的模块。理解这些模块之间的依赖关系，是制定阅读路线的前提：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>模块</th>
+                    <th>核心文件</th>
+                    <th>功能说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>内存管理</td>
+                    <td><code>zmalloc.c</code>, <code>zmalloc.h</code></td>
+                    <td>内存分配封装、统计、jemalloc 适配</td>
+                </tr>
+                <tr>
+                    <td>基础数据结构</td>
+                    <td><code>sds.c</code>, <code>adlist.c</code>, <code>dict.c</code>, <code>ziplist.c</code>, <code>listpack.c</code>, <code>skiplist.c</code>, <code>intset.c</code>, <code>rax.c</code></td>
+                    <td>动态字符串、链表、字典、压缩列表、listpack、跳表、整数集合、基数树</td>
+                </tr>
+                <tr>
+                    <td>对象系统</td>
+                    <td><code>object.c</code>, <code>t_string.c</code>, <code>t_hash.c</code>, <code>t_list.c</code>, <code>t_set.c</code>, <code>t_zset.c</code></td>
+                    <td>redisObject 封装、类型编码转换、命令实现</td>
+                </tr>
+                <tr>
+                    <td>网络 IO</td>
+                    <td><code>ae.c</code>, <code>ae_epoll.c</code>, <code>ae_kqueue.c</code>, <code>anet.c</code>, <code>networking.c</code></td>
+                    <td>事件循环、IO 多路复用抽象、连接管理</td>
+                </tr>
+                <tr>
+                    <td>命令处理框架</td>
+                    <td><code>server.c</code>, <code>db.c</code>, <code>multi.c</code></td>
+                    <td>main() 入口、命令表注册、键空间操作、事务</td>
+                </tr>
+                <tr>
+                    <td>持久化</td>
+                    <td><code>rdb.c</code>, <code>aof.c</code></td>
+                    <td>RDB 快照、AOF 日志、混合持久化</td>
+                </tr>
+                <tr>
+                    <td>复制与高可用</td>
+                    <td><code>replication.c</code>, <code>sentinel.c</code>, <code>cluster.c</code></td>
+                    <td>主从复制、哨兵、Cluster 集群</td>
+                </tr>
+                <tr>
+                    <td>进阶特性</td>
+                    <td><code>script.c</code>, <code>module.c</code>, <code>function.c</code>, <code>acl.c</code>, <code>latency.c</code></td>
+                    <td>Lua 引擎、模块系统、Redis Function、ACL、延迟监控</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>小贴士：</strong>deps/ 目录下的第三方库 <strong>不需要</strong> 全部通读。我们重点关注 <code>jemalloc</code>（分配器替换对内存碎片影响巨大）和 <code>lua</code>（script 执行的核心引擎），其他依赖按需查阅即可。
+        </div>
+
+        <h2>源码阅读路线图</h2>
+
+        <p>面对 60 多个 C 文件，初学者最容易犯的错误就是"从第一行开始读"——打开 <code>server.c</code> 从 <code>main()</code> 一路看下去，结果在 ae 事件循环和网络初始化中迷失方向。我推荐三种路线，你可以根据自己的背景选择：</p>
+
+        <h3>路线一：自底向上（推荐有 C 基础的同学）</h3>
+        <p>从最底层的基础数据结构开始，逐步向上层业务逻辑推进。这条路的好处是每一步都有坚实的理解基础，不会出现"跳过底层直接看命令，结果看不懂编码转换"的尴尬。顺序是：内存管理 → 基础数据结构（SDS → 链表 → 字典 → 跳表 → 整数集合） → 对象系统 → 单命令实现 → 事务/Lua → 网络 IO 框架 → 持久化 → 复制与集群。</p>
+
+        <h3>路线二：自顶向下（适合想快速解决实际问题的同学）</h3>
+        <p>从 <code>main()</code> 启动流程切入，理解 Redis 是如何初始化、进入事件循环、接收网络请求的。然后按照"接到一条命令→解析→查找命令表→调用对应的处理函数→操作数据类型→返回结果"这条链路逐层深入。这种路线阅读效率高，但遇到底层数据结构的细节时需要回头翻阅。</p>
+
+        <h3>路线三：混合路线（本课程采用）</h3>
+        <p>我们这门课采用的路线是：先花几章把底层数据结构讲透（第3~7章），然后以 redisObject 为跳板延伸到命令实现（第8~12章），再用专门的篇幅详解网络 IO 和事件循环（第13~16章），最后是持久化、复制、集群等分布式主题。这种先主干后分支的路线，能让你在前半段建立清晰的代码全景印象，后半段逐步填充细节。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>阅读阶段</th>
+                    <th>涵盖章节</th>
+                    <th>核心文件</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Stage 1：数据结构基石</td>
+                    <td>第3~7章</td>
+                    <td>zmalloc, sds, adlist, ziplist, listpack, dict, skiplist, intset</td>
+                </tr>
+                <tr>
+                    <td>Stage 2：对象与命令</td>
+                    <td>第8~12章</td>
+                    <td>object, t_string, t_hash, t_list, t_set, t_zset, stream, geo</td>
+                </tr>
+                <tr>
+                    <td>Stage 3：网络与事件驱动</td>
+                    <td>第13~16章</td>
+                    <td>ae, ae_epoll, anet, networking, server</td>
+                </tr>
+                <tr>
+                    <td>Stage 4：持久化与高可用</td>
+                    <td>第17~22章</td>
+                    <td>rdb, aof, replication, sentinel, cluster</td>
+                </tr>
+                <tr>
+                    <td>Stage 5：进阶与实战</td>
+                    <td>第23~28章</td>
+                    <td>module, script, function, acl, latency</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>编码风格与代码约定</h2>
+
+        <p>antirez 的编码风格非常统一，掌握这些约定能让你在阅读时节省大量时间：</p>
+
+        <ul>
+            <li><strong>缩进与格式：</strong>使用 4 空格缩进，花括号采用 K&R 风格（左花括号不换行）。函数名使用 <code>snake_case</code>，全局变量通过 <code>server.</code> 前缀访问（例如 <code>server.port</code>、<code>server.db</code>）。</li>
+            <li><strong>返回值约定：</strong>函数成功返回 <code>C_OK</code>（0），失败返回 <code>C_ERR</code>（-1）。这与 POSIX 传统一致。很多函数还通过指针参数返回结果，用返回值表示状态。</li>
+            <li><strong>内存管理：</strong>Redis 封装了 <code>zmalloc()</code> / <code>zfree()</code> / <code>zrealloc()</code> 系列函数，替换了标准 libc 的 malloc/free。这些函数在分配失败时会自动打印日志并退出，因此源码中几乎<strong>不需要</strong>检查返回值是否为 NULL——这在 C 工程中是一个非常实用的约定。</li>
+            <li><strong>日志打印：</strong>使用 <code>serverLog(level, format, ...)</code> 宏，level 可取 <code>LL_WARNING</code>、<code>LL_NOTICE</code>、<code>LL_VERBOSE</code> 等。antirez 会在关键的逻辑分支中加入 serverLog，这也是我们调试时的重要线索。</li>
+            <li><strong>错误处理模式：</strong>Redis 大量采用 <code>goto cleanup</code> 模式做资源释放。当一个函数中有多个失败返回点时，统一跳转到函数末尾的 cleanup 标签执行释放逻辑。这在 C 语言中是最优雅的错误处理方式之一。</li>
+        </ul>
+
+        <p>来看一个典型的 Redis 函数片段，体会它的编码风格：</p>
+
+        <pre><code>/* 从 sds 中删除 len 个字节 */
+sds sdstrim(sds s, const char *cset) {
+    char *start, *end, *sp, *ep;
+    size_t len;
+
+    sp = start = s;
+    ep = end = s + sdslen(s) - 1;
+    while (sp &lt;= end &amp;&amp; strchr(cset, *sp)) sp++;
+    while (ep &gt; start &amp;&amp; strchr(cset, *ep)) ep--;
+    len = (sp &gt; ep) ? 0 : ((ep - sp) + 1);
+    if (s != sp) memmove(s, sp, len);
+    s[len] = '\0';
+    sdssetlen(s, len);
+    return s;
+}</code></pre>
+
+        <div class="highlight">
+            <strong>代码观察：</strong>这个函数不到 15 行，没有检查 NULL、没有复杂的错误分支、两个 while 循环对称处理首尾。这正是 antirez 所说的"代码应该是叙事的，而不是说服的"——读这段代码就像读一个清晰的算法描述。
+        </div>
+
+        <h2>搭建源码阅读环境</h2>
+
+        <p>工欲善其事，必先利其器。在开始逐行阅读之前，我们先把开发环境配好。</p>
+
+        <h3>编译 Redis（带调试符号）</h3>
+        <p>默认的 <code>make</code> 会使用 <code>-O2</code> 优化，这会导致 GDB 单步跟踪时变量被优化掉或者跳转混乱。强烈建议在调试时关闭优化：</p>
+
+        <pre><code># 开发调试版本（-O0，包含 -g 调试符号）
+make REDIS_CFLAGS="-g -O0" REDIS_LDFLAGS="-g -O0"
+
+# 运行测试（验证环境正常）
+make test
+
+# 生产编译（默认 -O2）
+make</code></pre>
+
+        <h3>GDB 调试配置</h3>
+        <p>创建一个 <code>.gdbinit</code> 文件，加入常用宏定义，可以极大提升调试效率：</p>
+
+        <pre><code># Redis 专用 GDB 宏
+set print pretty on
+set pagination off
+
+# 打印 redisObject
+define pro
+    print (robj *)$arg0
+end</code></pre>
+
+        <h3>VSCode + clangd 代码跳转</h3>
+        <p>对于代码浏览，我推荐使用 VSCode 配合 clangd 插件，配合 <code>compile_commands.json</code> 实现精确跳转：</p>
+
+        <pre><code># 安装 bear，用于生成 compile_commands.json
+sudo apt install bear
+
+# 重新编译并生成编译数据库
+make clean
+bear -- make REDIS_CFLAGS="-g -O0"
+
+# 然后在 VSCode 中安装 clangd 插件并禁用默认的 C/C++ IntelliSense
+# clangd 会自动读取 compile_commands.json</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>曾经有一位同学反馈，线上 Redis 每过几秒就有一次毫秒级的延迟抖动，他用了各种 profiling 工具都查不出原因。后来我让他打开 Redis 的微秒级日志（<code>LATENCY DOCTOR</code>），发现是文件事件循环中的一个 <code>usleep(100)</code> 导致的——为了在空转时降低 CPU 占用，antirez 在 <code>ae.c</code> 中加了这个"善意"的 sleep。那位同学读完 <code>ae.c</code> 中事件循环的精确时序控制代码后，恍然大悟，调整了 <code>hz</code> 参数和 busy-reply 阈值彻底解决了问题。这就是读源码的力量：<strong>你知道它为什么这么设计，才知道怎么调。</strong>
+        </div>
+
+        <h3>关键的 make 命令速查</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>命令</th>
+                    <th>用途</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>make</code></td>
+                    <td>默认编译，-O2 优化</td>
+                </tr>
+                <tr>
+                    <td><code>make REDIS_CFLAGS="-g -O0"</code></td>
+                    <td>调试编译，包含完整符号</td>
+                </tr>
+                <tr>
+                    <td><code>make test</code></td>
+                    <td>运行 Tcl 集成测试套件</td>
+                </tr>
+                <tr>
+                    <td><code>make MALLOC=jemalloc</code></td>
+                    <td>强制使用 jemalloc（生产推荐）</td>
+                </tr>
+                <tr>
+                    <td><code>make distclean</code></td>
+                    <td>清理所有编译产物</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>好了，全景图已经铺开，路线明确，工具箱就位。下一章我们将正式进入实操环节——从源码编译开始，亲手搭建一个带调试符号的 Redis 开发环境，并用 GDB 跑通第一条命令。这将是我们后续所有章节的起点，请确保跟着做一遍。</p>
+
+        <div class="footer-nav">
+            <a href="javascript:void(0)">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="02.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 动态环境重规划</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是路径规划</a></li>
+            <li><a href="02.html">第2章 状态空间与构型空间</a></li>
+            <li><a href="03.html">第3章 图论基础</a></li>
+            <li><a href="04.html">第4章 栅格地图与代价地图</a></li>
+            <li><a href="05.html">第5章 启发式搜索入门</a></li>
+            <li><a href="06.html">第6章 Dijkstra算法</a></li>
+            <li><a href="07.html">第7章 A*算法</a></li>
+            <li><a href="08.html">第8章 A*改进与变体</a></li>
+            <li><a href="09.html">第9章 D* Lite增量搜索</a></li>
+            <li><a href="10.html">第10章 JPS跳点搜索</a></li>
+            <li><a href="11.html">第11章 RRT快速随机树</a></li>
+            <li><a href="12.html">第12章 RRT*渐进最优</a></li>
+            <li><a href="13.html">第13章 PRM概率路线图</a></li>
+            <li><a href="14.html">第14章 采样方法大对比</a></li>
+            <li><a href="15.html">第15章 路径平滑与后处理</a></li>
+            <li><a href="16.html">第16章 动态窗口法DWA</a></li>
+            <li><a href="17.html">第17章 人工势场法</a></li>
+            <li><a href="18.html">第18章 运动学约束与曲线</a></li>
+            <li><a href="19.html" class="active">第19章 动态环境重规划</a></li>
+            <li><a href="20.html">第20章 多目标路径规划</a></li>
+            <li><a href="21.html">第21章 多机器人协调</a></li>
+            <li><a href="22.html">第22章 优化模型方法</a></li>
+            <li><a href="23.html">第23章 可视化与调试</a></li>
+            <li><a href="24.html">第24章 算法性能基准测试</a></li>
+            <li><a href="25.html">第25章 仿真到实车部署</a></li>
+            <li><a href="26.html">第26章 学习型路径规划</a></li>
+            <li><a href="27.html">第27章 前沿趋势与未来</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <p>大家好！欢迎来到第四部分——进阶专题篇。如果说前 18 章我们搭建的是"静态世界"中的路径规划基本功，那么从这一章开始，我们要走进真实世界了。真实世界里没有什么是静止的——行人会突然横穿马路、隔壁车道的司机会不打灯变道、仓库里会有新的货架被放到过道上。面对这些意料之外的变化，你的规划器不能"假装没看见"，而是要快速响应、动态调整。今天我们就来聊聊<strong>动态环境重规划（Dynamic Replanning）</strong>这个话题。</p>
+
+        <p>先分享一个真实的踩坑故事。几年前我在调试一台 AGV（自动导引车）时遇到了一个诡异的现象：车辆在一条已知的固定路线上运行了上百次都没问题，结果有一天突然在一个 T 型路口"呆住"了——原地反复加减速，像喝醉了一样左右摇摆，最后触发了急停。查了三天日志才发现原因：那天仓库里新增了一个临时货架，位置正好卡在规划路径的一个关键拐点上。由于路径规划器只在启动时做了一次全局规划，之后全程"盲开"，遇到障碍物就被困住了。这个故事告诉我们一个深刻的教训：<strong>环境是会变的，你的规划器必须能感知并响应这种变化</strong>。</p>
+
+        <h2>动态环境的挑战</h2>
+
+        <p>在继续之前，我们先明确一下"动态环境"到底意味着哪些具体挑战：</p>
+
+        <ul>
+            <li><strong>障碍物出现/消失</strong>——最直观的变化。一辆停着的车突然启动并入你的车道；一个行人从遮挡物后面走出来。这意味着你原来规划的安全路径可能突然变得不安全了。</li>
+            <li><strong>障碍物移动</strong>——不像"出现/消失"那样离散变化，而是连续运动。你需要持续跟踪障碍物的状态，并预测它未来的位置。</li>
+            <li><strong>其他智能体的互动</strong>——其他机器人或车辆会根据你的行为做出反应。你减速它加速，你转向它也跟着转。这种"博弈"让规划问题变得更加复杂。</li>
+            <li><strong>规划过期</strong>——即使没有新的障碍物，刚规划好的路径也可能在几秒钟后就"过期"了——因为传感器更新了信息，或者机器人的定位发生了漂移。</li>
+        </ul>
+
+        <p>面对这些挑战，静态规划器显得无能为力。我们需要引入<strong>重规划（Replanning）</strong>的思想：在机器人运动过程中持续感知环境变化，当发现原有路径不可行时，重新调用规划器生成新路径。</p>
+
+        <h2>时间维度建模</h2>
+
+        <p>处理动态环境最直接的方法就是把"时间"纳入规划模型。这就是<strong>时空图（Space-Time Graph / STG）</strong>的思路。</p>
+
+        <p>想象一下，我们把二维栅格地图复制 N 份，每份对应一个离散的时间步，然后在相邻时间步之间建立连接——机器人可以在 t 时刻在格子 (x, y)，在 t+1 时刻移动到相邻格子 (x', y')。这样，"动态障碍物"就变成了时空图中某些格子在某些时间步上被标记为"不可通行"。如果一辆车在 t=3 时刻会经过 (5, 5)，那么时空图中 t=3 层的 (5, 5) 格子就是阻塞的，规划器会自动绕开——就像绕开一个静态障碍物一样。</p>
+
+        <p>这种建模方式的优点是简洁直观，但它有一个致命弱点：<strong>维度灾难</strong>。假设地图有 100x100 个格子，时间窗口为 50 步，那么搜索空间就变成了 100x100x50 = 50 万个节点——这还没考虑速度、加速度等状态维度。对于复杂的动态场景，时空图的规模会迅速膨胀到无法处理的程度。</p>
+
+        <p>在工程实践中，我们通常不会真的构建一个完整的时空图，而是采用更轻量的方法——<strong>滚动窗口规划（Receding Horizon Planning）</strong>，也就是我们下一节要讲的内容。</p>
+
+        <h2>滚动窗口规划</h2>
+
+        <p>滚动窗口规划的核心思想是：<strong>不要一次性规划整个路径，只规划未来一小段</strong>。具体来说：</p>
+
+        <ol>
+            <li>感知当前局部环境（比如激光雷达扫描到的 30 米范围内的障碍物）</li>
+            <li>在局部窗口内规划一条短期路径（比如未来 3-5 秒的轨迹）</li>
+            <li>执行规划结果中的前几步（比如走 0.5 秒后停下来重新规划）</li>
+            <li>重复上述步骤</li>
+        </ol>
+
+        <p>这种方法在自动驾驶和移动机器人领域非常流行，它的核心优势在于：<strong>规划问题的规模被裁剪到了可控范围内</strong>。你不需要知道 1 公里外的路况细节，只需要关注眼前十几米的范围就行。但这也带来了一个关键问题：<strong>什么时候触发重规划？</strong></p>
+
+        <p>常见的策略有三种：</p>
+
+        <ul>
+            <li><strong>定时重规划</strong>——每 100ms 无条件重新规划一次。简单粗暴，但计算资源消耗大。</li>
+            <li><strong>事件触发重规划</strong>——只有在检测到环境变化时才重新规划。更高效，但需要可靠的变更检测机制。</li>
+            <li><strong>混合策略</strong>——定时规划为主，同时检测到剧烈变化时触发紧急重规划。实践中用得最多。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>自定驾驶的"200ms 法则"：</strong>在自动驾驶领域中，业界有一个广泛认可的经验法则——从传感器检测到障碍物到规划出新的避让路径，整个闭环必须在 <strong>200ms</strong> 内完成。超过这个时间，以 60km/h 行驶的车辆已经前进了 3.3 米，很可能已经撞上了。这 200ms 包括了感知、预测、规划和控制一整条链路，留给规划器的时间往往只有 20-50ms。这就是为什么自动驾驶中很少用计算量大的全局规划器做重规划——时间根本不够。
+        </div>
+
+        <h2>终身规划A*（LPA*）</h2>
+
+        <p>滚动窗口规划虽然有效，但它有一个明显的浪费：<strong>每次重规划都是从零开始搜索</strong>。如果环境只发生了局部变化，比如地图左上角新增了一个障碍物，而你正好在右下角，那么重新跑一遍 A* 会把大量算力浪费在搜索没有变化的区域上。</p>
+
+        <p>这就引出了<strong>增量搜索（Incremental Search）</strong>的思想——利用之前搜索的结果来加速后续搜索。其中最具代表性的算法之一就是<strong>LPA*（Lifelong Planning A*）</strong>。</p>
+
+        <p>LPA* 是 Koenig 和 Likhachev 在 2001 年提出的算法，它的核心想法非常优雅：<strong>当边的代价发生变化时，不需要重新搜索整个图，只需要更新受影响的那部分区域的代价估计</strong>。为此 LPA* 引入了两个关键的概念：</p>
+
+        <ul>
+            <li><strong>g(s)</strong>——从起点到节点 s 的实际最短路径代价（就像 A* 中的 g 值）</li>
+            <li><strong>rhs(s)</strong>——基于前驱节点计算出的"备选"g 值，定义为 rhs(s) = min(g(s') + c(s', s))，其中 s' 是 s 的前驱节点</li>
+        </ul>
+
+        <p>在 LPA* 中，rhs(s) 和 g(s) 的"一致性"是关键：当所有节点的 g(s) == rhs(s) 时，我们就得到了从起点到终点的最短路径。当一条边的代价发生变化时，算法更新受影响节点的 rhs 值，然后将不一致的节点放入优先队列重新扩展——这个过程一直持续到所有节点重新变得一致，或者终点被标记为一致。</p>
+
+        <p>下面的代码实现了一个简化的 LPA* 算法，在一个 2D 栅格地图上运行——当障碍物发生变化时，它比重新跑 A* 快得多：</p>
+
+        <pre><code>import heapq
+import math
+
+class LPAStar:
+    def __init__(self, grid, start, goal):
+        self.grid = grid          # 0=free, 1=obstacle
+        self.start = start
+        self.goal = goal
+        self.rows = len(grid)
+        self.cols = len(grid[0])
+        self.g = {}               # g(s)
+        self.rhs = {}             # rhs(s)
+        self.OPEN = []            # 优先队列
+        self.closed = set()
+        # 初始化：所有节点的 g 和 rhs 为无穷大
+        for r in range(self.rows):
+            for c in range(self.cols):
+                self.g[(r, c)] = float('inf')
+                self.rhs[(r, c)] = float('inf')
+        self.rhs[start] = 0
+        heapq.heappush(self.OPEN, (self._key(start), start))
+
+    def _heuristic(self, node):
+        """欧几里得距离作为启发式"""
+        return math.sqrt((node[0] - self.goal[0])**2 +
+                         (node[1] - self.goal[1])**2)
+
+    def _key(self, node):
+        """优先键: [min(g,rhs)+h, min(g,rhs)]"""
+        k1 = min(self.g[node], self.rhs[node]) + self._heuristic(node)
+        k2 = min(self.g[node], self.rhs[node])
+        return (k1, k2)
+
+    def _neighbors(self, node):
+        """四邻域扩展"""
+        r, c = node
+        for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < self.rows and 0 <= nc < self.cols:
+                if self.grid[nr][nc] == 0:
+                    yield (nr, nc)
+
+    def _update_vertex(self, node):
+        if node != self.start:
+            self.rhs[node] = min(
+                self.g[prev] + 1  # 边代价为1
+                for prev in self._neighbors(node)
+            )
+        # 将不一致节点加入优先队列（或更新其键值）
+        for i, (_, n) in enumerate(self.OPEN):
+            if n == node:
+                self.OPEN.pop(i)
+                heapq.heapify(self.OPEN)
+                break
+        if self.g[node] != self.rhs[node]:
+            heapq.heappush(self.OPEN, (self._key(node), node))
+
+    def compute_shortest_path(self):
+        """主循环：不断扩展直到起点一致且终点达到目标"""
+        while self.OPEN:
+            # 取最小键节点
+            key, node = heapq.heappop(self.OPEN)
+            if self.g[node] > self.rhs[node]:
+                # "局部过一致"：g > rhs，更新 g = rhs
+                self.g[node] = self.rhs[node]
+                self.closed.add(node)
+                for succ in self._neighbors(node):
+                    self._update_vertex(succ)
+            else:
+                # "局部欠一致"：g < rhs，重置 g 为无穷大后重新扩展
+                self.g[node] = float('inf')
+                self.closed.discard(node)
+                for succ in self._neighbors(node):
+                    self._update_vertex(succ)
+                self._update_vertex(node)
+            # 如果终点已一致，可以提前退出
+            if self.g[self.goal] == self.rhs[self.goal]:
+                break
+
+    def update_obstacle(self, r, c, is_obstacle):
+        """当检测到障碍物变化时调用此方法"""
+        self.grid[r][c] = 1 if is_obstacle else 0
+        # 更新受影响的节点
+        self._update_vertex((r, c))
+        for nb in self._neighbors((r, c)):
+            self._update_vertex(nb)
+        # 重新规划
+        self.compute_shortest_path()
+
+    def get_path(self):
+        """从终点回溯路径"""
+        if self.g[self.goal] == float('inf'):
+            return None
+        path = [self.goal]
+        node = self.goal
+        while node != self.start:
+            node = min(self._neighbors(node),
+                       key=lambda n: self.g.get(n, float('inf')))
+            path.append(node)
+        return list(reversed(path))</code></pre>
+
+        <p>这段代码的精髓在于 <code>_update_vertex</code> 方法。当检测到障碍物变化时，我们只需要调用 <code>update_obstacle</code>，它只会更新受影响节点及其邻居的 rhs 值，然后 LPA* 会利用优先队列自动"扩散"这个更新——就像在平静的水面扔一颗石子，涟漪只传播到需要修改的区域，而不会波及整个池塘。</p>
+
+        <p>LPA* 是后续 D* Lite 的基础——实际上 D* Lite 就是 LPA* 的"逆向着"版本，从终点向起点搜索，更适合机器人正在运动时的增量规划。在第 9 章我们已经详细介绍过 D* Lite，现在你可以理解它的本质了。</p>
+
+        <h2>预测与反应</h2>
+
+        <p>面对动态环境，还有一个更深层的哲学问题：<strong>我们应该预测其他物体的运动然后规划（predict-then-plan），还是仅仅对传感器观测做出反应（sense-then-react）？</strong></p>
+
+        <p><strong>基于预测的方法（Prediction-based）</strong>：先对其他移动物体进行运动预测（如卡尔曼滤波、恒定速度模型、基于学习的轨迹预测），然后将预测结果作为约束融入规划器。这种方法的优点是规划结果更"有远见"，比如可以预判到行人将要横穿马路，提前减速而非急刹。缺点是预测模型可能不准——人是最难预测的，他可能在最后一刻改变主意。</p>
+
+        <p><strong>基于反应的方法（Reaction-based）</strong>：不做预测，直接用传感器数据驱动规划。DWA 就是典型的反应式方法——每次规划只考虑接下来几秒内可能到达的速度和方向组合，选一个不会撞上此刻检测到的障碍物的方案。优点是计算量小、不需要假设障碍物的行为模型。缺点是目光短浅，容易陷入"局部陷阱"——比如在一个障碍物前急转方向，然后发现另一侧也有障碍物，来回摇摆。</p>
+
+        <p><strong>混合方法</strong>：实践中通常将两者结合。一种常见架构是"预测器 + 滚动窗口规划 + 紧急避障"三层结构——预测层给出障碍物的预期轨迹，规划层在滚动窗口中优化路径，最底层保留一个"安全刹车"机制，当规划层来不及响应时触发紧急制动。</p>
+
+        <p>为了帮助你选择合适的重规划策略，下表总结了四种常见方法的对比：</p>
+
+        <table>
+            <tr>
+                <th>策略</th>
+                <th>核心思想</th>
+                <th>计算开销</th>
+                <th>最优性</th>
+                <th>适用场景</th>
+            </tr>
+            <tr>
+                <td>从零重规划</td>
+                <td>检测到变化后重新运行全局规划器</td>
+                <td>高（每次从头计算）</td>
+                <td>高</td>
+                <td>环境变化不频繁、计算资源充裕</td>
+            </tr>
+            <tr>
+                <td>D* Lite</td>
+                <td>反向增量搜索，只更新受影响的节点</td>
+                <td>低（增量更新）</td>
+                <td>高</td>
+                <td>动态密集、需要实时响应的场景</td>
+            </tr>
+            <tr>
+                <td>LPA*</td>
+                <td>正向增量搜索，利用历史搜索结果加速</td>
+                <td>低（增量更新）</td>
+                <td>高</td>
+                <td>地图已知但局部变化、需要多次规划的场合</td>
+            </tr>
+            <tr>
+                <td>滚动窗口</td>
+                <td>只规划局部时间窗口内的路径，周期重规划</td>
+                <td>低（窗口受限）</td>
+                <td>中等（可能丢失全局最优）</td>
+                <td>感知范围有限、实时性要求极高的场景</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <strong>工程建议：</strong>如果让我给一个入门者推荐，我会说：先把滚动窗口规划做对，这是最不容易出错的方案。当你发现"重规划太多了，算力吃紧"时，再升级到 D* Lite 做增量优化。不要一上来就追求"最优"——在动态环境中，"足够好且可执行"往往比"理论上最优但已过期"强一百倍。
+        </div>
+
+        <p>下一章我们将面对另一个经典难题：<strong>多目标路径规划</strong>——当机器人需要访问多个目标点而不是从一个点移动到另一个点时，路径规划问题会如何变化？这和经典的旅行商问题（TSP）有什么关系？我们下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

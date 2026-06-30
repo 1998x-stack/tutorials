@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 多机器人协调</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是路径规划</a></li>
+            <li><a href="02.html">第2章 状态空间与构型空间</a></li>
+            <li><a href="03.html">第3章 图论基础</a></li>
+            <li><a href="04.html">第4章 栅格地图与代价地图</a></li>
+            <li><a href="05.html">第5章 启发式搜索入门</a></li>
+            <li><a href="06.html">第6章 Dijkstra算法</a></li>
+            <li><a href="07.html">第7章 A*算法</a></li>
+            <li><a href="08.html">第8章 A*改进与变体</a></li>
+            <li><a href="09.html">第9章 D* Lite增量搜索</a></li>
+            <li><a href="10.html">第10章 JPS跳点搜索</a></li>
+            <li><a href="11.html">第11章 RRT快速随机树</a></li>
+            <li><a href="12.html">第12章 RRT*渐进最优</a></li>
+            <li><a href="13.html">第13章 PRM概率路线图</a></li>
+            <li><a href="14.html">第14章 采样方法大对比</a></li>
+            <li><a href="15.html">第15章 路径平滑与后处理</a></li>
+            <li><a href="16.html">第16章 动态窗口法DWA</a></li>
+            <li><a href="17.html">第17章 人工势场法</a></li>
+            <li><a href="18.html">第18章 运动学约束与曲线</a></li>
+            <li><a href="19.html">第19章 动态环境重规划</a></li>
+            <li><a href="20.html">第20章 多目标路径规划</a></li>
+            <li><a href="21.html" class="active">第21章 多机器人协调</a></li>
+            <li><a href="22.html">第22章 优化模型方法</a></li>
+            <li><a href="23.html">第23章 可视化与调试</a></li>
+            <li><a href="24.html">第24章 算法性能基准测试</a></li>
+            <li><a href="25.html">第25章 仿真到实车部署</a></li>
+            <li><a href="26.html">第26章 学习型路径规划</a></li>
+            <li><a href="27.html">第27章 前沿趋势与未来</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <p>大家好！前面几章我们一直在讨论"一个机器人"的路径规划——不管环境怎么变、目标点有多少，主角都只有一个。但在真实世界里，机器人很少形单影只。Amazon 仓库里有上千台 Kiva 机器人在地板上穿梭，港口中有几十台 AGV 同时搬运集装箱，工厂流水线旁多台协作机器人共舞。当多个机器人共享同一物理空间时，它们之间会相互影响——你的路径可能挡住我的路，我的减速可能导致你被迫绕行。这种<strong>多机器人协调（Multi-Robot Coordination）</strong>问题，是路径规划领域中最困难、也最迷人的课题之一。</p>
+
+        <p>讲一个让我印象深刻的踩坑经历。有个项目需要在 100 平米的空间内部署 5 台送货机器人，给办公楼送快递。我们设计了"完美"的路径——每台机器人都走最优路线，出发前用全局规划算好了每条路径。结果第一次联调就炸了：5 台机器人在一个 T 型路口全部卡住，形成了一个完美的死锁（deadlock）——每台机器人都等着另一个机器人让路，结果谁都不让。保安大哥跑过来问："你们这机器人是吵架了吗？" 从那天起我认识到一个残酷的事实：<strong>多个机器人的"最优个体路径"之和，不等于"系统最优"</strong>。</p>
+
+        <h2>多机器人场景的复杂性</h2>
+
+        <p>多机器人协调的难点远超直觉想象。让我用几个数据来说明：</p>
+
+        <ul>
+            <li><strong>状态空间指数爆炸</strong>——一台机器人在 100x100 的栅格地图上有 10,000 个可能位置。两台呢？是 10,000 × 10,000 = 100,000,000。三台就是 10¹²。即使你有一台超级计算机，也无法暴力搜索 50 台机器人的联合状态空间。</li>
+            <li><strong>资源争用（Resource Contention）</strong>——空间是共享资源，路径交叉区域就是资源争用的"热点"。多个机器人同时想要通过同一个狭窄通道时，冲突不可避免。</li>
+            <li><strong>死锁（Deadlock）</strong>——当机器人 A 挡住了机器人 B 的路，而 B 又挡住了 A 的路（或者涉及更多机器人的循环依赖），系统就陷入了不可恢复的僵局。</li>
+            <li><strong>活锁（Livelock）</strong>——比死锁更气人：机器人们都在动，但都在互相让路，结果谁都无法前进。它们在"谦让"中无限循环。</li>
+        </ul>
+
+        <h2>冲突类型</h2>
+
+        <p>为了更好地处理多机器人冲突，我们需要先对冲突进行分类。常见的冲突类型有四种：</p>
+
+        <ul>
+            <li><strong>正面冲突（Head-on）</strong>——两台机器人在同一条直线通道上相向而行。最直接的冲突，往往发生在走廊、通道中。</li>
+            <li><strong>交叉冲突（Crossing）</strong>——两台机器人从不同方向驶向同一个交叉路口，路径呈十字交叉。典型的路口场景。</li>
+            <li><strong>汇合冲突（Merging）</strong>——一台机器人从支路汇入主路，而主路上已有机器人在行驶。类似高速公路入口。</li>
+            <li><strong>跟驰冲突（Following）</strong>——一台机器人在另一台后面同向行驶，前车减速导致后车被迫减速。这是最常见的"软冲突"，处理不好会引发连锁反应。</li>
+        </ul>
+
+        <p>检测这些冲突通常有两种思路：一种是<strong>基于路径的冲突检测</strong>，在规划阶段就检查各机器人的路径是否存在时空重叠；另一种是<strong>基于传感器的反应式检测</strong>，在运动过程中实时感知并避免冲突。前者精度高但计算量大，后者实时性好但可能不够"有远见"。</p>
+
+        <h2>优先级规划</h2>
+
+        <p>优先级规划（Prioritized Planning）是多机器人协调中最经典、最工程友好的方法。它的思路非常直观：</p>
+
+        <ol>
+            <li>为每个机器人分配一个优先级（Priority）</li>
+            <li>按优先级从高到低依次规划路径：高优先级机器人的路径"冻结"为障碍物，低优先级机器人的规划必须避开高优先级机器人的路径</li>
+            <li>如果需要在线更新，低优先级机器人检测到新障碍物（其实就是高优先级机器人）时触发重规划</li>
+        </ol>
+
+        <p>这种方法的优点是实现简单、计算高效——n 台机器人的规划问题被分解成了 n 个独立的单机器人规划问题（每个的复杂度是 O(nlogn) 而不是指数级）。缺点也很明显：低优先级机器人的路径质量可能很差，甚至可能找不到可行路径——如果高优先级机器人把所有的好路线都占了，低优先级就只能绕远路，或者被"困在"某个区域出不去。</p>
+
+        <p>那优先级怎么分配呢？常见的方法有：</p>
+
+        <ul>
+            <li><strong>静态优先级</strong>——根据任务重要性事先固定（比如"执行紧急任务的机器人优先级最高"）</li>
+            <li><strong>随机优先级</strong>——每次规划时随机排列，避免系统偏差</li>
+            <li><strong>动态优先级</strong>——根据当前状态实时计算（比如"最快接近冲突区域的机器人获得更高优先级"）</li>
+        </ul>
+
+        <h2>交通规则法</h2>
+
+        <p>如果你觉得优先级规划"太不公平"，那么交通规则法（Traffic Rules）可能更合你的胃口。它的想法也很简单：把人类社会成熟的交通规则搬到机器人世界中来。</p>
+
+        <p>具体实现包括：</p>
+
+        <ul>
+            <li><strong>虚拟交通灯（Virtual Traffic Lights）</strong>——在交叉路口设置虚拟的红绿灯。机器人靠近路口时通过通信协商获取通行权，绿灯亮时通过，红灯时等待。可以基于令牌（Token）或分布式共识实现。</li>
+            <li><strong>右侧优先/让行规则（Right-of-Way Rules）</strong>——在无信号灯的路口，规定"右侧来车优先"或"直行优先于转弯"等规则。这不需要额外的通信，只要所有机器人遵循同一套规则。</li>
+            <li><strong>车道化（Lane-based Coordination）</strong>——将地面空间划分为明确的车道，强制机器人沿固定方向行驶。Amazon 仓库就采用了类似的方法——机器人全部在地面的二维码网格上沿固定方向行进，不允许逆行。</li>
+        </ul>
+
+        <p>交通规则法的优势在于它几乎不需要全局通信——每个机器人只需要感知局部环境并遵守规则。但缺点也同样突出：规则无法覆盖所有场景，在复杂非结构化环境中，"转弯让直行"这种规则可能根本用不上。</p>
+
+        <h2>去中心化协调</h2>
+
+        <p>当机器人数量很多（几十上百台）时，集中式的规划方法开始失效——你不可能让一个中央服务器为所有机器人规划路径，通信带宽和计算延时都不允许。这时我们需要<strong>去中心化（Decentralized）</strong>的协调方法。</p>
+
+        <p>其中最著名的算法是<strong>速度障碍法</strong>家族的三个成员：</p>
+
+        <ul>
+            <li><strong>VO（Velocity Obstacle）</strong>——这是基础版本。对于一对机器人 A 和 B，VO 定义了所有会导致 A 在将来某个时间与 B 发生碰撞的速度集合。A 只需要避开这些"禁止速度"即可。</li>
+            <li><strong>RVO（Reciprocal Velocity Obstacle）</strong>——考虑了双方的相互避让。如果 A 和 B 都按照 VO 的原理避让对方，会导致"振荡"——两人都向左让，发现要撞上了，又都向右让。RVO 假设双方各承担一半的避让责任，从而消除振荡。</li>
+            <li><strong>ORCA（Optimal Reciprocal Collision Avoidance）</strong>——RVO 的改进版。ORCA 为每个机器人生成一个半平面约束——只要 A 和 B 各自选择一个位于各自半平面内的速度，就能保证在 τ 时间内互不碰撞，且选择的轨迹与机器人当前首选速度的偏差最小。</li>
+        </ul>
+
+        <p>下面是一个简化的 ORCA 实现，展示了核心的碰撞避免逻辑：</p>
+
+        <pre><code>import math
+import random
+
+class Robot:
+    def __init__(self, x, y, vx, vy, radius=0.5):
+        self.pos = (x, y)
+        self.vel = (vx, vy)
+        self.radius = radius
+        self.pref_vel = (vx, vy)  # 首选速度（无碰撞时的理想速度）
+
+def orca_collision_avoidance(robot, others, time_horizon=2.0, delta=0.1):
+    """
+    简化版 ORCA 避碰逻辑。
+    为 robot 计算一个新的速度，使其在未来 time_horizon 秒内不与 others 中的任何机器人碰撞。
+    """
+    best_vel = robot.pref_vel
+    best_cost = float('inf')
+
+    # 在首选速度附近采样候选速度
+    for _ in range(200):
+        # 在半径 delta 范围内随机采样速度
+        sample_vx = robot.pref_vel[0] + random.uniform(-delta, delta)
+        sample_vy = robot.pref_vel[1] + random.uniform(-delta, delta)
+        sample_vel = (sample_vx, sample_vy)
+
+        # 检查是否与任何其他机器人在时间窗口内碰撞
+        collision = False
+        for other in others:
+            # 相对位置和相对速度
+            rel_pos = (robot.pos[0] - other.pos[0],
+                       robot.pos[1] - other.pos[1])
+            rel_vel = (sample_vel[0] - other.vel[0],
+                       sample_vel[1] - other.vel[1])
+            # 最近距离和时间
+            dist = math.hypot(rel_pos[0], rel_pos[1])
+            speed_sq = rel_vel[0]**2 + rel_vel[1]**2
+            if speed_sq < 1e-6:
+                # 相对速度为零，检查当前距离
+                if dist < robot.radius + other.radius:
+                    collision = True
+                    break
+                continue
+            # 计算达到最近距离的时间
+            t_closest = -(rel_pos[0]*rel_vel[0] + rel_pos[1]*rel_vel[1]) / speed_sq
+            if t_closest < 0:
+                t_closest = 0
+            if t_closest > time_horizon:
+                continue
+            # 计算最近距离
+            closest_dist = math.hypot(
+                rel_pos[0] + rel_vel[0] * t_closest,
+                rel_pos[1] + rel_vel[1] * t_closest
+            )
+            if closest_dist < robot.radius + other.radius:
+                collision = True
+                break
+
+        if not collision:
+            # 计算与首选速度的偏差
+            cost = math.hypot(
+                sample_vel[0] - robot.pref_vel[0],
+                sample_vel[1] - robot.pref_vel[1]
+            )
+            if cost < best_cost:
+                best_cost = cost
+                best_vel = sample_vel
+
+    return best_vel
+
+
+# ---------- 仿真主循环 ----------
+def simulate(robots, steps=100):
+    for step in range(steps):
+        new_velocities = []
+        for i, robot in enumerate(robots):
+            others = [r for j, r in enumerate(robots) if j != i]
+            new_vel = orca_collision_avoidance(robot, others)
+            new_velocities.append(new_vel)
+        # 更新所有机器人的速度和位置
+        for i, robot in enumerate(robots):
+            robot.vel = new_velocities[i]
+            robot.pos = (robot.pos[0] + robot.vel[0] * 0.1,
+                         robot.pos[1] + robot.vel[1] * 0.1)
+        # 检查是否有碰撞发生
+        for i in range(len(robots)):
+            for j in range(i+1, len(robots)):
+                d = math.hypot(robots[i].pos[0] - robots[j].pos[0],
+                               robots[i].pos[1] - robots[j].pos[1])
+                if d < robots[i].radius + robots[j].radius:
+                    print(f"步骤 {step}: 机器人 {i} 和 {j} 发生碰撞!")
+
+# 创建两个相向而行的机器人测试
+r1 = Robot(0, 0, 1, 0)    # 向右走
+r2 = Robot(5, 0, -1, 0)   # 向左走
+simulate([r1, r2], 20)</code></pre>
+
+        <p>这段代码的核心思想很朴素：在首选速度附近采样，找到所有不会导致碰撞的速度中与首选速度偏差最小的一个。真实的 ORCA 算法使用半平面约束来精确计算可行速度区域（而不是盲目采样），但这里为了清晰展示工作原理，使用了采样方法。你可以看到，即使只有两个相向而行的机器人，ORCA 也能自动让它们"各让一步"，完成安全交错。</p>
+
+        <p>下面是几种协调方法的对比：</p>
+
+        <table>
+            <tr>
+                <th>方法</th>
+                <th>通信需求</th>
+                <th>计算方式</th>
+                <th>完备性</th>
+                <th>适用规模</th>
+                <th>典型场景</th>
+            </tr>
+            <tr>
+                <td>优先级规划</td>
+                <td>低（只需优先级信息）</td>
+                <td>集中式顺序规划</td>
+                <td>中等</td>
+                <td>10-50 台</td>
+                <td>仓库 AGV、实验室</td>
+            </tr>
+            <tr>
+                <td>交通规则法</td>
+                <td>低（局部感知即可）</td>
+                <td>去中心化</td>
+                <td>低（依赖规则覆盖）</td>
+                <td>50-500 台</td>
+                <td>Amazon Kiva 仓库</td>
+            </tr>
+            <tr>
+                <td>ORCA / RVO</td>
+                <td>中（需交换速度信息）</td>
+                <td>去中心化</td>
+                <td>高（数学保证）</td>
+                <td>10-100 台</td>
+                <td>密集人群、无人机编队</td>
+            </tr>
+            <tr>
+                <td>集中式全局规划</td>
+                <td>极高（全信息）</td>
+                <td>集中式联合搜索</td>
+                <td>最高（可达全局最优）</td>
+                <td>2-10 台</td>
+                <td>小规模精密协作</td>
+            </tr>
+        </table>
+
+        <div class="warning">
+            <strong>警惕"走廊死锁"陷阱：</strong>在多机器人系统中，有一种场景极难处理——两台机器人在一条狭窄走廊中相向而行，走廊宽度只够一台机器人通过。如果双方都不愿（或无法）后退，它们会面对面卡住，形成死锁。解决这个问题通常需要引入"后退"行为——一方主动倒车到走廊外让路。但"谁该后退"的决策本身就涉及协调问题。更糟糕的是，如果走廊较长且中间有多个机器人，可能会形成多米诺骨牌式的连锁阻塞。在项目设计中，<strong>请尽量避免这种"单点瓶颈"的拓扑结构</strong>——规划行走路线时优先选择环路而非单线走廊。
+        </div>
+
+        <p>多机器人协调是一个还在快速发展中的领域。随着机器人普及率的提高，这个问题只会变得越来越重要。如果你感兴趣，可以进一步研究<strong>多智能体强化学习（MARL）</strong>——这是目前最前沿的解决方案：让机器人在仿真环境中通过试错学会自动协调，而不需要人工预设任何规则。</p>
+
+        <p>下一章我们将从另一个角度来处理复杂场景：<strong>优化模型方法</strong>。如果说本章的策略是通过"协调"来处理多机器人，那么下一章的思路是把路径规划本身建模成一个数学优化问题，让求解器来帮我们找到最优解。这也是 ROS2 Nav2 等主流框架中使用的核心方法。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

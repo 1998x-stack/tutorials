@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 CPU调度</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html" class="active">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第10章 CPU调度</h2>
+
+        <p>大家好，我是你们的讲师。设想一个场景：你的服务器上有128个可运行的线程，但CPU只有16个核。谁先上CPU？谁在后面排队？每个线程该运行多久？怎样确保没有线程被"饿死"？这些问题的答案就是CPU调度——操作系统的核心引擎。</p>
+
+        <p>如果说进程管理回答的是"有哪些执行实体"，那CPU调度回答的就是"下一个谁来执行"。调度器的设计直接影响系统的响应速度、吞吐量和公平性——你可以把它理解为操作系统的心脏。心脏怎么跳？跳快了会不会乱？跳慢了会不会死？这章我们全面拆解。</p>
+
+        <p>聊聊我个人的调度器"启蒙时刻"。多年以前我帮客户诊断一台数据库服务器的间歇性卡顿。iostat看磁盘很正常，free看内存也充足，但业务就是每隔几秒会抖一下。用perf看了半天，发现罪魁祸首居然是"NUMA balancing"——内核的自动NUMA均衡线程每隔一段时间会扫描所有进程的地址空间，导致CPU cache被大范围冲刷。关掉 <code>numa_balancing</code> 后，抖动立刻消失。这件事让我认识到：调度器不只是"谁先运行"那么简单——它会扫描、会迁移、会平衡，这些后台活动本身就是开销。</p>
+
+        <h2>调度器简史</h2>
+
+        <p>Linux调度器的演进史，就是一部"在更大规模的硬件上保持公平和效率"的斗争史。让我们快速回顾几个里程碑：</p>
+
+        <h3>O(n)调度器（Linux 2.4时代）</h3>
+        <p>最早的Linux调度器实现非常简单：一个全局的运行队列，每次选任务时遍历整个队列找优先级最高的。当时服务器通常只有单核或双核，任务数也不多，O(n)遍历还能接受。但随着核心数和任务数的增长，每次调度都要遍历所有任务的开销变得不可接受。在进程数较多时，调度本身就能吃掉高达5-10%的CPU时间。</p>
+
+        <h3>O(1)调度器（Linux 2.6, 2003）</h3>
+        <p>Ingo Molnar重写了调度器，引入了每个CPU独立的运行队列和优先级位图。核心思想是用140个优先级队列替代全局链表——调度器通过位图操作可以在O(1)时间内找到最高优先级的任务。解决了大规模下的调度开销问题，但公平性不佳：高优先级任务可能抢占太多CPU时间，交互式体验时好时坏。</p>
+
+        <h3>CFS完全公平调度器（Linux 2.6.23, 2007）</h3>
+        <p>Con Kolivas的"楼梯调度"思路启发了Ingo Molnar开发CFS（Completely Fair Scheduler）。CFS抛弃了传统的"优先级+时间片"模型，改用"目标延迟+权重"模型——试图让每个任务获得公平的CPU时间比例。这个调度器统治了Linux长达17年。</p>
+
+        <h3>EEVDF（Linux 6.6, 2023）</h3>
+        <p>在CFS服役17年后，由Peter Zijlstra主导的EEVDF调度器正式接替CFS成为默认调度器。EEVDF（Earliest Eligible Virtual Deadline First）在CFS的公平性基础上增加了延迟感知能力，对多样化的负载特征有了更好的适应。</p>
+
+        <table>
+            <tr><th>调度器</th><th>引入版本</th><th>核心数据结构</th><th>核心问题</th></tr>
+            <tr><td>O(n)</td><td>Linux 2.4</td><td>全局链表</td><td>大量进程时O(n)遍历开销</td></tr>
+            <tr><td>O(1)</td><td>Linux 2.6 (2003)</td><td>140级优先级位图</td><td>公平性不足</td></tr>
+            <tr><td>CFS</td><td>Linux 2.6.23 (2007)</td><td>红黑树</td><td>延迟不敏感</td></tr>
+            <tr><td>EEVDF</td><td>Linux 6.6 (2023)</td><td>红黑树 + 虚拟截止时间</td><td>多样化负载适配</td></tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>历史教训</strong>：每一次调度器变革都是因为前一代调度器在某种新场景下暴露了根本性缺陷——O(n)在大核数下太慢，O(1)不公平，CFS在混合负载中延迟控制不够好。这告诉我们：没有"终极"调度器，只有"当前场景下够好"的调度器。</p>
+        </div>
+
+        <h2>CFS完全公平调度器</h2>
+
+        <p>CFS虽然已经被EEVDF取代，但理解CFS是理解EEVDF的基础。实际上EEVDF也沿用了很多CFS的核心机制。</p>
+
+        <h3>vruntime：衡量"不公平"的标尺</h3>
+
+        <p>CFS不直接使用时间片。它的核心思想是：每个进程都有一个 <code>vruntime</code>（虚拟运行时间）。调度器用红黑树组织所有可运行的进程，以vruntime为键值。每次调度时选择vruntime最小的那个进程——因为它被"亏待"得最多。</p>
+
+        <p>vruntime的计算考虑了优先级：高优先级进程的vruntime增长得慢（同样的实际运行时间，高优先级进程的vruntime数值增加得更少），因此它们更有可能成为红黑树中最左边的节点，获得更多CPU时间。</p>
+
+        <pre><code>// 简化的CFS vruntime更新逻辑
+// 核心公式：vruntime += 实际运行时间 × (NICE_0_LOAD / 进程权重)
+
+// 内核中实际路径（来自 kernel/sched/fair.c）
+static void update_curr(struct cfs_rq *cfs_rq)
+{
+    struct sched_entity *curr = cfs_rq->curr;
+    u64 now = rq_clock_task(rq_of(cfs_rq));
+    u64 delta_exec = now - curr->exec_start;
+
+    // 更新vruntime
+    curr->vruntime += calc_delta_fair(delta_exec, curr);
+    curr->exec_start = now;
+
+    // 检查是否需要触发调度
+    if (cfs_rq->nr_running > 1)
+        resched_curr(rq_of(cfs_rq));
+}
+
+// 选择下一个运行的任务：取红黑树最左节点
+static struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
+{
+    struct rb_node *left = rb_first_cached(&cfs_rq->tasks_timeline);
+    if (!left)
+        return NULL;
+    return rb_entry(left, struct sched_entity, run_node);
+}</code></pre>
+
+        <p>红黑树的优势：插入和删除都是O(log N)复杂度，而且中序遍历天然有序。每次调度时直接取最左边节点即可，不需要遍历。</p>
+
+        <div class="tip">
+            <p><strong>直观理解</strong>：可以把CFS想象成一个"最穷的人优先得到救济"系统。每个进程的vruntime就是它的"贫困度"。vruntime最小的进程就是最穷的，应该优先获得CPU。权重（优先级）在这里的作用是：权重更大的进程，"花钱速度"更慢——同样的CPU时间，在它们账上记的vruntime更少。所以它们能"穷"得更久，得到更多CPU时间。</p>
+        </div>
+
+        <h2>EEVDF：Linux 6.6后的新王者</h2>
+
+        <p>CFS的公平性模型有一个隐含假设：所有进程都是"同等延迟敏感"的。但在现实中，有的进程需要快速响应（如Web服务器处理请求），有的进程可以慢慢跑（如后台日志压缩）。CFS对此一视同仁——导致交互式进程的延迟变得不可预测。</p>
+
+        <p>EEVDF（Earliest Eligible Virtual Deadline First）在CFS的基础上引入了<strong>延迟感知</strong>。它同时追踪两个量：</p>
+
+        <ul>
+            <li><strong>lag（滞后度）</strong>：进程已经获得的CPU时间与"应该获得的CPU时间"之间的差距——这就是CFS的vruntime概念。</li>
+            <li><strong>virtual deadline（虚拟截止时间）</strong>：进程希望何时获得CPU的"最晚时间点"。如果进程的权重很大或者需要低延迟，这个截止时间会更紧迫。</li>
+        </ul>
+
+        <p>EEVDF调度决策的核心规则：在所有 eligible（即lag未被满足、应该获得CPU的）进程中，选择 virtual deadline 最早的那个。也就是说，EEVDF不只是看谁最"亏"，还看谁最"急"。</p>
+
+        <div class="highlight">
+            <p><strong>设计突破</strong>：EEVDF的核心洞见是——"公平"不等于"平均"。两个进程，一个需要立即响应、一个可以延迟处理，给它们完全相同的CPU时间份额是公平的，但用户体验极差。EEVDF允许调度器在"公平分配CPU时间"的大前提下，优先让"紧急"的任务先执行。</p>
+        </div>
+
+        <p>EEVDF被合入Linux 6.6主线，作为新的默认调度器。这是CFS服役17年后的首次更替。内核邮件列表上的讨论长达数年，测试基准覆盖了从数据库到Web服务器、从HPC到桌面交互的全场景。最终EEVDF在保持CFS公平性的同时，在延迟和吞吐量方面都展现出优势。</p>
+
+        <h2>sched_ext与用户态调度</h2>
+
+        <p>如果说EEVDF是内核调度的自我革新，那sched_ext（从Linux 6.12开始合入）代表的则是一个更激进的范式转变——用eBPF让用户态写调度器。</p>
+
+        <p>传统上调度器是内核最核心的模块之一，修改它需要理解复杂的内核调度框架、通过LKML审核、合入主线。这对普通开发者来说门槛极高。sched_ext通过eBPF提供了一组调度器操作的钩子（ops），开发者可以用C语言（编译为BPF字节码）编写自定义调度策略，动态加载到内核中。</p>
+
+        <pre><code>// sched_ext 调度器示例（极简伪代码）
+// 开发者只需实现几个回调函数
+
+struct sched_ops my_sched = {
+    .select_cpu     = my_pick_next_task,
+    .enqueue        = my_enqueue_task,
+    .dequeue        = my_dequeue_task,
+    .tick           = my_tick,
+    .running        = my_running,
+    .stopping       = my_stopping,
+};
+
+// 示例：一个简单的"优先调度I/O密集型任务"的策略
+s32 my_pick_next_task(struct task_struct *prev)
+{
+    // 获取当前CPU上我自定义的运行队列
+    struct my_rq *mrq = get_my_rq();
+
+    // 优先选择近期被I/O阻塞过的任务
+    struct task_struct *p = first_io_bound(mrq);
+    if (!p)
+        p = first_cpu_bound(mrq);
+
+    return p->sched_task_id;
+}</code></pre>
+
+        <p>sched_ext最有想象力的应用场景包括：</p>
+        <ul>
+            <li><strong>cgroup sub-scheduler</strong>：为不同cgroup组使用不同的调度策略——比如数据库容器用延迟优化策略，批处理任务用吞吐优先策略。</li>
+            <li><strong>多租户差异化调度</strong>：云平台上不同租户的虚拟机可以用不同的调度策略，互不干扰。</li>
+            <li><strong>快速实验</strong>：学术界的新调度算法不再需要等待内核合入，通过sched_ext直接在生产环境验证。</li>
+        </ul>
+
+        <div class="warning">
+            <p><strong>风险提示</strong>：sched_ext虽然强大，但用户态调度器写不好，后果很严重——可能导致系统响应迟钝甚至完全卡死。Meta内部用了sched_ext优化数据中心调度，但那是建立在大量测试和灰度验证基础上的。新手别在核心生产服务器上直接试验。</p>
+        </div>
+
+        <h2>实时调度与PREEMPT_RT</h2>
+
+        <p>Linux从一开始就是一个分时操作系统——它不保证任务在指定时间内完成。但对于工业控制、机器人、自动驾驶等场景，"准时"是刚性需求。这就是实时调度的用武之地。</p>
+
+        <h3>实时调度策略</h3>
+
+        <p>Linux内核支持两种实时调度策略：</p>
+
+        <table>
+            <tr><th>策略</th><th>调度方式</th><th>行为</th></tr>
+            <tr><td>SCHED_FIFO</td><td>先进先出</td><td>一旦获得CPU，就运行到主动让出或被更高优先级任务抢占。同优先级FIFO内按等待时间排序。</td></tr>
+            <tr><td>SCHED_RR</td><td>时间片轮转</td><td>在SCHED_FIFO基础上增加了时间片限制——每个实时进程运行一段时间片后让出CPU。</td></tr>
+            <tr><td>SCHED_DEADLINE</td><td>最早截止时间优先</td><td>使用EDF（Earliest Deadline First）算法，每个任务声明周期和运行时间，内核保证在截止时间前完成。</td></tr>
+        </table>
+
+        <p>调度优先级范围：实时进程的优先级范围是0-99（数值越大优先级越高），普通进程的nice值范围是-20到19，nice值-20映射到100，nice值19映射到139——所以<strong>任何实时进程的优先级都高于所有普通进程</strong>。这意味着如果你写了一个 <code>SCHED_FIFO</code> 的死循环，它可以"饿死"所有普通进程（包括sshd和bash），让你连ssh都登不上机器——我当年干过这事，血的教训。</p>
+
+        <h3>PREEMPT_RT：20年的工程结晶</h3>
+
+        <p>Linux的实时能力提升是一个持续了20年的工程。核心问题是：标准的Linux内核在很多地方是不可抢占的——比如在执行spinlock保护的临界区时、在处理中断时。这意味着即使有一个高优先级的实时任务就绪，它也可能被一个低优先级任务在临界区中"挡住"数十到数百微秒——在实时系统中这是不可接受的。</p>
+
+        <p>PREEMPT_RT补丁集的核心工作包括：</p>
+        <ul>
+            <li>将spinlock替换为可睡眠的rt_mutex（raw_spinlock例外）</li>
+            <li>将中断处理线程化（interrupt threading）——大部分中断处理程序以内核线程形式运行，可以被实时任务抢占</li>
+            <li>将各种不可抢占的临界区缩小到极致</li>
+        </ul>
+
+        <p>经过长达20年的补丁维护和主线合并工作，PREEMPT_RT在Linux 6.12中正式合入主线内核。这意味着任何Linux发行版都可以方便地开启完全可抢占模式，而不需要打额外的补丁。</p>
+
+        <div class="tip">
+            <p><strong>实验命令</strong>：检查你的Linux内核是否支持PREEMPT_RT：<code>cat /boot/config-$(uname -r) | grep PREEMPT</code>。如果输出包含 <code>CONFIG_PREEMPT_RT=y</code>，你的内核就是一个正式支持的实时内核。在实时内核上，调度延迟的中位数通常在个位数微秒级别，最坏情况也能控制在几十微秒内。</p>
+        </div>
+
+        <p>CPU调度器是操作系统的心脏——它决定了谁跑、跑多久、什么时候换人。从O(n)的蛮力遍历到CFS的vruntime公平模型，再到EEVDF的延迟感知，再到sched_ext的用户态可编程调度，每一步都是对更大规模、更多样化负载的适配。实时调度领域的PREEMPT_RT合入主线，更是Linux走向工业控制领域的里程碑事件。</p>
+
+        <p>下一章，我们把目光从"谁来跑"转向"怎么协同跑"——当多个进程或多个线程同时访问共享数据时，如何确保数据的一致性？自旋锁、互斥锁、信号量、RCU——这些同步原语各有什么特长和场景？死锁的四个条件是什么，lockdep又是如何在内核中自动检测潜在死锁的？下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

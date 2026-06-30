@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 物理内存管理</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html" class="active">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第13章 物理内存管理</h2>
+
+        <p>大家好，我是你们的讲师。前一章我们讲了虚拟内存——CPU看到的、进程感觉到的那层"假"地址空间。这一章我们把这层抽象扒开，看看底下真正的物理内存是如何被管理的。物理内存管理回答的是两个核心问题：第一，进程需要一页内存时，内核怎么分配给它？第二，物理内存不够时，内核怎么腾出空间？</p>
+
+        <p>物理内存管理可以粗分为两个层级——页面级的分配（Buddy System负责）和对象级的分配（Slab负责）。前者管理4KB物理页面的分配和回收，后者在内核中为各种小对象（inode、task_struct、dentry等）提供缓存。两者配合，构成了Linux物理内存管理的骨架。而页面回收、swap、MGLRU则是当内存紧张时的应急机制。最后，memcg让多租户场景下的内存隔离成为可能。</p>
+
+        <p>分享一个让我后悔莫及的调优经历。有次在数据库服务器上，我把 <code>vm.swappiness</code> 设置为0（尽量少用swap），以为这样能提升性能。结果到了内存紧张的时候，内核直接触发了OOM Killer，把数据库进程给杀了——比用swap慢10倍还要糟糕！后来才明白，swappiness=0并不意味着"永远不swap"——在真正的内存压力下，内核依然可以swap，但因为没有提前做页面回收，触发OOM的概率反而更高。适度的swap（swappiness=10左右）让内核有缓冲空间，反而更安全。</p>
+
+        <h2>Buddy System伙伴分配器</h2>
+
+        <p>内核管理物理内存的基本单位是"页帧"（Page Frame），即4KB大小的物理内存块（如果配置了大页就是2MB或1GB）。Buddy System 是Linux内核中用于管理物理页分配和回收的核心算法。</p>
+
+        <h3>算法的核心思想</h3>
+
+        <p>Buddy System把物理页按照2的幂次方分组——每种大小的块形成一个链表（freelist）。分配时，如果请求n页，内核会找到大于等于n的最小2的幂次方大小的块。如果那个大小的链表里没有空闲块，就向更大一级的链表借一个块，然后一分为二（称为"分裂"），把分裂后的一半放回小一级的链表，另一半用于分配。</p>
+
+        <p>回收时刚好相反——释放的块会检查它的"伙伴"（即与它大小相同、物理地址相邻的块）是否也是空闲的。如果是，就把两个块合并成一个大块，放回大一级的链表。合并过程可以递归进行。</p>
+
+        <pre><code>// Buddy System 的分配示意
+// 请求分配 2 个连续物理页（order=1，即2^1=2页）
+
+当前空闲列表状态：
+order 0 (1页):  [页A] [页B] [页C] [页D] [页E] [页F] [页G] [页H]
+order 1 (2页):  (空)
+order 2 (4页):  [页I-K页] [页L-O页]
+
+分配过程：
+1. order 1 没有空闲 → 向 order 2 请求
+2. order 2 有 [页I-K页] 和 [页L-O页]
+   → 取 [页L-O页]，分裂成两个 order 1 块：[页L-M页] 和 [页N-O页]
+3. 把 [页N-O页] 放回 order 1 空闲链表
+4. 把 [页L-M页] 返回给调用者
+
+回收时：
+  释放 [页L-M页] → 检查伙伴 [页N-O页] 是否空闲
+  → 是！合并成 [页L-O页] → 放回 order 2</code></pre>
+
+        <p>Buddy System的优点在于它通过分裂和合并有效地减少了外部碎片（external fragmentation）。但它的缺点是内部碎片（internal fragmentation）——比如你只需要1页，但系统最小的分配单位是1页，没问题；但如果你需要3页，系统会分配4页（order 2），其中1页就浪费了。</p>
+
+        <table>
+            <tr><th>Order</th><th>连续页数</th><th>大小</th><th>常见用途</th></tr>
+            <tr><td>0</td><td>1</td><td>4KB</td><td>通用分配（匿名页、文件页）</td></tr>
+            <tr><td>1</td><td>2</td><td>8KB</td><td>小规模DMA缓冲区</td></tr>
+            <tr><td>2</td><td>4</td><td>16KB</td><td>PTE页表</td></tr>
+            <tr><td>3</td><td>8</td><td>32KB</td><td>栈扩展</td></tr>
+            <tr><td>4</td><td>16</td><td>64KB</td><td>中等DMA缓冲区</td></tr>
+            <tr><td>5</td><td>32</td><td>128KB</td><td>文件系统缓存</td></tr>
+            <tr><td>9</td><td>512</td><td>2MB</td><td>透明大页（THP）</td></tr>
+            <tr><td>18</td><td>262144</td><td>1GB</td><td>1GB大页</td></tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>设计哲学</strong>：Buddy System用"以空间换时间"的策略——为了分配和回收的O(log N)效率，接受了一定程度的内部碎片。而且物理内存管理里几乎所有路径都要求原子操作（不能睡眠），所以Buddy的实现依赖自旋锁和per-CPU缓存来减少锁争用。</p>
+        </div>
+
+        <h2>Slab/Slub分配器</h2>
+
+        <p>内核中频繁创建和销毁大量小对象——task_struct、inode、dentry、mm_struct等。如果每次创建都通过Buddy System分配一个或多个物理页，效率太低了。一方面，4KB以下的分配造成严重的内部碎片；另一方面，对象的初始化和销毁需要额外开销。</p>
+
+        <p>Slab分配器（以及它的后继者Slub和Slob）正是为了解决这个问题而生的。它们为每种内核对象类型维护一个对象缓存池。</p>
+
+        <h3>Slub的工作方式</h3>
+
+        <pre><code>// Slub分配器的核心结构（以 kmem_cache 为管理单位）
+// 每个 kmem_cache 管理一种固定大小的对象
+
+struct kmem_cache {
+    const char *name;         // 缓存名称（如 "task_struct"）
+    unsigned int object_size; // 对象大小
+    unsigned int offset;      // 空闲指针偏移（用于freelist）
+    struct kmem_cache_node *node; // NUMA节点信息
+    struct kmem_cache_cpu *cpu_slab;  // per-CPU缓存
+};
+
+// 分配对象
+void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags)
+{
+    // 1. 优先从 per-CPU 空闲列表分配（无需锁）
+    struct kmem_cache_cpu *c = raw_cpu_ptr(cachep->cpu_slab);
+    void *object = c->freelist;
+
+    if (object)
+        c->freelist = get_freepointer(cachep, object);
+    else
+        object = __slab_alloc(cachep, c, flags, _RET_IP_);
+    // 如果 per-CPU 为空，从 slab 页面中分配
+
+    return object;
+}
+
+// 释放对象
+void kmem_cache_free(struct kmem_cache *cachep, void *object)
+{
+    // 1. 放回 per-CPU 空闲列表
+    struct kmem_cache_cpu *c = raw_cpu_ptr(cachep->cpu_slab);
+    set_freepointer(cachep, object, c->freelist);
+    c->freelist = object;
+}</code></pre>
+
+        <p>Slub的几个关键优化：</p>
+        <ul>
+            <li><strong>per-CPU缓存</strong>：每个CPU有自己的空闲对象列表，分配和释放都不需要加锁（在单核视角下）</li>
+            <li><strong>着色（Coloring）</strong>：让不同对象的起始地址在cache line上错开，减少缓存行争用</li>
+            <li><strong>批量操作</strong>：当per-CPU缓存为空时，从slab页面批量搬运一批对象过来</li>
+        </ul>
+
+        <h3>Sheaves和Barns：Linux 6.x的新机制</h3>
+
+        <p>Linux 6.x在Slub中引入了一个名为Sheaves和Barns的新分配路径。传统的Slub在per-CPU缓存耗尽时，需要获取全局锁去slab页面中搬运对象，这在多核高并发下可能成为瓶颈。Sheaves/Barns机制用batch-alloc的方式，在新对象分配时预先从伙伴系统获取整页，减少了全局锁的竞争。</p>
+
+        <div class="tip">
+            <p><strong>观察方法</strong>：在Linux上运行 <code>cat /proc/slabinfo</code> 可以看到所有Slab缓存的当前使用情况。输出中的 <code>active_objs</code> 和 <code>num_objs</code> 分别表示当前已分配对象数和缓存中的总对象数。高频的内核对象（如 dentry、inode）通常有非常大的缓存池。</p>
+        </div>
+
+        <h2>页面回收与swap</h2>
+
+        <p>物理内存是有限的，当系统内存不足时，内核必须选择"牺牲"某些页面——把不常用的页面换出到磁盘（swap out），腾出物理内存给更需要的页面。</p>
+
+        <h3>kSwapd守护进程</h3>
+
+        <p>Linux有一个内核线程叫 <code>kswapd</code>，它负责在后台监控内存使用情况。当某个内存区域的空闲页数低于 <code>watermark[WMARK_LOW]</code> 时，kswapd被唤醒，开始回收页面，直到空闲页数恢复到 <code>watermark[WMARK_HIGH]</code>。</p>
+
+        <p>如果kswapd回收速度跟不上分配速度，空闲页数跌到 <code>watermark[WMARK_MIN]</code> 以下，那么分配路径会进入<strong>直接回收</strong>（Direct Reclaim）——分配者直接参与页面回收，同步等待。这在极端情况下会导致线程阻塞在内存分配上，形成严重的性能抖动。如果直接回收还是不够，最终的保底方案是OOM Killer——选择一个进程杀掉。</p>
+
+        <h3>页面回收流程</h3>
+
+        <p>页面回收有四个主要目标（按优先级递减）：</p>
+
+        <ol>
+            <li><strong>Clean页缓存</strong>：回收干净的（未被修改的）文件缓存页——直接丢弃，不需要写磁盘</li>
+            <li><strong>Dirty页缓存</strong>：把修改过的文件缓存页写回磁盘（通过writeback机制），再回收</li>
+            <li><strong>匿名页Swap out</strong>：把进程的匿名页（堆、栈等）写入swap分区</li>
+            <li><strong>OOM Killer</strong>：杀进程，回收其所有内存</li>
+        </ol>
+
+        <pre><code># 查看内存水位线和水印
+$ cat /proc/zoneinfo | grep -A 3 "watermark"
+
+# 查看swap使用情况
+$ swapon --show
+NAME       TYPE      SIZE   USED   PRIO
+/dev/sda5  partition 16G    2.1G   -2
+
+# 查看kswapd的CPU消耗（如果kswapd占用CPU很高，说明内存紧张）
+$ top -b -n 1 | grep kswapd
+   PID  %CPU  COMMAND
+   179   5.3  kswapd0
+
+# 查看页面回收相关统计
+$ cat /proc/vmstat | grep -E "(pgscan|pgsteal|pgfree)"
+pgscan_kswapd 12847
+pgscan_direct 342
+pgsteal_kswapd 12621
+pgsteal_direct 318</code></pre>
+
+        <div class="warning">
+            <p><strong>性能警钟</strong>：当你在 <code>/proc/vmstat</code> 中看到 <code>pgscan_direct</code> 持续增长，说明系统已经发生了直接回收——这意味着内存压力已经比较严重，进程在等待内存分配时被阻塞。这时候系统的延迟通常会显著增加。正常情况下的内存回收应该完全由kswapd在后台完成。</p>
+        </div>
+
+        <h2>MGLRU多代LRU</h2>
+
+        <p>传统的Linux页面回收使用LRU（Least Recently Used）链表来追踪页面的"热度"。但这个设计的根本问题在于：LRU链表在大量页面时（数GB甚至数十GB）遍历成本极高。而且，一次页面访问就会把一个页面从链表的尾部移到头部，这在多核系统上导致大量的链表锁争用。</p>
+
+        <p>MGLRU（Multi-Gen LRU，多代LRU）由Google工程师开发，旨在解决传统LRU的上述问题。它在Linux 6.1中被合入主线。</p>
+
+        <h3>核心设计</h3>
+
+        <p>MGLRU的核心思想是把页面按访问频率分成多代（Generations），每一代代表一个"最近是否被访问过"的等级。页面只在代之间移动，而不是在全局链表中移动：</p>
+
+        <ul>
+            <li><strong>Gen 0（最新代）</strong>：近期被频繁访问的页面</li>
+            <li><strong>Gen 1（较旧代）</strong>：一段时间内没有被访问的页面</li>
+            <li><strong>Gen 2（更旧代）</strong>：更长时间没有被访问的页面</li>
+            <li><strong>Gen 3（最旧代）</strong>：可以优先回收的页面</li>
+        </ul>
+
+        <p>当需要回收页面时，MGLRU从最旧的代开始扫描，大大减少了扫描的范围。它不需要遍历整个LRU链表——只需检查最旧一代中的页面是否有资格被回收。</p>
+
+        <p>MGLRU还引入了"页表遍历"（page table walking）技术，通过直接扫描进程的页表来决定哪些页面应该被降代（aged），而不是依赖硬件访问位（Accessed bit）——这避免了访问位扫描导致的TLB抖动。</p>
+
+        <table>
+            <tr><th>维度</th><th>传统LRU</th><th>MGLRU</th></tr>
+            <tr><td>数据结构</td><td>双向链表（active/inactive）</td><td>多代多级链表</td></tr>
+            <tr><td>遍历范围</td><td>全部inactive页</td><td>仅最旧一代</td></tr>
+            <tr><td>锁争用</td><td>高（全局LRU锁）</td><td>低（分代+per-node）</td></tr>
+            <tr><td>扫描效率</td><td>低（大量无用遍历）</td><td>高（针对性扫描）</td></tr>
+            <tr><td>文件密集型负载</td><td>基准</td><td>提升约30%</td></tr>
+            <tr><td>内存压力大时</td><td>延迟抖动严重</td><td>更平滑的性能下降</td></tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>工程成就</strong>：MGLRU不是理论创新——FIFO/LRU/LFU这些基础算法几十年前就有了。MGLRU的真正价值在于工程化的实现：它在海量页面的场景下（数百万到数亿页）解决了传统LRU在大规模系统中的扩展性问题。Google在数据中心部署后，内存回收带来的延迟抖动大幅降低。</p>
+        </div>
+
+        <h2>内存cgroup</h2>
+
+        <p>在多租户场景下（如容器、虚拟机），多个进程组共享相同的物理内存。如果没有隔离机制，一个容器可能耗尽所有内存，导致其他容器被OOM Killer杀掉。memcg（Memory Cgroup）正是为解决这个问题而生的。</p>
+
+        <h3>memcg的限制与控制</h3>
+
+        <p>memcg支持三种内存水位线：</p>
+
+        <table>
+            <tr><th>参数</th><th>含义</th><th>超额时的行为</th></tr>
+            <tr><td><code>memory.low</code></td><td>保证内存</td><td>此之内的内存不会被回收（即使系统整体内存紧张）</td></tr>
+            <tr><td><code>memory.high</code></td><td>软限制</td><td>超过时，触发内存回收节流（throttle），但可以继续超过</td></tr>
+            <tr><td><code>memory.max</code></td><td>硬限制</td><td>超过时，触发OOM Killer（在cgroup内杀进程）</td></tr>
+        </table>
+
+        <p>这三个参数构成了一个三级防护：low保证你一定能拿到多少，high提醒你开始收敛，max是你绝不能超过的上限。比如一个容器设置 <code>memory.low=1G memory.high=2G memory.max=4G</code>，意味着保底1GB、建议控制在2GB以内、坚决不能超过4GB。</p>
+
+        <pre><code># 为容器设置内存cgroup
+# 创建cgroup并设置limits
+mkdir /sys/fs/cgroup/my_container
+echo 1G > /sys/fs/cgroup/my_container/memory.low
+echo 2G > /sys/fs/cgroup/my_container/memory.high
+echo 4G > /sys/fs/cgroup/my_container/memory.max
+
+# 把进程加入到cgroup
+echo $PID > /sys/fs/cgroup/my_container/cgroup.procs
+
+# 查看cgroup的内存使用
+cat /sys/fs/cgroup/my_container/memory.current
+# 输出: 1560281088  (约1.45GB)</code></pre>
+
+        <p>在容器化部署中（Docker、Kubernetes），每个容器自动拥有自己的memcg。Docker的 <code>--memory</code> 参数实际上就是设置memory.max。Kubernetes的Pod resource limits同样是映射到cgroup的memory.max。</p>
+
+        <div class="tip">
+            <p><strong>生产实践</strong>：配置docker容器的memory limit时，建议不要设置得刚好等于应用的预期内存使用——留出10-20%的余量给page cache和内核开销。我曾经见过一个Java应用设置了 <code>-Xmx512m</code> 和Docker memory limit 512MB，结果JVM还没开始干活就被OOM Kill了——因为JVM本身和操作系统内核也需要额外内存。</p>
+        </div>
+
+        <p>物理内存管理是操作系统中最靠近硬件的部分之一——Buddy System管理物理页、Slub加速小对象分配、kswapd和MGLRU在内存压力下优雅降级、memcg实现多租户隔离。这些机制合在一起，让物理内存这个有限且复杂的资源变得易于使用而又高效可控。</p>
+
+        <p>下一章，我们从"内存"转向"存储"——文件系统。当你执行 <code>cat file.txt</code> 时，从文件名到磁盘扇区之间经历了哪些层次？VFS的抽象、inode和dentry的缓存、ext4和Btrfs的不同设计哲学——下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

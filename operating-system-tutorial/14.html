@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 文件系统</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html" class="active">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第14章 文件系统</h2>
+
+        <p>大家好，我是你们的讲师。前面几章我们讲了CPU怎么调度进程、内存怎么管理虚拟地址和物理页。但你有没有想过——你双击一个Word文档，编辑后按Ctrl+S保存，整个过程中内核都做了哪些事？文档的内容是如何在磁盘上"持久化"存储的？下次开机怎么还能读到？</p>
+
+        <p>文件系统（File System）是操作系统在存储方面提供的核心抽象。它的作用可以概括为一句话——把磁盘上原始的、无结构的扇区组织成有层次的、用户友好的文件和目录结构。从你的视角看，就是一个"文件"和"文件夹"（或者叫"目录"）；但从内核的视角看，这背后涉及从VFS统一模型、到inode和dentry的结构设计、再到具体文件系统（ext4、Btrfs、XFS）的不同实现策略。</p>
+
+        <p>说一个我早年犯的低级错误。有次帮客户做数据恢复，客户说他误删了一个重要文件，但在ext4文件系统上立即umount了分区，问我能不能恢复。我信心满满地说没问题——ext4删除文件只是删除了inode的链接，数据块还在磁盘上。结果用ext4恢复工具一跑，发现文件内容全部是零。为什么？因为ext4的"延迟分配"（delayed allocation）特性——在文件被删除时，那些被延迟分配的数据块还没来得及写入磁盘，就直接被丢弃了。这个案例告诉我：文件系统的很多"优化"特性，在数据恢复场景下可能是噩梦。</p>
+
+        <h2>VFS：一切皆文件的基石</h2>
+
+        <p>VFS（Virtual File System，虚拟文件系统）是Linux文件系统架构的灵魂。它的核心思想是：<strong>所有对象无论是文件、目录、设备、socket、管道——都统一用文件操作接口来访问</strong>。你在用户态看到的 <code>read()</code> / <code>write()</code> / <code>open()</code> / <code>close()</code>，到了VFS层被派发给不同底层文件系统的具体实现。</p>
+
+        <p>VFS定义了三种关键的操作表（operations），每种文件系统都要实现这些回调：</p>
+
+        <table>
+            <tr><th>操作表</th><th>作用</th><th>包含的核心回调</th></tr>
+            <tr><td><code>file_operations</code></td><td>对"已打开的文件"的操作</td><td>read, write, mmap, poll, ioctl, llseek</td></tr>
+            <tr><td><code>inode_operations</code></td><td>对"文件/目录元数据"的操作</td><td>create, lookup, link, unlink, mkdir, rmdir, rename</td></tr>
+            <tr><td><code>address_space_operations</code></td><td>对"文件数据页缓存"的操作</td><td>readpage, writepage, writepages, dirty_folio, migrate_folio</td></tr>
+        </table>
+
+        <p>这种设计起到了"适配器"的作用：你可以在同一个系统上同时挂载ext4（传统磁盘文件系统）、Btrfs（COW文件系统）、tmpfs（内存文件系统）、procfs（进程信息文件系统）、sysfs（内核对象文件系统）。它们各自的实现天差地别，但通过VFS提供的统一接口，用户态看到的都是"文件"。</p>
+
+        <pre><code>// 用户态调用 read() 的完整路径
+read(fd, buf, 1024);
+
+  ↓ sys_read()  // 系统调用入口
+  ↓ vfs_read()  // VFS公共层（权限检查、锁等）
+  ↓ file->f_op->read_iter()  // 具体的文件系统回调
+    ↓ ext4_file_read_iter()  // ext4的实现
+      ↓ generic_file_read_iter()
+        ↓ filemap_read()      // 通过页缓存读取
+          ↓ address_space_operations.readpage()
+            ↓ ext4_readpage()  // 从磁盘读取到页缓存
+
+// 如果是 procfs 的文件（如 /proc/cpuinfo），路径完全不同：
+read(fd, buf, 1024);
+  ↓ sys_read() → vfs_read()
+  ↓ proc_reg_read()  // procfs 的实现
+    ↓ ...直接从内核数据结构中获取信息</code></pre>
+
+        <div class="highlight">
+            <p><strong>设计哲学</strong>：VFS是UNIX"一切皆文件"理念的工程实现。通过分层抽象：系统调用层→VFS层→具体文件系统层→块设备层→物理设备层——每一层的职责清晰，替换任意一层都不影响其他层。你更换了硬盘，应用程序代码不需要改一行。</p>
+        </div>
+
+        <h2>inode与dentry</h2>
+
+        <p>当你访问一个文件如 <code>/home/user/doc.txt</code> 时，文件系统需要完成"从文件路径到磁盘块"的映射。这条映射链上有三个关键数据结构：dentry、inode和page cache。</p>
+
+        <h3>dentry（目录项缓存）</h3>
+        <p>dentry是路径名与其对应inode之间的纽带。每个路径分量对应一个dentry——比如 <code>/home/user/doc.txt</code> 需要四个dentry：<code>/</code>、<code>home</code>、<code>user</code>、<code>doc.txt</code>。dentry缓存在dcache中，加速路径查找。下次快速访问同一路径时无需重新遍历目录。</p>
+
+        <h3>inode（索引节点）</h3>
+        <p>inode存储文件的所有元数据（除文件名以外）：权限、大小、时间戳、数据块指针等。文件名不存储在inode中——文件名在目录项中，inode通过编号（inode number）被目录项引用。inode中关键的数据块指针结构对于不同文件系统各不相同。</p>
+
+        <h3>page cache（页缓存）</h3>
+        <p>当从磁盘读取文件数据时，内核把数据缓存到页缓存中。写入时也先写入页缓存（标记为dirty），稍后由writeback机制刷回磁盘。同一页可能同时被多个进程map——这通过address_space实现共享。</p>
+
+        <pre><code>开文件 /home/user/doc.txt 的数据流：
+
+1. 路径解析（Path Walk）
+   dentry cache lookup:    "/" → dcache hit？ 否 → 从disk读根目录inode
+   dentry cache lookup:    "home" → dcache hit？ 否 → readdir遍历根目录找home
+   dentry cache lookup:    "user" → ...
+   dentry cache lookup:    "doc.txt" → dcache hit？是！得到dentry
+
+2. 获取inode
+   dentry->d_inode → inode #12345
+   包含：文件大小、权限、数据块指针等
+
+3. 读取数据
+   → page cache lookup:  inode 12345 offset 0 → cache hit？否
+   → ext4_readpage(): 根据inode中的extent tree找到磁盘块号
+   → submit_bio(): 向块设备层提交I/O请求
+   → 磁盘返回数据 → 放入页缓存 → copy_to_user() 给应用程序
+
+完成！下次读取同一文件直接从page cache返回，无需磁盘I/O。</code></pre>
+
+        <div class="tip">
+            <p><strong>性能观察</strong>：通过 <code>cat /proc/meminfo</code> 查看 <code>Cached</code> 和 <code>Dirty</code> 两行。Cached就是页缓存的总大小，Dirty是需要写回磁盘的脏页数量。如果Dirty持续增长，说明系统在大量写文件，writeback可能跟不上。可以用 <code>sysctl vm.dirty_ratio</code> 和 <code>sysctl vm.dirty_background_ratio</code> 调整writeback的触发时机。</p>
+        </div>
+
+        <h2>ext4的设计</h2>
+
+        <p>ext4是当前Linux上最广泛使用的文件系统（没有之一），也是ext家族的最新成员。它在ext3的基础上引入了三个重要的设计革新：区段树、日志、延迟分配。</p>
+
+        <h3>区段树（Extent Tree）</h3>
+        <p>ext3及以前的文件系统使用"间接块指针"来映射文件逻辑块到物理块——对于大文件（尤其是GB级别的文件），需要多层间接指针，每次访问都需要遍历多层，效率低下。ext4引入了extent（区段）的概念：一个extent描述一段连续的物理块范围（起始块号+长度）。大文件只需十几个extent就能描述全部数据块位置，大幅减少了元数据开销。</p>
+
+        <pre><code>// Extent Tree 的简化结构
+// 一个extent描述一段连续的物理块范围
+
+struct ext4_extent {
+    __le32  ee_block;    // 文件内的起始逻辑块号
+    __le16  ee_len;      // extent 长度（块数）
+    __le16  ee_start_hi; // 起始物理块号（高16位）
+    __le32  ee_start_lo; // 起始物理块号（低32位）
+};
+
+// 对于一个 1GB 的文件（假设4KB块大小）:
+// - 如果完全连续存储: 1个extent即可描述
+// - 即使有碎片: 通常也只需要几十个extent
+// 而在ext3的间接块模式下，需要 256K+ 个块指针条目</code></pre>
+
+        <h3>日志（Journal）</h3>
+        <p>ext4使用日志（journal）来保证文件系统的一致性：在修改元数据之前，先把修改操作记录到日志区域。如果系统在写入过程中崩溃，重启后通过replay日志恢复一致性，不需要对整个文件系统做fsck检查。日志模式有三种：journal（全量日志，所有数据和元数据先写日志）、ordered（仅元数据日志，但数据先于元数据写入磁盘）、writeback（仅元数据日志，不保证数据写入顺序）。默认的是ordered模式——在性能和一致性之间取得平衡。</p>
+
+        <h3>延迟分配（Delayed Allocation）</h3>
+        <p>ext4在写入数据时不会立即为每个块分配物理磁盘位置，而是等到数据即将刷回磁盘时（通常延迟几秒），一次性分配连续的物理块。这样内核可以在分配前看到"实际要写多少数据"，从而做出更好的连续分配决策，减少磁盘碎片。这正是前面数据恢复案例中"文件内容变为零"的根本原因——数据从未真正落到磁盘上。</p>
+
+        <table>
+            <tr><th>特性</th><th>ext3</th><th>ext4</th></tr>
+            <tr><td>块映射</td><td>间接块指针（多层）</td><td>Extent Tree（区段树）</td></tr>
+            <tr><td>最大文件</td><td>2TB</td><td>16TB (4KB块) / 更大</td></tr>
+            <tr><td>最大卷</td><td>16TB</td><td>1EB</td></tr>
+            <tr><td>分配策略</td><td>立即分配</td><td>延迟分配（减少碎片）</td></tr>
+            <tr><td>时间戳精度</td><td>秒级</td><td>纳秒级</td></tr>
+            <tr><td>扩展属性</td><td>受限</td><td>扩展（纳秒+额外属性）</td></tr>
+            <tr><td>预分配</td><td>手动fallocate</td><td>fallocate + 延迟预分配优化</td></tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>权衡思考</strong>：ext4的延迟分配是一把双刃剑。它提升了性能、减少了碎片，但降低了数据安全性——如果系统在延迟窗口内崩溃，那些已被应用程序"确认写入"（write()返回成功）但实际还在页缓存中的数据会丢失。所以在数据库场景下，通常会打开O_DIRECT或使用O_SYNC标志，绕过页缓存直接写入磁盘。</p>
+        </div>
+
+        <h2>Btrfs与写时复制</h2>
+
+        <p>如果说ext4是在ext3基础上的渐进式改进，那Btrfs（B-tree File System）则是一次革命性的重新设计。它的核心设计思想是：写时复制（Copy-on-Write, COW）——写入新数据时，不覆盖原有数据块，而是在新的位置写入，然后通过B树的原子指针更新来实现"瞬间切换"。</p>
+
+        <h3>Btrfs的COW设计</h3>
+
+        <p>COW带来的几个关键好处：</p>
+        <ul>
+            <li><strong>快照（Snapshot）</strong>：秒级创建子卷快照——不复制数据，只复制B树的根节点指针。子卷可以独立读写，COW保证快照和原卷互不影响。</li>
+            <li><strong>校验和（Checksum）</strong>：每个数据块和元数据块都存储crc32c校验和。读取时验证，自动检测静默数据损坏（silent data corruption）。</li>
+            <li><strong>透明压缩</strong>：自动对数据块进行zstd/lzo/zlib压缩，节省磁盘空间（尤其适合文本和日志文件）。</li>
+            <li><strong>自修复</strong>：配合DUP或RAID模式，在检测到校验和错误时从副本读取数据并修复。</li>
+        </ul>
+
+        <pre><code># Btrfs 常用操作
+# 创建子卷（相当于独立的"逻辑文件系统"）
+btrfs subvolume create /mnt/data/@docker
+
+# 创建快照（瞬间完成，不复制数据）
+btrfs subvolume snapshot /mnt/data/@docker /mnt/data/@docker_snap
+
+# 启用透明压缩
+mount -o compress=zstd /dev/sda1 /mnt/data
+
+# 查看校验和错误
+btrfs device stats /mnt/data
+
+# 查看磁盘使用情况
+btrfs filesystem df /mnt/data</code></pre>
+
+        <p>Btrfs的缺点也很明显：COW在大量小文件随机写入时会产生显著的碎片化问题，因为每次修改都涉及新块分配。对于数据库或VM镜像这样的随机写负载，需要关闭COW（<code>chattr +C</code> 设置文件的NOCOW属性）。另外，Btrfs在极端情况下（磁盘空间耗尽）的表现不如ext4稳健——历史上出现过"ENOSPC"问题，即明明还有空间但内核认为空间已满。</p>
+
+        <div class="tip">
+            <p><strong>场景推荐</strong>：Btrfs非常适合快照和回滚需求频繁的桌面系统和开发环境（搭配snapper自动快照特别方便），也适合需要数据完整性保护的场景（带校验和的NAS存储）。但对于高并发的OLTP数据库，建议使用ext4或XFS——它们的无COW设计和成熟的fsync语义更适合这类负载。</p>
+        </div>
+
+        <h2>现代文件系统生态</h2>
+
+        <p>文件系统的世界远不止ext4和Btrfs。下面几个文件系统各有专长，了解它们能帮你在不同场景下做出更合适的选择。</p>
+
+        <table>
+            <tr><th>文件系统</th><th>专项优势</th><th>适用场景</th></tr>
+            <tr><td>XFS</td><td>大规模高并发扩展性</td><td>大型文件服务器、数据仓库、多线程写入</td></tr>
+            <tr><td>Bcachefs</td><td>海量小文件优化、完整数据校验</td><td>通用场景（新兴、潜力大）</td></tr>
+            <tr><td>F2FS</td><td>闪存优化（磨损均衡、GC友好）</td><td>SSD、SD卡、移动设备</td></tr>
+            <tr><td>EROFS</td><td>只读极致压缩和性能</td><td>容器镜像、嵌入式固件</td></tr>
+        </table>
+
+        <h3>XFS</h3>
+        <p>XFS是高性能64位日志文件系统，最初由SGI为IRIX开发，2000年移植到Linux。它的设计核心是大规模并发——使用分配组（Allocation Group）对磁盘进行分区管理，每个组有独立的inode和空闲空间管理，支持多线程并行分配。XFS在元数据操作密集的场景下（大量文件的创建/删除）通常比ext4表现更好。目前Red Hat Enterprise Linux的默认文件系统就是XFS。</p>
+
+        <h3>Bcachefs</h3>
+        <p>Bcachefs是一个较新的文件系统，由Kent Overstreet（也是Bcache的作者）历经多年开发。它的目标是提供一个"一劳永逸"的通用文件系统——同时具备ext4的可靠性、Btrfs的快照/校验和功能、ZFS的池化存储管理、以及XFS的扩展性。Bcachefs还特别优化了海量小文件的场景（数百万个文件在单目录中）。经过多年开发，Bcachefs在Linux 6.7中正式合入主线。</p>
+
+        <h3>F2FS</h3>
+        <p>F2FS（Flash-Friendly File System）由三星开发，专门为NAND闪存设计。传统文件系统（如ext4）的碎片整理、写放大等问题在SSD上非常突出。F2FS在日志结构（Log-structured）的基础上引入了几个闪存友好的设计：用多级日志区域组织数据、冷热数据分离、自适应的GC（垃圾回收）策略。它在消费级SSD和SD卡上的表现通常优于ext4。</p>
+
+        <h3>EROFS</h3>
+        <p>EROFS（Enhanced Read-Only File System）是华为开发的高性能只读文件系统，Linux 5.4合入主线。它的设计核心是极致压缩和解压性能——使用了固定输出大小的压缩策略（fixed-sized output compression），解压速度比传统压缩文件系统快数倍。EROFS在容器镜像分发场景中表现出色——Docker和CRI-O已经支持直接使用EROFS格式的镜像层，显著减少了容器的启动时间。</p>
+
+        <div class="highlight">
+            <p><strong>生态视野</strong>：文件系统的选择不是"谁最好"的问题，而是"哪个最适合我的场景"的问题。你不可能用一个文件系统覆盖所有需求——ext4的成熟稳定适合通用服务器，Btrfs的快照适合开发和备份，XFS的大规模并发适合数据仓库，F2FS的闪存优化适合移动设备，EROFS的只读压缩适合容器镜像。在系统设计中，根据场景选对文件系统，能省去很多运维层面的烦恼。</p>
+        </div>
+
+        <p>文件系统是操作系统中"离用户最近"的子系统和"离硬件最近"的子系统之间的桥梁。从VFS的抽象、到inode和dentry的数据结构、到ext4的工程优化、到Btrfs的COW革命、再到现代文件系统的多元化生态——每层设计都在回答同一个问题：如何高效、安全、可靠地把数据存储在磁盘上，并让应用程序方便地访问。</p>
+
+        <p>下一章，我们进入I/O模型的世界——从阻塞I/O到非阻塞I/O、从select/poll到epoll、从传统的BIO块层到革命性的io_uring。你会发现，I/O性能的终极瓶颈往往不在磁盘本身，而在于数据从磁盘到达应用程序的路径上。下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

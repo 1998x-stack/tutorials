@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 同步与互斥</title>
+    <link rel="description" content="操作系统教程 - 第11章 进程/线程同步与互斥">
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html" class="active">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第11章 同步与互斥</h2>
+
+        <p>大家好，我是你们的讲师。如果你让我用一句话总结并发编程的难度——"It's all about shared state"。多个执行流共享同一份数据，就是并发Bug的万恶之源。你写一个单线程程序，每一步的执行顺序是确定的，没有问题。但一旦上了多线程，相同的输入可能每次跑出不同的结果——有时对，有时错，而且在开发和测试阶段完全看不出问题，到了生产环境才偶尔爆炸。这就是并发问题最让人头疼的特性：非确定性（Non-determinism）。</p>
+
+        <p>这章我们从并发问题的根源讲起，然后深入到操作系统提供（以及内核自身使用）的同步原语：自旋锁、互斥锁、信号量、RCU——每个原语都有自己的设计哲学和适用场景。最后，我们用死锁分析和lockdep来收尾，因为"不会用锁"和"用错了锁"是并发编程的两大杀手。</p>
+
+        <p>分享一个让我终身难忘的线上事故。有一次我们上线了一个新的缓存服务，上线后偶尔出现某个用户看到其他用户数据的诡异Bug。因为是概率性出现，开发环境完全复现不了。花了近两周时间，最终用gdb attach到进程、加打印日志层层排查，找到了罪魁祸首——一个全局的HashMap在并发读写时没有加锁，put和get同时发生时，内部的链表结构被破坏，导致get返回了错误的数据。更可怕的是，这个Bug在低并发时几乎从不出现，每次请求量超过某个阈值才开始暴露。"并发Bug就像鬼——你不知道它什么时候来，但它真的存在。"</p>
+
+        <h2>并发问题的根源</h2>
+
+        <p>三个关键概念，是理解并发问题的基石：</p>
+
+        <h3>竞态条件（Race Condition）</h3>
+        <p>当程序的输出结果依赖于多个执行流的相对时序时，就存在竞态条件。经典例子——两个线程同时执行 <code>counter++</code>。看起来是一行代码，但编译后是三条指令：load counter到寄存器、寄存器加1、store回内存。如果两个线程的load和store交错执行，结果可能只增加了1而不是2。</p>
+
+        <h3>临界区（Critical Section）</h3>
+        <p>访问共享资源的那段代码区域。临界区的设计原则是：<strong>尽量小、尽量短</strong>。在临界区里待的时间越长，其他等待的线程阻塞的时间就越久，系统的并发度就越低。</p>
+
+        <h3>数据竞争（Data Race）</h3>
+        <p>两个或以上的线程同时访问同一块内存，且至少有一个是写操作，且没有任何同步机制保护——这就是数据竞争。C++标准明确表示数据竞争是"未定义行为"（Undefined Behavior），编译器可以生成任何代码——包括你完全想不到的"优化"。</p>
+
+        <pre><code>// 经典的数据竞争例子
+int counter = 0;
+
+// 线程A                // 线程B
+counter++;               counter++;
+
+// 预期结果: counter = 2
+// 实际可能结果: counter = 1 !!!
+// 因为两个线程的 load-add-store 可能交错：
+// A load (counter=0) → B load (counter=0) → A add → A store (1) → B add → B store (1)</code></pre>
+
+        <div class="warning">
+            <p><strong>现实案例</strong>：2012年，一个名为"Mars Climate Orbiter"的火星探测器因竞态条件导致坠毁。更近的例子——2018年Linux内核发现的一个TCP数据竞争Bug，影响了全球数百万服务器，一个精心构造的数据包可以让服务器内核panic。并发Bug不是学术问题，是真能炸掉服务器甚至航天器的。</p>
+        </div>
+
+        <h2>自旋锁 vs 互斥锁</h2>
+
+        <p>这两种锁的实现哲学完全不同，理解它们的差异对于写出高性能的并发代码至关重要。</p>
+
+        <h3>自旋锁（spinlock）</h3>
+
+        <p>自旋锁的核心行为：如果锁被占用，当前线程就在原地"自旋"（一个紧循环不断检查锁状态），直到锁被释放。它不会导致线程睡眠，所以<strong>自旋锁可以在中断上下文中使用</strong>（因为睡眠在中断上下文中是非法的）。但自旋锁的代价是浪费CPU——如果锁被持有的时间较长，自旋的线程就是在空转烧电。</p>
+
+        <pre><code>// Linux 内核中的自旋锁实现（x86-64）
+// 核心是 atomic 的 test-and-set 操作
+
+static __always_inline void spin_lock(spinlock_t *lock)
+{
+    // 使用 LOCK CMPXCHG 指令原子的尝试获取锁
+    // 如果锁的值从0变为1成功，则获取锁
+    // 否则 continuosly 尝试
+    asm volatile(
+        "1: LOCK CMPXCHG %1, %0\n\t"
+        "   JNZ 1b\n\t"
+        : "+m" (lock->raw_lock),
+          "+r" (1)
+        :: "memory"
+    );
+}</code></pre>
+
+        <p>Linux内核还引入了更高效的 <code>qspinlock</code>（队列自旋锁），它维护一个等待队列，每个自旋的CPU在不同的cache line上旋转，避免了多核同时自旋同一地址导致的cache一致性风暴。</p>
+
+        <h3>互斥锁（mutex）</h3>
+
+        <p>互斥锁在锁被占用时会让当前线程睡眠（调用schedule()让出CPU），然后被放入等待队列。当锁释放时，内核会唤醒等待队列中的线程。这涉及两次上下文切换（一次睡眠、一次唤醒），开销远大于自旋锁。但互斥锁不浪费CPU时间。</p>
+
+        <table>
+            <tr><th>维度</th><th>自旋锁</th><th>互斥锁</th></tr>
+            <tr><td>等待方式</td><td>忙等待（spin）</td><td>睡眠等待（schedule）</td></tr>
+            <tr><td>CPU占用</td><td>高（自旋时CPU全速运转）</td><td>低（睡眠时CPU可干别的）</td></tr>
+            <tr><td>持有时间</td><td>极短（微秒级）</td><td>可长可短</td></tr>
+            <tr><td>中断上下文</td><td>可用</td><td>不可用（会触发BUG）</td></tr>
+            <tr><td>切换开销</td><td>无</td><td>高（两次context switch）</td></tr>
+            <tr><td>适用场景</td><td>临界区极短</td><td>临界区较长或可能阻塞</td></tr>
+        </table>
+
+        <div class="tip">
+            <p><strong>调优经验</strong>：一个经验法则是——如果临界区的执行时间小于两次上下文切换的时间（通常为1-5微秒），用自旋锁更好。如果你不确定，从互斥锁开始，用perf测量锁争用情况，再决定是否换用自旋锁。千万别一开始就选自旋锁——它容易引入隐蔽的性能问题。</p>
+        </div>
+
+        <h2>信号量与PV操作</h2>
+
+        <p>信号量（Semaphore）是Dijkstra在1965年提出的经典同步原语。它本质上是一个整型计数器 + 两个原子操作：P（proberen，荷兰语的"测试"，减少计数器，如果为负则阻塞）和V（verhogen，"增加"，增加计数器，唤醒阻塞的线程）。</p>
+
+        <p>如果你把信号量理解为"资源的数量"，就很好理解了：P操作是"申请一个资源"（资源数-1），V操作是"归还一个资源"（资源数+1）。当资源数为0时，申请者必须等待。</p>
+
+        <p>信号量可以解决几乎所有经典的同步问题。我们来看三个最经典的：</p>
+
+        <h3>生产者-消费者问题</h3>
+
+        <pre><code>// 生产者-消费者：使用三个信号量
+sem_t empty;    // 缓冲区中空位数量，初始 = N
+sem_t full;     // 缓冲区中满位数量，初始 = 0
+sem_t mutex;    // 互斥访问缓冲区，初始 = 1
+
+// 生产者
+void producer() {
+    while (1) {
+        item = produce();
+        P(&empty);      // 等空位
+        P(&mutex);      // 锁缓冲区
+        buffer[in] = item;
+        in = (in + 1) % N;
+        V(&mutex);      // 解锁缓冲区
+        V(&full);       // 增加满位
+    }
+}
+
+// 消费者
+void consumer() {
+    while (1) {
+        P(&full);       // 等满位
+        P(&mutex);      // 锁缓冲区
+        item = buffer[out];
+        out = (out + 1) % N;
+        V(&mutex);      // 解锁缓冲区
+        V(&empty);      // 增加空位
+        consume(item);
+    }
+}</code></pre>
+
+        <h3>哲学家就餐与读者-写者</h3>
+
+        <p>哲学家就餐问题的核心挑战：五个哲学家（线程）围坐一桌，每两人之间有一根筷子（共享资源）。哲学家需要同时拿起左右两根筷子才能吃饭。最朴素的实现（先拿左边再拿右边）会导致死锁——所有人都拿了左筷子等右筷子。解决方案包括：限制同时就餐人数、使用奇数位拿法（左边的先拿右）、或者用管程（Monitor）封装叉子的获取。</p>
+
+        <p>读者-写者问题：多个读者可以同时读共享数据，但写者需要独占访问。解决方案有"读者优先"和"写者优先"两种策略——前者可能导致写者饥饿，后者读者饥饿。现实中多数系统采用"写者优先"变体，因为写者通常持有最新的数据。</p>
+
+        <div class="highlight">
+            <p><strong>经典的力量</strong>：这三个问题（生产者-消费者、哲学家就餐、读者-写者）不是学术游戏——它们就是你在实际系统中每天遇到问题的抽象化。你在写一个消息队列（生产者-消费者）、数据库事务（读者-写者）、资源分配（哲学家就餐）时，本质上就是在解决这些经典问题的变体。</p>
+        </div>
+
+        <h2>RCU：读多写少的终极武器</h2>
+
+        <p>到目前为止讨论的所有同步机制都有一个共同点：读操作也需要加锁。但在某些场景下，读操作的频率远高于写操作（比如路由表查找、文件系统inode缓存、网络连接跟踪），加锁的开销在整体性能中占比极大。RCU（Read-Copy-Update）正是为解决这种"读多写少"场景而生的。</p>
+
+        <h3>RCU的核心思想</h3>
+
+        <p>RCU的设计非常巧妙：读操作不需要任何锁，直接读取数据。写操作不是直接修改原数据，而是创建一个副本，在副本上修改，然后用一个原子的指针更新操作把新版本"发布"出去。旧版本不会立即释放——要等到所有正在读取旧版本的读者都完成之后才能释放。这个等待期叫做"宽限期"（Grace Period）。</p>
+
+        <pre><code>// 简化的RCU模式示例
+struct foo {
+    int key;
+    int data;
+    struct rcu_head rcu;
+};
+
+// 读者：完全无锁，极快
+rcu_read_lock();
+struct foo *p = rcu_dereference(g_foo);
+int val = p->data;   // 访问数据
+rcu_read_unlock();
+
+// 写者：创建副本，原子更新，延迟释放
+struct foo *old = g_foo;
+struct foo *new = kmalloc(sizeof(*new), GFP_KERNEL);
+*new = *old;             // 复制
+new->data = new_value;   // 修改
+rcu_assign_pointer(g_foo, new);  // 原子指针更新
+// 此时新读者看到新版本，但旧读者还可能在看旧版本
+// 等待所有旧读者退出RCU临界区后再释放旧版本
+kfree_rcu(old, rcu);     // kfree_rcu 自动等待宽限期</code></pre>
+
+        <p>注意：RCU不是万能药。它在写操作时涉及复制和延迟释放，内存开销大。且RCU要求保护的数据主要通过指针访问，不适合复杂的链表内操作。但在合适的场景下——路由表、文件系统的dentry cache、网络协议栈的连接跟踪——RCU能提供几乎无开销的读性能。</p>
+
+        <div class="highlight">
+            <p><strong>无处不在的RCU</strong>：RCU在Linux内核中无处不在。据粗略统计，Linux内核中有超过10,000处RCU使用点。从进程调度器的cgroup统计、到网络协议栈的路由表查找、到文件系统的dcache查找——只要是以读为主的共享数据，内核都用RCU来保护。这正是"读多写少"场景下最极致的优化。</p>
+        </div>
+
+        <h2>死锁的四个条件与lockdep</h2>
+
+        <p>当你使用以上任何一种同步机制时，都有一个挥之不去的阴影——死锁（Deadlock）。死锁发生时，多个线程互相等待对方释放资源，所有线程都被卡住，系统完全丧失功能。</p>
+
+        <h3>死锁的四个必要条件（Coffman条件）</h3>
+
+        <table>
+            <tr><th>条件</th><th>含义</th><th>示例</th></tr>
+            <tr><td>互斥（Mutual Exclusion）</td><td>资源同时只能被一个线程持有</td><td>互斥锁的本质</td></tr>
+            <tr><td>持有并等待（Hold and Wait）</td><td>线程已经持有一个资源，又在等待另一个资源</td><td>持有锁A，请求锁B</td></tr>
+            <tr><td>不可抢占（No Preemption）</td><td>线程持有的资源不能被强制剥夺</td><td>持有锁时不能被别人抢走</td></tr>
+            <tr><td>循环等待（Circular Wait）</td><td>存在一个线程-资源的循环等待链</td><td>T1等T2的锁，T2等T1的锁</td></tr>
+        </table>
+
+        <p>破除死锁只需要破坏上述任意一个条件。实践中用得最多的是破坏"循环等待"——通过锁的有序获取（Lock Ordering），比如规定必须按A→B→C的顺序获取锁，就永远不会出现循环等待。</p>
+
+        <h3>lockdep：内核中的死锁检测神器</h3>
+
+        <p>Lockdep是Linux内核中一个非常巧妙的运行时锁依赖验证工具。它在内核代码每次获取和释放锁时，记录下锁的获取顺序，构建一个"锁类→锁类"的有向图。如果检测到任何循环依赖，lockdep会立即打印详细的死锁报告并触发内核警告。</p>
+
+        <pre><code># 如果你的内核开启了 CONFIG_PROVE_LOCKING=y
+# lockdep 会自动运行。检测到死锁风险时你会看到类似这样的输出：
+
+============================================
+WARNING: possible circular locking dependency detected
+6.8.0-40-generic #45 Not tainted
+---------------------------------------------
+kworker/0:1/27 is trying to acquire lock:
+&sb->s_type->i_mutex_key#2 (inode->i_rwsem){++++}-{3:3}
+
+but task is already holding lock:
+&mm->mmap_lock (mmap_lock){++++}-{0:0}
+
+which lock already depends on the new lock.
+============================================
+
+# 然后 lockdep 会打印出完整的锁依赖链，帮你定位问题</code></pre>
+
+        <p>Lockdep的强大之处在于：它不只是在死锁实际发生时才发现问题，而是靠分析锁的获取顺序来<strong>预测潜在的死锁</strong>。即使某个循环等待链从未在运行时被完整触发过，只要lockdep发现存在这种可能性，它就会报告。这意味着你可以把死锁消灭在代码审查阶段而不是生产环境。</p>
+
+        <div class="tip">
+            <p><strong>最佳实践</strong>：在内核开发中，永远不要关闭lockdep（CONFIG_PROVE_LOCKING）。它会捕获大量潜在的同步问题。用户态也有类似工具——如TSan（ThreadSanitizer）和Helgrind（Valgrind的线程检测工具）。每次写多线程代码时，养成用这些工具跑一遍的习惯，可以避免90%以上的并发Bug。</p>
+        </div>
+
+        <p>同步与互斥是并发编程中最难、也最有魅力的部分。从原子指令到自旋锁、从信号量到RCU、从死锁分析到lockdep自动检测——每一层抽象都在帮你降低并发编程的心智负担。但记住，没有银弹。选择合适的同步原语需要你理解场景：读多写少用RCU、临界区段用自旋锁、临界区长用互斥锁、资源计数用信号量。</p>
+
+        <p>下一章，我们把视角从"CPU和并发"转向"内存的奥秘"——虚拟内存。为什么每个程序都以为自己在使用整个地址空间？从虚拟地址到物理地址的翻译过程是怎样的？TLB miss和page fault的开销到底有多大？大页为什么能显著提升性能？让我们一探究竟。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

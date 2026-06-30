@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 进程管理</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html" class="active">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第8章 进程管理</h2>
+
+        <p>大家好，我是你们的讲师。想象一下，你打开了一台新电脑——浏览器开了30个标签页、VS Code在编译工程、网易云音乐在后台播放、微信在接收消息、还有一个Docker容器在跑数据库。电脑到底是怎么"同时"做完这么多事情的？每个程序在底层是怎么被"管"起来的？这就是进程管理的核心问题。</p>
+
+        <p>进程（Process）是操作系统中最核心的抽象之一。它不仅是资源分配的基本单位，也是系统隔离和保护的基础。可以毫不夸张地说，理解了进程管理，你就理解了操作系统的半边天。这一章，我们从进程的物理本质出发，深入到Linux内核的task_struct、五种状态模型、fork的写时拷贝机制，一直到execve如何加载一个新程序。这一整套链路，构成了进程从"生"到"死"的完整故事。</p>
+
+        <p>说一个我踩过的坑。刚工作那会儿，我写了一个后台服务，上线后每隔一段时间就会莫名其妙地丢失大量子进程，日志里全是"Resource temporarily unavailable"的错误。排查了半天，发现是进程数量突破了`ulimit -u`限制——我每次请求都fork新进程但忘了wait回收，导致僵尸进程堆积，耗尽了系统的进程数上限。从那以后我牢牢记住了：进程资源不是无限的，创建进程的同时，你必须想清楚谁来收尸。</p>
+
+        <h2>进程到底是什么</h2>
+
+        <p>一个最经典的定义——进程是"运行中的程序"。程序是一堆躺在磁盘上的二进制指令和数据，是静态的；进程是这些指令被加载到内存、CPU开始逐条执行后的那个动态实体。同一个程序（比如你的浏览器）可以同时启动多个进程，每个进程有自己的内存空间、文件描述符、堆栈和执行上下文。</p>
+
+        <h3>进程在内存中的布局</h3>
+
+        <p>一个进程被加载到内存后，它的地址空间从低地址到高地址大致分为五个区域：</p>
+
+        <pre><code>高地址 ──────────────
+        │  栈（Stack）      │  ← 局部变量、函数调用帧，向下增长
+        │   ↓ 向下增长      │
+        ├──────────────────┤
+        │  堆（Heap）       │  ← malloc动态分配，向上增长
+        │   ↑ 向上增长      │
+        ├──────────────────┤
+        │  BSS段           │  ← 未初始化的全局变量/静态变量
+        ├──────────────────┤
+        │  数据段（Data）   │  ← 已初始化的全局变量/静态变量
+        ├──────────────────┤
+        │  代码段（Text）   │  ← 只读的机器指令
+低地址 ──────────────</code></pre>
+
+        <p>其中代码段是只读的，由程序的二进制指令构成。数据段和BSS段存放全局变量。堆是动态内存分配的区域，栈则管理函数调用——每次函数调用都会在栈上压入一个栈帧（Stack Frame），包含返回地址、局部变量、寄存器上下文。栈和堆相向生长，中间是空闲区域，如果它们撞上了，就会发生经典的栈溢出或堆溢出。</p>
+
+        <div class="tip">
+            <p><strong>面试考点</strong>：进程地址空间的五个段（Text/Data/BSS/Heap/Stack）是OS面试几乎必问的基础题。常见延伸问题包括：BSS段为什么和Data段分开？答案是为了节省可执行文件的空间——BSS段不占用磁盘空间，只记录大小，加载时由内核初始化为零。</p>
+        </div>
+
+        <h2>task_struct：Linux进程的"身份证"</h2>
+
+        <p>在内核眼里，每个进程都是用一个庞大的结构体来描述的——这就是 <code>task_struct</code>，定义在 <code>include/linux/sched.h</code> 中。这个结构体有多大？不同内核版本略有差异，但通常超过2000字节，包含了几十个字段。它是Linux内核中最核心的数据结构，没有之一。</p>
+
+        <p>一个进程从被创建到消亡，内核把它的所有信息都塞进了这个结构体。我们来看看最重要的几类字段：</p>
+
+        <table>
+            <tr><th>字段类别</th><th>核心字段示例</th><th>作用</th></tr>
+            <tr><td>标识</td><td>pid（进程ID）、tgid（线程组ID）</td><td>唯一标识一个进程</td></tr>
+            <tr><td>状态</td><td>state（TASK_RUNNING等）</td><td>记录进程当前处于何种状态</td></tr>
+            <tr><td>内存</td><td>mm（mm_struct指针）</td><td>指向进程地址空间描述符</td></tr>
+            <tr><td>文件</td><td>files（files_struct指针）</td><td>已打开的文件描述符表</td></tr>
+            <tr><td>信号</td><td>signal（signal_struct）、pending</td><td>信号处理与等待信号</td></tr>
+            <tr><td>调度</td><td>se/sched_entity、prio、policy</td><td>调度实体、优先级、调度策略</td></tr>
+            <tr><td>父子关系</td><td>parent、children、sibling</td><td>通过链表连接进程树</td></tr>
+            <tr><td>时间统计</td><td>utime、stime、start_time</td><td>用户态/内核态CPU时间</td></tr>
+        </table>
+
+        <p>有趣的是，Linux内核把<strong>所有</strong> task_struct 通过链表串起来。你可以用 <code>ps aux</code> 看到的每一个进程（包括内核线程），在内核中都是一个 task_struct 实例。它们通过 <code>tasks</code> 链表成员串成一个双向循环链表——内核遍历所有进程，本质上就是遍历这个链表。</p>
+
+        <h3>current宏：找到"我"自己</h3>
+
+        <p>内核代码中经常看到 <code>current</code> 这个宏，它返回当前正在执行的进程的 task_struct 指针。这是个极其高频使用的宏——内核需要频繁读取当前进程的uid、pid、内存描述符等信息。</p>
+
+        <pre><code>// 在 x86-64 上，current 通过 per-CPU 变量实现
+// 每个 CPU 核心维护一个指向当前进程 task_struct 的指针
+// 每次进程切换时更新这个指针
+
+static __always_inline struct task_struct *get_current(void)
+{
+    return this_cpu_read_stable(pcpu_hot.current_task);
+}
+
+// 使用示例
+printk("Current PID: %d, State: %ld\n",
+       current->pid, current->__state);</code></pre>
+
+        <div class="highlight">
+            <p><strong>核心洞见</strong>：task_struct之所以如此庞大，是因为Linux奉行"一切皆进程"的设计哲学。甚至是内核自己的工作——比如内存回收、刷脏页、处理中断下半部——也包装成"内核线程"，用task_struct来表示。在Linux里，几乎任何执行上下文都能归结为一个task_struct。</p>
+        </div>
+
+        <h2>进程五状态模型与Linux实现</h2>
+
+        <p>教科书上经典的进程五状态模型是：创建（New）、就绪（Ready）、运行（Running）、阻塞（Blocked/Waiting）、终止（Terminated）。我们来看看Linux内核是如何映射这些抽象状态的。</p>
+
+        <h3>Linux内核中的进程状态</h3>
+
+        <p>Linux在 task_struct 的 <code>state</code> 字段中定义了下面几种状态，它们定义在 <code>include/linux/sched.h</code>：</p>
+
+        <table>
+            <tr><th>Linux状态常量</th><th>对应教科书状态</th><th>含义</th></tr>
+            <tr><td>TASK_RUNNING</td><td>就绪 / 运行</td><td>进程要么正在CPU上运行，要么在就绪队列中等待调度</td></tr>
+            <tr><td>TASK_INTERRUPTIBLE</td><td>阻塞</td><td>等待某个条件（I/O、信号等），收到信号即可唤醒</td></tr>
+            <tr><td>TASK_UNINTERRUPTIBLE</td><td>阻塞（不可打断）</td><td>等待内核态条件（如磁盘I/O），信号也无法唤醒</td></tr>
+            <tr><td>TASK_STOPPED</td><td>暂停</td><td>收到 SIGSTOP/SIGTSTP 等信号后暂停执行</td></tr>
+            <tr><td>TASK_TRACED</td><td>被跟踪</td><td>被ptrace跟踪（如gdb调试时）</td></tr>
+            <tr><td>EXIT_ZOMBIE</td><td>僵尸</td><td>进程已终止，但task_struct未被父进程回收</td></tr>
+            <tr><td>EXIT_DEAD</td><td>终止</td><td>最终状态，等待被彻底移除</td></tr>
+        </table>
+
+        <p>TASK_UNINTERRUPTIBLE 是一个特别值得讲的状态。当你执行 <code>kill -9</code> 都杀不死一个进程时，它可能就是卡在D状态（即 TASK_UNINTERRUPTIBLE）。这通常意味着进程在内核中执行某种不可打断的操作（典型如等待磁盘I/O）。遇到这种情况，光靠kill是没用的——需要修复根本的硬件或驱动问题。</p>
+
+        <div class="warning">
+            <p><strong>踩坑经验</strong>：我曾经在NFS挂载的网络文件系统上跑了大数据任务。NFS服务器挂了之后，所有读写NFS的进程都进入了D状态，kill -9都杀不掉，最终只能重启机器。这就是TASK_UNINTERRUPTIBLE状态最经典的场景——等待的I/O既不能中断，也无法完成，进程"卡死"了。</p>
+        </div>
+
+        <h3>僵尸进程</h3>
+
+        <p>还有一个有趣的状态——僵尸（Zombie）。当进程执行完毕调用exit()退出后，它的大部分资源都被释放了，但task_struct和退出信息（退出码、资源使用统计）还保留着。此时进程处于僵尸状态，等待父进程调用wait()来"收尸"。如果父进程既不调用wait()也不忽略SIGCHLD信号，僵尸进程就会一直存在——这就是我们开头说的那个踩坑故事的根源。</p>
+
+        <p>少量的僵尸进程没问题，但如果大量堆积，就会耗尽内核能分配的pid上限（<code>/proc/sys/kernel/pid_max</code>），导致无法创建新进程。</p>
+
+        <h2>fork()写时拷贝的魔法</h2>
+
+        <p>创建新进程的传统方式是fork()系统调用。但这个系统调用的实现却非常巧妙——它用了一个叫"写时拷贝"（Copy-on-Write，COW）的延迟复制技术。</p>
+
+        <h3>朴素的fork实现有什么问题？</h3>
+
+        <p>最直观的想法：fork的时候把父进程的整个地址空间完整复制一份给子进程。这面看着简单，但问题是——绝大多数fork之后紧接着就是execve（加载一个新程序），意味着刚复制完的地址空间马上就被丢弃了。如果每次fork都完整复制一次内存，相当于做了大量的无用功。这就是"COW"要解决的核心问题。</p>
+
+        <h3>COW的工作原理</h3>
+
+        <p>COW的核心思想很巧妙：fork()时，内核不为子进程复制物理内存，而是让父进程和子进程共享同一份物理页，但把这些页的页表项都标记为"只读"。当任何一方尝试写入时，CPU触发缺页异常，内核在异常处理中分配一个新的物理页，把原内容复制过去，然后修改页表指向新页并标记为可写——这就是"写时拷贝"的名字来源：只有在真正写入的那一刻，拷贝才发生。</p>
+
+        <pre><code>// fork()系统调用的核心路径（简化）
+SYSCALL_DEFINE0(fork)
+{
+    // 1. 调用 _do_fork()
+    return _do_fork(SIGCHLD, 0, NULL, NULL);
+}
+
+static long _do_fork(unsigned long clone_flags, ...)
+{
+    // 2. 复制 task_struct
+    struct task_struct *p = copy_process(clone_flags, ...);
+    if (!IS_ERR(p)) {
+        // 3. 唤醒子进程使其可被调度
+        wake_up_new_task(p);
+    }
+    return p->pid;
+}
+
+// copy_process 中的核心步骤
+static __latent_entropy struct task_struct *copy_process(...)
+{
+    // dup_task_struct() — 复制 task_struct 和内核栈
+    // copy_mm() — 不复制物理页，只复制页表（所有页标记为只读）
+    // copy_fs() — 复制文件系统信息
+    // copy_files() — 复制文件描述符表
+    // copy_signal() — 复制信号处理相关结构
+}</code></pre>
+
+        <p>内核开发者在优化fork的性能上下了大功夫。在Linux 5.x之后，即使是内核栈也用了vmalloc，进一步减少了fork时必须拷贝的部分。当你在Linux上启动一个进程时，fork的延迟主要花在复制task_struct和页表结构上——物理内存的复制被推迟到了必须的时刻。</p>
+
+        <div class="tip">
+            <p><strong>性能洞见</strong>：COW把fork操作的时间复杂度从O(进程地址空间大小)降到了O(页表大小)。对于一个大进程（比如占用数GB内存的数据库），fork的性能提升是数量级的。这也是为什么Redis的RDB持久化可以用fork + COW来创建内存快照——子进程共享主进程的物理页，只有在主进程修改数据时才复制。</p>
+        </div>
+
+        <h2>execve()：一个程序的诞生</h2>
+
+        <p>fork创建了一个"几乎和父进程一模一样"的子进程（共享地址空间但用COW）。但绝大多数情况下，你fork之后想干的是——让子进程运行一个完全不同的程序。这就是execve()系统调用的职责。</p>
+
+        <h3>execve()干了什么</h3>
+
+        <p>execve() 接收三个参数：要执行的程序的路径、命令行参数数组( argv )、环境变量数组( envp )。它的工作就是：把当前进程的地址空间完全替换成新程序的地址空间。</p>
+
+        <pre><code>#include &lt;unistd.h&gt;
+
+int execve(const char *pathname, char *const argv[],
+           char *const envp[]);
+// 成功不返回，失败返回 -1</code></pre>
+
+        <p>注意第一句话——execve成功就"不返回"了。这是因为它把当前进程的代码段、数据段、堆、栈全部替换掉了，不存在"再回到调用点执行"的可能。如果execve返回了，说明它失败了（比如文件不存在或没有执行权限）。</p>
+
+        <h3>ELF加载过程</h3>
+
+        <p>Linux上最常见的可执行文件格式是ELF（Executable and Linkable Format）。execve()加载ELF文件的完整流程大致如下：</p>
+
+        <pre><code>execve() 系统调用的执行路径：
+1. 用户态调用 execve() → 触发 sys_execve() 陷入内核
+2. 内核调用 do_execveat_common()
+3.  → exec_binprm() 开始加载
+4.    → load_elf_binary()   ← ELF格式的加载器
+5.       a. 检查ELF魔数（\x7fELF）
+6.       b. 解析ELF头，获取入口地址、程序头表
+7.       c. 遍历程序头，将PT_LOAD类型的段映射到内存
+8.       d. 设置新进程的栈（argv, envp, auxv）
+9.       e. 设置mm->start_code/end_code等地址范围
+10.      f. 释放旧的地址空间 (exec_mmap)
+11.      g. 设置新程序的入口点（ELF入口地址）
+12. 返回用户态 → CPU跳转到新程序的入口地址开始执行</code></pre>
+
+        <p>从这个流程可以看到：execve()先释放掉旧的地址空间（包括通过fork COW共享的那些物理页），然后根据ELF文件中的段信息重新建立内存映射。这也是为什么fork+execve的组合如此经典——fork只是复制了地址空间的"骨架"（页表），execve直接把"肉"换掉了。</p>
+
+        <div class="highlight">
+            <p><strong>本质思考</strong>：fork() + execve() 的两步设计是UNIX系统设计的经典案例。fork提供"快速创建进程上下文"的能力，execve提供"替换进程内容"的能力。两者分离，各司其职，组合起来就形成了一个强大的进程创建原语。相比之下，Windows的CreateProcess()是一个一步到位的API，同时完成"创建"和"加载"——各有利弊。</p>
+        </div>
+
+        <p>讲到这里，进程从创建（fork）、内容替换（execve）、状态转换（五状态模型）到终止（exit + wait）的完整生命周期就讲完了。你可以看到，每个环节都有精妙的设计——COW避免不必要的内存复制、ELF加载器的层次化设计、进程状态的细粒度控制——这些都不是拍脑袋想出来的，而是几十年的工程实践积累的智慧。</p>
+
+        <p>下一章，我们沿着"执行粒度更小"的方向继续深挖——从进程到线程，再到协程。你会发现，当同步机制越来越重、切换开销越来越成为瓶颈时，操作系统提供了更轻量的并发原语来应对。我们下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

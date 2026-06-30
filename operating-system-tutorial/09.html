@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 线程与协程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html" class="active">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第9章 线程与协程</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们讲了进程——操作系统中资源分配的基本单位。但如果每次想并发执行多个任务都创建一个新进程，你会发现开销太大了：每个进程有自己的地址空间、文件描述符表、信号处理函数……光是复制这些数据结构就够CPU忙活一阵子。更关键的是，多个进程之间共享数据非常麻烦——必须用管道、消息队列、共享内存这些IPC机制，又慢又复杂。</p>
+
+        <p>那有没有一种更轻量的并发单位？有的，这就是线程（Thread）。线程和进程共享地址空间，但各自有独立的程序计数器、栈和寄存器上下文。切换线程比切换进程快得多。而协程（Coroutine）则更进一步，把调度权从内核态拿到了用户态，实现了微秒级别的切换开销。这章我们沿着"越来越轻"的路线，把这三者的区别和联系讲透。</p>
+
+        <p>先讲一个我遇到的性能案例。几年前我优化一个游戏服务器的网络模块，当时每个连接用一个pthread处理。服务器连接数从1000涨到5000时，延迟突然飙升了10倍。用perf分析后发现，超过一半的CPU时间花在了内核态的线程切换上——频繁的上下文切换导致cache疯狂miss。后来改成了基于epoll的事件驱动+有限线程池，同样处理5000连接，CPU占用反而下降了70%。这个教训让我深刻理解了"线程不是免费的"。</p>
+
+        <h2>线程：CPU调度的最小单位</h2>
+
+        <p>教科书上的经典定义：进程是资源分配的基本单位，线程是CPU调度的基本单位。这意味着什么？</p>
+
+        <p>一个进程可以包含多个线程，这些线程共享进程的地址空间（代码段、数据段、堆），但每个线程有自己的栈、寄存器和程序计数器。切换线程时，因为地址空间不变（页表不用换），TLB不用刷新，cache热数据也还在——所以线程切换的开销远小于进程切换。</p>
+
+        <table>
+            <tr><th>对比维度</th><th>进程</th><th>线程</th></tr>
+            <tr><td>地址空间</td><td>独立地址空间</td><td>共享进程地址空间</td></tr>
+            <tr><td>资源开销</td><td>大（独立PCB、页表、文件表）</td><td>小（只分配栈和寄存器上下文）</td></tr>
+            <tr><td>切换开销</td><td>高（TLB刷新、cache失效）</td><td>低（无需刷新地址空间）</td></tr>
+            <tr><td>数据共享</td><td>需要IPC（共享内存、管道等）</td><td>直接读写全局变量</td></tr>
+            <tr><td>隔离性</td><td>强（一个进程挂了不影响其他）</td><td>弱（一个线程crash可能导致整个进程崩溃）</td></tr>
+            <tr><td>创建速度</td><td>慢（需要复制/COW页表）</td><td>快（共享页表）</td></tr>
+        </table>
+
+        <p>看到"隔离性"这一行——线程因为共享地址空间，一个线程的非法内存访问（比如写野指针）可能直接破坏另一个线程的堆或栈。这也是为什么多线程编程远比多进程编程更需要小心。</p>
+
+        <div class="highlight">
+            <p><strong>关键认知</strong>：从内核的视角来看，它根本不知道"线程"这个概念。内核眼里只有"可调度的实体"——其实就是task_struct。但在Linux中，线程和进程的本质区别在于：多个线程之间共享了哪些CLONE_*标志。这一点我们马上细讲。</p>
+        </div>
+
+        <h2>Linux中线程就是轻量级进程</h2>
+
+        <p>在Linux的哲学里，没有"线程"和"进程"的严格区分——一切都是"任务"（task）。创建所谓的"线程"时，用的系统调用和创建进程一样都是 <code>clone()</code>，只不过传入了不同的标志位，决定了父子之间共享哪些资源。</p>
+
+        <p>这就引出了Linux线程模型最特殊的"艺术"——clone()的flags参数。</p>
+
+        <h3>clone()的flags艺术</h3>
+
+        <p>Linux内核中，创建进程和线程都通过 <code>clone()</code> 系统调用实现。区别只在于flags参数：</p>
+
+        <pre><code>// 创建进程：fork() 实际上调用 clone(SIGCHLD, 0)
+clone(SIGCHLD, 0);
+
+// 创建线程：pthread_create() 内部调用
+// clone(CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+//       CLONE_THREAD | CLONE_SETTLS | CLONE_PARENT_SETTID |
+//       CLONE_CHILD_CLEARTID | CLONE_SYSVSEM, ...)</code></pre>
+
+        <p>关键的flags含义如下：</p>
+
+        <table>
+            <tr><th>Flag</th><th>含义</th><th>共享了什么</th></tr>
+            <tr><td>CLONE_VM</td><td>共享地址空间</td><td>父子进程使用同一个mm_struct（页表）</td></tr>
+            <tr><td>CLONE_FS</td><td>共享文件系统信息</td><td>当前目录、umask等</td></tr>
+            <tr><td>CLONE_FILES</td><td>共享文件描述符表</td><td>打开的文件、socket等</td></tr>
+            <tr><td>CLONE_SIGHAND</td><td>共享信号处理函数</td><td>signal_struct</td></tr>
+            <tr><td>CLONE_THREAD</td><td>成为同一线程组</td><td>tgid相同（getpid()返回值相同）</td></tr>
+        </table>
+
+        <p>看到没有？pthread_create()创建线程时传入了 CLONE_VM，表示"我们共享地址空间"——这就是线程和进程最根本的区别。如果你创建一个子进程时<strong>不</strong>传递 CLONE_VM，那么它就是普通进程——有自己的地址空间。</p>
+
+        <div class="tip">
+            <p><strong>底层视角</strong>：在shell里执行 <code>ps -eLf</code>，你会看到每个线程都有一条记录，但同一进程的线程有相同的PID（tgid）和不同的LWP（Lightweight Process ID）。从内核角度看，每个LWP就是一个独立的task_struct——差别在于它们之间的task_struct共享了哪些资源指针。</p>
+        </div>
+
+        <h2>1:1 vs M:N 线程模型</h2>
+
+        <p>我们刚才说了，Linux内核里每个线程（轻量级进程）都是一个独立的调度实体（task_struct）。这意味着用户态创建的一个pthread，在内核中就对应一个可被独立调度的实体——这就是1:1线程模型。</p>
+
+        <p>但这不是唯一的实现方式。事实上，业界有三种主流的线程模型，各有取舍。</p>
+
+        <h3>多对一（M:1）线程模型</h3>
+        <p>多个用户态线程映射到一个内核态线程。线程的创建、切换全在用户态完成，不需要系统调用，速度快。但一个线程阻塞（如I/O）会导致整个进程阻塞，因为内核不知道用户态还有别的线程可以运行。这种模型在纯用户态线程库中比较常见（如早期的GNU Portable Threads），现在已经很少用了。</p>
+
+        <h3>一对一（1:1）线程模型</h3>
+        <p>每个用户线程对应一个内核线程。这是Linux上pthread的实现方式。优点是充分利用多核，一个线程阻塞不影响其他线程。缺点是每次线程操作（创建、切换）都需要系统调用，开销较大。Linux的NPTL（Native POSIX Threads Library）就是1:1模型的代表作。</p>
+
+        <h3>多对多（M:N）线程模型</h3>
+        <p>M个用户态线程映射到N个内核线程。结合了前两者的优点——用户态线程轻量切换、内核态线程充分利用多核。但实现复杂度极高，需要精巧的用户态调度器。既要在用户态管理M个线程的运行队列，又要处理内核线程的阻塞同步。</p>
+
+        <table>
+            <tr><th>特性</th><th>M:1（用户级）</th><th>1:1（内核级）</th><th>M:N（混合）</th></tr>
+            <tr><td>创建开销</td><td>极低（用户态）</td><td>高（系统调用）</td><td>中等</td></tr>
+            <tr><td>切换开销</td><td>低</td><td>高（陷入内核）</td><td>中低</td></tr>
+            <tr><td>多核利用</td><td>不能</td><td>能</td><td>能</td></tr>
+            <tr><td>一个线程阻塞</td><td>全进程阻塞</td><td>仅该线程阻塞</td><td>仅该内核线程阻塞</td></tr>
+            <tr><td>代表</td><td>GNU Pth（已废弃）</td><td>Linux NPTL (pthread)</td><td>Go Goroutine</td></tr>
+        </table>
+
+        <h3>Go Goroutine的M:N调度</h3>
+        <p>Go语言的Goroutine是M:N模型最成功的工业实践。Go运行时维护一个M（Machine，内核线程）对N（Goroutine，用户态协程）的映射，用G（Goroutine）、M（Machine）、P（Processor）三个结构体实现了高效的M:N调度。Go的调度器在程序主动让出（channel操作、time.Sleep、系统调用）时自动切换Goroutine，避免了内核态切换的开销。</p>
+
+        <div class="highlight">
+            <p><strong>性能对比</strong>：创建一个pthread大约需要微秒级别的时间和数KB的栈空间（可设置最小栈）。而创建一个Goroutine的开销仅为约4KB的栈和不到百纳秒的创建时间。这也是为什么Go可以轻松启动数十万个Goroutine，而同等数量的pthread会导致系统资源耗尽。</p>
+        </div>
+
+        <h2>协程的本质</h2>
+
+        <p>讲完了线程，我们来聊聊协程（Coroutine）。其实协程的思路比线程更古老——它最早可以追溯到1958年Melvin Conway的论文。协程的核心思想就是：让函数可以暂停执行，在某个时刻恢复执行。</p>
+
+        <p>线程是抢占式调度的——内核在任意时刻都可以打断一个线程的执行，切换到另一个线程。协程是协作式调度的——协程自己决定何时让出执行权（yield），操作系统没有能力在任意时刻打断一个协程。</p>
+
+        <h3>有栈协程 vs 无栈协程</h3>
+
+        <p>协程的两种实现方式，是很多初学者容易混淆的。我们直接对比：</p>
+
+        <table>
+            <tr><th>维度</th><th>有栈协程（Stackful）</th><th>无栈协程（Stackless）</th></tr>
+            <tr><td>实现方式</td><td>拥有独立的调用栈</td><td>复用调用者的栈（状态用对象保存）</td></tr>
+            <tr><td>可嵌套调用</td><td>可以（在子函数中yield）</td><td>不可以（只能在顶层函数中yield）</td></tr>
+            <tr><td>内存开销</td><td>较大（需要预分配栈空间）</td><td>极小（几字节的状态对象）</td></tr>
+            <tr><td>语言代表</td><td>Go Goroutine、C++ Boost.Coroutine</td><td>Python async/await、Rust async、C++20 coroutine</td></tr>
+        </table>
+
+        <p>Go的Goroutine是有栈协程。每个Goroutine有自己的栈（初始4KB，动态增长），可以在任意嵌套函数中调用 <code>runtime.Gosched()</code> 让出。Python的async/await是无栈协程——它把协程的"暂停点"用状态机表示，不维护独立的调用栈。</p>
+
+        <h3>async/await的底层原理</h3>
+
+        <p>无栈协程背后的实现机制其实是一个编译器驱动的状态机变换。以Python为例：</p>
+
+        <pre><code>async def fetch_data():
+    # 当执行到这里时，控制权返回到事件循环
+    data = await http_request(url_1)
+    # 当http_request完成时，从这里继续执行
+    result = await http_request(url_2)
+    return result
+
+# 编译器实际上把上面的函数变换成类似这样的状态机：
+class fetch_data__coroutine:
+    def __init__(self):
+        self.__state = 0
+
+    def __next__(self):
+        if self.__state == 0:
+            self.__state = 1
+            return http_request(url_1)   # await点1
+        elif self.__state == 1:
+            self.__state = 2
+            self.__data = <await结果>
+            return http_request(url_2)   # await点2
+        elif self.__state == 2:
+            self.__result = ...          # 最终结果
+            raise StopIteration</code></pre>
+
+        <p>每次await都是一个"暂停点"，协程把当前状态保存到一个状态对象中，返回控制权给事件循环。事件循环（如Python的asyncio或Node.js的libuv）负责监控所有等待的I/O事件，一旦某个事件就绪，就唤醒对应的协程从暂停点继续执行。整个过程完全在用户态完成，不需要内核参与。</p>
+
+        <div class="tip">
+            <p><strong>本质洞察</strong>：协程说到底是把"控制流的切换"从内核态拿到了用户态。它利用编译器（状态机变换）或运行时（独立栈+寄存器保存）来实现函数执行的中断和恢复。对于I/O密集型的应用（比如Web服务器），协程可以轻松管理数十万并发连接——这是线程模型难以企及的。</p>
+        </div>
+
+        <p>回顾一下这条"轻量化"的演进路线：进程→线程→协程。进程提供最完善的隔离但切换最重，线程共享地址空间减轻了切换代价，协程则彻底把调度放到了用户态实现了微秒级切换。没有哪种方案是压倒性最优的——隔离、开销、复杂度之间的权衡，取决于你的具体应用场景。</p>
+
+        <p>下一章，我们把视角从"谁来执行"转向"谁决定谁先执行"——CPU调度。当一个系统里有几十个可运行的线程时，操作系统如何决定下一次该运行哪一个？公平、高效、低延迟，这三者怎么平衡？Linux的调度器从O(n)到O(1)到CFS再到EEVDF，每一次变革都带来了什么？下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

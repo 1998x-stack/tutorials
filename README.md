@@ -1,12 +1,12 @@
 # 1998x-stack Tutorials
 
-A collection of 53 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 54 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
 ## Tutorials by Discipline
 
-### AI / 数据科学 (19 courses)
+### AI / 数据科学 (20 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -29,6 +29,7 @@ A collection of 53 free, comprehensive technical tutorials in Chinese — from f
 | 🖼️ | 计算机视觉经典模型 · 从入门到精通 | 28 | [CV-tutorial](https://1998x-stack.github.io/CV-tutorial/) |
 | 🤖 | AIGC生成模型 · 从入门到精通 | 28 | [aigc-tutorial](https://1998x-stack.github.io/aigc-tutorial/) |
 | 📊 | LLM预训练数据集 · 从入门到精通 | 28 | [pretraining-dataset-tutorial](https://1998x-stack.github.io/pretraining-dataset-tutorial/) |
+| 📊 | AI神经网络数据集分析与实战 · 从入门到精通 | 28 | [dataset-analysis-tutorial](https://1998x-stack.github.io/dataset-analysis-tutorial/) |
 
 ### 数学基础 (9 courses)
 

@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 LangGraph状态图 - LLM Agent 工程实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Agent技术概述</a></li>
+            <li><a href="02.html">第2章 感知-思考-行动循环</a></li>
+            <li><a href="03.html">第3章 开发环境搭建</a></li>
+            <li><a href="04.html">第4章 Prompt工程与指令设计</a></li>
+            <li><a href="05.html">第5章 工具调用与Function Calling</a></li>
+            <li><a href="06.html">第6章 记忆系统设计</a></li>
+            <li><a href="07.html">第7章 多Agent协作模式</a></li>
+            <li><a href="08.html">第8章 LangChain 1.x 统一API</a></li>
+            <li><a href="09.html">第9章 中间件系统</a></li>
+            <li><a href="10.html" class="active">第10章 LangGraph状态图</a></li>
+            <li><a href="11.html">第11章 条件分支与循环</a></li>
+            <li><a href="12.html">第12章 RAG Agent实战</a></li>
+            <li><a href="13.html">第13章 多Agent编排</a></li>
+            <li><a href="14.html">第14章 生产化部署与监控</a></li>
+            <li><a href="15.html">第15章 AutoGen核心架构</a></li>
+            <li><a href="16.html">第16章 GroupChat与协作模式</a></li>
+            <li><a href="17.html">第17章 代码执行与安全沙箱</a></li>
+            <li><a href="18.html">第18章 从AutoGen到MAF</a></li>
+            <li><a href="19.html">第19章 OpenManus分层架构</a></li>
+            <li><a href="20.html">第20章 工具生态与MCP协议</a></li>
+            <li><a href="21.html">第21章 CrewAI角色化开发</a></li>
+            <li><a href="22.html">第22章 厂商原生SDK</a></li>
+            <li><a href="23.html">第23章 测试策略与质量保障</a></li>
+            <li><a href="24.html">第24章 成本优化与性能调优</a></li>
+            <li><a href="25.html">第25章 安全治理与合规</a></li>
+            <li><a href="26.html">第26章 项目：智能客服系统</a></li>
+            <li><a href="27.html">第27章 项目：自动化研究助手</a></li>
+            <li><a href="28.html">第28章 框架选型与趋势展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第10章 LangGraph 状态图</h2>
+
+<p>前两章我们都在 LangChain 1.x 的体系内打转——统一 API 搞定了组件标准化，中间件系统搞定了横切关注点。但当你真正去搭建一个复杂的 Agent 系统时，很快就会撞上线性链的天花板：传统的链式结构（Chain）只能按固定顺序执行，处理不了分支、循环、并行这些真实世界的复杂流程。</p>
+
+<p>举个例子：一个智能客服系统需要先判断用户意图（查询/投诉/退货），不同意图走不同的处理流程；在退货流程中可能需要多轮确认；如果用户有历史投诉记录，还要并行查询历史数据。用线性链来表达这些逻辑，要么疯狂嵌套条件判断，要么把整个逻辑塞到一个 Agent 里——两种方式都让代码变得难以维护和调试。</p>
+
+<p><strong>LangGraph</strong> 正是为解决这个问题而生的。它把 Agent 系统建模为一个<strong>有向状态图（StateGraph）</strong>——节点是处理步骤，边是状态转移条件。这让复杂工作流的表达变得自然且可维护。本章基于 LangGraph v1.1.10，带你从零上手这个强大的编排引擎。</p>
+
+<div class="highlight">
+    <strong>定位澄清：</strong> LangGraph 不是 LangChain 的替代品，而是它的"超集"。LangChain 擅长线性的"链"，LangGraph 擅长图结构的"流"。两者在 1.x 生态中无缝集成——LangGraph 的节点内部可以运行任何 LangChain Runnable。
+</div>
+
+<h2>10.1 有向图编排 vs 线性链</h2>
+
+<p>先来看一个直观的对比。传统链式架构中，流程是硬编码的：</p>
+
+<pre><code># 链式架构：线性执行
+def customer_service_chain(user_input):
+    intent = classify_intent(user_input)  # 第一步：意图识别
+    if intent == "query":
+        return handle_query(user_input)    # 第二步：处理查询
+    elif intent == "complaint":
+        return handle_complaint(user_input)
+    elif intent == "return":
+        return handle_return(user_input)
+    # 每增加一种意图，就要修改函数逻辑</code></pre>
+
+<p>而在 LangGraph 中，同样的逻辑被建模为状态图——每个节点独立，节点之间的连接清晰可见：</p>
+
+<pre><code># LangGraph：图结构
+# 节点：classify → [query | complaint | return] → respond
+# 边：根据 classify 的结果动态选择路径
+# 增加新意图不需要修改已有节点逻辑，只需添加节点和边</code></pre>
+
+<table>
+    <thead>
+        <tr>
+            <th>维度</th>
+            <th>线性链 (Chain)</th>
+            <th>状态图 (StateGraph)</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>流程拓扑</td>
+            <td>固定顺序，线性或树形</td>
+            <td>任意有向图，支持分支、循环、并行</td>
+        </tr>
+        <tr>
+            <td>状态管理</td>
+            <td>隐式（变量在链间传递）</td>
+            <td>显式（全局 State 对象）</td>
+        </tr>
+        <tr>
+            <td>分支逻辑</td>
+            <td>代码中的 if/else</td>
+            <td>Conditional Edge（声明式）</td>
+        </tr>
+        <tr>
+            <td>循环能力</td>
+            <td>不支持（需要外部 while 循环）</td>
+            <td>原生支持（边可以指回前面的节点）</td>
+        </tr>
+        <tr>
+            <td>可调试性</td>
+            <td>靠日志和断点</td>
+            <td>支持 Checkpoint 回放、Time-travel</td>
+        </tr>
+        <tr>
+            <td>可扩展性</td>
+            <td>改流程需改代码</td>
+            <td>增删节点/边即可</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="tip">
+    <strong>什么时候用 Chain，什么时候用 Graph？</strong> 简单规则：如果流程是"A → B → C → D"这种直线，Chain 就够了；一旦出现"A → {B|C|D}"的分支、循环、并行，或者"E → A → E"的自循环，就该上 LangGraph 了。
+</div>
+
+<h2>10.2 StateGraph 核心概念：State/Node/Edge</h2>
+
+<p>LangGraph 围绕三个核心概念构建：</p>
+
+<ul>
+    <li><strong>State（状态）：</strong> 整个图共享的数据对象。每个节点读取和写入 State，State 的变化驱动图的流转。State 是一个 TypedDict 或 Pydantic 模型。</li>
+    <li><strong>Node（节点）：</strong> 图中的处理单元。每个节点是一个函数，接收当前 State，返回更新后的 State（或部分 State）。</li>
+    <li><strong>Edge（边）：</strong> 节点之间的连接。有两种类型——普通边（无条件从一个节点到另一个节点）和条件边（根据 State 内容动态选择下一个节点）。</li>
+</ul>
+
+<pre><code>from typing import TypedDict, Literal
+from langgraph.graph import StateGraph
+
+# 1. 定义 State
+class AgentState(TypedDict):
+    messages: list       # 对话历史
+    intent: str          # 用户意图
+    data: dict           # 查询到的数据
+    has_error: bool      # 是否出错
+
+# 2. 定义 Node 函数
+def classify_intent(state: AgentState) -> dict:
+    """意图识别节点"""
+    last_msg = state["messages"][-1]["content"]
+    # 调用 LLM 识别意图 ...
+    return {"intent": "query"}  # 返回要更新的 State 字段
+
+def handle_query(state: AgentState) -> dict:
+    """处理查询"""
+    # 执行查询逻辑 ...
+    return {"data": {"result": "查询结果"}, "has_error": False}
+
+# 3. 定义路由函数（条件边）
+def route_by_intent(state: AgentState) -> Literal["query", "complaint", "return"]:
+    """根据意图动态路由"""
+    return state["intent"]
+
+# 4. 构建图
+graph = StateGraph(AgentState)
+
+# 添加节点
+graph.add_node("classify", classify_intent)
+graph.add_node("query", handle_query)
+graph.add_node("complaint", handle_complaint)
+graph.add_node("return", handle_return)
+graph.add_node("respond", generate_response)
+
+# 添加边
+graph.set_entry_point("classify")               # 入口
+graph.add_conditional_edges(                    # 条件边
+    "classify",                                 # 源节点
+    route_by_intent,                            # 路由函数
+    path_map={                                  # 路由映射
+        "query": "query",
+        "complaint": "complaint",
+        "return": "return",
+    }
+)
+graph.add_edge("query", "respond")              # 普通边
+graph.add_edge("complaint", "respond")
+graph.add_edge("return", "respond")
+graph.set_finish_point("respond")               # 出口
+
+# 5. 编译并运行
+app = graph.compile()
+result = app.invoke({
+    "messages": [{"role": "user", "content": "我想退换货"}],
+})</code></pre>
+
+<div class="highlight">
+    <strong>状态更新机制：</strong> 每个 Node 函数返回的不是完整的 State，而是 State 中需要更新的字段。LangGraph 使用"递归合并"（recursive merge）策略——返回的字典只会覆盖 State 中同名的键，不会清除其他字段。这意味着你可以让不同节点各自负责 State 的不同部分，互不干扰。
+</div>
+
+<h2>10.3 构建第一个 LangGraph Agent</h2>
+
+<p>现在我们来构建一个真正的 Agent——它能在"思考-行动-观察"之间循环，直到完成任务。这正是 ReAct 模式的图结构实现：</p>
+
+<pre><code>from langgraph.graph import StateGraph
+from langchain.chat_models import ChatOpenAI
+from langchain.tools import tool
+from typing import TypedDict, Literal
+
+# --- 工具 ---
+
+@tool
+def search_web(query: str) -> str:
+    """搜索网络"""
+    return f"搜索结果：{query}相关..."
+
+@tool
+def calculate(expr: str) -> str:
+    """数学计算"""
+    return str(eval(expr))
+
+# --- State ---
+
+class ReActState(TypedDict):
+    messages: list
+    next_action: str       # "tool_call" 或 "respond"
+    tool_calls: list
+
+# --- 节点 ---
+
+def agent_node(state: ReActState) -> dict:
+    """Agent 思考节点：调用 LLM 决定下一步"""
+    model = ChatOpenAI(model="gpt-4o").bind_tools([search_web, calculate])
+    response = model.invoke(state["messages"])
+
+    if response.tool_calls:
+        return {
+            "messages": [response],
+            "next_action": "tool_call",
+            "tool_calls": response.tool_calls,
+        }
+    else:
+        return {
+            "messages": [response],
+            "next_action": "respond",
+        }
+
+def tool_node(state: ReActState) -> dict:
+    """执行工具调用并返回结果"""
+    tool_map = {"search_web": search_web, "calculate": calculate}
+    results = []
+
+    for tc in state["tool_calls"]:
+        result = tool_map[tc.name].invoke(tc.args)
+        results.append({
+            "role": "tool",
+            "content": result,
+            "tool_call_id": tc.id,
+        })
+
+    return {
+        "messages": results,
+        "next_action": "agent",
+    }
+
+# --- 路由 ---
+
+def should_continue(state: ReActState) -> Literal["tool", "respond"]:
+    """决定是继续调用工具还是返回结果"""
+    if state["next_action"] == "tool_call":
+        return "tool"
+    return "respond"
+
+# --- 构建图 ---
+
+graph = StateGraph(ReActState)
+
+graph.add_node("agent", agent_node)
+graph.add_node("tool", tool_node)
+
+graph.set_entry_point("agent")
+graph.add_conditional_edges(
+    "agent",
+    should_continue,
+    {"tool": "tool", "respond": "__end__"},
+)
+graph.add_edge("tool", "agent")  # 工具执行完后回到 agent
+
+app = graph.compile()
+
+# --- 执行 ---
+
+result = app.invoke({
+    "messages": [{"role": "user", "content": "搜索一下今天的AI新闻，然后计算 256*1024"}],
+})
+print(result["messages"][-1]["content"])</code></pre>
+
+<div class="tip">
+    <strong>关键洞察：</strong> 这个 ReAct Agent 的核心是一个"agent → tool → agent → tool → ... → respond"的循环结构。<code>graph.add_edge("tool", "agent")</code> 这一行让 tool 节点执行完后自动回到 agent 节点，形成循环。直到 agent 节点认为任务完成（不调用工具），条件边才把流程导向终点。这种"循环直到完成"的模式，正是 LangGraph 相比线性链的最大优势。
+</div>
+
+<h2>10.4 Checkpoint 与状态持久化</h2>
+
+<p>LangGraph 最强大的特性之一是其<strong>Checkpoint（检查点）</strong>机制。每次图执行经过一个节点时，LangGraph 可以自动保存当前 State 的快照。这意味着：你可以暂停执行、重启执行、回溯到任意节点的状态。这对于长时运行的 Agent、需要人工干预的场景、以及调试来说，都是革命性的。</p>
+
+<pre><code>from langgraph.checkpoint import MemorySaver
+from langgraph.checkpoint.postgres import PostgresSaver
+
+# 方式一：内存存储（开发和测试用）
+memory = MemorySaver()
+app = graph.compile(checkpointer=memory)
+
+# 执行时指定线程 ID（用于关联同一个对话的多个消息）
+config = {"configurable": {"thread_id": "user-123-conversation-1"}}
+result = app.invoke(
+    {"messages": [{"role": "user", "content": "帮我查一下我的订单"}]},
+    config=config,
+)
+
+# 方式二：PostgreSQL 存储（生产环境）
+postgres_saver = PostgresSaver.from_conn_string(
+    "postgresql://user:pass@localhost:5432/langgraph"
+)
+await postgres_saver.setup()  # 创建必要的表
+app = graph.compile(checkpointer=postgres_saver)
+
+# 恢复历史状态
+saved_states = postgres_saver.list(thread_id="user-123-conversation-1")
+latest_state = postgres_saver.get(
+    thread_id="user-123-conversation-1",
+    checkpoint_id="checkpoint-xyz"
+)</code></pre>
+
+<table>
+    <thead>
+        <tr>
+            <th>存储后端</th>
+            <th>适用场景</th>
+            <th>持久化</th>
+            <th>性能</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>MemorySaver</strong></td>
+            <td>开发测试、单进程</td>
+            <td>否（进程重启丢失）</td>
+            <td>极快</td>
+        </tr>
+        <tr>
+            <td><strong>PostgresSaver</strong></td>
+            <td>生产环境、多实例部署</td>
+            <td>是</td>
+            <td>中等（需网络 IO）</td>
+        </tr>
+        <tr>
+            <td><strong>RedisSaver</strong></td>
+            <td>高吞吐、低延迟场景</td>
+            <td>取决于配置（可持久化）</td>
+            <td>极快</td>
+        </tr>
+        <tr>
+            <td><strong>SQLiteSaver</strong></td>
+            <td>单机部署、嵌入式</td>
+            <td>是</td>
+            <td>快（本地文件）</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="warning">
+    <strong>踩坑实录：</strong> 我们在生产环境刚上 LangGraph 时犯了一个低级错误——没有给 thread_id 设置 TTL（过期时间）。结果每个用户对话的 Checkpoint 都在 PostgreSQL 中永久保留，三个月后数据库暴涨了 200GB。后来加了自动清理策略：对话结束后 7 天删除 Checkpoint，活跃对话的 Checkpoint 只保留最近 50 个节点。如果你的 Checkpoint 存储持续增长，别忘了配置清理策略。
+</div>
+
+<h2>10.5 Postgres/Redis/SQLite 后端配置</h2>
+
+<p>不同场景下 Checkpoint 后端的配置方式也不相同。下面是三种主要后端的配置示例：</p>
+
+<pre><code>from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.redis import RedisSaver
+from langgraph.checkpoint.sqlite import SQLiteSaver
+
+# --- PostgreSQL（推荐生产使用） ---
+
+pg_saver = PostgresSaver.from_conn_string(
+    conn_string="postgresql://user:pass@host:5432/langgraph",
+    # 自动建表（首次执行需要）
+    auto_setup=True,
+    # 连接池配置
+    pool_size=10,
+    max_overflow=20,
+    # Checkpoint 保留策略
+    retention={
+        "max_checkpoints_per_thread": 50,    # 每个线程最多保留 50 个
+        "ttl_days": 7,                        # 自动清理超过 7 天的
+    },
+)
+
+# --- Redis（高性能场景） ---
+
+redis_saver = RedisSaver.from_url(
+    url="redis://localhost:6379/0",
+    # 持久化模式（AOF 或 RDB）
+    persistence_mode="aof",
+    # 自动过期（与 PostgreSQL 的 retention 类似）
+    default_ttl=3600,  # 1 小时过期
+)
+
+# --- SQLite（单机/开发使用） ---
+
+sqlite_saver = SQLiteSaver.from_path(
+    path="./langgraph_checkpoints.db",
+    # 自动清理
+    vacuum_on_exit=True,
+)</code></pre>
+
+<div class="tip">
+    <strong>生产选型建议：</strong>
+    <ul>
+        <li><strong>单实例部署：</strong> SQLite 完全够用，配置最简单。</li>
+        <li><strong>多实例部署（Kubernetes）：</strong> PostgreSQL 是标准选择，支持事务和并发。</li>
+        <li><strong>高吞吐实时场景：</strong> Redis 做 Checkpoint 存储 + PostgreSQL 做长期归档，两层架构。</li>
+        <li><strong>注意：</strong> Checkpoint 的大小直接影响性能。一个典型的 Checkpoint 可能包含几 KB 到几百 KB 的数据（取决于 messages 的长度）。设计 State 时要注意控制大小。</li>
+    </ul>
+</div>
+
+<h2>10.6 可视化与调试</h2>
+
+<p>LangGraph 内置了图可视化和调试工具，这在实际开发中非常有价值。你可以直观地看到 Agent 的执行路径、每个节点的状态变化、以及每个 Checkpoint 的内容。</p>
+
+<pre><code>from langgraph.checkpoint import MemorySaver
+from IPython.display import Image, display
+
+# 1. 可视化图结构
+app = graph.compile(checkpointer=MemorySaver())
+
+# 生成 Mermaid 图
+png_data = app.get_graph().draw_mermaid_png()
+with open("agent_graph.png", "wb") as f:
+    f.write(png_data)
+# 可以用浏览器打开 agent_graph.png 查看
+
+# 2. 流式执行 + 调试信息
+for event in app.stream(
+    {"messages": [{"role": "user", "content": "查天气并计算"}]},
+    config={"configurable": {"thread_id": "debug-1"}},
+):
+    # 每个节点执行完成后都会产生一个事件
+    for node_name, state in event.items():
+        print(f"[{node_name}] State 更新: {state}")
+
+# 3. 回溯 Checkpoint 历史
+checkpoints = list(app.checkpointer.list(thread_id="debug-1"))
+for cp in checkpoints:
+    print(f"Checkpoint {cp.checkpoint_id}:")
+    print(f"  节点: {cp.node_name}")
+    print(f"  状态: {cp.state}")
+    print("---")
+
+# 4. LangSmith 集成
+# 设置环境变量后，所有执行自动 Trace 到 LangSmith
+# export LANGCHAIN_TRACING_V2=true
+# export LANGCHAIN_PROJECT=my-langgraph-agent</code></pre>
+
+<div class="highlight">
+    <strong>调试技巧：</strong> 在开发阶段，建议使用 <code>graph.stream()</code> 而非 <code>graph.invoke()</code>。stream 会在每个节点执行完成后立即返回当前状态，让你看到 Agent 每一步的"思考过程"——观察它什么时候调用工具、工具返回了什么、模型如何理解工具结果。这种细粒度的可见性，是线性链架构很难提供的。
+</div>
+
+<h2>本章小结</h2>
+
+<p>LangGraph 将 Agent 系统的编排从"线性脚本"升级到了"有向状态图"的层次。通过 State/Node/Edge 这三个核心抽象，你可以用声明式的方式表达任意复杂的业务流程——分支、循环、并行、子图嵌套，无所不能。Checkpoint 机制更是为生产部署提供了状态持久化、断点续跑和 Time-travel 调试的能力。</p>
+
+<p>掌握了基础的状态图构建之后，下一章我们将进一步探索 LangGraph 的高级特性——<strong>条件分支与循环</strong>。你会学到如何使用 conditional_edge 实现动态路由，如何构建自反射式的循环 Agent，以及如何用 Time-travel 调试功能"穿越"回任意历史节点重新执行。</p>
+
+<div class="footer-nav">
+    <a href="09.html">← 上一章</a>
+    <a href="index.html">📖 返回目录</a>
+    <a href="11.html">下一章 →</a>
+</div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

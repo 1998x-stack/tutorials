@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第25章 源码级问题定位实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html" class="active">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第25章：源码级问题定位实战</h2>
+
+        <p>大家好，我是你们的讲师。前面两章，我们学习了诊断工具链（第23章）和生产环境踩坑指南（第24章）——你知道了用什么工具，也知道了常见的坑是什么。但如果你真的遇到一个"文档里没有写"的问题呢？比如 Redis 突然在凌晨 3 点崩溃，core dump 文件摆在眼前，你只有一份源码和一个 GDB 提示符。这时候，<strong>工具的使用者</strong>和<strong>源码的阅读者</strong>之间的差距就体现出来了。</p>
+
+        <p>这一章我们不教你怎么用工具——而是教你<strong>怎么用工具直接看源码</strong>。我们将从最底层出发：用 GDB 调试运行中的 Redis、用 strace 追踪每个系统调用的耗时、用 core dump 反推崩溃时的现场。然后通过三个完整的实战案例，展示从现象到根因的完整推理链条。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>调试工具</th>
+                    <th>适用场景</th>
+                    <th>性能开销</th>
+                    <th>学习曲线</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>GDB 附加调试</td>
+                    <td>运行时状态查看、逻辑分支追踪</td>
+                    <td>高（暂停进程）</td>
+                    <td>中</td>
+                </tr>
+                <tr>
+                    <td>Core Dump 分析</td>
+                    <td>崩溃后 root cause 分析</td>
+                    <td>无（事后分析）</td>
+                    <td>高</td>
+                </tr>
+                <tr>
+                    <td>strace 系统调用追踪</td>
+                    <td>IO 延迟、系统调用级瓶颈</td>
+                    <td>高（-c 统计模式较低）</td>
+                    <td>低</td>
+                </tr>
+                <tr>
+                    <td>perf + 火焰图</td>
+                    <td>CPU 热点分析</td>
+                    <td>中</td>
+                    <td>中</td>
+                </tr>
+                <tr>
+                    <td>lsof / /proc 文件系统</td>
+                    <td>文件描述符泄漏、内存映射查看</td>
+                    <td>低</td>
+                    <td>低</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>GDB 实战调试</h2>
+
+        <p>GDB（GNU Debugger）是 C 语言调试的瑞士军刀。很多 Redis 使用者从来没想过可以用 GDB 来"看"一个运行中的 Redis 实例内部发生了什么。下面是最常用的调试流程。</p>
+
+        <h3>附加到运行中的 Redis</h3>
+
+        <pre><code># 找到 Redis 的 PID
+pgrep redis-server
+# 输出: 12345
+
+# 启动 GDB 并附加（需要编译时带 -g 符号）
+gdb -p 12345
+
+# 常见问题：如果没有调试符号，GDB 只能看到地址看不到函数名
+# 解决方案：在运行机器上也要有带符号的二进制
+# 可以将编译机的 redis-server 拷贝到生产机对应路径</code></pre>
+
+        <h3>断点调试命令处理流程</h3>
+        <p>如果你想追踪"一条 SET 命令从接收到返回的完整路径"，可以在关键函数上设置断点：</p>
+
+        <pre><code>(gdb) b processCommand      # 命令执行前的校验逻辑
+(gdb) b setCommand          # SET 命令的具体实现
+(gdb) b addReply            # 回复客户端
+(gdb) c                     # 继续运行
+
+# 当断点触发时，查看当前 client 的状态
+(gdb) p *c                  # 打印 client 结构体
+(gdb) p c->argc             # 命令参数个数
+(gdb) p c->argv[0]->ptr     # 命令名（SDS 字符串）
+(gdb) p c->argv[1]->ptr     # 第一个参数（如 key）</code></pre>
+
+        <p>查看 <code>redisObject</code> 的内部状态是调试中的高频操作：</p>
+
+        <pre><code># 打印 redisObject 的详细信息
+(gdb) p *(robj*)c->argv[1]
+# $1 = {type = 0, encoding = 0, lru = 1234567, refcount = 1,
+#        ptr = 0x7f1234567890}
+
+# 对于不同编码的 robj，ptr 指向的结构不同：
+# OBJ_ENCODING_RAW   -> ptr = (sds)
+# OBJ_ENCODING_INT   -> ptr = (long)
+# OBJ_ENCODING_HT    -> ptr = (dict)
+
+# 查看 SDS 字符串内容
+(gdb) p (sds)c->argv[1]->ptr
+# $2 = (sds) 0x7f1234567890 "mykey"
+(gdb) p *(sdshdr8 *)c->argv[1]->ptr
+# $3 = {len = 5, alloc = 5, flags = 1 '\001', buf = "mykey"}</code></pre>
+
+        <div class="tip">
+            <strong>小贴士：</strong>GDB 中可以使用 <code>~/.gdbinit</code> 文件预定义一些常用宏，减少每次输入冗长的命令。例如定义一个 <code>pro</code> 命令来打印 robj：<code>define pro\n print (robj *)$arg0\n end</code>。你还可以把 <code>server.h</code> 中的常用类型定义写进去，但更好的方式是用 <code>gdb --cd=./src -p PID</code> 让 GDB 自动加载编译目录下的符号文件。
+        </div>
+
+        <h3>条件断点</h3>
+        <p>当你想在特定条件下暂停（比如拦截某个具体的 key），条件断点非常有用：</p>
+
+        <pre><code># 只有当命令参数超过 5 个时才停住（怀疑某个 big 命令）
+(gdb) b processCommand if c->argc > 5
+
+# 只有当操作的是 "blocked_user" 这个 key 时才停住
+(gdb) b setCommand if strstr((char*)c->argv[1]->ptr, "blocked_user") != NULL
+
+# 查看调用栈
+(gdb) bt
+# 显示：processCommand → getNodeByQuery → clusterRedirectClient → ...</code></pre>
+
+        <p>条件断点可以让你在千万次 SET 操作中精准地抓住"有问题的那一次"，而不需要反复暂停和手动检查。</p>
+
+        <h2>Core Dump 分析</h2>
+
+        <p>当 Redis 崩溃时，如果系统配置了 core dump 生成，操作系统会将进程退出时的内存映像写入一个 core 文件。这是<strong>事后分析崩溃根因</strong>最强大的方式——你能看到崩溃那一瞬间所有线程的调用栈、变量的值、内存中的数据。</p>
+
+        <h3>配置 Core Dump 生成</h3>
+
+        <pre><code># 检查 core dump 配置
+ulimit -c                 # 如果输出 0，表示 core dump 被禁用
+ulimit -c unlimited       # 临时启用（当前 shell 有效）
+
+# 永久配置（写入 /etc/security/limits.conf 或 systemd unit）
+# * soft core unlimited
+
+# 设置 core dump 文件路径和命名格式（选做）
+echo "/tmp/core-%e-%p-%t" > /proc/sys/kernel/core_pattern</code></pre>
+
+        <h3>分析 Core Dump</h3>
+
+        <pre><code># 用 GDB 加载 core dump
+gdb /path/to/redis-server /path/to/core.redis-server.12345
+
+# 查看崩溃时的线程状态
+(gdb) info threads
+# 找到崩溃线程（通常标有 #0 或 LWP）
+
+# 切换到崩溃线程
+(gdb) thread 1
+
+# 查看崩溃时的调用栈
+(gdb) bt
+#0  __GI_raise (sig=sig@entry=6) at ../sysdeps/unix/sysv/linux/raise.c:50
+#1  0x00007f8b2c3a88b3 in __GI_abort () at abort.c:79
+#2  0x00007f8b2c3a87a8 in __assert_fail_base () at assert.c:92
+#3  0x00007f8b2c3a902a in __assert_fail () at assert.c:101
+#4  0x0000000000456789 in zmalloc (size=140736381273632) at zmalloc.c:68
+#5  0x0000000000423abc in sdsnewlen (init=NULL, initlen=5) at sds.c:87
+#6  0x0000000000467def in processCommand (c=0x7f8b1c001234) at server.c:3456
+
+# 查看关键帧的局部变量
+(gdb) frame 4
+(gdb) p size
+# $1 = 140736381273632  —— 异常大的 size！（接近 128TB，明显是个野指针）
+
+# 查看导致崩溃的 client 信息
+(gdb) frame 6
+(gdb) p c->argc
+(gdb) p c->cmd->name</code></pre>
+
+        <p>框架级崩溃原因反推：</p>
+        <ul>
+            <li>如果 bt 显示在 <code>zmalloc</code> 中 abort：检查调用 zmalloc 时的 size 是否异常（野指针或整数溢出）。</li>
+            <li>如果 bt 显示在 <code>dictFind</code> 中 segfault：通常是 <code>dict</code> 指针被误释放或覆盖——检查是否有模块或 Lua 脚本不小心改写了 dict 结构体。</li>
+            <li>如果 bt 显示在 <code>addReply</code> 中 assert：说明输出缓冲区写入越界，可能是 client 结构体损坏。</li>
+            <li>如果 bt 显示在 <code>epoll_wait</code> 中收到 SIGSEGV：往往是文件描述符被关闭后仍被引用，属于内存释放后使用（use-after-free）错误——这种问题最棘手，需要结合源码仔细分析。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>实战技巧：</strong>如果谁问你是如何定位一个 Redis core dump 的，99% 的情况你要做的就是三件事：<code>bt</code>（看崩溃栈）、<code>frame N</code>（跳到关键帧）、<code>p variable</code>（打印核心里涉及的变量值）。这三步能覆盖 90% 的崩溃场景。剩余 10% 需要结合源码仔细推理——比如崩溃在 <code>freeMemoryIfNeeded</code> 中，但崩溃原因是数据结构不一致而不是内存不足，这就需要你阅读 <code>evict.c</code> 中该函数的完整逻辑来找到哪个先决条件没有被满足。
+        </div>
+
+        <h2>strace 系统调用追踪</h2>
+
+        <p>strace 可以追踪 Redis 进程的所有系统调用及其耗时。当你怀疑问题出在操作系统层面（IO 延迟、内存分配、网络栈）而不是 Redis 逻辑本身时，strace 是最直接的证据。</p>
+
+        <h3>追踪文件 IO</h3>
+
+        <pre><code># 追踪 Redis 的所有文件写入和 fsync 操作
+strace -p `pgrep redis-server` -e trace=write,fsync,fdatasync -T 2>&1 | head -20
+
+# 输出示例：
+# [pid 12345] write(9, "REDIS0009úredis-ver^E7.2.0...", 4096) = 4096 <0.000012>
+# [pid 12345] fsync(9)                   = 0 <0.045231>
+# [pid 12345] write(6, "*3\r\n$3\r\nSET\r\n...", 128) = 128 <0.000008>
+# [pid 12345] fsync(6)                   = 0 <0.002134></code></pre>
+
+        <p>看到 <code>fsync</code> 耗时 45ms 了吗？这就是 AOF 配置为 <code>appendfsync always</code> 时的代价——每次写操作都要等待磁盘 flush 完成。如果改为 <code>everysec</code>，fsync 的调用频率会降到每秒一次，大幅降低对主线程的影响。</p>
+
+        <h3>追踪网络 IO</h3>
+
+        <pre><code># 追踪 epoll_wait 的调用频率和耗时
+strace -p `pgrep redis-server` -e trace=epoll_wait -T 2>&1 | head -20
+
+# 输出示例：
+# [pid 12345] epoll_wait(5, [{EPOLLIN, {u32=123, u64=123}}], 1024, 101) = 1 <0.000015>
+# [pid 12345] epoll_wait(5, [], 1024, 97) = 0 <0.097043>
+# [pid 12345] epoll_wait(5, [], 1024, 100) = 0 <0.100023></code></pre>
+
+        <p>注意第二个 epoll_wait 的 timeout 是 97ms 但返回 0——说明在这 97ms 内没有任何事件到达。如果有大量 epoll_wait timeout 返回 0，说明 Redis 大部分时间在"空等"。这本身不是问题，但如果你结合 <code>-T</code> 发现某些 epoll_wait 的延时异常（比如 timeout 设为 100ms 但实际花了 5 秒），说明内核调度出了问题——可能是系统负载过高、或者内存压力导致进程被换出。</p>
+
+        <h3>统计模式（安全模式）</h3>
+
+        <pre><code># -c 统计模式：汇总系统调用的次数和耗时，不会为每次调用输出一行
+strace -p `pgrep redis-server` -c -S time sleep 10
+
+# % time     seconds  usecs/call     calls    errors  syscall
+# ------ ----------- ----------- --------- --------- ----------------
+#  42.35    0.425231        2126       200           ＜b＞fsync＜/b＞
+#  28.12    0.282145          21     13432           ＜b＞write＜/b＞
+#  15.67    0.157234         112      1403           ＜b＞epoll_wait＜/b＞
+#   8.91    0.089432           9      9930           ＜b＞read＜/b＞
+#   4.95    0.049723          14       355           ＜b＞sendto＜/b＞
+# ------ ----------- ----------- --------- --------- ----------------</code></pre>
+
+        <p>fsync 只调用了 200 次但耗时 42% 的总时间——这说明 write 操作很快，但 fsync 的刷盘是真正的瓶颈。这个发现直接指导你将 <code>appendfsync</code> 从 <code>always</code> 改为 <code>everysec</code>，或者考虑使用 SSD 来降低 fsync 延迟。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>有一次我为了定位一个生产 Redis 的延迟问题，直接在生产服务器上运行了 <code>strace -p PID -T</code> 追踪每次系统调用。结果 strace 每秒输出数十万行日志，占满了 /tmp 分区（40GB 硬盘被日志写爆），同时 strace 本身的 ptrace 开销将 Redis 的 QPS 拉低了 30%——原本 100us 的请求涨到了 300us。这次血的教训让我明白：<strong>strace 会显著降低性能，生产环境使用需谨慎</strong>。从那以后，我几乎只用 <code>strace -c -S time</code> 统计模式——它只做汇总不做逐行输出，性能开销只有 3~5%，而且直接给出了最耗时系统调用的排名，比逐行分析效率高得多。
+        </div>
+
+        <h2>实战案例一：延迟毛刺定位</h2>
+
+        <p>现在我们用一套完整的流程来定位一个典型的延迟毛刺问题。</p>
+
+        <h3>现象</h3>
+        <p>线上 Redis P99 延迟从 2ms 突然飙到 200ms，持续约 10 秒，然后自行恢复。每 2~3 小时出现一次，没有明显规律。</p>
+
+        <h3>第一步：Latency Monitor 定位毛刺时间段</h3>
+
+        <pre><code>LATEST LATENCY EVENTS:
+1) command - 184.3ms - 1634567890.123456
+2) command - 195.7ms - 1634567890.145678
+3) eventloop - 201.1ms - 1634567890.156789
+
+LATENCY DOCTOR:
+I have 120 latency events, 110 are command type, 10 are eventloop type.
+The highest latency I saw was 201ms in eventloop event.
+The event with the highest average latency is eventloop with 150ms average.</code></pre>
+
+        <p>注意 eventloop 延迟高达 201ms——这意味着事件循环被阻塞了 201ms。这<a>不</a>是单个命令慢的问题，而是整个事件循环卡住了。</p>
+
+        <h3>第二步：Perf 火焰图关联时间段</h3>
+        <p>在可疑时间段内采集 perf 样本：</p>
+
+        <pre><code># 在事件循环的毛刺时间段内采集
+perf record -a -g -p `pgrep redis-server` -- sleep 60
+
+# 生成火焰图并分析
+perf script | ./stackcollapse-perf.pl | ./flamegraph.pl > redis-latency.svg</code></pre>
+
+        <p>火焰图显示 <code>rdbSave</code> 占用了 60% 的采样，其中 <code>rdbSaveRio</code> → <code>rdbWriteRaw</code> 是热点路径。同时注意到 <code>write(2)</code> 系统调用占用了大量时间——因为 RDB 文件写入时需要刷盘。</p>
+
+        <h3>第三步：反查源码确认</h3>
+
+        <pre><code>/* rdb.c —— rdbSave 主函数 */
+int rdbSave(char *filename, rdbSaveInfo *rsi) {
+    // ...
+    if (fork() == 0) {
+        /* 子进程：执行快照写入 */
+        FILE *fp = fopen(tmpfile, "w");
+        retval = rdbSaveRio(rdb, &error, rsi);
+        if (retval == C_OK) {
+            /* 子进程在退出前一定会刷盘 */
+            if (fflush(fp) == EOF) goto werr;
+            if (fsync(fileno(fp)) == -1) goto werr;
+        }
+        exitFromChild((retval == C_OK) ? 0 : 1);
+    }
+    /* 父进程：等待子进程结束，但不阻塞事件循环 */
+    // ...
+}</code></pre>
+
+        <p>等等——父进程在 fork 之后应该是立即返回并继续事件循环的，父进程不应该阻塞！那么问题不在 rdbSave 本身，而在 fork() 的耗时和 COW 内存膨胀上。进一步排查发现：</p>
+        <ul>
+            <li><code>latest_fork_usec</code> 在毛刺时段显示 1800ms（1.8 秒）——fork 一个 18GB 的进程耗时 1.8 秒。</li>
+            <li>检查 THP 状态：<code>/sys/kernel/mm/transparent_hugepage/enabled</code> 显示 <code>[always]</code>。</li>
+        </ul>
+
+        <h3>第四步：根因确认</h3>
+        <p>THP 被开启，导致 fork 后的 COW 放大。Fork 一个 18GB 的 Redis 进程本来只需要 200~300ms，但在 THP 的影响下，父进程的写入操作触发了大量 2MB 大页的复制，COW 内存从预计的 2GB 膨胀到 15GB。最终父进程因内存压力被内核频繁换入换出（swap），eventloop 被挂起。</p>
+
+        <p><strong>解决方案：</strong>关闭 THP、将 Redis 实例从 18GB 拆分为 2 个 9GB 实例、将 <code>vm.overcommit_memory</code> 设为 1。三项操作实施后，P99 从 200ms 降至 3ms，毛刺完全消失。</p>
+
+        <h2>实战案例二：内存过高定位</h2>
+
+        <h3>现象</h3>
+        <p>Redis 的 RSS 持续增长，从 8GB 涨到 28GB，超过系统内存后触发 OOM Killer 导致进程被杀死重启。但重启后内存又开始持续增长，周期约为一周。</p>
+
+        <h3>第一步：INFO Memory 采集</h3>
+
+        <pre><code># INFO memory 关键指标
+used_memory: 10.2G
+used_memory_rss: 28.1G
+mem_fragmentation_ratio: 2.75
+used_memory_peak: 28.5G
+maxmemory: 30G</code></pre>
+
+        <p><code>mem_fragmentation_ratio = 2.75</code>——碎片率极高。但光看碎片率不能确定是分配器问题还是数据结构膨胀。</p>
+
+        <h3>第二步：MEMORY STATS 分析</h3>
+
+        <pre><code># MEMORY STATS 输出
+used_memory: 10.2G
+used_memory_dataset: 8.5G      # 纯数据占用
+used_memory_overhead: 1.7G     # 元数据开销
+used_memory_scripts: 2.1M
+
+# 逐类型分析
+# 发现：server.db[0].dict 的大小为 2.3 亿个 key
+# 但 server.db[0].expires 只有 500 万个 key
+# 意味着 2.25 亿个 key（98%）没有设置过期时间！</code></pre>
+
+        <p>这是第一个重大发现：绝大多数 key 没有 TTL，它们在"永久"增长。但为什么 RSS 是 used_memory 的 2.75 倍？</p>
+
+        <h3>第三步：逐 key 类型分析 dict 大小</h3>
+
+        <pre><code># 使用 MEMORY USAGE 遍历大 key
+# 发现某个 Hash 类型的 key "user_sessions" 有 1200 万个 field
+# 单个 key 就占用了 used_memory 中的 3.2GB
+
+# 深入分析：dict 内部结构
+# 这个 1200 万 field 的 dict，负载因子维持在 ~0.8
+# 所以底层哈希表的大小是 1500 万 entry
+# 每个 dictEntry 开销：24 字节指针 + 2 个指针 + 1 个 long = 约 48 字节
+# 总 dictEntry 开销：1500 万 * 48 ≈ 720MB
+
+# 再加上 field 和 value 的 SDS 字符串，以及 hash 本身的 redisObject
+# 发现数据分布非常不均匀：大量 field 的 value 只有 4~8 字节（小整数）
+# 但 SDS 的 minimum overhead 是 3 字节（sdshdr5）</code></pre>
+
+        <h3>第四步：源码中找到膨胀点</h3>
+
+        <pre><code>/* t_hash.c —— 当使用哈希编码时 */
+void hashTypeSet(robj *o, sds field, sds value, int flags) {
+    if (o->encoding == OBJ_ENCODING_LISTPACK) {
+        /* listpack 编码：小哈希使用紧凑存储 */
+        // ...
+        if (hashTypeLength(o) > server.hash_max_listpack_entries) {
+            /* 超过阈值，转换为 dict 编码 */
+            hashTypeConvert(o, OBJ_ENCODING_HT);
+        }
+    }
+
+    if (o->encoding == OBJ_ENCODING_HT) {
+        /* dict 编码：每个 field 独立分配，overhead 大 */
+        dict *d = o->ptr;
+        dictEntry *de = dictAddRaw(d, field, NULL);
+        if (de) {
+            dictSetVal(d, de, sdsdup(value));
+        }
+    }
+}</code></pre>
+
+        <p>根因浮出水面：这个 Hash 在增长过程中，field 数量超过了 <code>hash-max-listpack-entries</code>（默认 512），从 listpack 编码转换为 dict 编码。dict 编码对大量"小 value"的额外内存开销很大——每个 field 的 SDS 头 + dictEntry + 指针，这部分 overhead 远远大于数据本身。再加上 dict 扩容时的 rehash 过程会产生大量"冗余"的哈希表槽位（HT 的负载因子约 0.5~1），RSS 自然疯狂增长。</p>
+
+        <p><strong>解决方案：</strong>将 <code>hash-max-listpack-entries</code> 调大到 1024（延迟转换），同时对"user_sessions"的 field 数量设上限（超过 50 万 field 自动 split 到多个 key）。实施后，这两个 key 的内存总量从 3.2GB 降到 800MB，碎片率从 2.75 降到 1.2。</p>
+
+        <h2>实战案例三：复制断连定位</h2>
+
+        <h3>现象</h3>
+        <p>Redis 主从集群中，从库每隔几小时就与主库断开连接，然后重新进行全量同步。每次全量同步消耗数 GB 的网络带宽，严重影响主库性能。</p>
+
+        <h3>第一步：从库日志分析</h3>
+
+        <pre><code># 从库日志片段：
+# 73891:S 28 Jun 2024 14:23:11.112 * MASTER &lt;-&gt; REPLICA sync started
+# 73891:S 28 Jun 2024 14:23:11.112 * Non blocking connect for sync...
+# 73891:S 28 Jun 2024 14:23:11.113 * Master replied to PING...
+# 73891:S 28 Jun 2024 14:23:11.113 * Partial resynchronization not possible
+#                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+# 73891:S 28 Jun 2024 14:23:11.113 * Full resync from master: 3a8f2c1...0</code></pre>
+
+        <p>关键信息："Partial resynchronization not possible" —— 说明主库的 replication backlog 中没有从库需要的偏移量数据。</p>
+
+        <h3>第二步：GDB 断点确认 backlog 溢出原因</h3>
+
+        <pre><code># 在主库上设置断点，观察 backlog 的写入和淘汰
+(gdb) b feedReplicationBacklog
+(gdb) b replicationCacheMaster
+
+# 在 feedReplicationBacklog 中观察 backlog 的当前使用量
+(gdb) p server.repl_backlog->histlen
+# $1 = 16777216  —— backlog 已经写满！
+(gdb) p server.repl_backlog->size
+# $2 = 16777216  —— backlog 只有 16MB
+
+# 检查从库的复制偏移量落后了多少
+(gdb) p server.master_repl_offset
+# $3 = 32849123456  —— 主库当前偏移量
+# 从库上报的偏移量（查看 replication.c 中的 repl_put_online 流程）
+# 发现从库严重落后主库超过 200MB 的数据</code></pre>
+
+        <p>问题确认：<code>repl-backlog-size</code> 默认只有 16MB（在 Redis 7.2 中仍然是此默认值）。当主库写入量很大时（每小时写入约 50GB 数据），16MB 的 backlog 被迅速覆盖。从库如果因为网络抖动或负载过高导致复制延迟超过几秒钟，它需要的偏移量就已经被 backlog 淘汰了，psync 失败后只能发起全量同步。</p>
+
+        <h3>第三步：修复配置</h3>
+
+        <pre><code># 根据主库写入量估算 backlog 大小
+# 公式：repl-backlog-size = 主库峰值写入速率 × 可容忍的复制延迟
+# 假设：主库峰值写入 200MB/s，可容忍延迟 60 秒
+# 那么：repl-backlog-size = 200 * 60 = 12000MB ≈ 12GB
+
+# 配置修改（redis.conf）
+repl-backlog-size 4096mb       # 从 16MB 增大到 4GB
+repl-backlog-ttl 3600          # 没有从库时保留 backlog 的时间</code></pre>
+
+        <p>增大 <code>repl-backlog-size</code> 到 4GB 后，从库在短时间断连后仍能通过 psync 增量同步，不再触发全量同步。网络带宽消耗从每小时数 GB 降到几乎为零。</p>
+
+        <div class="tip">
+            <strong>小贴士：</strong><code>repl-backlog-size</code> 设置过大也有代价——内存占用。4GB 的 backlog 意味着 Redis 启动后立即占用 4GB 的虚拟内存（虽然 RSS 只包含实际写入的部分）。在内存紧张的情况下，可以结合 <code>repl-backlog-ttl</code> 来控制 backlog 释放的时机：<code>repl-backlog-ttl 3600</code> 表示如果 1 小时内没有从库连接，自动释放 backlog 内存。
+        </div>
+
+        <p>这三个实战案例覆盖了常见的三类问题：<strong>延迟异常、内存膨胀、复制断连</strong>。它们的共同特点是——只用 INFO/SLOWLOG 等工具看到的是"表面现象"，而结合 GDB/strace/core dump 等源码级工具，你能穿透到数据结构层面、系统调用层面、甚至条件断点级别，从根因上解决问题。</p>
+
+        <p>掌握了源码级调试能力，下一章我们将深入两个非常特殊的机制——<strong>Lua 脚本与事务</strong>。这两个特性都涉及"多条命令原子执行"的语义，但在实现上走的是完全不同的路径：一个是嵌入式解释器，一个是命令队列。理解它们如何与 Redis 的单线程模型共存，是打通"命令层"到"执行层"的关键一步。</p>
+
+        <div class="footer-nav">
+            <a href="24.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="26.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

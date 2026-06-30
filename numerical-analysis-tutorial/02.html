@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第2章 误差分析与数值稳定性</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 数值分析概述</a></li>
+            <li><a href="02.html" class="active">第2章 误差分析与数值稳定性</a></li>
+            <li><a href="03.html">第3章 插值法基础</a></li>
+            <li><a href="04.html">第4章 Newton插值与均差</a></li>
+            <li><a href="05.html">第5章 Hermite插值与分段插值</a></li>
+            <li><a href="06.html">第6章 三次样条插值</a></li>
+            <li><a href="07.html">第7章 函数逼近基本理论</a></li>
+            <li><a href="08.html">第8章 最佳平方逼近</a></li>
+            <li><a href="09.html">第9章 最小二乘曲线拟合</a></li>
+            <li><a href="10.html">第10章 数值积分基础</a></li>
+            <li><a href="11.html">第11章 复合求积与Romberg外推</a></li>
+            <li><a href="12.html">第12章 Gauss求积公式</a></li>
+            <li><a href="13.html">第13章 数值微分</a></li>
+            <li><a href="14.html">第14章 正交多项式与数值积分</a></li>
+            <li><a href="15.html">第15章 Gauss消去法与LU分解</a></li>
+            <li><a href="16.html">第16章 Cholesky分解与追赶法</a></li>
+            <li><a href="17.html">第17章 向量/矩阵范数与条件数</a></li>
+            <li><a href="18.html">第18章 经典迭代法</a></li>
+            <li><a href="19.html">第19章 Krylov子空间与共轭梯度法</a></li>
+            <li><a href="20.html">第20章 非线性方程求根(一)</a></li>
+            <li><a href="21.html">第21章 非线性方程求根(二)</a></li>
+            <li><a href="22.html">第22章 非线性方程组Newton法</a></li>
+            <li><a href="23.html">第23章 矩阵特征值计算</a></li>
+            <li><a href="24.html">第24章 QR方法与特征值</a></li>
+            <li><a href="25.html">第25章 常微分方程数值解(一)</a></li>
+            <li><a href="26.html">第26章 常微分方程数值解(二)</a></li>
+            <li><a href="27.html">第27章 刚性方程与线性多步法</a></li>
+            <li><a href="28.html">第28章 综合实战：从算法到代码</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第2章 误差分析与数值稳定性</h2>
+
+        <p>大家好，我是你们的讲师。今天我们要聊一个看起来有点枯燥、但实际上决定了你的程序到底"算对没有"的话题——误差分析。</p>
+
+        <p>先讲一个真实的故事。1996年，欧洲航天局的Ariane 5火箭在发射后仅仅37秒就凌空爆炸，直接损失超过3.7亿美元。调查发现，罪魁祸首是一个数值溢出错误——惯性导航系统中的一个64位浮点数转换到16位整数时超出了范围。这个bug在Ariane 4上从未暴露，因为Ariane 5的飞行轨迹加速度更大，导致那个数值刚好越过了阈值。代码是直接复用的，没人想到去检查数值范围。这就是误差分析不到位付出的惨重代价。</p>
+
+        <div class="warning">
+        <strong>💥 踩坑故事：</strong> 笔者曾在一个金融风控系统中发现，计算组合VaR时，两笔高度相关的资产的协方差相减导致了严重的大数相消（catastrophic cancellation），结果VaR低估了30%。如果当时没有仔细做误差分析，这家机构可能已经因风险敞口超额而被监管处罚了。
+        </div>
+
+        <p>这一章，我们就来系统地学习误差是怎么产生、怎么传播、以及如何避免它破坏你的计算结果。</p>
+
+        <h2>2.1 误差的来源与分类</h2>
+
+        <p>在数值计算中，误差大致可以分为以下几类：</p>
+
+        <ul>
+            <li><strong>模型误差（Modeling Error）</strong>——用数学公式近似物理现象时引入的误差。比如用线性弹簧模型近似真实弹簧的迟滞效应。</li>
+            <li><strong>观测误差（Measurement Error）</strong>——输入数据的测量不精确带来的误差。传感器总有自己的精度极限。</li>
+            <li><strong>截断误差（Truncation Error）</strong>——用有限项近似无限过程。比如用Taylor展开的前几项近似一个函数，剩下的余项就是截断误差。</li>
+            <li><strong>舍入误差（Rounding Error）</strong>——计算机浮点数有限精度导致的误差。这是我们这一章的重点。</li>
+        </ul>
+
+        <h2>2.2 误差传播分析</h2>
+
+        <p>假设我们有一个函数 y = f(x₁, x₂, ..., xₙ)，每个输入都有微小的误差 Δxᵢ。那么输出的误差 Δy 可以用一阶Taylor展开来近似：</p>
+
+        <p><code>Δy ≈ ∂f/∂x₁ · Δx₁ + ∂f/∂x₂ · Δx₂ + ... + ∂f/∂xₙ · Δxₙ</code></p>
+
+        <p>这给我们提供了一种分析误差传播的方法。来看几种基本运算：</p>
+
+        <ul>
+            <li><strong>加法/减法：</strong> y = x₁ ± x₂ → Δy = Δx₁ ± Δx₂。绝对误差直接相加。但如果 x₁ ≈ x₂，那么相对误差会被急剧放大——这就是大数相消的根源。</li>
+            <li><strong>乘法：</strong> y = x₁ · x₂ → Δy/y ≈ Δx₁/x₁ + Δx₂/x₂。相对误差相加，还算温和。</li>
+            <li><strong>除法：</strong> y = x₁ / x₂ → Δy/y ≈ Δx₁/x₁ − Δx₂/x₂。如果 x₂ 很小，相对误差会被剧烈放大。</li>
+        </ul>
+
+        <p>这里有一个经典的现象叫做<strong>"大数吃小数"</strong>（smearing）。当你把一个大数和一个小数做加法时，小数可能会被完全吞没。比如在float32下：</p>
+
+        <pre><code>import numpy as np
+
+# "大数吃小数" 演示
+a = np.float32(1.0e8)
+b = np.float32(1.0)
+print(f"a + b = {a + b}")   # 输出 1.0e8，b完全被吃了！
+
+# 更隐蔽的例子
+n = 1000000
+total = np.float32(0.0)
+for i in range(n):
+    total += np.float32(0.1)
+print(f"累加 0.1 共 {n} 次 = {total}")  # 远小于 100000.0</code></pre>
+
+        <div class="tip">
+        <strong>💡 小技巧：</strong> 当需要累加大量小数时，先排序再从小到大地加，或者使用Kahan求和算法，可以显著减少舍入误差的积累。
+        </div>
+
+        <h2>2.3 浮点数表示与 IEEE 754</h2>
+
+        <p>几乎所有现代计算机都遵循IEEE 754标准来表示浮点数。一个浮点数由三个部分组成：</p>
+
+        <p><code>值 = (-1)ˢ × 1.f × 2ᵉ⁻ᵇⁱᵃˢ</code></p>
+
+        <p>其中 s 是符号位（1 bit），f 是尾数（mantissa/fraction），e 是指数（exponent），bias 是指数偏移量。</p>
+
+        <p>最常见的两种格式如下：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>类型</th>
+                    <th>总位数</th>
+                    <th>符号位</th>
+                    <th>指数位</th>
+                    <th>尾数位</th>
+                    <th>机器精度 ε<sub>mach</sub></th>
+                    <th>近似值</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>float16 (半精度)</td>
+                    <td>16</td>
+                    <td>1</td>
+                    <td>5</td>
+                    <td>10</td>
+                    <td>2⁻¹⁰</td>
+                    <td>≈ 9.77×10⁻⁴</td>
+                </tr>
+                <tr>
+                    <td>float32 (单精度)</td>
+                    <td>32</td>
+                    <td>1</td>
+                    <td>8</td>
+                    <td>23</td>
+                    <td>2⁻²³</td>
+                    <td>≈ 1.19×10⁻⁷</td>
+                </tr>
+                <tr>
+                    <td>float64 (双精度)</td>
+                    <td>64</td>
+                    <td>1</td>
+                    <td>11</td>
+                    <td>52</td>
+                    <td>2⁻⁵²</td>
+                    <td>≈ 2.22×10⁻¹⁶</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+        <strong>🔍 机器精度的意义：</strong> ε<sub>mach</sub> ≈ 2.22×10⁻¹⁶ 对于 float64 意味着你最多只能保证约 15-16 位有效数字。如果你的问题本身的条件数很大，这些舍入误差会被指数倍放大，最终结果可能毫无意义。
+        </div>
+
+        <p>在Python中，你可以用以下方式查看机器精度：</p>
+
+        <pre><code>import numpy as np
+
+print(f"float16 机器精度: {np.finfo(np.float16).eps}")
+print(f"float32 机器精度: {np.finfo(np.float32).eps}")
+print(f"float64 机器精度: {np.finfo(np.float64).eps}")
+
+# 验证：1.0 + eps ≈ 1.0 的临界点
+eps = np.finfo(np.float64).eps
+print(f"1 + eps == 1? {1.0 + eps == 1.0}")        # False
+print(f"1 + eps/2 == 1? {1.0 + eps/2 == 1.0}")    # True</code></pre>
+
+        <h2>2.4 条件数（Condition Number）</h2>
+
+        <p>条件数是衡量一个问题对输入误差敏感程度的指标。对于一个函数 f(x)，条件数定义为：</p>
+
+        <p><code>cond(f) = |x f'(x) / f(x)|</code></p>
+
+        <p>当 cond(f) 很大时，我们说问题是<strong>病态（ill-conditioned）</strong>的；当 cond(f) ≈ 1 时，问题是<strong>良态（well-conditioned）</strong>的。</p>
+
+        <p>在线性方程组 Ax = b 中，条件数定义为 κ(A) = ||A|| · ||A⁻¹||。如果 κ(A) 很大，那么 A 或 b 的微小变化可能导致解 x 的巨大变化。</p>
+
+        <p>一个经典的病态矩阵是<strong>Hilbert矩阵</strong>：</p>
+
+        <p><code>H<sub>ij</sub> = 1 / (i + j - 1),  i, j = 1, 2, ..., n</code></p>
+
+        <p>Hilbert矩阵的条件数随着维数 n 呈指数增长。n=10 时，κ(H₁₀) ≈ 1.6×10¹³——这意味着你的求解过程会完全被舍入误差淹没。</p>
+
+        <div class="warning">
+        <strong>⚠️ 踩坑故事：</strong> 一名研究生用 Hilbert 矩阵做线性回归示例，在 n=12 时，用 float64 求解得到的系数与真解完全不相关。他花了三周调试代码，最终发现是条件数太大，计算机已经无法分辨解的正确方向。换用正则化方法后问题立即解决。
+        </div>
+
+        <p>在Python中验证：</p>
+
+        <pre><code>import numpy as np
+
+for n in [5, 8, 10, 12]:
+    H = np.array([[1.0/(i+j-1) for j in range(1, n+1)] for i in range(1, n+1)])
+    cond = np.linalg.cond(H)
+    print(f"H_{n} 条件数 = {cond:.2e}")</code></pre>
+
+        <h2>2.5 避免误差危害的实用准则</h2>
+
+        <p>在学习了一堆理论之后，我们来看看实践中到底该怎么做。以下是一些经过实战检验的准则：</p>
+
+        <h3>准则一：避免相近数相减</h3>
+
+        <p>如果两个几乎相等的数相减，有效数字会大量损失。例如：</p>
+
+        <pre><code># 不好的做法：直接相减
+x = 1.0000001
+y = 1.0000000
+print(x - y)  # 只有 1 位有效数字！
+
+# 好的做法：重新设计公式
+# 比如求 sqrt(x+1) - sqrt(x)
+# 改为：1 / (sqrt(x+1) + sqrt(x))</code></pre>
+
+        <h3>准则二：避免除以小数的操作</h3>
+
+        <p>除以一个很小的数等价于乘以一个很大的数，这会放大输入中的舍入误差。如果无法避免，考虑重新缩放问题。</p>
+
+        <h3>准则三：使用稳定的计算公式</h3>
+
+        <p>以 log(1+x) 为例，当 x 很小时，直接计算 log(1+x) 会导致严重的精度损失。现代数学库提供了 log1p(x) 函数，它使用了特殊的算法来保证小 x 时的精度：</p>
+
+        <pre><code>import numpy as np
+
+x = 1e-16
+print(f"log(1+x) = {np.log(1 + x)}")     # 0.0 — 完全丢失精度
+print(f"log1p(x) = {np.log1p(x)}")       # 1e-16 — 精确</code></pre>
+
+        <h3>准则四：减少运算次数——秦九韶算法（Horner's Method）</h3>
+
+        <p>计算多项式 P(x) = a₀ + a₁x + a₂x² + ... + aₙxⁿ，直接计算需要 O(n²) 次乘法，而 Horner 方法只需要 O(n)：</p>
+
+        <pre><code>def naive_poly(coeffs, x):
+    """直接计算多项式，O(n²)"""
+    n = len(coeffs)
+    result = 0.0
+    for i in range(n):
+        result += coeffs[i] * (x ** i)
+    return result
+
+def horner_poly(coeffs, x):
+    """秦九韶算法/Horner方法，O(n)"""
+    result = coeffs[-1]
+    for i in range(len(coeffs)-2, -1, -1):
+        result = result * x + coeffs[i]
+    return result
+
+# 测试：n=100，对比误差
+import numpy as np
+coeffs = np.random.randn(100)
+x = 0.5
+print(f"Naive: {naive_poly(coeffs, x)}")
+print(f"Horner: {horner_poly(coeffs, x)}")</code></pre>
+
+        <div class="tip">
+        <strong>💡 历史小知识：</strong> 秦九韶算法在13世纪由南宋数学家秦九韶在其著作《数书九章》中提出，比西方的 Horner 方法早了约500年。这是中国古代数学在数值计算领域的杰出贡献。
+        </div>
+
+        <div class="highlight">
+        <strong>🔍 核心思想：</strong> 误差分析告诉我们两个重要道理：第一，理解问题的条件数比追求高精度更关键——一个病态问题用多高精度都救不了；第二，算法的设计（比如减少运算次数、避免大数相消）直接影响数值稳定性。这不是"优化"问题，而是"正确性"问题。
+        </div>
+
+        <p>下一章，我们将进入插值法的世界，学习如何用多项式来逼近未知函数。你会发现，误差分析的知识在那里会反复出现——尤其是Runge现象，它本质上就是一个"误差放大"的故事。</p>
+
+        <div class="footer-nav">
+            <a href="01.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="03.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

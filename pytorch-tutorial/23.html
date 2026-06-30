@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第23章 模型部署与导出</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html" class="active">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第23章 模型部署与导出</h2>
+
+<p>大家好，我是你们的讲师。到了第23章，咱们要聊一个非常务实的话题：模型部署与导出。前面22章，你训练了各种模型，调了超参数，做了迁移学习，甚至在多卡上跑了FSDP——但如果你的模型只能在你的训练脚本里跑，那它跟躺在学术论文里的"玩具"没什么两样。模型的价值在于被使用，而部署就是那道"最后一公里"的桥梁。</p>
+
+<p>PyTorch 的模型导出历史上走过不少弯路。从最早的 TorchScript tracing 到 scripting，再到后来的 torch.fx，最后到现在的 torch.export——这条路几乎是一部"后悔药"的发展史。这一章我会带你理清这些概念，掌握正确的导出姿势，以及如何把模型送到 ONNX Runtime、TorchServe 等生产环境。</p>
+
+<h3>23.1 TorchScript 的遗产：为什么 deprecated 了</h3>
+
+<p>TorchScript 曾经是 PyTorch 官方主推的部署方案。它的思路很直白：你把 Python 代码"编译"成一种静态的 IR（Intermediate Representation），然后脱离 Python 解释器运行。听起来很美好，但实践中处处是坑。</p>
+
+<pre><code># TorchScript 方式（已过时，仅作对比）
+class MyModel(torch.nn.Module):
+    def forward(self, x, hidden=None):
+        if hidden is None:
+            hidden = torch.zeros(...)  # ❌ TorchScript 不支持动态默认值
+        return ...
+
+traced = torch.jit.trace(model, example_inputs)  # tracing 只能跟踪一条路径
+scripted = torch.jit.script(model)                # scripting 要求纯 Python 子集</code></pre>
+
+<p>TorchScript 的问题在于：<strong>它既要兼容 Python 的动态性，又要保证静态图的确定性</strong>——这两个目标本身就是冲突的。你写一个 <code>if training:</code> 分支，TorchScript 就不知道怎么处理。更糟糕的是，TorchScript 的报错信息往往是「Illegal instruction」或者「Segmentation fault」，你根本不知道代码里哪一行出了问题。</p>
+
+<div class="tip">
+  <p><strong>现状</strong>：PyTorch 2.x 之后官方已将 TorchScript 标记为 deprecated，推荐使用 <code>torch.export</code> 作为导出方案。如果你在维护老项目，尽量规划迁移；新项目一律不要碰 TorchScript。</p>
+</div>
+
+<h3>23.2 torch.export：新一代导出方案</h3>
+
+<p><code>torch.export</code> 是 PyTorch 2.x 推出的新一代导出机制。它基于 TorchDynamo 捕获计算图，生成的 ExportedProgram 是一个完整的、self-contained 的静态图描述，包含参数、buffer、gradient 信息——而且可读性远超 TorchScript。</p>
+
+<pre><code>import torch
+import torch.export as export
+
+class MyModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(784, 256)
+        self.relu = torch.nn.ReLU()
+        self.fc2 = torch.nn.Linear(256, 10)
+
+    def forward(self, x, training: bool = True):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x
+
+model = MyModel().eval()
+example_inputs = (torch.randn(1, 784),)
+
+# 导出模型
+exported_program = export.export(
+    model,
+    args=example_inputs,
+    strict=False,     # 允许 dynamic shape
+)
+
+# 查看导出的计算图
+print(exported_program.graph)
+print(exported_program.graph_module.code)
+
+# 运行导出的模型
+result = exported_program.module()(torch.randn(1, 784))</code></pre>
+
+<p><code>torch.export</code> 的核心优势在于：它不走 Python 解释器，而是直接基于 TorchDynamo 的 Guard 机制捕获 FX Graph，然后在 FX 图上做 Dead Code Elimination、常量折叠等优化。最终产物是一个纯的、确定性的计算图，没有 Python 相关的副作用。</p>
+
+<h3>23.3 Programmatic Capture：capture_pre_autograd</h3>
+
+<p>有些场景下，你需要在 Autograd 之前「截获」计算图进行自定义转换。比如你想把某些算子替换成量化版本，或者在图中插入 profiling 点。这时候就需要 <code>torch._export.capture_pre_autograd</code>（也称为 programmatic capture）。</p>
+
+<pre><code>from torch._export import capture_pre_autograd
+
+def transform_graph(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+    """自定义图变换：将所有 ReLU 替换为量化的近似版本"""
+    for node in gm.graph.nodes:
+        if node.op == "call_function" and node.target == torch.relu:
+            with gm.graph.inserting_after(node):
+                new_node = gm.graph.call_function(quantized_relu, args=node.args)
+                node.replace_all_uses_with(new_node)
+            gm.graph.erase_node(node)
+    gm.recompile()
+    return gm
+
+pre_autograd_graph = capture_pre_autograd(model, example_inputs)
+transformed_graph = transform_graph(pre_autograd_graph)
+
+# 之后可以继续调用 torch.export
+final_export = export.export(transformed_graph, example_inputs)</code></pre>
+
+<div class="warning">
+  <p><strong>注意</strong>：<code>capture_pre_autograd</code> 是实验性 API，API 签名在不同 PyTorch 版本间可能有变化。生产环境使用前请确认你的 PyTorch 版本文档。</p>
+</div>
+
+<h3>23.4 ONNX 导出：跨框架部署的瑞士军刀</h3>
+
+<p>不是所有生产环境都跑 PyTorch。你可能需要在 TensorRT、ONNX Runtime、OpenVINO 甚至手机上跑你的模型。这时候 ONNX（Open Neural Network Exchange）就是你的最佳选择。</p>
+
+<pre><code>import torch
+import onnx
+import onnxruntime as ort
+
+# 导出 ONNX
+dummy_input = torch.randn(1, 3, 224, 224)
+torch.onnx.export(
+    model,
+    dummy_input,
+    "model.onnx",
+    opset_version=17,       # 推荐 17 以上
+    input_names=["input"],
+    output_names=["output"],
+    dynamic_axes={
+        "input": {0: "batch_size"},
+        "output": {0: "batch_size"}
+    }
+)
+
+# 验证 ONNX 模型
+onnx_model = onnx.load("model.onnx")
+onnx.checker.check_model(onnx_model)
+print(f"ONNX IR version: {onnx_model.ir_version}")
+
+# 使用 ONNX Runtime 推理
+session = ort.InferenceSession("model.onnx")
+input_name = session.get_inputs()[0].name
+result = session.run(None, {input_name: dummy_input.numpy()})</code></pre>
+
+<p>ONNX 导出的常见坑：</p>
+<ul>
+  <li><strong>动态 shape</strong>：务必通过 <code>dynamic_axes</code> 声明可变维度，否则导出后 batch size 就固定了</li>
+  <li><strong>算子兼容性</strong>：不是所有 PyTorch 算子都有对应的 ONNX opset。遇到不支持的操作时，可以尝试降低 opset_version，或者用 <code>torch.onnx.register_custom_op_symbolic</code> 注册自定义映射</li>
+  <li><strong>控制流</strong>：如果模型里有 <code>if/else</code> 或循环，需要先用 <code>torch.export</code> 导出静态图，再转 ONNX</li>
+</ul>
+
+<div class="highlight">
+  <p><strong>建议</strong>：从 PyTorch 2.1 开始，推荐先用 <code>torch.export.export()</code> 得到 ExportedProgram，再调用 <code>torch.onnx.export(exported_program, ...)</code> 转 ONNX。这种方式生成的 ONNX 图更干净，兼容性更好。</p>
+</div>
+
+<h3>23.5 TorchServe 快速入门</h3>
+
+<p>TorchServe 是 PyTorch 官方的模型服务框架。它帮你处理 HTTP 请求、批量推理、模型版本管理——你只需要提供一个 model 文件和一个 handler 脚本。</p>
+
+<pre><code># 1. 安装 TorchServe
+# pip install torchserve torch-model-archiver
+
+# 2. 打包模型
+torch-model-archiver \
+    --model-name resnet50 \
+    --version 1.0 \
+    --model-file model.py \
+    --serialized-file resnet50.pt \
+    --handler image_classifier \
+    --export-path model_store/
+
+# 3. 创建 config.properties
+echo 'inference_address=http://0.0.0.0:8080
+management_address=http://0.0.0.0:8081
+metrics_address=http://0.0.0.0:8082
+model_store=model_store
+load_models=resnet50.mar
+default_response_timeout=120
+batch_size=8
+max_batch_delay=100' > config.properties
+
+# 4. 启动服务
+torchserve --start --model-store model_store --ts-config config.properties
+
+# 5. 发送预测请求
+# curl http://localhost:8080/predictions/resnet50 -T image.jpg</code></pre>
+
+<p>TorchServe 的 handler 是自定义推理逻辑的核心。你也可以写自己的 handler：</p>
+
+<pre><code>from ts.torch_handler.base_handler import BaseHandler
+
+class MyHandler(BaseHandler):
+    def preprocess(self, requests):
+        # 从 HTTP 请求中提取并预处理数据
+        images = [self._image_to_tensor(r) for r in requests]
+        return torch.stack(images).to(self.device)
+
+    def inference(self, data):
+        # 前向推理（自动享受 batch 合并）
+        with torch.inference_mode():
+            return self.model(data)
+
+    def postprocess(self, output):
+        # 将输出转为 JSON 可序列化格式
+        return output.softmax(dim=-1).tolist()</code></pre>
+
+<h3>23.6 训练后量化（Post-Training Quantization）</h3>
+
+<p>量化是将模型权重/激活值从 FP32 或 FP16 降到 INT8（甚至更低），以换取推理速度和模型体积的优化。PTQ 不需要重新训练，直接在训练好的模型上操作。</p>
+
+<table>
+  <tr><th>量化方式</th><th>精度损失</th><th>速度提升</th><th>模型体积缩减</th><th>适用场景</th></tr>
+  <tr><td>Dynamic Quantization</td><td>极小（~0.5%）</td><td>1.5x - 2x</td><td>4x</td><td>NLP 模型（LSTM、Transformer）</td></tr>
+  <tr><td>Static Quantization</td><td>小（1-2%）</td><td>2x - 3x</td><td>4x</td><td>CV 模型（CNN、ResNet）</td></tr>
+  <tr><td>Quantization Aware Training</td><td>极小（~0.1%）</td><td>2x - 4x</td><td>4x</td><td>精度敏感的模型（医疗、金融）</td></tr>
+</table>
+
+<pre><code>import torch.quantization as quant
+
+model = MyModel().eval()
+
+# Dynamic Quantization（最简单，推荐作为起点）
+quantized_model = quant.quantize_dynamic(
+    model,
+    {torch.nn.Linear, torch.nn.LSTM},  # 只量化这些层
+    dtype=torch.qint8
+)
+
+# Static Quantization（需要 calibration 数据集）
+model.qconfig = quant.get_default_qconfig('fbgemm')
+quant.prepare(model, inplace=True)
+# 用 calibration 数据集跑几个 batch
+for images in calibration_loader:
+    model(images)
+quant.convert(model, inplace=True)  # 模型已替换为量化版本
+
+# 对比推理速度
+import time
+start = time.time()
+for _ in range(100):
+    quantized_model(dummy_input)
+print(f"量化模型推理时间: {(time.time()-start)/100*1000:.2f} ms")</code></pre>
+
+<div class="tip">
+  <p><strong>推荐路线</strong>：先从 Dynamic Quantization 开始——它只需要改一行代码，精度损失几乎为零。如果还不够快，再尝试 Static Quantization。QAT 只在精度要求极高且前两者不满足时才考虑。</p>
+</div>
+
+<h3>23.7 torch.compile 推理优化：别忘了 mode="reduce-overhead"</h3>
+
+<p>torch.compile 不只是训练加速器，也是推理服务端的利器。但在推理场景下，你必须指定 <code>mode="reduce-overhead"</code>，否则可能适得其反。</p>
+
+<pre><code>import torch
+import time
+
+model = MyModel().eval()
+
+# ❌ 默认 mode 在推理场景可能更慢
+compiled_default = torch.compile(model)
+compiled_default(dummy_input)  # warmup
+
+# ✅ 推理推荐：reduce-overhead
+compiled_infer = torch.compile(model, mode="reduce-overhead")
+compiled_infer(dummy_input)  # warmup
+
+# 对比
+for name, m in [("eager", model), ("default", compiled_default), ("reduce-overhead", compiled_infer)]:
+    start = time.perf_counter()
+    for _ in range(500):
+        m(dummy_input)
+    elapsed = time.perf_counter() - start
+    print(f"{name}: {elapsed/500*1000:.3f} ms per inference")</code></pre>
+
+<div class="warning">
+  <p><strong>踩坑实录</strong>：有团队把训练时 torch.compile 的配置直接搬到生产推理服务中，发现推理比训练还慢 2 倍。折腾了一周才发现是因为默认 mode 为了保留训练所需的梯度信息，做了额外的 graph break。切换到 <code>mode="reduce-overhead"</code> 后直接恢复到了应有的推理速度。记住：<strong>训练和推理的 torch.compile 配置不能混用</strong>。</p>
+</div>
+
+<h3>23.8 导出后验证清单</h3>
+
+<p>模型导出之后，有几件事你务必确认：</p>
+
+<ol>
+  <li><strong>数值一致性</strong>：导出的模型在相同输入下，输出与原始 PyTorch 模型的最大误差在 1e-3 以内</li>
+  <li><strong>动态 batch</strong>：测试多个不同的 batch size，确保 dynamic shape 正常工作</li>
+  <li><strong>多线程安全</strong>：在并发请求场景下测试，确保没有共享权重被意外修改</li>
+  <li><strong>冷启动时间</strong>：记录模型加载到首次推理的时间，确认满足你的 SLA</li>
+  <li><strong>吞吐与延迟</strong>：在预期 QPS 下测量 P50/P99 延迟</li>
+</ol>
+
+<pre><code># 数值一致性检查
+original_out = model(dummy_input)
+exported_out = exported_program.module()(dummy_input)
+max_diff = (original_out - exported_out).abs().max().item()
+assert max_diff < 1e-3, f"最大差异 {max_diff} 超出阈值"</code></pre>
+
+<p>到这里，你应该能熟练地把 PyTorch 模型导出为多种格式，并且部署到生产环境中了。下一章我们聊一个非常重要但经常被忽视的话题——Profiling 与性能分析。你会发现，有时候模型本身不是瓶颈，问题出在你根本没想到的地方。</p>
+
+        <div class="footer-nav">
+            <a href="22.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="24.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

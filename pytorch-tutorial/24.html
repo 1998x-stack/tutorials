@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第24章 Profiling与性能分析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html" class="active">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第24章 Profiling 与性能分析</h2>
+
+<p>大家好，我是你们的讲师。在之前的章节里我们花了大量精力优化模型——混合精度训练、torch.compile、FSDP——但有没有想过一个问题：<strong>你怎么知道这些优化真正生效了？</strong> 更关键的是，如果训练还是慢，瓶颈到底在哪里？</p>
+
+<p>这就是 profiling 的价值所在。Profiling 不是可有可无的「加分项」，而是性能优化的罗盘。没有 profiling，你的优化就是在黑暗中乱撞——运气好撞到瓶颈提升了 2 倍，运气不好花了三天「优化」了一个根本不占时间的环节。这一章我会教你用好 torch.profiler，学会读懂 Chrome Trace 的火焰图，以及如何系统性地诊断性能瓶颈。</p>
+
+<h3>24.1 torch.profiler 基础用法</h3>
+
+<p><code>torch.profiler</code> 是 PyTorch 官方提供的 profiling 工具，它可以记录算子级别的 CPU/GPU 执行时间、CUDA kernel 启动开销、内存分配情况等。它的 API 设计非常简洁：</p>
+
+<pre><code>import torch
+import torch.profiler as profiler
+
+model = MyModel().cuda()
+inputs = torch.randn(32, 3, 224, 224).cuda()
+
+# 基础 profiling
+with profiler.profile(
+    activities=[
+        profiler.ProfilerActivity.CPU,
+        profiler.ProfilerActivity.CUDA,
+    ],
+    schedule=profiler.schedule(wait=2, warmup=2, active=5, repeat=1),
+    on_trace_ready=profiler.tensorboard_trace_handler("./log"),
+    record_shapes=True,
+    profile_memory=True,
+) as p:
+    for step in range(20):
+        model(inputs)
+        p.step()  # 通知 profiler 进入下一步
+
+# 查看结果摘要
+print(p.key_averages().table(
+    sort_by="self_cuda_time_total",
+    row_limit=20
+))</code></pre>
+
+<p>参数说明：</p>
+<ul>
+  <li><strong>activities</strong>：指定监控哪些设备的活动。训练场景通常同时开启 CPU 和 CUDA</li>
+  <li><strong>schedule</strong>：wait 步数跳过，warmup 步数预热，active 步数实际采集。这个配置是为了避免前几个 step 的冷启动抖动污染数据</li>
+  <li><strong>on_trace_ready</strong>：每一轮 trace 采集完毕后的回调。最常用的是写入 TensorBoard 或保存为 Chrome Trace 格式</li>
+  <li><strong>record_shapes</strong>：记录每个算子的输入张量形状，对分析显存和算子性能很有帮助</li>
+  <li><strong>profile_memory</strong>：开启内存 profiling，追踪每个算子的显存分配和释放</li>
+</ul>
+
+<div class="tip">
+  <p><strong>预热的重要性</strong>：PyTorch 有 JIT 编译、CUDA graph 缓存等机制，前几个 step 的执行时间不能代表稳态性能。务必要配置 warmup 步数，通常 warmup=2 起步，对于 torch.compile 模型建议 warmup=5 以上。</p>
+</div>
+
+<h3>24.2 解读 Chrome Trace 时间线</h3>
+
+<p>调用 <code>tensorboard_trace_handler</code> 后，你会在日志目录下得到一个 <code>.json</code> 文件。用 Chrome 浏览器打开 <code>chrome://tracing</code>，加载这个文件，你会看到一条条彩色的时间线——每个矩形代表一个算子的执行。</p>
+
+<p>解读 Chrome Trace 的几个关键点：</p>
+
+<ol>
+  <li><strong>CPU 侧</strong>：浅色带代表 CPU 线程的活动。如果 CPU 算子之间出现过长的空白带，说明 CPU 在等待——可能是 DataLoader 不够快，也可能是 Python 解释器的 GIL 阻塞</li>
+  <li><strong>GPU 侧</strong>：深色带代表 CUDA kernel 的执行。你希望看到 GPU 流上密集的 kernel 执行，没有大的空隙</li>
+  <li><strong>CUDA 拷贝</strong>：标有 <code>memcpy</code> 或 <code>cudaMemcpy</code> 的条——主机与设备之间的数据传输。频繁的 H2D/D2H 拷贝往往是性能杀手</li>
+  <li><strong>同步点</strong>：<code>cudaDeviceSynchronize</code> 或 <code>cudaStreamSynchronize</code> 通常是红色或橙色的长条，说明 CPU 在阻塞等待 GPU 完成</li>
+</ol>
+
+<pre><code># 程序化读取 trace 文件
+import json
+from collections import Counter
+
+with open("log/chrome_trace_16777216.json") as f:
+    trace = json.load(f)
+
+# 统计所有事件的持续时间
+durations = {}
+for event in trace:
+    if event["ph"] == "X":  # "X" = 持续时间事件
+        name = event["name"]
+        dur = event.get("dur", 0)
+        if name not in durations or dur > durations[name]:
+            durations[name] = dur
+
+# 找出最耗时的前 20 个操作
+sorted_ops = sorted(durations.items(), key=lambda x: x[1], reverse=True)
+for name, dur in sorted_ops[:20]:
+    print(f"{name}: {dur/1000:.2f} ms")</code></pre>
+
+<h3>24.3 内存分析：Memory Timeline 与 Snapshot</h3>
+
+<p>OOM（Out of Memory）是训练大模型时最常见的噩梦。torch.profiler 提供了两种内存分析工具：</p>
+
+<pre><code>with profiler.profile(
+    activities=[profiler.ProfilerActivity.CUDA],
+    profile_memory=True,
+) as p:
+    model(inputs)
+    p.step()
+    model(inputs)
+    p.step()
+
+# 内存时间线（显示每个 step 的显存变化）
+print(p.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=15))
+
+# 内存快照（记录当前的分配情况）
+snapshot = profiler._memory_snapshot()
+for seg in snapshot:
+    print(f"地址: {seg.address:#x}, 大小: {seg.total_size / 1024**2:.2f} MB, "
+          f"分配器: {seg.device_type}")</code></pre>
+
+<div class="warning">
+  <p><strong>踩坑实录</strong>：有同学训练时遇到 OOM，第一反应是降低 batch size。结果 batch size 降到 1 照样 OOM——用 profiler 的内存快照一查，发现是 optimizer 的 state 里存了一份完整模型参数的 EMA 副本占掉了 2/3 的显存。关掉 EMA 后 batch size 直接回到 64。所以说，<strong>别猜，profile 一下</strong>。</p>
+</div>
+
+<p>常见的显存泄漏症状：</p>
+<ul>
+  <li>每个 step 的显存占用持续增长，不会回落到基线</li>
+  <li>TensorBoard 的 memory timeline 图上出现阶梯状上升</li>
+  <li>多次迭代后突然 OOM，但减小 batch size 没有帮助</li>
+</ul>
+
+<h3>24.4 通信瓶颈 vs 计算瓶颈</h3>
+
+<p>在分布式训练中，性能瓶颈通常分为两类：</p>
+
+<table>
+  <tr><th>类型</th><th>特征</th><th>Chrome Trace 表现</th><th>常见原因</th></tr>
+  <tr><td>Compute-bound（计算瓶颈）</td><td>GPU 利用率高（>90%），但吞吐不够</td><td>GPU kernel 密集但单个 kernel 很慢</td><td>模型太大、算子未融合、未使用 Tensor Cores</td></tr>
+  <tr><td>Communication-bound（通信瓶颈）</td><td>GPU 利用率低（<50%），大量时间在 NCCL 通信</td><td>GPU 流上出现大量 `ncclAllReduce` 长条，kernel 之间空隙很大</td><td>all-reduce 没有 Overlap、网络带宽不足、多卡间负载不均</td></tr>
+  <tr><td>I/O-bound（数据加载瓶颈）</td><td>GPU 利用率低，CPU 侧出现等待 DataLoader</td><td>GPU 流长时间空闲，CPU 流上出现 `DataLoader` 事件</td><td>磁盘 IO 慢、预处理太复杂、num_workers 太少</td></tr>
+  <tr><td>Memory-bound（显存瓶颈）</td><td>无法增大 batch size，出现显存抖动</td><td>kernel 之间出现大量 `cudaMalloc`/`cudaFree`</td><td>激活值缓存过大、未使用 activation checkpointing</td></tr>
+</table>
+
+<pre><code># 诊断通信 vs 计算比
+# 在 profiler 结果中查看 NCCL 相关算子的总耗时
+averages = p.key_averages()
+nccl_time = 0
+compute_time = 0
+for avg in averages:
+    if "nccl" in avg.key.lower():
+        nccl_time += avg.cuda_time_total
+    elif avg.key.startswith("aten::"):
+        compute_time += avg.cuda_time_total
+
+total = nccl_time + compute_time
+print(f"计算占比: {compute_time/total*100:.1f}%")
+print(f"通信占比: {nccl_time/total*100:.1f}%")
+# 如果通信占比 > 30%，你应该优先优化通信效率</code></pre>
+
+<h3>24.5 GPU 利用率与 SM Efficiency</h3>
+
+<p>GPU 利用率（GPU Utilization）是一个宏观指标，但光看它不够——一个 GPU 利用率 100% 的机器，可能有一半的 SM（Streaming Multiprocessor）在空转。需要看更细粒度的指标：</p>
+
+<pre><code>import subprocess
+import json
+
+# 通过 nvidia-smi 查看 GPU 利用率
+result = subprocess.run(
+    ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+     "--format=csv,noheader,nounits"],
+    capture_output=True, text=True
+)
+print(result.stdout)
+
+# 更详细的 SM 利用率需要 Nsight 或 DCGM
+# nvprof --metrics sm_efficiency python train.py
+# sm_efficiency = 实际执行的 warp cycles / 所有可能的 warp cycles
+
+# 实际 SM 利用率低的原因：
+# - Memory-bound kernel：SM 在等待内存访问，计算单元空闲
+# - 低 occupancy：每个 SM 上的活跃 warp 数太少，无法隐藏延迟
+# - 分支分歧：warp 内的线程走了不同的分支路径</code></pre>
+
+<div class="highlight">
+  <p><strong>关键认知</strong>：GPU 利用率高 ≠ 程序效率高。一个糟糕实现的 kernel 可能让 GPU 一直忙，但做的有用工作很少。比如频繁的 <code>torch.numpy()</code> + <code>torch.from_numpy()</code> 会导致 CPU-GPU 同步，GPU 利用率的数字再好看也没用。真正的效率指标是 <strong>SM Efficiency</strong> 和 <strong>Computation Throughput</strong>。</p>
+</div>
+
+<h3>24.6 优化决策树</h3>
+
+<p>面对一份 profiler 输出，你该怎么决定先优化哪个环节？以下是一个诊断决策树：</p>
+
+<table>
+  <tr><th>profiler 发现</th><th>最可能的根因</th><th>优先处理</th></tr>
+  <tr><td>GPU 流有大段空闲</td><td>DataLoader 慢</td><td>增加 num_workers，使用 pinned memory，prefetch_factor</td></tr>
+  <tr><td>NCCL 通信占 >30% 时间</td><td>通信瓶颈</td><td>开启 gradient checkpoint，增大 batch size，使用 NCCL 的 gradient compression</td></tr>
+  <tr><td>单个 aten::mm 或 aten::bmm 极慢</td><td>未使用 Tensor Cores</td><td>确保输入维度是 8 的倍数，使用 FP16/BF16，检查 cuBLAS 配置</td></tr>
+  <tr><td>频繁 cudaMalloc/cudaFree</td><td>显存碎片化</td><td>开启 torch.cuda.empty_cache()，使用 caching allocator，减少动态 shape</td></tr>
+  <tr><td>CPU 侧出现大量 Python 操作</td><td>Graph break 过多</td><td>检查 torch.compile 的 graph break 原因，简化模型代码</td></tr>
+  <tr><td>kernel launch 间隔长</td><td>Kernel launch overhead</td><td>使用 CUDA Graph 捕获，增大 batch size 以摊薄 launch 开销</td></tr>
+</table>
+
+<div class="warning">
+  <p><strong>A100 惨案</strong>：一个团队高高兴兴把 V100 集群升级到 A100，预期训练时间缩短 50%。结果一跑——只快了 10%。大家怀疑 A100 有问题，联系厂商、查驱动、换机型折腾了两周。最后还是 profiler 救了他们：Chrome Trace 显示 GPU 利用率只有 30%，大量的时间花在 DataLoader 的 <code>torchvision.transforms</code> 上。原来之前的 V100 上 DataLoader 就是瓶颈，但 V100 算力低，这个瓶颈被掩盖了。换了 A100 后，GPU 算力翻了几倍，DataLoader 的短板暴露无遗。修复方案：把 transforms 全部移到 GPU 上（用 <code>transforms.v2</code>），增加 num_workers，内存预加载——最终 1.8x 加速。记住：<strong>升级硬件前，先 profile 你的管线</strong>。</p>
+</div>
+
+<h3>24.7 建立 profiling 的习惯</h3>
+
+<p>Profiling 不应该在性能出问题了才想起它。我建议你建立以下习惯：</p>
+
+<ol>
+  <li><strong>基线 profiling</strong>：每次新项目启动时，跑一次完整的 profiling，保存一份 baseline 报告</li>
+  <li><strong>修改后对比</strong>：每次改动了模型结构、训练策略或硬件环境后，对比 baseline 看差异</li>
+  <li><strong>自动化监控</strong>：在 CI 中加入 profiling 指标门禁——比如 "单步时间增加超过 10% 则告警"</li>
+  <li><strong>定期审查</strong>：每两周查看一次 profiler 输出，你可能发现某些算子的性能随着 PyTorch 版本升级发生了变化</li>
+</ol>
+
+<pre><code># 一个简单的 profiling wrapper
+import torch.profiler as profiler
+from pathlib import Path
+
+def profile_run(model, dataloader, steps=50, log_dir="./profiles"):
+    Path(log_dir).mkdir(exist_ok=True)
+    with profiler.profile(
+        activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA],
+        schedule=profiler.schedule(wait=2, warmup=3, active=5),
+        on_trace_ready=profiler.tensorboard_trace_handler(log_dir),
+        profile_memory=True,
+    ) as p:
+        for i, batch in enumerate(dataloader):
+            if i >= steps:
+                break
+            loss = model(batch)
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            p.step()
+    # 打印摘要
+    print(p.key_averages().table(sort_by="cuda_time_total", row_limit=15))</code></pre>
+
+<p>Profiling 是性能优化的前提和指南针。没有 profiling 的优化就像闭着眼走路——也许能走到终点，但一定会撞几次墙。掌握 torch.profiler 后，你不仅能回答「哪里慢」，还能回答「为什么慢」和「怎么修」。</p>
+
+<p>下一章我们将放眼 PyTorch 生态全景。你会发现 PyTorch 远远不止是一个深度学习框架——它周围有一个庞大而活跃的生态系统，帮你解决数据加载、模型构建、训练管理等方方面面的问题。</p>
+
+        <div class="footer-nav">
+            <a href="23.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="25.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

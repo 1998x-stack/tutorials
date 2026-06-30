@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 动态调度与乱序执行 — 计算机体系结构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 体系结构概述</a></li>
+            <li><a href="02.html">第2章 数字逻辑基础</a></li>
+            <li><a href="03.html">第3章 数据表示与运算</a></li>
+            <li><a href="04.html">第4章 指令集架构(ISA)</a></li>
+            <li><a href="05.html">第5章 RISC-V指令集精讲</a></li>
+            <li><a href="06.html">第6章 MIPS与x86指令集对比</a></li>
+            <li><a href="07.html">第7章 汇编与机器码实战</a></li>
+            <li><a href="08.html">第8章 单周期处理器设计</a></li>
+            <li><a href="09.html">第9章 流水线技术原理</a></li>
+            <li><a href="10.html">第10章 流水线冲突与解决</a></li>
+            <li><a href="11.html">第11章 分支预测技术</a></li>
+            <li><a href="12.html">第12章 异常与中断处理</a></li>
+            <li><a href="13.html">第13章 静态多发射与VLIW</a></li>
+            <li><a href="14.html" class="active">第14章 动态调度与乱序执行</a></li>
+            <li><a href="15.html">第15章 存储层次与局部性原理</a></li>
+            <li><a href="16.html">第16章 Cache设计与优化</a></li>
+            <li><a href="17.html">第17章 虚拟内存与TLB</a></li>
+            <li><a href="18.html">第18章 总线与I/O系统</a></li>
+            <li><a href="19.html">第19章 超标量与前瞻执行</a></li>
+            <li><a href="20.html">第20章 多核与多处理器架构</a></li>
+            <li><a href="21.html">第21章 SIMD与向量处理器</a></li>
+            <li><a href="22.html">第22章 GPU体系结构</a></li>
+            <li><a href="23.html">第23章 RISC-V开放生态与香山处理器</a></li>
+            <li><a href="24.html">第24章 Chiplet与先进封装</a></li>
+            <li><a href="25.html">第25章 AI加速器与领域专用架构</a></li>
+            <li><a href="26.html">第26章 从零构建计算机</a></li>
+            <li><a href="27.html">第27章 性能建模与仿真工具</a></li>
+            <li><a href="28.html">第28章 量子计算与体系结构的未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第14章 动态调度与乱序执行</h2>
+
+        <p>同学们好！上一章我们学习了静态调度——
+        让编译器在编译时找出指令间的并行性，打包发射。
+        这一章我们转向相反的思路：
+        <strong>让硬件在运行时动态地调度指令的执行顺序</strong>。
+        这意味着指令可以"不按程序顺序"执行——
+        后一条指令如果操作数已经就绪，
+        它可以先于前一条没有就绪的指令执行。
+        这就是乱序执行（Out-of-Order Execution），
+        现代高性能处理器的核心能力。</p>
+
+        <h3>为什么需要乱序执行</h3>
+
+        <p>让我们先看一个具体的例子来理解乱序执行的必要性。
+        假设有以下指令序列：</p>
+
+        <pre><code>// 示例：长延迟操作阻塞后续独立指令
+1: DIV x1, x2, x3     // x1 = x2 / x3, 需要20个周期
+2: ADD x4, x1, x5     // 依赖DIV的结果，必须等x1
+3: ADD x6, x7, x8     // 独立于DIV，操作数x7、x8已就绪
+4: ADD x9, x10, x11   // 独立于DIV
+5: ADD x12, x13, x14  // 独立于DIV
+6: ADD x15, x16, x17  // 独立于DIV</code></pre>
+
+        <p>在按序（In-Order）流水线中：
+        指令1（DIV）在EX阶段卡住20个周期，
+        指令2等待指令1完成，
+        指令3-6虽然在逻辑上完全独立于DIV，但也只能排队等候。
+        处理器空转了近20个周期，
+        而完全可以在这段时间内完成指令3-6的执行。</p>
+
+        <p>乱序执行的核心突破就在于此：
+        <strong>当一条指令因为等待长操作（如除法、缓存未命中的load）
+        而无法继续时，后续独立指令可以"越过"它，先执行</strong>。
+        这样功能单元被充分利用，处理器的有效吞吐量大幅提升。
+        在这个例子中，乱序执行可以在DIV执行的20个周期内
+        完成指令3-6，然后在第21周期开始执行指令2
+        （此时DIV的结果已经就绪）。
+        总时间从26周期（6条指令顺序执行）缩短到21周期，
+        节省了约19%的时间。如果DIV的延迟更长，
+        或者独立指令更多，节省的比例就更大。</p>
+
+        <h3>Scoreboard算法</h3>
+
+        <p>乱序执行的历史可以追溯到1964年。
+        Seymour Cray在CDC 6600——
+        那个时代最快的超级计算机——中首次实现了动态调度。
+        他的方案被称为Scoreboard（记分板）。</p>
+
+        <p>Scoreboard的核心是一个硬件表格，跟踪三类状态：</p>
+
+        <ul>
+            <li><strong>指令状态（Instruction Status）</strong>：
+            每条指令当前处于哪个阶段
+            （Issue、Read Operands、Execute、Write Result）。</li>
+            <li><strong>功能单元状态（Functional Unit Status）</strong>：
+            每个功能单元是否忙碌、当前执行哪条指令、
+            源寄存器和目标寄存器分别是什么。</li>
+            <li><strong>寄存器结果状态（Register Result Status）</strong>：
+            每个寄存器当前正在被哪个功能单元作为目标
+            （哪个功能单元即将写入该寄存器）。</li>
+        </ul>
+
+        <p>Scoreboard的执行流程分为四个阶段：</p>
+
+        <ol>
+            <li><strong>发射（Issue）</strong>：如果功能单元可用
+            且没有WAW冲突，则发射指令。指令进入功能单元。</li>
+            <li><strong>读取操作数（Read Operands）</strong>：
+            当所有源操作数都就绪（没有RAW冲突）时，
+            从寄存器堆读取操作数。</li>
+            <li><strong>执行（Execute）</strong>：
+            功能单元执行计算。执行时间因功能单元而异。</li>
+            <li><strong>写结果（Write Result）</strong>：
+            将结果写回寄存器堆。在此阶段，
+            如果有等待该结果的指令，它们会被唤醒。</li>
+        </ol>
+
+        <p>Scoreboard的创新在于将"发射"和"读取操作数"分离
+        ——一条指令可以在功能单元中等待操作数就绪，
+        而不阻塞后续指令的发射。
+        但Scoreboard有一个局限：
+        <strong>不能消除WAR和WAW冲突</strong>，
+        因为它没有寄存器重命名能力。
+        当两条指令存在名称依赖时，Scoreboard只能等待。</p>
+
+        <h3>Tomasulo算法</h3>
+
+        <p>1967年，IBM的Robert Tomasulo为IBM 360/91浮点单元
+        设计了具有革命性的调度算法。
+        Tomasulo算法引入了三个关键创新：</p>
+
+        <ul>
+            <li><strong>保留站（Reservation Stations）</strong>：
+            每个功能单元前面有一个或多个保留站，
+            保存等待执行的指令及其操作数。
+            保留站像一个"小队列"——
+            指令在保留站中等待操作数就绪，
+            不需要占用功能单元本身。</li>
+            <li><strong>通用数据总线（Common Data Bus, CDB）</strong>：
+            所有功能单元的计算结果广播到CDB上，
+            同时发送给所有等待该结果的保留站。
+            这是一个高效的"发布-订阅"机制——
+            指令不需要轮询寄存器堆来检查操作数是否就绪。</li>
+            <li><strong>寄存器重命名（Register Renaming）</strong>：
+            通过将架构寄存器（程序员看到的寄存器）
+            映射到保留站或寄存器堆中的物理位置，
+            消除了WAR和WAW冲突。
+            每一条写寄存器的指令实际上写到一个新的物理位置，
+            不影响之前对该寄存器的引用。</li>
+        </ul>
+
+        <p>让我们通过一个示例来走一遍Tomasulo算法的执行过程：</p>
+
+        <pre><code>// Tomasulo算法执行示例 (6条指令)
+// 假设: MULT需要10周期, ADD需要2周期
+
+// 指令序列:
+I1: LD  F0, 0(R1)       // F0 = Mem[R1+0]
+I2: MULTD F2, F0, F4    // F2 = F0 * F4
+I3: LD   F6, 0(R2)      // F6 = Mem[R2+0]
+I4: ADDD F8, F6, F10    // F8 = F6 + F10
+I5: SUBD F12, F8, F2    // F12 = F8 - F2
+I6: SD   F12, 0(R3)     // Mem[R3+0] = F12
+
+// 执行过程 (简化):
+// 周期1: I1发射(保留站1空闲), I3发射(保留站3空闲)
+// 周期2: I2发射(保留站2), 标记F0的来源为保留站1
+//         I4发射(保留站4), 标记F6的来源为保留站3
+// 周期3: I5发射(保留站5), 标记F8来源为保留站4, F2来源为保留站2
+//         I1完成, 结果放上CDB → 保留站2收到F0
+//         I2的源操作数全部就绪! 但MULT需要10周期
+// 周期4: I2开始执行(MULT, 10周期)
+//         I3完成, F6放上CDB → 保留站4收到F6
+//         I4源操作数就绪, 开始执行(ADDD)
+// 周期5-6: I4执行(ADDD, 2周期)
+// 周期6: I4完成, F8放上CDB → 保留站5收到F8
+//         但I5的F2还依赖I2(MULT中)
+// 周期7-13: I2执行中...
+// 周期14: I2完成 → 保留站5收到F2, I5开始执行
+// 周期15-16: I5执行(SUBD, 2周期)
+// 周期17: I5完成, F12放上CDB → I6收到F12
+// 周期18: I6执行(写内存)
+//
+// 关键观察: I3和I4在I2(MULT)执行期间就完成了!
+// 如果按序执行, 所有指令都要等I2的20个周期</code></pre>
+
+        <p>Tomasulo算法的每个保留站和寄存器
+        需要跟踪的关键字段如下：</p>
+
+        <table>
+            <tr><th>数据结构</th><th>字段</th><th>说明</th></tr>
+            <tr><td rowspan="5">保留站 (Reservation Station)</td><td>Op</td><td>要执行的操作（如ADD、MULT）</td></tr>
+            <tr><td>Vj, Vk</td><td>源操作数的值（如果已就绪）</td></tr>
+            <tr><td>Qj, Qk</td><td>源操作数来自哪个保留站（未就绪时）</td></tr>
+            <tr><td>Busy</td><td>保留站是否被占用</td></tr>
+            <tr><td>Dest</td><td>目标寄存器或ROB条目</td></tr>
+            <tr><td rowspan="2">寄存器状态 (Register Status)</td><td>Qi</td><td>寄存器i的结果将由哪个保留站产生</td></tr>
+            <tr><td>Busy</td><td>寄存器i是否正在被等待</td></tr>
+        </table>
+
+        <div class="tip">
+            <strong>Tomasulo算法于1967年发明，
+            IBM 360/91是第一个实现的机器</strong>——
+            这个算法的核心思想（保留站、CDB广播、寄存器重命名）
+            至今仍然存在于每一个高性能处理器中。
+            60年过去了，所有的"现代化"乱序执行引擎
+            本质上都是Tomasulo的变体。
+        </div>
+
+        <h3>Reorder Buffer（ROB）</h3>
+
+        <p>Tomasulo算法有一个重要的缺失：
+        它不能保证精确异常。
+        因为指令可以乱序完成并写回，当异常发生时，
+        异常指令后面的指令可能已经修改了寄存器状态，
+        导致无法恢复到异常前的程序状态。</p>
+
+        <p><strong>Reorder Buffer（重排序缓冲，ROB）</strong>
+        解决了这个问题。ROB是一个先进先出（FIFO）的环形缓冲，
+        其中每个条目对应一条已发射但尚未提交的指令。
+        ROB引入了两个阶段的写回机制：</p>
+
+        <ul>
+            <li><strong>完成（Complete）</strong>：指令执行结束，
+            结果写入ROB条目。
+            此结果可以被后续指令通过CDB转发使用。</li>
+            <li><strong>提交（Commit）</strong>：
+            当ROB头部的指令（即最早发射的指令）完成时，
+            将其结果从ROB写入寄存器堆或内存。
+            此时指令才真正"生效"。</li>
+        </ul>
+
+        <p>ROB保证了<strong>按序提交</strong>：
+        指令可以乱序执行完成，但必须按程序顺序提交。
+        当异常发生时，
+        ROB中位于异常指令之后的条目全部被清除，
+        它们的执行结果被丢弃。
+        异常指令之前提交的指令结果已经写入寄存器堆
+        ——这些是正确的、不可撤销的。</p>
+
+        <p>现代处理器中，ROB与物理寄存器文件
+        （Physical Register File, PRF）协同工作。
+        Architectural Register（如RISC-V的32个整数寄存器）
+        只是物理寄存器的"视图"。
+        ROB维护了一个寄存器别名表
+        （Register Alias Table, RAT），
+        将架构寄存器号映射到物理寄存器号。
+        每次写入架构寄存器时，
+        从空闲列表中分配一个新的物理寄存器——
+        这就是寄存器的重命名过程。</p>
+
+        <h3>现代乱序处理器的实现</h3>
+
+        <p>今天的乱序处理器在Tomasulo + ROB的基础上
+        增加了更多优化，构成了一套复杂的执行引擎：</p>
+
+        <ul>
+            <li><strong>物理寄存器文件（Physical Register File, PRF）</strong>：
+            比架构寄存器多得多。Apple M1的整数PRF有~200个物理寄存器，
+            在8发射宽度下能够支持大量正在执行的指令。</li>
+            <li><strong>统一的保留站 vs 分布式发射队列</strong>：
+            Intel倾向于使用统一保留站（Unified Reservation Station），
+            AMD使用分布式发射队列（Distributed Issue Queue）。
+            后者将保留站分散到各个功能单元端口，
+            减少了调度逻辑的复杂度，但降低了灵活性。</li>
+            <li><strong>加载-存储队列（Load-Store Queue, LSQ）</strong>：
+            用于处理访存指令的乱序执行。LSQ跟踪所有未提交的load和store指令，
+            检测地址别名冲突和违反内存顺序的情况。</li>
+            <li><strong>存储转发（Store-to-Load Forwarding）</strong>：
+            后续load指令可以直接从前面未提交的store指令的LSQ条目中读取数据，
+            减少了load-to-use延迟。</li>
+        </ul>
+
+        <p>乱序处理器的性能参数由几个关键数字定义：</p>
+
+        <ul>
+            <li><strong>发射宽度（Issue Width）</strong>：
+            每周期最多发射多少条指令到保留站。
+            Apple M1: 8条/周期。更宽的发射意味着更大的指令窗口。</li>
+            <li><strong>ROB大小</strong>：
+            支撑的"在途"指令数量。
+            Apple M1: 630条ROB。
+            更大的ROB允许指令窗口更宽，找到更多并行性。</li>
+            <li><strong>调度队列深度</strong>：
+            保留站中等待发射的指令数量。
+            M1的整数调度队列有~110个条目。</li>
+            <li><strong>LSU深度</strong>：
+            加载-存储队列大小，决定访存乱序的能力。</li>
+        </ul>
+
+        <p>真实世界的"踩坑"故事：
+        2018年我参与的一个乱序执行RISC-V核项目
+        在FPGA验证阶段遇到了一个极其隐蔽的bug——
+        一个load指令和一个store指令的地址在运行时恰好重合，
+        但LSQ的地址别名检测逻辑因为地址计算延迟错过了这个冲突，
+        导致load读到了旧数据。
+        这个bug只在特定的内存布局和特定的指令交织下才触发，
+        用传统的定向测试完全无法覆盖。
+        我们花了整整两周，
+        用随机指令生成器跑了上百亿条指令才复现并修复。
+        从此之后，LSQ的地址别名检测
+        成为我们处理器验证流程中的重点检查项，
+        每个新的乱序核心设计都要针对LSQ
+        做专门的"地址冲突"形式化验证。</p>
+
+        <p>乱序执行是现代高性能处理器的巅峰之作。
+        从CDC 6600的Scoreboard到IBM 360/91的Tomasulo，
+        再到今天Apple M1的宽发射乱序引擎，
+        六十年间动态调度技术的进化史
+        就是计算机性能不断突破的历史。
+        但处理器跑得再快，如果数据供不上也是白搭
+        ——下一章我们将进入存储层次（Memory Hierarchy）的世界，
+        从局部性原理到Cache设计，从虚拟内存到TLB，
+        全面理解存储器系统如何成为
+        整个体系结构中最关键的瓶颈。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 静态多发射与VLIW — 计算机体系结构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 体系结构概述</a></li>
+            <li><a href="02.html">第2章 数字逻辑基础</a></li>
+            <li><a href="03.html">第3章 数据表示与运算</a></li>
+            <li><a href="04.html">第4章 指令集架构(ISA)</a></li>
+            <li><a href="05.html">第5章 RISC-V指令集精讲</a></li>
+            <li><a href="06.html">第6章 MIPS与x86指令集对比</a></li>
+            <li><a href="07.html">第7章 汇编与机器码实战</a></li>
+            <li><a href="08.html">第8章 单周期处理器设计</a></li>
+            <li><a href="09.html">第9章 流水线技术原理</a></li>
+            <li><a href="10.html">第10章 流水线冲突与解决</a></li>
+            <li><a href="11.html">第11章 分支预测技术</a></li>
+            <li><a href="12.html">第12章 异常与中断处理</a></li>
+            <li><a href="13.html" class="active">第13章 静态多发射与VLIW</a></li>
+            <li><a href="14.html">第14章 动态调度与乱序执行</a></li>
+            <li><a href="15.html">第15章 存储层次与局部性原理</a></li>
+            <li><a href="16.html">第16章 Cache设计与优化</a></li>
+            <li><a href="17.html">第17章 虚拟内存与TLB</a></li>
+            <li><a href="18.html">第18章 总线与I/O系统</a></li>
+            <li><a href="19.html">第19章 超标量与前瞻执行</a></li>
+            <li><a href="20.html">第20章 多核与多处理器架构</a></li>
+            <li><a href="21.html">第21章 SIMD与向量处理器</a></li>
+            <li><a href="22.html">第22章 GPU体系结构</a></li>
+            <li><a href="23.html">第23章 RISC-V开放生态与香山处理器</a></li>
+            <li><a href="24.html">第24章 Chiplet与先进封装</a></li>
+            <li><a href="25.html">第25章 AI加速器与领域专用架构</a></li>
+            <li><a href="26.html">第26章 从零构建计算机</a></li>
+            <li><a href="27.html">第27章 性能建模与仿真工具</a></li>
+            <li><a href="28.html">第28章 量子计算与体系结构的未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第13章 静态多发射与VLIW</h2>
+
+        <p>同学们好！前面几章我们深入学习了单发射流水线——
+        每周期取指、译码、执行一条指令。
+        通过流水线，我们让不同指令的不同阶段重叠执行，提升了吞吐量。
+        但一个自然的问题是：能不能每个周期取指和执行多条指令呢？
+        这就是指令级并行（Instruction-Level Parallelism, ILP）
+        的核心追求。
+        本章我们将学习两种利用ILP的经典方式：
+        静态多发射和VLIW（超长指令字）。</p>
+
+        <h3>指令级并行（ILP）的基本概念</h3>
+
+        <p>ILP指的是指令之间可以被并行执行的程度。
+        如果两条指令之间没有数据依赖、控制依赖或资源冲突，
+        它们就可以并行执行。
+        ILP的大小决定了处理器在一个周期内能够利用多少并行度。</p>
+
+        <p>指令之间的依赖关系有三种：</p>
+
+        <ul>
+            <li><strong>数据依赖（True Data Dependency / RAW）</strong>：
+            一条指令的结果是下一条指令的输入。
+            例如 <code>add x1, x2, x3 / sub x4, x1, x5</code>
+            ——sub必须等add完成。这是真正的依赖，无法消除。</li>
+            <li><strong>名称依赖（Name Dependency）</strong>：
+            包括反依赖（WAR）和输出依赖（WAW）。
+            两条指令使用同一个寄存器但没有真正的数据流动。
+            通过寄存器重命名可以消除。</li>
+            <li><strong>控制依赖（Control Dependency）</strong>：
+            分支指令之后的指令是否执行取决于分支的结果。
+            通过分支预测和前瞻执行可以缓解。</li>
+        </ul>
+
+        <p>ILP的度量：<code>ILP = CPI_ideal_pipeline / CPI_achieved</code>。
+        在理想五级单发射流水线中，如果没有任何停顿，ILP=1。
+        多发射处理器的目标是让ILP > 1——
+        每周期完成超过一条指令。
+        注意这里说的是"完成"（commit/retire），
+        不是"发射"（issue）。现代超标量处理器
+        虽然发射宽度为4甚至8，
+        但由于依赖和冲突的存在，实际CPI通常在0.5-1.0之间
+        （即IPC为1-2）。</p>
+
+        <h3>静态多发射处理器</h3>
+
+        <p>静态多发射（Static Multiple Issue）的核心思想是：
+        编译器负责将多条独立的指令组合成"发射包"（issue packet），
+        处理器在每个周期取出并执行一个发射包中的所有指令。
+        这是"静态"的，因为指令的分组在编译时就已经确定了。</p>
+
+        <p>多发射带来的硬件需求是巨大的：</p>
+
+        <ul>
+            <li><strong>更宽的取指</strong>：如果每周期发射2条指令，
+            取指宽度必须是原来的2倍（64位/周期）。
+            这要求指令存储器有更宽的读取端口。</li>
+            <li><strong>多套译码器</strong>：需要多个并行的译码器，
+            同时解析多条指令。2发射需要2套，4发射需要4套。</li>
+            <li><strong>多个功能单元</strong>：需要多个ALU、
+            多个访存单元等，让发射的指令有硬件可执行。
+            如果2条指令都是ALU操作，但只有一个ALU，
+            那就发生了结构冲突。</li>
+            <li><strong>额外的寄存器端口</strong>：
+            寄存器堆需要更多的读端口和写端口
+            来支持多个并行的读写操作。
+            2发射至少需要4个读端口和2个写端口。</li>
+        </ul>
+
+        <p>静态发射的挑战在于：
+        <strong>发射包内部的指令之间不能有冲突</strong>。
+        编译器必须保证同一发射包中的指令
+        不使用相同的硬件资源、没有数据依赖。
+        如果编译器找不到足够的并行指令，
+        就必须在发射包中填充nop。
+        这意味着静态发射的性能高度依赖于编译器的调度能力。
+        在数值计算这样的规则代码中，编译器可以找到大量并行性；
+        但在控制流密集的通用程序中，编译器常常力不从心。</p>
+
+        <h3>VLIW架构详解</h3>
+
+        <p>VLIW（Very Long Instruction Word，超长指令字）
+        将静态多发射的理念推向了极致。
+        它的哲学是：
+        <strong>让编译器完成所有指令调度工作，
+        硬件只需要按照指令包的指示执行即可</strong>。</p>
+
+        <p>在VLIW架构中：</p>
+
+        <ul>
+            <li>一条"指令"实际上是一个<strong>包（bundle）</strong>，
+            包含多个独立的操作（slot）。
+            每个slot对应一个特定的功能单元。</li>
+            <li>包中的操作编码了它们各自的操作码和操作数，
+            但<strong>它们必须同时执行</strong>
+            ——没有任何硬件冒险检测。</li>
+            <li>每个slot与功能单元之间有固定的映射关系。
+            slot 0 → ALU0，slot 1 → ALU1，
+            slot 2 → Branch Unit，slot 3 → Load/Store Unit等。
+            这种固定映射简化了硬件的解码逻辑。</li>
+        </ul>
+
+        <p>下面是一个示意性的VLIW指令包：</p>
+
+        <pre><code>// TI C6000 VLIW DSP 指令包示例
+// 每个包包含8条32位指令，共256位
+// 所有8条指令在同一周期内并行执行
+
+|----- slot 0 (ALU) -----|----- slot 1 (ALU) -----|
+   ADD x1, x2, x3           SUB x4, x5, x6
+
+|----- slot 2 (MUL) -----|----- slot 3 (MUL) -----|
+   MPY x7, x8, x9           MPY x10, x11, x12
+
+|----- slot 4 (LOAD) -----|----- slot 5 (STORE) --|
+   LDW x13, *p1++           STW x14, *p2++
+
+|----- slot 6 (DSU) -----|----- slot 7 (BRANCH) --|
+   CMPEQ x15, x16, x17     B  loop_start
+
+// 编译器必须保证上述8个操作之间：
+// 1. 没有数据依赖 (无RAW冲突)
+// 2. 没有资源竞争 (每个slot使用不同的功能单元)
+// 3. 所有操作都在一个周期内完成
+// 编译器通过"软件流水"(software pipelining)
+// 和循环展开等技术来调度</code></pre>
+
+        <p>VLIW的优势非常明显：</p>
+
+        <ul>
+            <li><strong>硬件简单</strong>：不需要复杂的冲突检测、
+            转发逻辑和动态调度电路。
+            流水线控制逻辑比超标量处理器简单得多。</li>
+            <li><strong>低功耗</strong>：简单的控制逻辑
+            意味着更少的晶体管和更低的功耗。
+            对于嵌入式设备和DSP来说，功耗是首要考虑因素。</li>
+            <li><strong>高确定性</strong>：执行时间可预测
+            ——这对实时系统至关重要。
+            在VLIW上，你可以精确计算一个循环需要多少周期，
+            因为硬件行为是完全确定的。</li>
+        </ul>
+
+        <p>但VLIW也有显著缺点：</p>
+
+        <ul>
+            <li><strong>代码膨胀</strong>：当编译器找不到
+            足够的并行操作时，必须在包中填充nop。
+            在某些工作负载中，nop占比可达30-50%。
+            这意味着更大的代码体积和更差的指令缓存利用率。</li>
+            <li><strong>二进制兼容性</strong>：
+            不同代VLIW处理器的发射宽度和功能单元配置不同，
+            二进制代码不能直接移植。
+            这一问题对VLIW的商业化推广造成了巨大障碍。</li>
+            <li><strong>编译器压力</strong>：ILP提取完全依赖编译器，
+            而编译器无法预测运行时的数据值和缓存命中情况。
+            这意味着编译器必须在"最坏情况"下做保守调度。</li>
+        </ul>
+
+        <h3>Intel Itanium (IA-64) 的教训</h3>
+
+        <p>Itanium是VLIW历史上最重要也最惨烈的案例。
+        Intel和HP在1990年代联手开发的这个项目，
+        目标是彻底取代x86。
+        它的设计理念——EPIC
+        （Explicitly Parallel Instruction Computing）——
+        本质上是VLIW的进化版：</p>
+
+        <ul>
+            <li><strong>128位包</strong>：每个包包含3条41位指令
+            + 5位模板（template），模板指示包内指令的并行关系。
+            模板让同一包的指令可以有多种并行组合方式。</li>
+            <li><strong>谓词执行（Predicated Execution）</strong>：
+            每条指令都可以带一个谓词（predicate），
+            只有谓词为真时才执行。
+            这避免了短分支的预测错误代价——
+            if-then-else的两条路径都可以被取入，
+            但只有谓词为真的那条路径实际提交。</li>
+            <li><strong>投机加载（Speculative Load）</strong>：
+            ld.s指令可以安全地从不可访问的地址"试探性"加载，
+            如果地址无效则设置一个标志而不是触发异常。
+            这样编译器可以提前将load指令移动到分支之前。</li>
+            <li><strong>先进软件流水</strong>：
+            编译器通过循环展开和软件流水等技术深度调度代码。
+            Itanium的编译器被认为是当时最复杂的编译器之一。</li>
+        </ul>
+
+        <p>Itanium的命运众所周知——市场上惨败，
+        被戏称为"Itanic"。失败原因复杂：</p>
+
+        <ul>
+            <li>编译器无法为通用（非数值计算）代码提取足够的ILP。
+            指针别名分析、不规则控制流、运行时缓存未命中
+            ——这些都是静态编译器难以克服的困难。</li>
+            <li>代码膨胀严重：Itanium的代码体积通常是x86的2-3倍，
+            这对指令缓存的压力极大。</li>
+            <li>x86兼容层（IA-32 EL）性能极差，
+            导致Itanium无法运行已有的x86软件生态。
+            用户要花大价钱买新硬件，却跑不了已有的软件。</li>
+            <li>Intel自己的Xeon系列处理器性能增长更快，
+            最终吞噬了Itanium的目标市场。
+            Xeon的发展速度超过了Itanium的计划路线图。</li>
+        </ul>
+
+        <p>但Itanium的技术遗产并未完全消亡——
+        谓词执行影响了ARM的条件执行，
+        投机加载影响了现代处理器的内存排序模型设计。
+        从这个意义上说，Itanium的探索是值得的。</p>
+
+        <div class="highlight">
+            <strong>VLIW的哲学</strong>：
+            把复杂性从硬件转移给编译器。
+            如果编译器做得好，硬件可以更简单、更省电、更可预测。
+            但历史证明，对于通用计算来说，编译器往往做不到
+            ——静态分析无法应对运行时的不确定性。
+            这是VLIW在通用计算领域失败的根本原因。
+        </div>
+
+        <p>下面是超标量（Superscalar）处理器与VLIW处理器的
+        全面对比：</p>
+
+        <table>
+            <tr><th>对比维度</th><th>超标量 (Superscalar)</th><th>VLIW</th></tr>
+            <tr><td>指令调度</td><td>硬件动态调度</td><td>编译器静态调度</td></tr>
+            <tr><td>硬件复杂度</td><td>高（转发、冲突检测、重排序）</td><td>低（简单的流水线控制）</td></tr>
+            <tr><td>编译器复杂度</td><td>低（标准编译即可）</td><td>高（需要深度指令调度）</td></tr>
+            <tr><td>代码大小</td><td>紧凑</td><td>膨胀（nop填充）</td></tr>
+            <tr><td>二进制兼容性</td><td>好（同一ISA跨代兼容）</td><td>差（不同发射宽度不兼容）</td></tr>
+            <tr><td>功耗效率</td><td>较低</td><td>较高</td></tr>
+            <tr><td>执行可预测性</td><td>低（动态行为不确定）</td><td>高（编译时可确定执行时间）</td></tr>
+            <tr><td>典型应用</td><td>通用CPU（x86, ARM, RISC-V）</td><td>DSP, 嵌入式, 实时系统</td></tr>
+        </table>
+
+        <h3>VLIW的现代应用</h3>
+
+        <p>尽管VLIW在通用计算中失败了，
+        但在特定的领域它仍然活得很好：</p>
+
+        <ul>
+            <li><strong>数字信号处理器（DSP）</strong>：
+            TI C6000系列是VLIW DSP的代表作，
+            8个功能单元并行执行。
+            信号处理算法的数据流非常规整，编译器可以高效调度。
+            Qualcomm Hexagon DSP（用于骁龙系列）
+            也采用VLIW架构。</li>
+            <li><strong>GPU的Warp调度</strong>：
+            NVIDIA的SIMT（单指令多线程）
+            本质上是一种类VLIW的执行模型——
+            一个warp中的32个线程在同一个周期
+            执行同一条指令，只是数据不同。</li>
+            <li><strong>专用加速器</strong>：
+            许多AI加速器、视频编解码器
+            采用了类VLIW的设计——
+            计算模式固定，编译器可以精确调度。</li>
+        </ul>
+
+        <p>为什么VLIW在DSP领域成功？
+        原因在于DSP程序的特性：
+        循环密集、内存访问模式规则、无复杂的控制流、代码体积小。
+        这些特点让编译器能够发挥全部调度能力。
+        反观通用程序——指针、虚函数、运行时多态、共享数据结构
+        ——编译器在编译时几乎无法预测运行时的行为。</p>
+
+        <p>静态多发射和VLIW的核心理念是
+        "让编译器在编译时做更多的调度工作"，从而简化硬件。
+        但下一章我们将看到完全相反的道路：
+        让硬件在运行时动态调度指令——
+        这就是乱序执行（Out-of-Order Execution），
+        现代高性能处理器的基石。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

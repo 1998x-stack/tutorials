@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 异常与中断处理 — 计算机体系结构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 体系结构概述</a></li>
+            <li><a href="02.html">第2章 数字逻辑基础</a></li>
+            <li><a href="03.html">第3章 数据表示与运算</a></li>
+            <li><a href="04.html">第4章 指令集架构(ISA)</a></li>
+            <li><a href="05.html">第5章 RISC-V指令集精讲</a></li>
+            <li><a href="06.html">第6章 MIPS与x86指令集对比</a></li>
+            <li><a href="07.html">第7章 汇编与机器码实战</a></li>
+            <li><a href="08.html">第8章 单周期处理器设计</a></li>
+            <li><a href="09.html">第9章 流水线技术原理</a></li>
+            <li><a href="10.html">第10章 流水线冲突与解决</a></li>
+            <li><a href="11.html">第11章 分支预测技术</a></li>
+            <li><a href="12.html" class="active">第12章 异常与中断处理</a></li>
+            <li><a href="13.html">第13章 静态多发射与VLIW</a></li>
+            <li><a href="14.html">第14章 动态调度与乱序执行</a></li>
+            <li><a href="15.html">第15章 存储层次与局部性原理</a></li>
+            <li><a href="16.html">第16章 Cache设计与优化</a></li>
+            <li><a href="17.html">第17章 虚拟内存与TLB</a></li>
+            <li><a href="18.html">第18章 总线与I/O系统</a></li>
+            <li><a href="19.html">第19章 超标量与前瞻执行</a></li>
+            <li><a href="20.html">第20章 多核与多处理器架构</a></li>
+            <li><a href="21.html">第21章 SIMD与向量处理器</a></li>
+            <li><a href="22.html">第22章 GPU体系结构</a></li>
+            <li><a href="23.html">第23章 RISC-V开放生态与香山处理器</a></li>
+            <li><a href="24.html">第24章 Chiplet与先进封装</a></li>
+            <li><a href="25.html">第25章 AI加速器与领域专用架构</a></li>
+            <li><a href="26.html">第26章 从零构建计算机</a></li>
+            <li><a href="27.html">第27章 性能建模与仿真工具</a></li>
+            <li><a href="28.html">第28章 量子计算与体系结构的未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第12章 异常与中断处理</h2>
+
+        <p>同学们好！到目前为止，我们一直假设程序是线性执行的
+        ——指令从存储器中顺序取出，即使有分支也是在预测的路径上。
+        但在现实世界中，程序运行时会出现各种"意外"：
+        除零错误、访问非法内存地址、外部设备请求服务等。
+        处理器如何优雅地处理这些意外，然后无缝地回到被中断的程序？
+        这就是本章的主题——异常与中断处理。</p>
+
+        <h3>异常 vs 中断</h3>
+
+        <p>在计算机体系结构中，
+        "异常"和"中断"这两个术语经常被混用，但它们有本质区别：</p>
+
+        <ul>
+            <li><strong>异常（Exception）</strong>：
+            由正在执行的指令触发，是同步的。
+            例如：非法操作码、除零错误、系统调用（ecall）、
+            页错误、访问未对齐的内存地址等。
+            这些事件与程序的执行流直接相关，发生在可预测的时刻。</li>
+            <li><strong>中断（Interrupt）</strong>：
+            由处理器外部的设备触发，是异步的。
+            例如：网卡收到数据包、定时器到期、键盘被按下、
+            磁盘完成读写等。
+            中断与当前执行的指令无关，可以在任何时刻发生。</li>
+        </ul>
+
+        <p>在RISC-V术语中，两者统称为"Trap"（陷入）。
+        但系统工程师通常还是区分"异常"和"中断"，
+        因为它们处理的流程有微妙差异。
+        一个重要的区别是：
+        异常发生时，处理器可以精确地知道哪条指令出了问题，
+        而中断发生时，处理器只知道"有个外部事件需要处理"。</p>
+
+        <p>以下是RISC-V定义的主要异常和中断代码
+        （mcause寄存器的值）：</p>
+
+        <table>
+            <tr><th>mcause值</th><th>类型</th><th>描述</th></tr>
+            <tr><td>0</td><td>中断(0除外)</td><td>用户软件中断</td></tr>
+            <tr><td>3</td><td>中断</td><td>机器软件中断</td></tr>
+            <tr><td>7</td><td>中断</td><td>机器定时器中断</td></tr>
+            <tr><td>11</td><td>中断</td><td>机器外部中断</td></tr>
+            <tr><td>0</td><td>异常</td><td>指令地址未对齐</td></tr>
+            <tr><td>1</td><td>异常</td><td>指令访问错误</td></tr>
+            <tr><td>2</td><td>异常</td><td>非法指令</td></tr>
+            <tr><td>3</td><td>异常</td><td>断点</td></tr>
+            <tr><td>4</td><td>异常</td><td>Load地址未对齐</td></tr>
+            <tr><td>5</td><td>异常</td><td>Load访问错误</td></tr>
+            <tr><td>6</td><td>异常</td><td>Store地址未对齐</td></tr>
+            <tr><td>7</td><td>异常</td><td>Store访问错误</td></tr>
+            <tr><td>8</td><td>异常</td><td>环境调用(ecall)</td></tr>
+            <tr><td>12</td><td>异常</td><td>指令页错误</td></tr>
+            <tr><td>13</td><td>异常</td><td>Load页错误</td></tr>
+            <tr><td>15</td><td>异常</td><td>Store页错误</td></tr>
+        </table>
+
+        <h3>精确异常处理</h3>
+
+        <p>在流水线处理器中，异常处理面临一个独特的难题：
+        当一条指令在EX阶段触发异常时，
+        后面几条指令可能已经进入了流水线的不同阶段。
+        如果直接清空流水线，后面的指令会丢失它们已经部分执行的副作用。
+        如果不清空，这些指令的结果可能会被错误地提交。</p>
+
+        <p><strong>精确异常（Precise Exception）</strong>
+        要求异常发生时：</p>
+
+        <ul>
+            <li>异常指令之前的所有指令都已完成（committed），
+            它们的执行结果是可见的。</li>
+            <li>异常指令及其之后的所有指令都没有执行，
+            或它们的执行结果被丢弃。</li>
+            <li>保存异常指令的PC，
+            让异常处理程序知道问题出在哪里。</li>
+        </ul>
+
+        <p>实现精确异常的硬件机制是
+        <strong>按序提交（In-Order Commit）</strong>：
+        每一条指令必须严格按照程序顺序提交其执行结果。
+        在五级流水线中，这意味着WB阶段不能提前写回结果
+        ——必须等到前面的指令都完成WB后才能进行。
+        这实际上是乱序执行处理器中Reorder Buffer（ROB）的前身。
+        如果没有精确异常保证，操作系统的调试将是一场灾难
+        ——你无法知道程序崩溃时到底执行到了哪条指令。
+        更糟糕的是，操作系统无法正确地杀死一个非法进程，
+        因为无法确定进程的哪些指令已经执行、哪些没有。</p>
+
+        <div class="warning">
+            <strong>不精确的异常是调试的噩梦</strong>
+            ——这也是为什么现代处理器宁愿增加复杂度
+            也要保证精确异常。早期的SPARC处理器
+            支持非精确异常的"快速模式"，
+            结果操作系统开发者发现调试器几乎无法工作，
+            因为异常返回地址指向的不是触发异常的指令，
+            而是之后的某条指令。
+            这个教训促使所有现代处理器都优先保证精确异常。
+        </div>
+
+        <h3>RISC-V的异常处理机制</h3>
+
+        <p>RISC-V将异常处理机制设计得非常清晰和精简。
+        与x86的复杂分段和特权级不同，
+        RISC-V使用一组控制状态寄存器
+        （Control and Status Registers, CSRs）
+        来管理异常处理。关键的CSR包括：</p>
+
+        <ul>
+            <li><strong>mtvec（Machine Trap Vector）</strong>：
+            保存异常处理程序的入口地址。
+            当异常发生时，处理器跳转到这个地址开始执行。</li>
+            <li><strong>mepc（Machine Exception PC）</strong>：
+            保存触发异常的指令的PC值。
+            异常处理完毕后，用mret指令将mepc写回PC，恢复执行。</li>
+            <li><strong>mcause（Machine Cause）</strong>：
+            保存异常的原因编号（如上表所示）。
+            最高位指示是中断还是异常，低位置指示具体原因。</li>
+            <li><strong>mtval（Machine Trap Value）</strong>：
+            保存与异常相关的附加信息。
+            例如地址访问错误时保存非法地址，
+            非法指令时保存指令编码。</li>
+            <li><strong>mstatus（Machine Status）</strong>：
+            保存处理器的状态信息，
+            包括全局中断使能位（MIE）、
+            之前的中断使能位（MPIE）和特权级（MPP）。</li>
+        </ul>
+
+        <p>RISC-V的异常处理流程如下：</p>
+
+        <ol>
+            <li>将当前PC保存到mepc</li>
+            <li>将异常原因写入mcause，附加信息写入mtval</li>
+            <li>保存当前中断使能位和特权级到mstatus的MPIE和MPP字段，
+            然后清除MIE（禁止嵌套中断）</li>
+            <li>跳转到mtvec指定的地址开始执行异常处理程序</li>
+            <li>异常处理程序执行完毕后，执行mret指令：
+            从mepc恢复PC，从mstatus恢复中断使能位和特权级</li>
+        </ol>
+
+        <p>下面是一个简单的RISC-V陷阱处理程序框架：</p>
+
+        <pre><code># RISC-V Trap Handler (机器模式)
+.section .text.trap
+.align 2
+trap_handler:
+    # 保存现场 (保存被中断程序的上下文)
+    csrrw sp, mscratch, sp  # 交换sp和mscratch
+    addi sp, sp, -32*8      # 分配保存区域
+    sd x1, 0(sp)            # 保存ra
+    sd x2, 8(sp)            # 保存sp
+    sd x3, 16(sp)           # 保存gp
+    # ... 保存其他寄存器 ...
+
+    # 判断异常类型
+    csrr t0, mcause
+    bltz t0, handle_interrupt   # mcause最高位=1 → 中断
+    # 处理异常
+    li t1, 8                # ecall的mcause值
+    beq t0, t1, handle_ecall
+    li t1, 2                # 非法指令
+    beq t0, t1, handle_illegal
+    j handle_default
+
+handle_interrupt:
+    # 根据中断类型分派
+    andi t0, t0, 0xFF       # 取低8位
+    li t1, 11               # 机器外部中断(MEI)
+    beq t0, t1, handle_external
+    # ... 其他中断处理 ...
+
+handle_ecall:
+    # 系统调用处理
+    csrr t0, mepc
+    addi t0, t0, 4          # 跳过ecall指令(4字节)
+    csrw mepc, t0           # 更新mepc
+    # ... 执行系统调用 ...
+    j trap_return
+
+trap_return:
+    # 恢复现场
+    ld x1, 0(sp)
+    ld x2, 8(sp)
+    ld x3, 16(sp)
+    # ... 恢复其他寄存器 ...
+    addi sp, sp, 32*8
+    csrrw sp, mscratch, sp
+    mret</code></pre>
+
+        <p>这个陷阱处理程序框架展示了RISC-V异常处理的核心模式：
+        保存现场 → 判断原因 → 分派处理 → 恢复现场 → mret返回。
+        所有具体的系统调用处理、设备驱动逻辑
+        都是在这个框架中由软件实现的。</p>
+
+        <h3>中断控制器与优先级</h3>
+
+        <p>在实际系统中，可能有几十个甚至上百个外部设备
+        能够产生中断。如何管理这些中断的优先级、路由和嵌套？
+        RISC-V体系结构中，中断控制功能由
+        <strong>平台级中断控制器
+        （Platform-Level Interrupt Controller, PLIC）</strong>负责。</p>
+
+        <p>PLIC的核心功能包括：</p>
+
+        <ul>
+            <li><strong>中断聚合</strong>：将所有外部中断源
+            （GPIO、UART、以太网等）汇聚到一条或几条处理器中断线。</li>
+            <li><strong>优先级管理</strong>：为每个中断源分配优先级。
+            当多个中断同时发生时，
+            PLIC将最高优先级的中断提交给处理器。</li>
+            <li><strong>中断屏蔽</strong>：允许软件动态启用
+            或禁用特定中断源。</li>
+            <li><strong>中断嵌套</strong>：高优先级中断可以抢占
+            低优先级中断的处理过程。
+            RISC-V通过mstatus.MIE位控制嵌套：
+            在中断处理程序中重新使能MIE即可允许嵌套中断。</li>
+        </ul>
+
+        <p>中断的触发方式有两种：</p>
+
+        <ul>
+            <li><strong>边沿触发（Edge-Triggered）</strong>：
+            检测信号的上升沿或下降沿。
+            优点是不会丢失中断（即使处理器正忙，边沿信号会被锁存）。
+            缺点是容易因抖动产生虚假中断。</li>
+            <li><strong>电平触发（Level-Triggered）</strong>：
+            检测信号的高电平或低电平。
+            优点是简单可靠，
+            但要求处理器在中断处理结束前清除中断源的电平信号，
+            否则会重复触发。</li>
+        </ul>
+
+        <h3>Syscall与陷入</h3>
+
+        <p>系统调用（System Call）是用户程序
+        进入操作系统内核的标准途径。在RISC-V中，
+        系统调用通过<strong>ecall</strong>指令触发。
+        让我们以Linux的<code>write()</code>系统调用为例，
+        完整走一遍user→kernel→user的旅程：</p>
+
+        <ol>
+            <li>用户程序调用 <code>write(fd, buf, count)</code>，
+            C库将其转换为RISC-V ABI调用：
+            设置a7=64（write的syscall编号）、a0=fd、
+            a1=buf、a2=count，然后执行ecall指令。</li>
+            <li>ecall触发异常（mcause=8），
+            处理器进入机器模式（M-mode），
+            跳转到mtvec指定的陷阱处理程序。</li>
+            <li>陷阱处理程序保存上下文，从mcause判断这是ecall，
+            检查a7中的系统调用编号，
+            分派到对应的内核服务函数。</li>
+            <li>内核执行实际的写操作——
+            这涉及到文件系统、VFS层、设备驱动等
+            复杂的软件栈。</li>
+            <li>内核将返回值写入a0，
+            恢复用户程序的上下文，执行mret返回用户模式。</li>
+            <li>用户程序从ecall之后的下一条指令继续执行，
+            读取a0中的返回值。</li>
+        </ol>
+
+        <p>这个过程中，处理器硬件只做了两件事：
+        捕获ecall并跳转到陷阱处理程序，
+        以及执行mret返回。
+        所有系统调用的分派、权限检查、参数验证
+        都是由软件完成的。
+        这种"硬件做最少的事情"的设计哲学
+        贯穿了RISC-V的整个异常处理系统。
+        相比之下，x86的sysenter/sysexit机制
+        在硬件中做了更多的事情
+        （如自动切换栈、加载段寄存器等），
+        但换来的是更高的复杂度和灵活性损失。</p>
+
+        <p>异常和中断处理是操作系统和处理器硬件的交汇点。
+        理解了异常处理，你就理解了操作系统
+        如何在硬件层面上获得控制权。
+        下一章我们将视角转回性能优化——
+        在解决了单指令执行效率、流水线冲突、分支预测
+        和异常处理之后，是时候探索指令级并行（ILP）
+        的最高境界了：静态多发射与VLIW架构。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

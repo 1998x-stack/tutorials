@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 GPU体系结构 — 计算机体系结构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 体系结构概述</a></li>
+            <li><a href="02.html">第2章 数字逻辑基础</a></li>
+            <li><a href="03.html">第3章 数据表示与运算</a></li>
+            <li><a href="04.html">第4章 指令集架构(ISA)</a></li>
+            <li><a href="05.html">第5章 RISC-V指令集精讲</a></li>
+            <li><a href="06.html">第6章 MIPS与x86指令集对比</a></li>
+            <li><a href="07.html">第7章 汇编与机器码实战</a></li>
+            <li><a href="08.html">第8章 单周期处理器设计</a></li>
+            <li><a href="09.html">第9章 流水线技术原理</a></li>
+            <li><a href="10.html">第10章 流水线冲突与解决</a></li>
+            <li><a href="11.html">第11章 分支预测技术</a></li>
+            <li><a href="12.html">第12章 异常与中断处理</a></li>
+            <li><a href="13.html">第13章 静态多发射与VLIW</a></li>
+            <li><a href="14.html">第14章 动态调度与乱序执行</a></li>
+            <li><a href="15.html">第15章 存储层次与局部性原理</a></li>
+            <li><a href="16.html">第16章 Cache设计与优化</a></li>
+            <li><a href="17.html">第17章 虚拟内存与TLB</a></li>
+            <li><a href="18.html">第18章 总线与I/O系统</a></li>
+            <li><a href="19.html">第19章 超标量与前瞻执行</a></li>
+            <li><a href="20.html">第20章 多核与多处理器架构</a></li>
+            <li><a href="21.html">第21章 SIMD与向量处理器</a></li>
+            <li><a href="22.html" class="active">第22章 GPU体系结构</a></li>
+            <li><a href="23.html">第23章 RISC-V开放生态与香山处理器</a></li>
+            <li><a href="24.html">第24章 Chiplet与先进封装</a></li>
+            <li><a href="25.html">第25章 AI加速器与领域专用架构</a></li>
+            <li><a href="26.html">第26章 从零构建计算机</a></li>
+            <li><a href="27.html">第27章 性能建模与仿真工具</a></li>
+            <li><a href="28.html">第28章 量子计算与体系结构的未来</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第22章 GPU体系结构</h2>
+
+        <p>同学们好！上一章我们学习了SIMD——一条指令处理多份数据，这是并行计算的"轻量级方案"。今天我们要见识真正的"并行巨兽"——<strong>GPU</strong>（Graphics Processing Unit）。GPU可以同时运行数万个线程，是当代AI革命的算力基石。但GPU的设计哲学和CPU完全不同，理解它的内部结构是发挥其威力的前提。让我们一起揭开GPU的神秘面纱。</p>
+
+        <h2>22.1 GPU vs CPU：两种哲学</h2>
+
+        <p>CPU和GPU的设计目标截然不同，我们可以用一句话概括：<strong>CPU是延迟优化的，GPU是吞吐量优化的</strong>。</p>
+
+        <p>CPU为了降低单条指令的延迟，投入了大量芯片资源：深流水线、分支预测、乱序执行、大容量cache、寄存器重命名、前瞻执行……所有这些超标量技术都在追求"让一条指令跑得更快"。代价是——这些控制逻辑占到了CPU芯片面积的60-70%，真正做计算的ALU只占一小部分。</p>
+
+        <p>GPU的选择完全不同。它用数千个简单的核心来换取<strong>总吞吐量</strong>（Throughput）。GPU核心是顺序执行的（in-order），没有分支预测，没有乱序执行，cache较小。它隐藏延迟的方式不是通过复杂的预测，而是通过<strong>线程切换</strong>：当一组线程在等待内存访问完成时，调度器立即切换到另一组准备好执行的线程。只要有足够的线程，GPU的执行单元就能始终保持忙碌。</p>
+
+        <p>结果就是：一个现代CPU（如Intel Core i9-14900K）的单线程浮点性能约200 GFLOPS，而一块RTX 4090的理论浮点性能超过80 TFLOPS——相差400倍！当然，GPU只有在足够多的并行工作负载下才能发挥这个性能。</p>
+
+        <h2>22.2 SIMT执行模型</h2>
+
+        <p>NVIDIA引入了一种称为<strong>SIMT</strong>（Single Instruction, Multiple Threads，单指令多线程）的执行模型，这是理解GPU编程的关键。</p>
+
+        <p>在SIMT模型中，<strong>Warp</strong>（线程束）是最基本的执行单元——32个线程组成一个warp，它们在同一个CUDA核心上以锁步（lockstep）方式执行同一指令。每个线程有自己的寄存器状态和程序计数器，但warp中的所有线程在同一时刻执行相同的指令。</p>
+
+        <p>如果warp中所有线程都走同一个分支路径，硬件利用率是100%。但如果线程发生<strong>分支分歧</strong>（Branch Divergence），情况就不同了：</p>
+
+        <pre><code>// CUDA 中的分支分歧示例
+__global__ void divergent_kernel(float* data, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; n) {
+        if (data[idx] &gt; 0.0f) {
+            data[idx] = sqrt(data[idx]);  // 路径A：正数处理
+        } else {
+            data[idx] = 0.0f;             // 路径B：非正数清零
+        }
+    }
+}
+
+// 在同一个warp中（32个相邻thread，假设threadIdx.x 0-31）：
+// 如果data[0] &gt; 0, data[1] &lt;= 0, data[2] &gt; 0, ...
+// 那么路径A和路径B的线程会分成两组
+// 硬件先执行路径A（thread 0,2,3...），thread 1,4等被mask掉（不写入）
+// 然后执行路径B（thread 1,4...），thread 0,2等被mask掉
+// 两种分支→ 两倍的执行时间！</code></pre>
+
+        <p>SIMT和SIMD的区别很微妙但重要：SIMD（如SSE/AVX）要求程序员显式地将数据打包到向量寄存器中，用向量指令操作；而SIMT让程序员为<strong>单个线程</strong>编写标量代码，硬件自动将线程组织成warp执行。程序员写的是"每个线程做什么"，硬件负责将线程分组并行的细节。这大大简化了编程模型。</p>
+
+        <h2>22.3 NVIDIA GPU内部结构</h2>
+
+        <p>以NVIDIA的架构为例，GPU的层次结构从大到小是：GPU芯片 → GPC（图形处理簇）→ SM（流多处理器）→ CUDA Core / Warp Scheduler。</p>
+
+        <p><strong>SM</strong>（Streaming Multiprocessor，流多处理器）是GPU的核心计算单元。一个典型的SM包含：</p>
+        <ul>
+            <li><strong>CUDA Core</strong>：64-128个整数/浮点运算单元</li>
+            <li><strong>Warp Scheduler</strong>：4个调度器，每个控制一组warp</li>
+            <li><strong>Register File</strong>：65536 × 32-bit（256KB！这比CPU L2 cache还大）</li>
+            <li><strong>Shared Memory + L1 Cache</strong>：可配置共享（0-100KB），用于线程块间通信</li>
+            <li><strong>Tensor Core</strong>：混合精度矩阵乘法加速器</li>
+            <li><strong>Special Function Units (SFU)</strong>：处理超越函数（sqrt, sin, cos）</li>
+        </ul>
+
+        <p>以H100（Hopper架构）为例：每个SM有4个warp调度器，每个调度器可以跟踪16个warp（共64个warp/SM），每个warp 32个线程，所以每个SM可以跟踪64×32 = 2048个线程。H100共有132个SM，因此总线程容量达到132 × 2048 ≈ 27万个并发线程！这就是GPU隐藏延迟的核心能力——当某个warp在等待内存时，warp调度器可以立即切换到另一个warp，零开销上下文切换。</p>
+
+        <h2>22.4 GPU存储层次</h2>
+
+        <p>理解GPU的存储层次是优化GPU程序的核心。从快到慢：</p>
+
+        <table>
+            <tr>
+                <th>存储层级</th>
+                <th>作用域</th>
+                <th>典型大小</th>
+                <th>延迟</th>
+                <th>用途</th>
+            </tr>
+            <tr>
+                <td>寄存器</td>
+                <td>每个线程私有</td>
+                <td>255个 32-bit/线程</td>
+                <td>~1 cycle</td>
+                <td>局部变量、中间结果</td>
+            </tr>
+            <tr>
+                <td>Shared Memory</td>
+                <td>线程块内共享</td>
+                <td>0-228KB / SM（H100）</td>
+                <td>~5-20 cycles</td>
+                <td>线程块协作、数据复用</td>
+            </tr>
+            <tr>
+                <td>L1/纹理Cache</td>
+                <td>SM内</td>
+                <td>可配置（与shared memory共享）</td>
+                <td>~20-30 cycles</td>
+                <td>通用数据缓存</td>
+            </tr>
+            <tr>
+                <td>L2 Cache</td>
+                <td>全局</td>
+                <td>60MB（H100）</td>
+                <td>~120-200 cycles</td>
+                <td>芯片级缓存</td>
+            </tr>
+            <tr>
+                <td>HBM3</td>
+                <td>全局</td>
+                <td>80GB（H100）</td>
+                <td>~300-600 cycles</td>
+                <td>主存，高带宽（3.35 TB/s）</td>
+            </tr>
+        </table>
+
+        <p>最重要的优化之一是<strong>合并访问</strong>（Coalesced Memory Access）。当一个warp中的32个线程访问全局内存时，硬件会尝试将这些访问合并成尽可能少的<strong>内存事务</strong>（Memory Transactions）。如果32个线程访问的是连续对齐的128字节块，所有访问可合并为1个事务，带宽利用率100%。但如果每个线程访问的是间隔很大的地址（如列优先矩阵访问），可能产生32个独立事务，带宽利用率暴跌到3%以下。</p>
+
+        <pre><code>// 合并访问 vs 非合并访问
+#define N 4096
+__global__ void coalesced(float* A, float* B, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i &lt; n) {
+        B[i] = A[i] * 2.0f;     // 连续访问，warp内线程访问A[0..31]
+                                  // 完美合并：1个事务传输128字节
+    }
+}
+
+__global__ void strided(float* A, float* B, int n, int stride) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i &lt; n) {
+        B[i * stride] = A[i * stride] * 2.0f;  // stride=32时，
+        // warp内线程访问A[0], A[32], A[64], ...
+        // 每次访问不同cache行，无法合并！
+    }
+}
+
+// 矩阵乘法 — 使用shared memory优化合并访问
+__global__ void matmul_shared(float* A, float* B, float* C, int M, int N, int K) {
+    __shared__ float As[32][32];
+    __shared__ float Bs[32][32];
+
+    int row = blockIdx.y * 32 + threadIdx.y;
+    int col = blockIdx.x * 32 + threadIdx.x;
+    float sum = 0.0f;
+
+    for (int t = 0; t &lt; K; t += 32) {
+        As[threadIdx.y][threadIdx.x] = A[row * K + t + threadIdx.x];
+        Bs[threadIdx.y][threadIdx.x] = B[(t + threadIdx.y) * N + col];
+        __syncthreads();
+
+        for (int k = 0; k &lt; 32; k++)
+            sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+        __syncthreads();
+    }
+    C[row * N + col] = sum;
+}</code></pre>
+
+        <h2>22.5 Tensor Core与AI时代的GPU</h2>
+
+        <p>2017年，NVIDIA在Volta架构（V100）中首次引入了<strong>Tensor Core</strong>——一种专门为矩阵乘法加速的硬件单元。这是一个革命性的设计，因为它标志着GPU从"图形处理器"向"AI处理器"的转型。</p>
+
+        <p>Tensor Core的核心是一个混合精度矩阵乘加运算：D = A × B + C，其中A和B通常是FP16/BF16/FP8格式，C和D可以是更高精度。一次Tensor Core操作可以在一个时钟周期内完成多个矩阵运算——一个H100 Tensor Core每个周期完成1024次FP16运算！</p>
+
+        <p>历代GPU的规格对比：</p>
+
+        <table>
+            <tr>
+                <th>架构</th>
+                <th>GPU</th>
+                <th>年份</th>
+                <th>SM数</th>
+                <th>CUDA Core</th>
+                <th>Tensor Core</th>
+                <th>显存带宽</th>
+                <th>FP16 TFLOPS</th>
+            </tr>
+            <tr>
+                <td>Kepler</td>
+                <td>K80</td>
+                <td>2014</td>
+                <td>13×2</td>
+                <td>2496×2</td>
+                <td>—</td>
+                <td>480 GB/s</td>
+                <td>—</td>
+            </tr>
+            <tr>
+                <td>Pascal</td>
+                <td>P100</td>
+                <td>2016</td>
+                <td>56</td>
+                <td>3584</td>
+                <td>—</td>
+                <td>732 GB/s</td>
+                <td>—</td>
+            </tr>
+            <tr>
+                <td>Volta</td>
+                <td>V100</td>
+                <td>2017</td>
+                <td>80</td>
+                <td>5120</td>
+                <td>640</td>
+                <td>900 GB/s</td>
+                <td>125</td>
+            </tr>
+            <tr>
+                <td>Turing</td>
+                <td>T4</td>
+                <td>2018</td>
+                <td>40</td>
+                <td>2560</td>
+                <td>320</td>
+                <td>320 GB/s</td>
+                <td>65</td>
+            </tr>
+            <tr>
+                <td>Ampere</td>
+                <td>A100</td>
+                <td>2020</td>
+                <td>108</td>
+                <td>6912</td>
+                <td>432</td>
+                <td>2.0 TB/s</td>
+                <td>312</td>
+            </tr>
+            <tr>
+                <td>Hopper</td>
+                <td>H100</td>
+                <td>2022</td>
+                <td>132</td>
+                <td>16896</td>
+                <td>528</td>
+                <td>3.35 TB/s</td>
+                <td>990</td>
+            </tr>
+            <tr>
+                <td>Blackwell</td>
+                <td>B200</td>
+                <td>2024</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>8 TB/s</td>
+                <td>2250</td>
+            </tr>
+        </table>
+
+        <p>Blackwell（B200）的发布标志着GPU进入了一个新阶段——FP4和FP6精度支持、Transformer Engine第二代（动态调度模型各层的计算精度）、以及更大规模的多芯片封装（两个GPU die通过10TB/s的NVLink连接）。GPU已经不再是"图形卡"，它是AI工厂的核心引擎。</p>
+
+        <div class="highlight">
+            <strong>🔑 GPU不是更快的CPU：</strong>GPU不是"更快的CPU"——它是为不同目的设计的完全不同类型的处理器。理解它的SIMT模型和存储层次是利用其算力的关键。CPU擅长"一件事做得非常快"（低延迟），GPU擅长"一万件事做得差不多快"（高吞吐）。在AI时代，这两种处理器不是竞争关系，而是协作关系——CPU负责指挥调度和不可并行的逻辑，GPU负责大规模并行计算。
+        </div>
+
+        <p>好了，GPU的体系结构就讲到这里。我们从CPU和GPU的哲学差异讲到了SIMT执行模型，从SM的内部构造讲到Tensor Core的革命性影响。下一章我们的话题将发生一个有趣的转折——从最商业化的GPU回到最开放的RISC-V，我们看看<strong>RISC-V开放生态与香山处理器</strong>如何改变游戏规则。敬请期待！</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

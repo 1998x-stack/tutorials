@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 时序交叉验证</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📈 课程目录</h3>
+        <ul class="chapter-list">
+<li><a href="01.html">第1章 认识时间序列</a></li>
+<li><a href="02.html">第2章 时序的组成与分解</a></li>
+<li><a href="03.html">第3章 平稳性</a></li>
+<li><a href="04.html">第4章 自相关分析</a></li>
+<li><a href="05.html">第5章 指数平滑</a></li>
+<li><a href="06.html">第6章 时间序列回归</a></li>
+<li><a href="07.html">第7章 频谱分析入门</a></li>
+<li><a href="08.html">第8章 自回归模型(AR)</a></li>
+<li><a href="09.html">第9章 移动平均模型(MA)</a></li>
+<li><a href="10.html">第10章 ARMA模型</a></li>
+<li><a href="11.html">第11章 差分与ARIMA</a></li>
+<li><a href="12.html">第12章 季节性ARIMA</a></li>
+<li><a href="13.html">第13章 建模实践与诊断</a></li>
+<li><a href="14.html">第14章 预测与评估</a></li>
+<li><a href="15.html">第15章 波动率建模(ARCH/GARCH)</a></li>
+<li><a href="16.html">第16章 多元时间序列(VAR)</a></li>
+<li><a href="17.html">第17章 协整与误差修正模型</a></li>
+<li><a href="18.html">第18章 状态空间与卡尔曼滤波</a></li>
+<li><a href="19.html">第19章 时序特征工程</a></li>
+<li><a href="20.html">第20章 树模型与时序预测</a></li>
+<li><a href="21.html">第21章 Prophet与自动预测</a></li>
+<li><a href="22.html" class="active">第22章 时序交叉验证</a></li>
+<li><a href="23.html">第23章 循环神经网络</a></li>
+<li><a href="24.html">第24章 卷积与时序</a></li>
+<li><a href="25.html">第25章 Transformer与时序</a></li>
+<li><a href="26.html">第26章 基础模型与扩散模型</a></li>
+<li><a href="27.html">第27章 生产部署与MLOps</a></li>
+<li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第22章 时序交叉验证</h2>
+
+<p>大家好。前面三章我们学了特征工程、树模型和自动化预测工具。这一章要聊的话题，比前面任何一个模型或特征都更加重要——<strong>如何正确地评估你的时序模型</strong>。</p>
+
+<p>你可能觉得评估很简单：划分训练集和测试集，算个 MAE 不就好了？但时序领域的评估暗藏杀机。一个看似合理的评估流程可能给你虚高的分数，让你满怀信心地把模型部署到生产环境，然后看着真实效果惨不忍睹。</p>
+
+<p>这章的核心只有一个问题：<strong>你凭什么相信你的模型真的能预测未来？</strong></p>
+
+<h3>22.1 为什么不能随机 Shuffle</h3>
+
+<p>先讲一个真实的案例。几年前，一家金融科技公司的数据科学家用随机森林预测用户违约风险，在交叉验证中 AUC 达到了 0.96。模型上线后，实际 AUC 掉到了 0.52——跟抛硬币差不多。</p>
+
+<p>问题出在哪里？他们用 <code>cross_val_score</code> 的默认 K-Fold。K-Fold 是随机划分数据的，而他们的数据是按时间排列的——用户的信贷行为在时间上是高度自相关的。随机划分意味着每个 fold 的测试集中，大量样本的时间"邻居"在训练集中。模型没有在预测未来，而是在做"近邻记忆"。</p>
+
+<p>这个故事的教训是：<strong>时序数据的交叉验证，永远不能随机 shuffle</strong>。你的训练集必须全部在测试集之前。</p>
+
+<div class="warning">
+<strong>踩坑警告：</strong>我曾经见过有人用 <code>ShuffleSplit</code> 做时序验证得到 R² = 0.95，换成时序划分后 R² = 0.31。团队差点拿着 0.95 的结果去给投资人做演示。这个 0.95 完全是无意义的数字——它衡量的是"模型能在相似的历史中做模式匹配"，而不是"模型能预测未来"。
+</div>
+
+<h3>22.2 两种时序验证策略</h3>
+
+<p>时序交叉验证有两种主流形式：</p>
+
+<p><strong>扩展窗口</strong>：训练集从起始点不断向后扩展，测试集固定在训练集之后的一个固定长度窗口。早期 fold 训练数据少、验证时间长，后期 fold 训练数据多、验证时间短。</p>
+
+<p><strong>滚动窗口</strong>：训练集固定一个窗口长度（如最近 365 天），随着时间向前滚动。测试集紧跟在训练窗口之后。所有 fold 的训练数据量保持一致。</p>
+
+<table>
+    <tr><th>特性</th><th>扩展窗口</th><th>滚动窗口</th></tr>
+    <tr><td>训练数据量</td><td>逐步增加</td><td>固定不变</td></tr>
+    <tr><td>适合场景</td><td>数据量小，想用全部历史</td><td>数据量大，或数据分布随时间变化</td></tr>
+    <tr><td>计算成本</td><td>递增（后期 fold 训练慢）</td><td>稳定</td></tr>
+    <tr><td>对概念漂移的适应性</td><td>差（早期数据拖累模型）</td><td>好（只关注近期模式）</td></tr>
+    <tr><td>更接近线上场景</td><td>不一定</td><td>通常更接近（只用近期数据预测）</td></tr>
+</table>
+
+<p>用代码实现两种策略：</p>
+
+<pre><code>import numpy as np
+import pandas as pd
+from sklearn.metrics import mean_absolute_error
+
+def expanding_window_cv(df, n_splits=5, test_size=30):
+    """扩展窗口交叉验证"""
+    scores = []
+    total = len(df)
+    start = total - n_splits * test_size
+
+    for i in range(n_splits):
+        train_end = start + i * test_size
+        test_start = train_end
+        test_end = test_start + test_size
+
+        train = df.iloc[:train_end]
+        test = df.iloc[test_start:test_end]
+
+        # 这里训练你的模型
+        # model.fit(train[features], train['y'])
+        # preds = model.predict(test[features])
+        # scores.append(mae(test['y'], preds))
+        print(f'Fold {i+1}: train=0:{train_end}, test={test_start}:{test_end}')
+
+    return scores
+
+def rolling_window_cv(df, window=365, test_size=30, n_splits=5):
+    """滚动窗口交叉验证"""
+    scores = []
+    for i in range(n_splits):
+        test_end = len(df) - i * test_size
+        test_start = test_end - test_size
+        train_start = test_start - window
+        train_end = test_start
+
+        train = df.iloc[train_start:train_end]
+        test = df.iloc[test_start:test_end]
+
+        print(f'Fold {i+1}: train={train_start}:{train_end}, test={test_start}:{test_end}')
+
+    return scores</code></pre>
+
+<h3>22.3 步长选择：一个容易被忽视的参数</h3>
+
+<p>时序交叉验证中，<strong>步长</strong>（step size / stride）是指每个 fold 向前移动多少步。理论上步长应该等于你的预测周期。如果你预测未来 30 天，步长应该是 30。但实践中，步长对评估结果的影响比你想象的大。</p>
+
+<p>步长太小（比如预测未来 30 天，但步长设为 1）：相邻 fold 的测试集几乎重叠，评估结果高度相关，你得到的"多次验证平均分数"其实只代表了一小段时间的表现。</p>
+
+<p>步长太大（比如预测未来 30 天，但步长设为 365）：验证次数太少，分数方差大，调参时容易过拟合 validation set。</p>
+
+<p>一个实用的折中：步长设为预测周期的 1-3 倍，验证次数不少于 5 次。比如预测未来 30 天，步长设为 30-90，做 5-10 个 fold。</p>
+
+<h3>22.4 Purging 和 Embargo：防止泄露的最后防线</h3>
+
+<p>即使你用了时序交叉验证，依然可能存在一种隐蔽的数据泄露。当你的特征包含滞后值时，测试集的一个样本和训练集中某个样本可能在时间上非常接近（甚至只差一天），导致信息通过"近邻相似性"泄露。</p>
+
+<p>解决方法分别是 <strong>purging</strong> 和 <strong>embargo</strong>，这两个概念来自 Marcos López de Prado 的《Advances in Financial Machine Learning》。</p>
+
+<ul>
+    <li><strong>Purging</strong>：从训练集中移除那些和测试集时间上重合的样本。适用于特征中含有长期滞后项的场景。</li>
+    <li><strong>Embargo</strong>：在训练集和测试集之间留出一段"隔离带"。例如，设定 embargo 为 5 天，意味着训练集只包含距离测试集至少 5 天之前的数据。</li>
+</ul>
+
+<div class="highlight">
+<strong>关键洞察：</strong>Embargo 的大小取决于特征中用到的最大滞后阶数。如果你的最大滞后是 lag_28，那么至少需要 28 天的 embargo，否则测试集的 t 时刻样本会包含训练集 t-1 时刻的信息。这个"自我重复"的微妙泄露，在金融时序中足以让你构建一个看起来很赚钱但实际上毫无预测能力的策略。
+</div>
+
+<h3>22.5 模型集成（Ensemble）与时序</h3>
+
+<p>在正确验证的基础上，我们可以进一步通过集成提升预测效果。时序模型集成和普通 ML 集成有一个关键区别：<strong>时序集成必须考虑时间漂移</strong>。</p>
+
+<p>两种主流的时序集成方式：</p>
+
+<p><strong>Blending（加权平均）</strong>：在验证集上计算每个模型的权重，然后用固定权重做预测。简单、稳定、不容易过拟合。权重可以用验证集上的误差（如 MAE）的倒数来确定。</p>
+
+<p><strong>Stacking（堆叠）</strong>：用一个元模型学习如何组合各基础模型的预测。更灵活，但也更容易过拟合。在时序场景下，Stacking 的元模型训练必须严格使用时序交叉验证——把每个 fold 的基础模型预测作为元模型的特征。</p>
+
+<pre><code>import numpy as np
+from sklearn.linear_model import Ridge
+
+def timeseries_blending(predictions_dict, y_true):
+    """
+    基于验证集表现做简单加权平均
+    predictions_dict: {'model_name': np.array of predictions}
+    """
+    errors = {}
+    for name, preds in predictions_dict.items():
+        errors[name] = np.mean(np.abs(preds - y_true))
+
+    total = sum(1 / e for e in errors.values())
+    weights = {name: (1 / e) / total for name, e in errors.items()}
+    return weights
+
+def timeseries_stacking(base_preds_train, y_train,
+                         base_preds_test, meta_model=None):
+    """
+    时序堆叠集成
+    base_preds_train: (n_train, n_models)
+    """
+    if meta_model is None:
+        meta_model = Ridge(alpha=1.0)
+    meta_model.fit(base_preds_train, y_train)
+    return meta_model.predict(base_preds_test)</code></pre>
+
+<h3>22.6 完整的基准对比框架</h3>
+
+<p>将以上所有内容综合起来，一个严谨的时序模型评估和对比框架应该包含：</p>
+
+<ol>
+    <li><strong>固定一个统一的时序交叉验证流程</strong>（5-fold 滚动窗口，步长 = 预测周期 × 2）</li>
+    <li><strong>每个 fold 内执行完整的特征工程</strong>（不使用未来数据，包括不会跨越 fold 边界的滚动特征）</li>
+    <li><strong>对比至少 3 个候选模型</strong>（如 ARIMA baseline、LightGBM、mlforecast）</li>
+    <li><strong>使用 purging 和 embargo</strong> 消除近邻泄露</li>
+    <li><strong>报告每个 fold 的分数分布</strong>（不只是平均分，还包括方差）</li>
+    <li><strong>做一次额外的"最终验证"</strong>：留出最后一段完全未见过的数据做终验
+        ——这段数据不参与任何调参和模型选择决策</li>
+</ol>
+
+<div class="tip">
+<strong>小贴士：</strong>严谨的评估框架看起来繁琐，但它是你和"数据骗子"之间的分界线。一个简单的建议：把你做评估的全部代码写成一个函数，每次评估新模型都用同一个函数。这样你永远不会"不小心"用了随机划分，也不会"不小心"让特征泄露了未来信息。
+</div>
+
+<h3>22.7 总结与过渡</h3>
+
+<p>到这里，时序预测的"经典机器学习"部分就告一段落了。我们用了四章时间，走完了从特征工程（第 19 章）、树模型（第 20 章）、自动化工具（第 21 章）到正确评估（本章）的完整路径。</p>
+
+<p>从下一章开始，我们要进入一个全新的维度——<strong>深度学习与时间序列</strong>。循环神经网络中的 LSTM 和 GRU 能够记忆长期依赖，一维卷积可以从局部模式中提取信息，Transformer 则用注意力机制重新定义了时序建模的方式。这些模型和前面学到的传统方法不是替代关系，而是互补——下一章我们从 RNN 开始。</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

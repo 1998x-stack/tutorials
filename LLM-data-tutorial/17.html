@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 流水线可复现性</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html" class="active">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>不可复现的数据管线 = 不可复现的研究</h2>
+
+        <p>2023年，AI2的研究团队在构建Dolma数据集时遇到了一个尴尬的局面：他们的论文声称使用了3万亿token的混合语料训练模型，但当同行想复现结果时，却发现了一个根本性的问题——即使拿到完全相同的清洗代码，也很难产出完全相同的训练数据。</p>
+
+        <p>这不是Dolma团队的错，而是整个数据工程领域普遍面临的困境。Common Crawl的快照在不断更新：2024年10月你看到的CC-MAIN-2024-50快照，和2025年3月从同一路径下载的内容可能已经不同（因为Common Crawl偶尔会修复损坏的文件重新上传）。开源模型如雨后春笋般涌现，但绝大多数模型的清洗代码和数据版本并未公开——即使公开了代码，也缺少生成数据的完整"配方"。这意味着论文中的实验结果在理论上是不可复现的。</p>
+
+        <p>Dolma团队把"全透明"作为核心使命。他们不仅开源了Dolma的清洗工具链，还公开发布了每一步处理的配置、参数和中间产物格式。这使得任何人都能用自己的算力，复现出与论文中描述的一致的3万亿token语料。这种对可复现性的极致追求，让Dolma成为了数据工程实践的标杆。</p>
+
+        <p>可复现性不是锦上添花——它是科学研究的基本要求。如果你的数据管线不可复现，那么基于这些数据训练出来的模型结果，在严格意义上就不能被称为"可验证的"。在本章中，我们将讨论如何系统性地确保数据管线的可复现性。</p>
+
+        <div class="highlight">
+            <strong>数据管线的"依赖地狱"：</strong> Common Crawl快照的版本问题只是冰山一角。你的清洗流水线还依赖于trafilatura版本（即使小版本号变化可能改变提取逻辑）、fastText模型的版本（不同语言分类模型版本差异巨大）、甚至JDK版本（Spark在不同JDK下的sort行为可能不同）。锁定所有依赖的版本，是通向可复现性的第一步。
+        </div>
+
+        <h2>数据版本控制</h2>
+
+        <p>代码有Git来管理版本，但Git不是为GB级以上的文件设计的。数据版本控制需要专门的工具。在数据工程领域，<strong>DVC（Data Version Control）</strong>是最广泛采用的方案。</p>
+
+        <p>DVC的核心思想很巧妙：它不直接存储数据文件到Git仓库，而是存储数据文件的<strong>校验和指针</strong>，真正的数据内容存放在远程存储（S3、GCS、本地磁盘）上。Git跟踪的是hash文件，而不是数据本身。效果上，你可以像操作代码一样操作数据版本——<code>git checkout</code>切换分支时，DVC会自动将对应的数据文件同步到工作目录。</p>
+
+        <p>典型的DVC工作流是这样的：</p>
+
+        <pre><code># 1. 初始化DVC
+$ dvc init
+
+# 2. 配置远程存储（以S3为例）
+$ dvc remote add -d myremote s3://dolma-data/dvc-store
+
+# 3. 追踪数据目录
+$ dvc add data/curated/v2.0/
+# 这会生成 data/curated/v2.0.dvc 文件（一个哈希指针文件）
+# 真正的数据被上传到 S3
+
+# 4. 将生成的.dvc文件提交到Git
+$ git add data/curated/v2.0.dvc
+$ git commit -m "Add curated dataset v2.0"
+
+# 5. 后续切换到旧版本
+$ git checkout &lt;old-commit&gt;    # 恢复.dvc文件
+$ dvc checkout                  # 同步对应的数据版本
+
+# 6. 查看数据版本历史
+$ dvc log data/curated/v2.0.dvc
+# 输出每次提交中该数据的版本变更</code></pre>
+
+        <p>除了DVC，社区中还有Git LFS（适合小团队、但需要付费）和LakeFS（在对象存储之上提供类Git的版本控制语义）。选择哪个工具取决于你的团队规模和数据量级——对于个人开发者，DVC + S3的组合是最低成本、最高性价比的选择。</p>
+
+        <p>值得注意的是，数据版本控制不仅仅是"记住文件长什么样"。更重要的目标是：给定一个数据版本号，你能追溯到它是由哪段代码、哪个输入快照、什么配置参数生成的。数据文件的校验和只是这个链条的终点——我们真正想要的是整条链路的可追溯性。</p>
+
+        <h2>确定性清洗</h2>
+
+        <p>可复现性的核心约束是一句数学般严格的等式：<strong>相同的输入 + 相同的代码 + 相同的配置 = 完全相同的输出</strong>。这听起来是理所应当的，但在分布式环境中，实现这个等式的难度远超想象。</p>
+
+        <p>非确定性的来源无处不在。最常见的是<strong>随机种子</strong>——如果你的清洗流程中任何一步调用了随机函数（比如随机采样做质量评分、随机打乱顺序），每次运行都会产生不同的结果。解决方案是明确设置随机种子，并且在代码中<strong>全局禁用不依赖种子的随机性</strong>。</p>
+
+        <p>更隐蔽的非确定性来源是<strong>并行排序的不稳定性</strong>。在分布式系统中，当多个分区的数据被合并排序时，如果两个文档的排序键相等，Spark可能会按不可预测的顺序排列它们（取决于哪个task先完成）。这会导致每次运行输出的文件顺序不同——如果你的后续流程依赖于行号或文件内排列顺序，这就会产生不同的结果。</p>
+
+        <pre><code>from pyspark.sql import SparkSession
+import hashlib
+
+spark = SparkSession.builder \
+    .appName("Deterministic-Pipeline") \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .getOrCreate()
+
+# 非确定性排序的修正方案：
+# 在排序键中加入文档内容的hash作为二级键，确保并行排序结果稳定
+
+df = spark.read.parquet("s3://data/documents/")
+
+# 为每条文档计算内容hash作为确定性排序的二级键
+from pyspark.sql.functions import sha2, col, concat_ws
+
+df_with_hash = df.withColumn(
+    "_content_hash",
+    sha2(concat_ws("||", "url", "text"), 256)
+)
+
+# 排序时使用内容hash打破平局
+df_sorted = df_with_hash.orderBy(
+    col("language").asc(),
+    col("length").desc(),
+    col("_content_hash").asc()   # 确定性打破平局
+)
+
+# 确定性去重：基于hash而非基于顺序
+# 正确做法：对每条文档计算去重hash，group之后选择hash最小的那条
+df_deduped = df_sorted.groupBy("dedup_hash") \
+    .agg(functions.min(struct("_content_hash", "text", "url"))) \
+    .select("url", "text")</code></pre>
+
+        <div class="warning">
+            <strong>多进程/多节点处理中的排序不稳定：</strong> 这是分布式数据工程中最常见的隐形非确定性来源。当你用Spark的<code>orderBy</code>做全局排序，且排序键存在重复值时，不同运行之间相同键的文档相对顺序可能不同。解决方案很简单——在排序键中加入文档的哈希值作为二次排序字段。这会确保即使并行度不同，同一批数据的排序结果始终一致。这条规则适用于所有分布式计算框架，不仅仅是Spark。
+        </div>
+
+        <h2>流水线配置管理</h2>
+
+        <p>可复现的第三个支柱是<strong>配置管理</strong>。数据管线的每个运行参数都必须被记录和版本化——不是写在某个人的便签上，而是在代码仓库中以结构化文件的形式存在。</p>
+
+        <p>Dolma团队在这方面做了很出色地示范。他们将整个数据管线的配置写成YAML文件，随代码一起提交到Git仓库。每次生成新版本的数据集，对应的配置文件也被打上标签。这意味着任何人都可以从Git历史中找出"v2.1数据集使用的精确配置是什么"。</p>
+
+        <pre><code># Dolma管线配置示例 (dolma/config/v2.1.yaml)
+dataset:
+  name: dolma-v2.1
+  version: "2.1"
+  created_at: "2024-08-15"
+
+input:
+  sources:
+    - name: common-crawl
+      snapshots:
+        - CC-MAIN-2024-10
+        - CC-MAIN-2024-18
+        - CC-MAIN-2024-50
+      extraction:
+        tool: trafilatura
+        version: "1.2.3"
+    - name: wikipedia
+      dump_date: "2024-07-01"
+      language: en
+
+filters:
+  heuristic:
+    min_length: 200
+    max_length: 100000
+    min_word_count: 50
+    max_na_ratio: 0.4
+    max_bullet_ratio: 0.9
+  language:
+    model: fasttext-lid.176.bin
+    min_probability: 0.5
+    keep_languages: [en, zh, de, fr, es, ja, ko, ru, ar, pt, hi]
+
+dedup:
+  exact:
+    enabled: true
+    hash_algorithm: sha256
+  minhash:
+    enabled: true
+    num_permutations: 128
+    threshold: 0.85
+    bands: 20
+    rows_per_band: 6
+
+blending:
+  strategy: heuristic-v1
+  distributions:
+    common-crawl: 0.70
+    wikipedia: 0.15
+    books: 0.10
+    code: 0.05</code></pre>
+
+        <p>这个配置示例涵盖了数据管线的关键可复现要素：输入来源的具体版本、每个过滤步骤的参数、去重算法的参数、混合配比策略。</p>
+
+        <table>
+            <thead>
+                <tr><th>配置类别</th><th>典型参数</th><th>对可复现性的影响</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>输入源</td><td>快照版本、WARC路径、dump日期</td><td>最关键——不同版本的CC快照内容不同</td></tr>
+                <tr><td>正文提取</td><td>trafilatura版本、提取策略参数</td><td>版本差异可导致5-15%的提取结果差异</td></tr>
+                <tr><td>规则过滤</td><td>长度阈值、符号比例、停用词列表</td><td>直接影响50%以上的数据保留/丢弃决策</td></tr>
+                <tr><td>去重算法</td><td>MinHash参数、相似度阈值</td><td>阈值变化0.01可影响数百万文档的去重结果</td></tr>
+                <tr><td>混合配比</td><td>各源比例、采样策略、随机种子</td><td>比例变化直接改变数据分布</td></tr>
+            </tbody>
+        </table>
+
+        <p>配置管理的黄金法则是：<strong>永远不要在生产环境中手动修改参数</strong>。任何参数变更都应该走代码审查流程，提交到git，然后通过CI/CD触发数据管线重新运行。如果你在集群上手动改了一个阈值参数然后运行，这个改动就永远丢失了——没有任何人能追溯当时的精确配置。</p>
+
+        <h2>元数据追踪</h2>
+
+        <p>可复现性的最后一个维度是<strong>元数据追踪</strong>。配置管理记录了"怎么做"，元数据追踪记录了"从哪来"。当你在最终的训练数据中看到一条可疑的文本时，你应该能回答三个问题：这条文本来自哪个Common Crawl快照？经过了哪些清洗步骤？每个步骤使用的参数是什么？</p>
+
+        <p>最实践的追溯方式是为每条文档记录一个元数据字段，其中包含完整的来源信息：</p>
+
+        <pre><code>{
+  "text": "本文的实际内容...",
+  "url": "https://example.com/article/123",
+  "metadata": {
+    "warc_path": "crawl-data/CC-MAIN-2024-50/segments/.../warc/CC-00001.warc.gz",
+    "warc_offset": 12345678,
+    "warc_length": 4567,
+    "extraction_timestamp": "2024-12-15T10:30:00Z",
+    "extraction_tool": "trafilatura v1.2.3",
+    "pipeline_version": "v2.1",
+    "processing_steps": [
+      {"step": "language_filter", "model": "fasttext-lid.176.bin", "score": 0.97},
+      {"step": "heuristic_filter", "min_length": 200, "max_length": 100000, "passed": true},
+      {"step": "exact_dedup", "hash": "sha256:abcd...", "duplicate_of": null},
+      {"step": "quality_classifier", "model": "edu-classifier-v3", "score": 0.82}
+    ]
+  }
+}</code></pre>
+
+        <p>这个元数据结构的设计不是随意的。注意<code>warc_path</code>字段记录了原始WARC文件在Common Crawl S3中的路径和偏移量。Common Crawl的<strong>WARC路径和偏移量是追踪单条数据来源的最可靠方式</strong>——即使原始WARC文件被重新分发或移动，只要路径和偏移量还在，任何人都能在Common Crawl的存档中定位到原始HTTP响应数据。这为审计和数据溯源提供了坚实的技术基础。</p>
+
+        <div class="tip">
+            <strong>Common Crawl的WARC路径和偏移量是追踪单条数据来源的最可靠方式。</strong> 在处理过程中保留这个信息不需要额外的计算开销——每条WARC记录的头部已经包含了路径和偏移量。只需要在你的流水线中增加一个字段将这条信息从输入传递到输出。很多团队在第一版管线中忽略了这一点，然后在需要debug时追悔莫及。Dolma管线明确在schema中包含了<code>warc_path</code>和<code>warc_offset</code>字段，并在所有清洗步骤中原样传递。
+        </div>
+
+        <p>有了可复现的数据管线，我们就可以放心地说：无论过多久、无论谁来运行，同一个配置必然产出同一个数据集。但还有一个关键问题没有回答：我们怎么知道这个数据集是"好"的？这就引出了下一章的主题——数据质量评估体系。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 语言识别与过滤</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html" class="active">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>为什么需要语言识别</h2>
+
+        <p>大家好，上章我们学会了如何从 HTML 中提取出干净的正文。但现在面临一个新问题：Common Crawl 是一个全球性的互联网爬取数据集，里面包含了 <strong>100 种以上的语言</strong>。你训练一个中文模型，结果喂进去的是英文、日文、阿拉伯文、甚至少量斯瓦希里文——这显然不行。</p>
+
+        <p>语言识别（Language Identification）是数据清洗流水线中不可或缺的一环。它解决的是一个看起来简单的问题："这段文本是什么语言？"但在 TB 级数据规模下，这个问题却有大量的工程挑战：要足够快、足够准、而且要对 100+ 种语言都有基本识别能力。</p>
+
+        <p>CCNet（2020年，Meta AI）是第一篇将语言识别作为大规模语料清洗核心步骤的里程碑论文。他们观察到，Common Crawl 中英文内容的比例大约在 40-50% 左右，其余都是其他语言或混合语言的页面。如果不做语言过滤，你的训练数据将是一个"语言大杂烩"——混合语言的数据不仅会浪费 token 预算，还会稀释模型在目标语言上的能力。</p>
+
+        <div class="tip">
+            <strong>有趣的观察：</strong> CCNet 团队发现 Common Crawl 中排名前 10 的语言占比约为 85%，剩余 90+ 种语言共享 15% 的份额。长尾语言的数据极度稀缺，对它们的识别准确率也相应较低。这意味着如果你需要为低资源语言构建数据集，需要有针对性的策略——不能简单地套用英语数据的处理流程。
+        </div>
+
+        <h2>fastText 语言分类器</h2>
+
+        <p>CCNet 选择的语言识别工具是 Facebook Research 开源的 <strong>fastText</strong>。准确来说，是 fastText 的预训练语言识别模型 <code>lid.176.bin</code>，它基于字符 n-gram 的线性分类器，体积小、速度快、覆盖语种多。</p>
+
+        <p>为什么选 fastText 而不是更复杂的方案？因为在大规模数据处理中，"快"比"准"有时候更重要。fastText 的语言分类器在 CPU 上单线程每秒可以处理数千个文档，而像基于神经网络的方案（如 XLM-R 的 zero-shot 分类）虽然精度略高，但每秒只能处理几十个文档。在 PB 级数据处理中，这种速度差异决定了是花 1 天还是花 1 个月。</p>
+
+        <p>截至 2025 年，fastText 的 <code>lid.176.bin</code> 模型支持 <strong>176 种语言</strong>。它的原理非常优雅：将文本拆分成字符级别的 n-gram（包括 unigram 到 pentagram），然后通过一个线性分类器来预测语言。由于只依赖字符特征，它不需要任何 NLP 预处理（不需要分词、不需要词表），真正做到了一行代码完成语言识别。</p>
+
+        <pre><code>import fasttext
+
+# 加载预训练模型（约 126MB）
+model = fasttext.load_model("lid.176.bin")
+
+# 单条文档的语言识别
+text = "Natural language processing is a subfield of AI."
+predictions = model.predict(text, k=3)  # 返回 top-3 预测
+
+# 输出示例：
+# (('__label__en', '__label__fr', '__label__de'),
+#  (0.9921, 0.0032, 0.0015))
+# 第一语言：英语，置信度 99.2%
+
+# 批量处理：将结果映射为简洁格式
+def detect_language(text, threshold=0.5):
+    labels, scores = model.predict(text.replace("\n", " "), k=1)
+    lang = labels[0].replace("__label__", "")
+    score = scores[0]
+    if score &lt; threshold:
+        return "unknown", score
+    return lang, score</code></pre>
+
+        <p>上面的代码就是一个工业级语言识别流水线的核心。CCNet 的处理流程就是对每个文档调用这个函数，如果置信度低于阈值就标记为"unknown"（通常是混合语言或噪音文档）。</p>
+
+        <h2>置信度阈值设计</h2>
+
+        <p>阈值的选择直接影响语言过滤的效果。CCNet 将阈值设为 <strong>0.5</strong>，这意味着置信度低于 50% 的文档会被丢弃。但这个阈值并非放之四海而皆准，不同的语言和数据源会有不同的最优阈值。</p>
+
+        <p>下面是 CCNet 在不同语言上的识别表现（基于他们的内部测试）：</p>
+
+        <table>
+            <thead>
+                <tr><th>语言</th><th>精确率</th><th>覆盖率</th><th>CCNet 阈值 0.5 下的保留率</th><th>备注</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>英语</td><td>99.8%</td><td>98.5%</td><td>~45%</td><td>最大语种，识别效果最好</td></tr>
+                <tr><td>中文</td><td>99.2%</td><td>97.3%</td><td>~8%</td><td>字符特征明显，识别效果也很好</td></tr>
+                <tr><td>阿拉伯语</td><td>98.5%</td><td>95.1%</td><td>~3%</td><td>文字系统独特，区分度高</td></tr>
+                <tr><td>印地语</td><td>97.3%</td><td>93.8%</td><td>~1.5%</td><td>有足够的训练语料</td></tr>
+                <tr><td>斯瓦希里语</td><td>85.2%</td><td>76.4%</td><td>~0.2%</td><td>资源有限，部分与邻近语言混淆</td></tr>
+                <tr><td>威尔士语</td><td>72.1%</td><td>60.3%</td><td>&lt;0.1%</td><td>训练数据极有限，阈值 0.5 可能过于严格</td></tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>阈值策略的权衡：</strong> 阈值设得越高，语言纯度越高，但会丢弃更多文档（尤其是短文档和低资源语言的文档）。如果你想构建一个多语言模型（如 XLM-R 的 100 语种覆盖），就要小心阈值不能太高，否则低资源语言的数据会完全消失。一种常见的改进方案是对不同语言设置不同的阈值——英语 0.5，低资源语言 0.3。
+        </div>
+
+        <h2>其他语言识别方案</h2>
+
+        <p>除了 fastText，社区中还有几种常用的语言识别工具。我整理了一个速度对比表：</p>
+
+        <table>
+            <thead>
+                <tr><th>工具</th><th>开发方</th><th>覆盖语言</th><th>速度（文档/秒/CPU）</th><th>模型大小</th><th>特点</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>fastText</strong></td><td>Meta</td><td>176</td><td>~5000</td><td>126MB</td><td>基于字符 n-gram，极致速度</td></tr>
+                <tr><td><strong>CLD3</strong></td><td>Google</td><td>107</td><td>~3000</td><td>~2MB（内置）</td><td>基于神经网络，体积小但覆盖语言少</td></tr>
+                <tr><td><strong>langdetect</strong></td><td>社区维护</td><td>55</td><td>~800</td><td>几 MB</td><td>基于字符 n-gram + Naive Bayes，纯 Python</td></tr>
+                <tr><td><strong>langid</strong></td><td>社区维护</td><td>97</td><td>~600</td><td>~20MB</td><td>也是基于 n-gram，但已经较少维护</td></tr>
+            </tbody>
+        </table>
+
+        <p>对于大规模数据处理，<strong>fastText 是目前的不二之选</strong>。它的速度优势在高吞吐场景下体现得尤为明显。CLD3 虽然体积很小，适合嵌入移动端或浏览器，但覆盖的语言种类太少。langdetect 的精度不错，但速度慢了将近一个数量级，不适合 TB 级别的数据处理。</p>
+
+        <p>一个小技巧：在实际使用中，我们可以用 CLD3 做快速预筛选（以节约 API 调用成本），对 CLD3 无法确定的文本再用 fastText 做二次判定。这种级联策略可以在几乎不影响精度的情况下，将整体吞吐量再提升 30-50%。</p>
+
+        <h2>多语言场景的数据配比</h2>
+
+        <p>如果你的目标是训练一个多语言模型，语言识别不仅仅是"过滤"，更是"配比"的依据。一个经典的案例是 XLM-R（Facebook 的跨语言模型），它的训练数据集 CCNet-100 包含了 100 种语言。</p>
+
+        <p>在多语言场景下，语言识别面临一个核心矛盾：<strong>高资源语言数据太多，低资源语言数据太少</strong>。CCNet-100 的数据分布极度不均衡——英语、中文、俄语占据了超过 60% 的数据量，而最底层的 30 种语言合起来不到 1%。如果不对语言分布做人为干预，模型将主要学会英语能力，而对低资源语言几乎"失明"。</p>
+
+        <div class="warning">
+            <strong>一个常见的错误：</strong> 很多团队在构建多语言训练数据时，简单地用语言分类器把所有非目标语言都过滤掉。如果你只需要做单语言模型，这没问题。但如果你的目标是多语言能力，这种做法会严重削弱模型的跨语言泛化能力。一个更好的策略是：先识别语言，然后按预定的语言比例进行采样（而不是过滤）。比如，英语数据虽然多，但限制每个训练 epoch 只使用 60% 的英语数据，剩下的 40% 留给 99 种其他语言。
+        </div>
+
+        <p>2024 年的 FineWeb 论文在这方面做了一个有趣的发现：即使你的目标是训练英文模型，保留少量其他语言的"噪音"反而可能有助于提高模型在代码混合（code-switching）场景下的表现。但这个结论是否普遍成立，目前学术界还有争议。</p>
+
+        <p>语言识别完成后，我们就知道每个文档属于哪种语言。但同一种语言内部，文档质量仍然天差地别——有些是精心撰写的维基百科条目，有些是毫无价值的机器生成垃圾。下一章，我们将学习如何使用启发式规则来识别并过滤这些低质量内容。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

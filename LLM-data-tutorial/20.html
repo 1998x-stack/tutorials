@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 词表设计与优化</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html" class="active">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>词表大小如何选择</h2>
+
+        <p>上一章我们探讨了 BPE tokenization 的工作原理。但有一个问题悬而未决——词表到底应该设多大？32K？64K？128K？还是像某些实验性的 tokenizer 一样做到 256K？这看似是一个简单的超参数选择，背后却牵涉到模型架构、训练效率、推理成本的多方权衡。</p>
+
+        <p>回看主流模型的选择，你会发现一个清晰的演进趋势：<strong>词表越来越大</strong>。GPT-2 的 50K 词表在 2019 年被认为是合理的，Llama-2 在 2023 年选择了 32K（甚至比 GPT-2 还小），但 2024 年的 Llama-3 直接把词表推到了 128K，2025 年的 DeepSeek-V3 也选择了 128K，而 Qwen-2.5 更进一步到了 152K。这不是无意义的军备竞赛——词表大小直接决定了一个关键指标：<strong>token 压缩率</strong>，即一个词能表示为多少个 token。</p>
+
+        <p>更大的词表意味着模型可以用更少的 token 表示同样的文本。对于 Llama-3 来说，128K 词表使得相同文本的 token 数比 Llama-2 (32K 词表) 减少了大约 25-30%。这意味着在同样 8192 的 context window 下，Llama-3 能"看到"的文本量多出 30%。但代价也很直接——embedding 层的参数数量与词表大小成正比。</p>
+
+        <table>
+            <thead>
+                <tr><th>词表大小</th><th>嵌入维度</th><th>Embedding 参数</th><th>约占总参数比</th><th>文本压缩率</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>32K</td><td>4096</td><td>~134M</td><td>7B 模型: ~2%</td><td>基准</td></tr>
+                <tr><td>64K</td><td>4096</td><td>~268M</td><td>7B 模型: ~4%</td><td>+12%</td></tr>
+                <tr><td>128K</td><td>4096</td><td>~536M</td><td>7B 模型: ~8%</td><td>+25%</td></tr>
+                <tr><td>128K</td><td>8192</td><td>~1.07B</td><td>70B 模型: ~1.5%</td><td>+25%</td></tr>
+                <tr><td>256K</td><td>8192</td><td>~2.15B</td><td>70B 模型: ~3%</td><td>+35%</td></tr>
+            </tbody>
+        </table>
+
+        <p>上面表格揭示了一个重要规律：对于大模型（70B+），embedding 层参数占比很小，所以扩大词表的边际成本很低。但对于 7B 级别的模型，128K 词表意味着 8% 的参数都花在 embedding 上——这是一个不能忽略的开销。这也是为什么小模型通常倾向于使用更小的词表。</p>
+
+        <p>2025 年的一篇系统研究对这个问题给出了更量化的答案：在相同的训练 token 预算下，128K 词表比 32K 在知识密集型任务上的平均得分高出 3-5%，但在简单生成任务上差异不大。这个差距主要来自 token 压缩率提升带来的"信息密度"增加——同样的窗口能装入更多知识。</p>
+
+        <h2>词表扩展 vs 从头训练</h2>
+
+        <p>在实际项目中，我们经常会遇到这样的场景：有一个基于 Llama-3 的通用模型，现在我们想把它适配到医学领域。Llama-3 的 tokenizer 对通用英文覆盖很好，但遇到 "TNF-alpha inhibitor"、"EGFR mutation" 这样的专业术语时，会被拆成一长串 token，既浪费序列长度，又让模型难以学习这些术语的语义。</p>
+
+        <p>解决方案是扩展 tokenizer 词表——在不破坏原有词表结构的前提下，加入领域专业词汇。这个过程通常包括以下几个步骤：</p>
+
+        <pre><code># 扩展已有 tokenizer 词表，加入领域词汇
+from tokenizers import Tokenizer
+
+def extend_tokenizer_vocab(
+    base_tokenizer_path: str,
+    domain_terms: list[str],
+    new_vocab_size: int
+):
+    # 1. 加载基础 tokenizer
+    tokenizer = Tokenizer.from_file(base_tokenizer_path)
+
+    # 2. 找出当前 tokenizer 不高效表示的领域词汇
+    #    （分解后 token 数超过阈值的词）
+    new_tokens = []
+    for term in domain_terms:
+        encoded = tokenizer.encode(term)
+        if len(encoded.tokens) &gt; 2:  # 被拆成 3+ 个 token 就需要加入
+            new_tokens.append(term)
+
+    # 3. 将这些词汇添加到 tokenizer 的词表中
+    #    注意：这需要操作 tokenizer 底层模型
+    current_vocab = tokenizer.get_vocab()
+    next_id = max(current_vocab.values()) + 1
+
+    for token in new_tokens:
+        if token not in current_vocab:
+            tokenizer.add_tokens([token])
+
+    # 4. 重新调整 embedding 矩阵的大小
+    #    （这一步在模型加载时完成）
+    print(f"已添加 {len(new_tokens)} 个领域词汇")
+    print(f"新词表大小: {tokenizer.get_vocab_size()}")
+
+    tokenizer.save("medical_llama_tokenizer.json")
+    return tokenizer</code></pre>
+
+        <div class="tip">
+            <strong>核心要点：</strong> 扩展词表后，新添加 token 的 embedding 是随机初始化的——这意味着模型还没学会如何表示这些新词。你必须对 embedding 层进行额外的训练（通常在微调阶段与其他参数一起训练），或者使用一些初始化技巧（如用相近 token 的 embedding 均值来初始化）。直接使用扩展后的 tokenizer 而不训练 embedding 层，新词的效果就是随机的。
+        </div>
+
+        <p>与词表扩展相对的另一种策略是"从头训练 tokenizer"。这通常发生在构建全新模型时，或者当目标语言与原始语言差异非常大时（例如将一个以英文为主的 tokenizer 适配到纯中文领域）。从头训练的好处是词表从零开始针对目标语料优化，token 效率最高；代价是需要重新训练整个模型。</p>
+
+        <h2>Tokenization 对推理效率的影响</h2>
+
+        <p>词表大小不仅影响训练阶段，更直接决定了推理效率——更大的词表意味着更短的序列，更短的序列意味着更少的 KV cache 占用和更少的推理步骤。在 LLM 服务部署中，<strong>推理延迟与序列长度近似成正比</strong>，所以 token 压缩率的提升可以直接换算成推理成本的降低。</p>
+
+        <p>Llama-3 选择 128K 词表的一个重要考量就是推理效率。以 Llama-3-8B 为例，与使用 32K 词表的模型相比，同样一段 1000 字的文本只需要大约 75% 的 token 数。在服务 1000 个并发请求时，这意味着约 25% 的 GPU 推理成本节省。对于 Meta 这种规模的部署，这笔经济账非常可观。</p>
+
+        <p>但 tokenization 对推理效率的影响不止于序列长度。2025 年提出的 <strong>FR-Spec</strong>（Frequency-Ranked Speculative Decoding）技术揭示了另一个维度：在自回归推理中，LM Head（将 hidden state 投影到词表大小的 logits）是一个计算热点。FR-Spec 利用 token 的频率统计信息，只对高频 token 做完整的 LM Head 计算，对低频 token 使用近似估计，从而将 LM Head 的计算量减少约 75%。这个技术直接受益于词表中 token 频率的分布特征——如果词表设计合理，少数高频 token 承担了大部分生成任务。</p>
+
+        <div class="highlight">
+            <strong>推理效率的量化视角：</strong> 假设模型 A 的词表为 32K，模型 B 的词表为 128K。模型 B 的平均序列长度比模型 A 短 25%，但 embedding 和 LM Head 的参数多了 4 倍。在 batch size 较小时，序列长度缩减带来的好处远大于参数增加的开销（因为 embedding 计算是 memory-bound 的，而序列长度影响的是 compute-bound 的 attention 计算）。综合来看，128K 词表在推理场景下通常比 32K 词表更有优势——但前提是模型足够大，embedding 层的相对开销可以忽略。
+        </div>
+
+        <p>还有一个容易被忽略的细节：tokenize 和 decode 操作本身也有计算开销。每次推理请求都需要将输入文本 tokenize（调用 tokenizer 的 encode 方法），然后对输出 token 进行 decode。对于短输入（如 100 个 token），这个开销可以忽略。但对于需要处理超长上下文的应用（如 CodeX 处理 128K 代码库），tokenize/decode 的时间可能占到总推理时间的 5-10%。在这个场景下，使用 Rust 实现的 HuggingFace Tokenizers（而不是纯 Python 实现）能带来显著的延迟改善。</p>
+
+        <h2>词表消融实验</h2>
+
+        <p>在学术研究中，词表消融实验（vocabulary ablation）是评估 tokenizer 质量的标准方法。基本思路是：保持其他所有条件不变，仅改变 tokenizer 的词表，训练一个小规模模型，观察下游任务的变化。</p>
+
+        <p>2024 年 AI2 的一项系统消融实验揭示了几个关键发现：</p>
+
+        <ul>
+            <li><strong>词表并非越大越好：</strong> 在 7B 模型上，256K 词表相比 128K 虽然 token 压缩率更高，但 MMLU 分数下降了约 1.5%。原因可能是词表过大导致 embedding 层参数过多，在有限的训练数据下无法充分学习。</li>
+            <li><strong>训练数据分布比词表大小更重要：</strong> 同样的 128K 词表，在代码语料上训练的 tokenizer 和在网上语料上训练的 tokenizer，对代码任务的 token 效率可以相差 40%。</li>
+            <li><strong>词表公平性：</strong> 在多语言设置下，英文 token 效率通常是最高的，中文/日文等非拉丁语言的 token/word 比可能高出 50-100%。这意味着一个英语主导的语料训练出的 tokenizer 对其他语言是"不公平"的。</li>
+        </ul>
+
+        <table>
+            <thead>
+                <tr><th>语言</th><th>Llama-2 (32K) token/word</th><th>Llama-3 (128K) token/word</th><th>相对英文效率 (Llama-3)</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>英文</td><td>1.2</td><td>1.1</td><td>100%</td></tr>
+                <tr><td>中文</td><td>2.8</td><td>1.9</td><td>58%</td></tr>
+                <tr><td>日文</td><td>3.5</td><td>2.3</td><td>48%</td></tr>
+                <tr><td>韩文</td><td>2.9</td><td>2.1</td><td>52%</td></tr>
+                <tr><td>阿拉伯文</td><td>2.2</td><td>1.6</td><td>69%</td></tr>
+                <tr><td>泰文</td><td>4.1</td><td>2.8</td><td>39%</td></tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>语言公平性陷阱：</strong> 一个在英语主导语料上训练的 tokenizer，对中文、日文等非拉丁语言非常"不友好"。以 Llama-2 为例，一个英文单词平均仅占 1.2 个 token，而一个中文字需要 2.8 个 token。这意味着在 4096 token 的 context window 下，中文用户能输入的内容只有英文用户的不到一半。如果你的目标用户群包括非英语使用者，在设计 tokenizer 训练语料时必须有意识地平衡各语言的比例。
+        </div>
+
+        <p>解决词表公平性问题的常用策略包括：在 tokenizer 训练语料中对低资源语言进行上采样（比如将中文的采样率从自然分布 5% 提高到 20%），或者使用多阶段训练——先在一个平衡的多语言语料上训练基础词表，再在目标语言上做微调。Qwen-2.5 的 152K 词表就是这种思想的体现——它专门针对中文进行了优化，使得中文的 token 效率在所有主流模型中表现最好。</p>
+
+        <p>词表设计和 tokenization 策略决定了模型如何"看到"世界。但无论你的 tokenizer 设计得多好，它处理的依然是真实世界中存在的天然文本。如果某些场景在天然数据中极其稀少（比如某个专业领域的推理链数据），仅靠优化 tokenizer 也无法创造新知识。下一个话题，我们将探讨如何解决这个天然数据的局限性——合成数据生成。</p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

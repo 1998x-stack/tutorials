@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 URL与域名过滤</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html" class="active">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>为什么需要 URL 过滤</h2>
+
+        <p>大家好，上章我们聊了启发式规则过滤。在所有的启发式规则中，有一类规则非常特殊——它们是针对 URL 和域名的，而不是针对内容本身的。</p>
+
+        <p>为什么要单独拿出来讲？因为 Common Crawl 的数据质量分布极度不均，大量垃圾站点、成人内容、恶意软件站点混杂在数据集中。而识别这些垃圾站点有一个极其高效的手段：<strong>看 URL 就够了</strong>。你不需要下载内容、不需要解析 HTML、不需要运行任何 NLP 模型——只需要查一下 URL 或域名是否在黑名单上，就能过滤掉一大批低质量数据。这种过滤完全零成本（只是查个字符串或正则匹配），在所有过滤手段中效率最高。</p>
+
+        <p>C4 和 Dolma 都维护了大规模 URL 黑名单。Dolma（2023年，AI2）在这方面做得最为系统——他们构建了一个包含 <strong>260 万个域名</strong>的黑名单，覆盖了色情、赌博、恶意软件、SEO 垃圾等 20 多个类别。C4 的黑名单相对保守，主要是针对已知的垃圾站点和成人内容。</p>
+
+        <div class="tip">
+            <strong>URL 过滤的性价比：</strong> 在流水线中，URL 过滤是我们做的<strong>第一时间、最廉价</strong>的过滤。在 WARC 解析阶段，甚至在下载之前，就可以对 URL 列表做黑名单匹配。如果你在一个数据调度系统中工作，建议先把 URL 黑名单检查作为第一道关卡——它可以在 5 分钟内过滤掉 10-15% 的数据，而几乎零计算成本。
+        </div>
+
+        <h2>Blocklist 的构建</h2>
+
+        <p>构建一个高质量的 URL/域名黑名单，远比想象中复杂。不是简单地收集几个已知的色情网站列表就完事了，需要系统性地从多个来源聚合筛选。</p>
+
+        <p>Dolma 团队的做法是目前最完善的一个参考案例。他们从以下来源构建了 2.6M 域名的黑名单：</p>
+
+        <table>
+            <thead>
+                <tr><th>类别</th><th>覆盖域名数</th><th>示例</th><th>来源</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>色情/成人内容</td><td>~820K</td><td>典型成人站点</td><td>UT1 黑名单 + 自建爬虫</td></tr>
+                <tr><td>赌博/博彩</td><td>~340K</td><td>在线赌场、体育博彩</td><td>UT1 + 手动收集</td></tr>
+                <tr><td>恶意软件/钓鱼</td><td>~150K</td><td>病毒分发、钓鱼页面</td><td>URLHaus、PhishTank</td></tr>
+                <tr><td>SEO 垃圾/关键词堆砌</td><td>~480K</td><td>"best cheapest fastest xxx" 类域名</td><td>域名模式分析 + 人工标注</td></tr>
+                <tr><td>仇恨言论/极端内容</td><td>~210K</td><td>极端主义、歧视性内容</td><td>自建列表 + 第三方安全列表</td></tr>
+                <tr><td>AI 生成垃圾站</td><td>~350K</td><td>2024-2025 年涌现的大量 AI 内容站</td><td>域名特征 + 内容分析</td></tr>
+                <tr><td>其他（跟踪/重定向等）</td><td>~250K</td><td>URL 缩短器、跟踪域名</td><td>已知跟踪域名列表</td></tr>
+            </tbody>
+        </table>
+
+        <p>黑名单的维护是一项持续的工作——垃圾站点每天都会注册新域名、变换域名后缀。Dolma 团队的建议是至少<strong>每月更新一次</strong>黑名单，结合自动化的域名特征分析和人工审核。2025年之后，由于 AI 自动生成垃圾站的爆发式增长，黑名单更新的频率需要进一步提高到每周级别。</p>
+
+        <div class="highlight">
+            <strong>一个启发：</strong> 域名黑名单看起来是一个"防御性"的工作，但它实际上能直接提升模型的安全性和有用性。在 2024 年的一项测试中，如果不做域名过滤训练出来的模型，生成"不适当内容"的概率大约比做了域名过滤的模型高出 3-5 倍。安全团队应该把域名过滤视为内容安全的第一道屏障。
+        </div>
+
+        <h2>SEO 垃圾识别</h2>
+
+        <p>除了固定的黑名单，URL 过滤还需要应对一个更动态的问题——<strong>SEO 垃圾</strong>。这类站点通过操纵搜索引擎排名来获取流量，它们的"内容"通常对人类读者毫无价值，但在关键词密度、链接结构上做了大量优化，使得简单的黑名单无法完全覆盖。</p>
+
+        <p>常见的 SEO 垃圾类型包括：</p>
+
+        <p><strong>Keyword Stuffing（关键词堆砌）：</strong> 页面上堆砌大量热门关键词，比如"减肥、瘦身、快速减肥、健康瘦身……"。这类页面的 URL 通常包含多个关键词，如 <code>/best-cheap-fast-weight-loss-tips-2025.html</code>。URL 中的关键词数量编码了垃圾内容的信号。</p>
+
+        <p><strong>Doorway Pages（门页）：</strong> 为特定搜索词制作的单页，没有任何实质内容，仅用于将用户重定向到其他页面。这类站点的 URL 模式相对固定，可以用正则表达式识别。</p>
+
+        <p><strong>AI 生成垃圾内容站（2024-2025 年爆发）：</strong> 这是当前最大的挑战。2024年生成式 AI 普及后，大量垃圾内容制造者开始用 LLM 自动生成整站内容——每天数千篇看似"正常"的文章，实际上是无意义的文本拼接。这些站点的域名往往有一些可识别的特征，比如包含大量年份、数字、或"best"、"top"、"review"等词的组合。</p>
+
+        <pre><code># 域名特征工程示例：判断域名是否是疑似垃圾站
+import re
+from urllib.parse import urlparse
+
+def compute_domain_features(url):
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+
+    features = {}
+    # 域名长度
+    features["domain_length"] = len(domain)
+    # 数字占比（垃圾站倾向于用很多数字）
+    digit_count = sum(1 for c in domain if c.isdigit())
+    features["digit_ratio"] = digit_count / len(domain) if domain else 0
+    # 连字符数量（垃圾站常有多连字符）
+    features["hyphen_count"] = domain.count("-")
+    # 路径段数（门页通常路径很深）
+    path_segments = [s for s in parsed.path.split("/") if s]
+    features["path_depth"] = len(path_segments)
+    # 路径中是否包含"review"、"best"等关键词
+    spam_keywords = ["review", "best", "top", "cheap", "price", "discount",
+                     "buy", "deal", "tutorial", "guide", "tips", "how-to"]
+    features["keyword_burden"] = sum(
+        1 for kw in spam_keywords if kw in parsed.path.lower()
+    )
+    # TLD 是否可疑（.xyz .top .gdn 等）
+    suspicious_tlds = {".xyz", ".top", ".gdn", ".loan", ".win", ".bid", ".trade"}
+    tld = "." + domain.rsplit(".", 1)[-1] if "." in domain else ""
+    features["suspicious_tld"] = 1 if tld in suspicious_tlds else 0
+
+    return features
+
+# 垃圾域名通常具有：长域名、高数字比、多连字符、可疑 TLD
+# 给每个特征赋予权重后可构建一个"垃圾评分"</code></pre>
+
+        <p>2025 年的一项研究显示，基于域名特征的垃圾检测可以识别出约 70% 的 AI 生成垃圾内容站，误报率控制在 2% 以下。但剩下的 30% 非常狡猾——它们使用看似正常的域名，内容本身用高质量的 LLM 生成，唯一的破绽是内容缺乏深度和原创性。对这类站点的检测，需要结合内容质量分析。</p>
+
+        <h2>域名级去重与权重调整</h2>
+
+        <p>URL 过滤不仅能过滤掉垃圾内容，还能解决一个更微妙的问题——<strong>某些高价值域名被过度采样</strong>。</p>
+
+        <p>维基百科（Wikipedia）就是一个典型的例子。它是目前公认的最高质量训练数据来源之一，但 Common Crawl 中包含的 Wikipedia 页面数量已经非常庞大——而且每个月都在更新。如果不对数据库做限制，Wikipedia 的页面可能占到你最终训练语料的 10-15%。这听起来是好事，但实际上会导致模型"过度适应"Wikipedia 的写作风格和知识结构，降低泛化能力。</p>
+
+        <p>RefinedWeb 团队的做法是：对每个域名设置一个 <strong>最大文档数限制</strong>，默认值为 <strong>10,000</strong>。任何域名超过这个数量后，多余的文档就会被丢弃。这个值不是拍脑袋定的，而是基于数据分布的统计分析——当某个域名的文档数量超过 10,000 时，新增文档的信息边际收益已经降到很低了。</p>
+
+        <div class="tip">
+            <strong>域名下采样的实际操作：</strong> 不是简单地"先到先得"保留前 10,000 篇。更合理的做法是：先按内容质量（如困惑度评分）对某个域名的所有文档排序，然后从高质量端保留 10,000 篇。这样既能确保该域名的最高质量内容被保留，又不会让单一域名控制训练语料。
+        </div>
+
+        <p>除了 Wikipedia，GitHub 也是另一个容易被过度采样的来源。一个 GitHub 仓库的 README、Wiki、Issue 页面可能多达数万篇。如果不加限制，你的训练数据会莫名其妙地包含大量的"how to fix bug #1234"的 Issue 讨论——对知识和能力的提升贡献不大。</p>
+
+        <h2>URL 过滤的实际操作</h2>
+
+        <p>在实际的流水线中，URL 过滤通常分三个步骤进行：</p>
+
+        <p><strong>第一步：URL Blocklist 检查（下载前）。</strong> 在调度系统层面，对需要下载的 URL 列表做黑名单匹配。这一步在数据管道的最上游完成，过滤掉已知的垃圾站点、成人内容站点等。优点是零成本（只需字符串匹配），缺点是只能覆盖已知的垃圾站点。</p>
+
+        <p><strong>第二步：URL 去重（标准化后）。</strong> 同一个页面可能通过不同的 URL 进入数据集——比如 <code>/article?id=123</code> 和 <code>/article/123/</code> 可能是同一篇内容。标准化 URL 的方法包括：去掉 tracking parameters（<code>?utm_source=...</code>）、统一大小写、去掉尾部斜杠等。然后对标准化后的 URL 做精确匹配去重。</p>
+
+        <p><strong>第三步：域名级 P90/P99 分析。</strong> 定期对当前数据集中的域名分布做统计。如果一个域名的文档数量处于 P99（即超过 99% 的其他域名），说明这个域名可能有问题——要么是垃圾内容站自动生成大量页面，要么是爬虫配置有遗漏。这时候需要手动检查该域名的内容质量，决定是否加入黑名单或启动域名下采样。</p>
+
+        <p>URL 过滤能帮我们在"看不见内容"的情况下排除大量垃圾，但数据质量还有一大杀手——<strong>重复</strong>。同一个 URL 可能在不同快照中被重复抓取，同一个新闻可能被几十个网站转载。下一章，我们将学习如何用精确去重（SHA-1 哈希）技术，去除这些完全重复的数据。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

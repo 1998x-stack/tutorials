@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第24章 Dolma 工具链全解析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html" class="active">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>透明化的力量</h2>
+
+        <p>DataTrove 让我们能够快速搭建清洗流水线，但在实际使用中你可能会产生一个疑问：别人是怎么做数据清洗的？他们的参数设置是什么？每个环节丢弃了多少数据？这些细节通常被论文隐藏了——大多数研究只会告诉你"我们做了过滤和去重"，但真正的工程参数从不公开。</p>
+
+        <p>2023 年，AI2（Allen Institute for AI）决定改变这种状况。他们发布了一个名为 <strong>Dolma</strong> 的项目，包含三个部分：一个 3 万亿 token 的高质量训练语料、一套完整的数据清洗工具链、以及每一步清洗过程的详细记录。在 Dolma 的技术报告中，作者写道：<strong>"We believe that data transparency is a prerequisite for reproducible AI research."</strong> 数据透明是可复现 AI 研究的前提条件。</p>
+
+        <p>这个信念意味着什么？意味着 Dolma 不仅告诉你"我们清洗了数据"，还告诉你清洗了哪些来源、每个来源用了什么参数、每步丢弃了多少文档、每个文档带有哪些质量元数据。甚至你可以用 Dolma 的工具链从零复现整个 Dolma 数据集——因为所有代码、配置和中间产物都是公开的。这种透明度的价值，在后续许多开源模型（如 OLMo）的训练中得到了充分验证。</p>
+
+        <h2>Dolma 管线的 8 个步骤</h2>
+
+        <p>Dolma 的清洗管线比 DataTrove 内置的 FineWeb 管线更为复杂，因为它处理的不只是 Common Crawl 网页数据——还包含学术论文、代码、书籍、新闻、Wikipedia 等 6 大来源。每个来源有各自的预处理流程，但在统一合并后共享 8 个核心清洗步骤。</p>
+
+        <p>下面是 Dolma 管线的完整步骤，以及每个步骤的实际处理量和保留率。这些数据来自 Dolma 的技术报告，是真实可查的：</p>
+
+        <table>
+            <thead>
+                <tr><th>步骤</th><th>操作</th><th>输入量</th><th>保留量</th><th>保留率</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>1</td><td>WARC 下载与解析</td><td>原始网页数据</td><td>—</td><td>100%</td></tr>
+                <tr><td>2</td><td>语言识别（fastText）</td><td>原始文档数</td><td>仅保留英文</td><td>~30%</td></tr>
+                <tr><td>3</td><td>URL+域名过滤</td><td>语言过滤后</td><td>移除 260 万黑名单域名</td><td>~95%</td></tr>
+                <tr><td>4</td><td>启发式过滤</td><td>URL 过滤后</td><td>剔除短/低质量文档</td><td>~60%</td></tr>
+                <tr><td>5</td><td>文档级 MinHash 去重</td><td>启发式过滤后</td><td>按 0.7 阈值去重</td><td>~70%</td></tr>
+                <tr><td>6</td><td>质量评分（fastText）</td><td>去重后</td><td>评分+阈值筛选</td><td>~50%</td></tr>
+                <tr><td>7</td><td>评测集去污染</td><td>质量评分后</td><td>移除 n-gram 重叠</td><td>~98%</td></tr>
+                <tr><td>8</td><td>数据混合与重采样</td><td>去污染后</td><td>多源按比例混合</td><td>最终 3T tokens</td></tr>
+            </tbody>
+        </table>
+
+        <p>从原始网页到最终语料，Dolma 的整体保留率大约在 6-7% 左右。这个数字比 FineWeb 的 8.7%（FineWeb-Edu 筛选后）略低，但要注意 Dolma 包含了多个来源，且不同来源的保留率差异很大——Web 数据的保留率最低，学术论文和书籍的保留率则高得多。</p>
+
+        <h2>Dolma 的关键设计决策</h2>
+
+        <p>Dolma 与 DataTrove 最大的不同在于其设计哲学。DataTrove 追求的是易用性和模块化，而 Dolma 追求的是透明性和工程完备性。这体现在几个关键设计决策上。</p>
+
+        <p><strong>基于 Spark 的分布式处理。</strong> Dolma 的所有管道都构建在 Apache Spark 之上。与 DataTrove 同时支持本地和 Spark 不同，Dolma 从一开始就假设你的数据在 TB 级别，因此不做本地模式的妥协。这带来了更优的性能，但也意味着 Dolma 的学习曲线比 DataTrove 更陡峭——你至少需要了解 Spark 的基本概念。</p>
+
+        <p><strong>CCNet 风格的困惑度过滤。</strong> Dolma 没有使用 FineWeb 的 LLM 辅助分类器（毕竟 2023 年时这种方法刚刚起步），而是沿用了 CCNet 提出的困惑度过滤方案。他们训练了一个基于 fastText 的语言模型，用困惑度（perplexity）作为质量信号。这种方法的优势在于计算成本极低——对每个文档只需几毫秒——而且效果已经得到了充分验证。</p>
+
+        <p><strong>三阶段去重策略。</strong> Dolma 的去重分为三个阶段：首先是精确去重（SHA-1 哈希），移除完全相同的文档；然后是 MinHash LSH 去重，移除近似重复的文档；最后是跨数据集去重，确保不同来源之间的冗余也被移除。这种三阶段策略比单一去重方法更加彻底，但也意味着更高的计算成本。</p>
+
+        <p><strong>数据版本追踪。</strong> Dolma 的每个文档都携带完整的处理元数据，包括来源标识、处理时间戳、经过的过滤步骤、质量评分等。这意味着你可以回溯任意一个文档的完整"身世"——它来自哪个 Common Crawl 快照，经过了哪些过滤步骤，在哪个阶段被评分为什么质量等级。这种审计能力对于研究机构来说至关重要。</p>
+
+        <pre><code># Dolma 管线的核心配置（YAML 格式简化版）
+# 完整配置见: github.com/allenai/dolma
+
+pipeline:
+  name: "dolma-v1.7"
+  description: "OLMo 训练语料清洗管线"
+
+  sources:
+    - name: "c4"
+      path: "s3://dolma/c4/raw/"
+      type: "jsonl"
+    - name: "common_crawl"
+      path: "s3://dolma/cc/raw/"
+      type: "warc"
+    - name: "peS2o"
+      path: "s3://dolma/pes2o/raw/"
+      type: "jsonl"
+
+  steps:
+    - name: "language_filter"
+      module: "dolma.filters.LanguageFilter"
+      params:
+        keep_languages: ["en"]
+        threshold: 0.5
+        model: "fasttext/lid.176.bin"
+
+    - name: "url_filter"
+      module: "dolma.filters.URLFilter"
+      params:
+        blocklist: "s3://dolma/blocklists/v2/url_blocklist.txt"
+
+    - name: "quality_filter"
+      module: "dolma.filters.QualityFilter"
+      params:
+        min_words: 50
+        max_word_length: 1000
+        min_chars_per_word: 2
+        max_chars_per_word: 1000
+        min_chars: 200
+        max_chars: 100000
+        min_ellipsis_ratio: 0.0
+        max_ellipsis_ratio: 0.3
+
+    - name: "minhash_dedup"
+      module: "dolma.dedup.MinHashDedup"
+      params:
+        num_permutations: 128
+        threshold: 0.7
+        num_bands: 20
+        min_length: 100</code></pre>
+
+        <div class="highlight">
+            <strong>项目意义：</strong> Dolma 是第一个完全透明公开的 3T+ token 数据集——不仅开源了数据清洗的代码，还发布了所有中间产物的统计信息（每个阶段的数据量、分布、丢弃原因等）。在这之前，几乎所有大规模预训练数据集都是"黑箱"：给你一个下载链接，但从不告诉你数据是怎么来的。Dolma 改变的不仅是数据本身，更是整个社区对数据透明度的期待标准。
+        </div>
+
+        <h2>Dolma 的数据混合配方</h2>
+
+        <p>多源混合是 Dolma 最值得学习的工程实践之一。Dolma 将数据分为 6 大类别，每个类别在最终语料中占据不同的比例。下表的比例是经过大量消融实验验证得出的——AI2 团队用不同配比训练了多个基线模型，最终选择在通用性能上表现最好的配比方案：</p>
+
+        <table>
+            <thead>
+                <tr><th>数据类别</th><th>最终占比</th><th>原始规模</th><th>清洗策略</th><th>上采样倍率</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Web（Common Crawl + C4）</td><td>50%</td><td>~40T tokens</td><td>标准清洗（8 步全流程）</td><td>1x</td></tr>
+                <tr><td>学术论文（peS2o + S2ORC）</td><td>22%</td><td>~48B tokens</td><td>轻量清洗（保留高引论文）</td><td>3x</td></tr>
+                <tr><td>代码（StarCoder + GitHub）</td><td>17%</td><td>~300B tokens</td><td>按文件扩展名+语法校验</td><td>2x</td></tr>
+                <tr><td>书籍（BookCorpus2 + Gutenberg）</td><td>6%</td><td>~40B tokens</td><td>章节级去重+篇幅过滤</td><td>2x</td></tr>
+                <tr><td>新闻（NewsCrawl + CC-News）</td><td>3%</td><td>~30B tokens</td><td>标准清洗+时间戳过滤</td><td>1x</td></tr>
+                <tr><td>Wikipedia（2023 年快照）</td><td>2%</td><td>~4B tokens</td><td>直接使用（无需过滤）</td><td>1x</td></tr>
+            </tbody>
+        </table>
+
+        <p>注意看"上采样倍率"这一列。学术论文和书籍在最终语料中的占比远高于它们在原始数据中的自然占比——这就是重采样（upsampling）的力量。AI2 发现，高质量源（如学术论文、书籍）经过 2-3 倍上采样后，模型在下游任务上的表现显著提升。这个发现与 FineWeb-Edu 的结论本质上是一致的：高质量数据值得重复使用。</p>
+
+        <div class="tip">
+            <strong>实用提示：</strong> Dolma 的数据混合比例后来被许多开源模型（如 OLMo、Tulu）直接采用。如果你在做通用领域的 LLM 训练，可以以 Dolma 的比例为起点，然后根据你的具体任务做微调。如果你在做代码方向的模型，可以提高代码的占比到 30-40%；如果你在做学术领域的模型，可以提高学术论文的占比。
+        </div>
+
+        <h2>与 DataTrove 的对比</h2>
+
+        <p>Dolma 和 DataTrove 是目前最主流的两个开源数据清洗框架。它们的目标相同——构建高质量训练语料——但实现路径和设计哲学有显著差异。我们来做一个全方位的对比：</p>
+
+        <table>
+            <thead>
+                <tr><th>维度</th><th>Dolma</th><th>DataTrove</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>开发方</td><td>AI2（Allen Institute for AI）</td><td>HuggingFace</td></tr>
+                <tr><td>发布时间</td><td>2023 年 8 月</td><td>2024 年 6 月</td></tr>
+                <tr><td>底层框架</td><td>Apache Spark（仅分布式）</td><td>Python 原生 + Spark 可选</td></tr>
+                <tr><td>分布式支持</td><td>Spark 原生</td><td>本地 + Spark 双模</td></tr>
+                <tr><td>模块化程度</td><td>中等（YAML 配置驱动的管线）</td><td>高（Python 原生模块组合）</td></tr>
+                <tr><td>学习曲线</td><td>较陡（需 Spark 基础）</td><td>平缓（纯 Python）</td></tr>
+                <tr><td>开箱即用配置</td><td>内置 C4/CCNet 风格配置</td><td>内置 FineWeb 完整配置</td></tr>
+                <tr><td>扩展接口</td><td>需写 Scala/Python 插件</td><td>Python 类继承（StatFilter）</td></tr>
+                <tr><td>元数据追踪</td><td>极其完善（审计链路）</td><td>基础（doc.metadata）</td></tr>
+                <tr><td>最佳适用场景</td><td>研究机构、需要完整审计</td><td>工程团队、快速迭代</td></tr>
+                <tr><td>社区活跃度</td><td>中等（AI2 生态）</td><td>高（HuggingFace 生态）</td></tr>
+            </tbody>
+        </table>
+
+        <p>从对比中可以看出，Dolma 更偏向研究场景——它强调透明、完整文档化、审计追踪，适合那些需要"完全复现"的研究机构。DataTrove 更偏向工程场景——它强调易用性、模块化、快速上手，适合需要快速构建和迭代清洗流水线的工程团队。</p>
+
+        <p>选择哪一个取决于你的场景。如果你在大学实验室做数据清洗的研究，Dolma 的透明性和完整文档可能是更好的选择。如果你在工业界需要快速构建一个清洗流水线来支持模型训练，DataTrove 的模块化和易用性会更适合。</p>
+
+        <p>学完了 DataTrove 和 Dolma 这两个具体工具后，我们站在一个更高的视角来审视整个数据清洗领域。从 2020 年的 C4 到 2026 年的 FLUX，六年间涌现了六种代表性清洗范式。下一章我们将逐一拆解它们的核心思想、技术路线和适用场景，帮你建立一份完整的"范式选择地图"。</p>
+
+        <div class="footer-nav">
+            <a href="23.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="25.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

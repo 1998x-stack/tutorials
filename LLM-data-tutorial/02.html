@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第2章 Common Crawl 数据采集</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html" class="active">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>互联网的图书馆：Common Crawl 是什么</h2>
+
+        <p>大家好，这一章我们正式开干。上一章我们聊了数据工程的全景图，现在让我们把目光对准整个流水线的起点——互联网上最大的公开网页数据集之一：Common Crawl。</p>
+
+        <p>Common Crawl 是一个非营利组织，从2007年开始就在做一件简单而疯狂的事：每月爬一次互联网，然后把爬取结果免费公开。到2025年，Common Crawl 的历史存储总量已经超过 20PB，每个月的增量大约 300TB。这意味着什么？意味着你只需要几行代码，就能拿到这个月互联网上数十亿网页的原始快照。</p>
+
+        <p>为什么几乎所有的大语言模型训练都离不开 Common Crawl？原因很简单：它是目前唯一公开可用的、规模达到互联网量级的网页数据集。Google 有自己的搜索索引、Meta 有自己的爬虫——但这些都是不公开的。对于那些没有自家爬虫的团队，Common Crawl 就是唯一的选项。OpenAI 的 GPT-3、Meta 的 Llama 系列、HuggingFace 的 FineWeb、AI2 的 Dolma，无一不是站在 Common Crawl 的肩膀上构建的。</p>
+
+        <div class="highlight">
+            <strong>一个重要的事实：</strong> 根据 EleutherAI 在2024年的一项统计，公开可训练的 LLM 训练数据中，超过 80% 的 token 最终都来源于 Common Crawl。无论你的流水线多么复杂，起点都是这里。
+        </div>
+
+        <h2>WARC / WAT / WET 三件套</h2>
+
+        <p>Common Crawl 的数据不是简单的一堆 HTML 文件。每个爬取周期会产生三种格式的文件，分别对应不同的使用场景：</p>
+
+        <table>
+            <thead>
+                <tr><th>格式</th><th>全称</th><th>内容</th><th>典型大小</th><th>用途</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>WARC</strong></td><td>Web ARChive</td><td>原始 HTTP 响应（header + body）</td><td>~1GB 每文件（gzip 压缩）</td><td>完整的数据归档，需要原始资源的场景</td></tr>
+                <tr><td><strong>WAT</strong></td><td>Web Archive Transformation</td><td>WARC 的元数据摘要</td><td>~100MB 每文件</td><td>快速检索响应时间、Content-Type、链接关系等</td></tr>
+                <tr><td><strong>WET</strong></td><td>Web Archive Text</td><td>纯文本抽取（去掉了所有 HTML 标签）</td><td>~200MB 每文件</td><td>只需要文本内容的场景，省去解析 HTML 的成本</td></tr>
+            </tbody>
+        </table>
+
+        <p>WARC 是最原始的格式，保留了服务器返回的完整 HTTP 响应，包括响应头、Cookie、HTML 正文。WAT 是 WARC 的元数据版本，只包含结构化信息（如响应时间、Content-Type、提取的链接等），适合做统计分析。WET 是最精简的版本，提前帮你做了一步 HTML 标签剥离，只留下纯文本。</p>
+
+        <p>大多数数据工程流水线会选择下载 WET 文件来减少处理量，但如果你需要精确判断页面结构、或者想自己做更精细的正文提取，你就得用 WARC。行业内，FineWeb 同时使用了 WARC 和 WET——他们先用 WET 做快速过滤，再回到 WARC 做精确的正文提取。</p>
+
+        <h2>获取数据的方式</h2>
+
+        <p>Common Crawl 的数据全部托管在 AWS S3 上，任何人都可以免费下载。唯一的成本是你的网络带宽。</p>
+
+        <p>每个爬取周期（crawl）都有一个唯一的标识符，格式像 <code>CC-MAIN-2025-40</code>。你可以通过索引文件来获取某个爬取周期下所有 WARC 文件的路径列表：</p>
+
+        <div class="tip">
+            <strong>快速下载 WARC 文件列表：</strong><br>
+            <code>wget https://data.commoncrawl.org/crawl-data/CC-MAIN-2025-40/warc.paths.gz</code><br>
+            <code>gunzip warc.paths.gz</code><br>
+            解压后每行就是一个 WARC 文件的相对路径，前面拼接上 <code>https://data.commoncrawl.org/</code> 就是完整的下载地址。
+        </div>
+
+        <p>不同的项目选择不同的快照策略，这里就体现了数据广度和数据新鲜度的权衡：</p>
+
+        <ul>
+            <li><strong>CCNet</strong>（2020年，Meta）：只使用了 2019年2月 的一个快照，然后用去重和质量过滤来保证数据质量。当时计算资源有限，他们用 5000 CPU core 花了 8.5 小时处理一个快照。</li>
+            <li><strong>FineWeb</strong>（2024年，HuggingFace）：使用了从2013年到2024年的 <strong>96 个快照</strong>，覆盖了超过十年的互联网数据。更多的快照意味着更大的覆盖范围和更丰富的信息量，但也意味着更高的存储成本和更复杂的去重挑战。</li>
+            <li><strong>Llama-3</strong>（2024年，Meta）：据说使用了超过 200 个快照，加上内部的网页索引数据，才能在 2024 年训练出 15T token 的史诗级语料。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>数据新鲜度 vs 数据规模：</strong> 更多快照意味着更大覆盖、更多样性，但也带来更高的存储成本和去重难度。如果你只需要特定时间范围内的数据，可以只选择相关月份的快照；如果你的目标是最大化数据量，就尽可能多选。FineWeb 的 96 个快照方案是目前公开的最佳实践参考。
+        </div>
+
+        <h2>WARC 解析实战</h2>
+
+        <p>拿到 WARC 文件后，怎么把它变成可用的文本数据？Python 社区最常用的工具是 <code>warcio</code> 这个库，由互联网档案馆（Internet Archive）维护。下面是一个完整的解析示例：</p>
+
+        <pre><code>import warcio
+from warcio.archiveiterator import ArchiveIterator
+import gzip
+
+# 打开压缩的 WARC 文件
+with gzip.open("CC-MAIN-2025-40-00000.warc.gz", "rb") as f:
+    for record in ArchiveIterator(f):
+        # 只处理响应记录（response），跳过请求记录（request）
+        if record.rec_type == "response":
+            # 提取 URL
+            url = record.rec_headers.get_header("WARC-Target-URI")
+
+            # 提取 HTTP 状态码
+            status = record.http_headers.get_statuscode()
+            if status != "200":
+                continue  # 只处理正常响应
+
+            # 提取 HTTP 响应头
+            content_type = record.http_headers.get_header("Content-Type")
+
+            # 提取 HTML 正文（可能需要解压）
+            payload = record.content_stream().read()
+            html_text = payload.decode("utf-8", errors="replace")
+
+            # 这里后续会接入 trafilatura 做正文提取
+            print(f"URL: {url}")
+            print(f"Content-Type: {content_type}")
+            print(f"HTML 长度: {len(html_text)} 字符")</code></pre>
+
+        <p>在实际的大规模处理中，WARC 文件会被分割成大小均匀的分片。CCNet 团队的做法是将 WARC 文件按 <strong>~5GB</strong> 的大小进行分片，然后在 Spark 集群上并行处理。他们使用了 5000 个 CPU core，平均 8.5 小时处理完一个爬取周期的全部数据。2025年有了 Ray 和更强大的分布式框架，处理效率已经大幅提升——同样的工作 Spark 需要 8.5 小时，用 Ray 优化后可以缩短到 2-3 小时。</p>
+
+        <h2>WARC 处理的陷阱</h2>
+
+        <p>WARC 看起来简单粗暴，实际用起来坑不少。我整理了几个最常见的踩坑点：</p>
+
+        <div class="warning">
+            <strong>踩坑一：同一个 URL 在不同快照中的内容可能完全不同。</strong> 页面会更新、改版、甚至被完全替换成不同主题。如果你的流水线一次性处理多个快照，要格外注意跨快照的版本管理。一个 URL 在2023年可能是一篇技术文章，到了2025年变成了一个 404 页面——你需要在流水线中记录快照时间戳，而不是只记录 URL。
+        </div>
+
+        <p><strong>编码问题：</strong> 虽然 Common Crawl 在 WET 中统一用 UTF-8 编码，但 WARC 中保留了原始响应。部分站点使用 GBK、Shift-JIS、Latin-1 等非 UTF-8 编码，解析时如果不做编码检测就会乱码。一个常见的做法是用 <code>charset</code> 库或 <code>ftfy</code> 库来自动检测和修复编码。</p>
+
+        <p><strong>JS 渲染缺失：</strong> Common Crawl 的爬虫不执行 JavaScript。这意味着大量依赖 JS 渲染的现代 Web 应用（React、Vue 等单页应用）在 WARC 中几乎不包含有意义的文本内容。2025年的互联网中，超过 40% 的网站使用了某种形式的客户端渲染——这些站点在 Common Crawl 中基本上就是空的。不同团队对此的态度不同：有些直接丢弃，认为这些内容不"accessible"；有些则尝试在数据清洗后通过其他方式补充这些内容。这个问题至今没有很好的公开解决方案。</p>
+
+        <p>还有一个很多人忽略的问题：WARC 文件中混杂了大量的 <strong>自动生成页面</strong>——搜索结果的 URL 参数变体、CMS 生成的标签聚合页面、社交媒体自动同步的重复内容。这些在 WARC 级别很难区分，需要在后续的去重步骤中解决。</p>
+
+        <p>总之，Common Crawl 是一个宝库，但需要精心挖掘。拿到原始的 WARC 文件只是第一步——下一步是怎么从这些铺天盖地的 HTML 中提取出真正有用的正文内容。这正是我们下一章要讲的主题。</p>
+
+        <div class="footer-nav">
+            <a href="01.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="03.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

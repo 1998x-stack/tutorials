@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 大规模数据存储</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html" class="active">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>存储是数据工程的基石</h2>
+
+        <p>上一章我们花了大量篇幅讨论"怎么算"——分布式计算架构的选择、分区策略、容错机制。但有一个问题我们不能回避：算出来的海量数据放哪儿？</p>
+
+        <p>从原始WARC到最终训练token，一条数据要历经至少五个阶段的转换。每个阶段的数据形态完全不同：原始WARC是压缩的HTTP响应流，提取后的正文是纯文本，经过过滤后的数据是结构化的JSON记录，去重后的数据需要支持高效的去重查询，而最终的训练数据需要方便模型训练框架读取。</p>
+
+        <p>让我们直观感受一下数据量级。Common Crawl的所有快照数据累计存储在Amazon S3上，总量约<strong>20PB</strong>——这还只是原始WARC格式的大小。如果你把所有快照的提取结果、中间处理产物、最终清洗结果全部加起来，存储需求轻松突破50PB。全世界的LLM团队每年花在数据存储上的费用，保守估计在数亿美元级别。</p>
+
+        <p>存储不是"买个硬盘存起来"那么简单。在大规模数据工程中，存储策略直接影响处理效率、成本、以及数据管线的可维护性。这一章我们就来聊聊，如何为LLM数据管线设计一个合理的存储架构。</p>
+
+        <h2>分层存储策略</h2>
+
+        <p>数据工程的第一个存储设计原则是：<strong>不要把所有数据存在同一个地方</strong>。不同的处理阶段需要不同的存储特性——处理中的中间数据需要高吞吐低延迟，最终的成品数据需要高持久性且低成本。</p>
+
+        <p>实践中常见的做法是三层存储架构：</p>
+
+        <p><strong>热层（Hot Tier）</strong>——存放正在处理的数据。通常使用HDFS或本地SSD。Spark在处理过程中会产生大量的shuffle中间数据，这些数据需要极高的读写速度。典型的配置是每个计算节点挂载若干块NVMe SSD，作为Spark的临时存储目录。FineWeb团队在AWS上使用的是挂载了实例存储（instance store）的EC2实例，这些临时SSD虽然实例停止后数据会丢失，但I/O吞吐是EBS的10倍以上。</p>
+
+        <p><strong>温层（Warm Tier）</strong>——存放各处理阶段的中间输出。这是对象存储（如AWS S3、Google Cloud Storage、阿里云OSS）的领域。对象存储的读写延迟远高于本地SSD（毫秒级vs微妙级），但由于分布式处理引擎通常做批量读取，这个延迟差距对整体吞吐的影响有限。更重要的是，对象存储可以做到几乎无限的扩展，不需要担心容量问题。Dolma管线中，每个清洗步骤的输出都会写入S3，这样即使后续步骤失败，前面的成果不会丢失。</p>
+
+        <p><strong>冷层（Cold Tier）</strong>——存放原始数据存档和不太可能重访的中间产物。AWS S3 Glacier和Google Cloud Archive是冷层的主力选手。Common Crawl的原始WARC数据全部存储在S3上，其中较早的快照已经转移到Glacier Deep Archive，每月每GB的存储成本不到0.01元人民币。</p>
+
+        <table>
+            <thead>
+                <tr><th>存储层</th><th>典型技术</th><th>读写延迟</th><th>每TB/月成本</th><th>典型用途</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>热层</td><td>NVMe SSD、HDFS</td><td>~0.1ms 读 / ~0.01ms 写</td><td>~$30-50</td><td>Spark shuffle、临时中间结果</td></tr>
+                <tr><td>温层</td><td>S3 Standard、GCS</td><td>~5-20ms 读 / ~10-50ms 写</td><td>~$15-23</td><td>清洗输出、去重索引、成品数据集</td></tr>
+                <tr><td>冷层</td><td>S3 Glacier、GCS Archive</td><td>几分钟到数小时（需解冻）</td><td>~$1-4</td><td>原始WARC归档、快照历史版本</td></tr>
+            </tbody>
+        </table>
+
+        <p>一个好的实践是：清洗流水线中每个step的输入从温层读取，输出也写入温层，热层只作为计算的临时缓冲。这样架构清晰，且最容易从失败中恢复——只需要重启Spark作业，它会重新读取S3上的输入数据。</p>
+
+        <h2>数据序列化格式</h2>
+
+        <p>数据存在哪儿决定了I/O的物理属性，而数据怎么存（序列化格式）则决定了空间效率和读写性能。在LLM数据工程领域，三种序列化格式占据了主要舞台：</p>
+
+        <p><strong>JSON Lines (.jsonl)</strong>——每行一条JSON记录，是人类可读的格式。优点是方便调试、直接可以用文本编辑器打开查看、与各种处理工具的兼容性最好。缺点是体积大——同样的数据，JSON Lines比二进制格式大5-10倍。RefinedWeb和C4发布的最终数据集主要使用JSON Lines格式，因为方便社区直接使用。</p>
+
+        <p><strong>Parquet</strong>——列式存储格式，天然适合Spark生态。Parquet的列式压缩使得只读取部分列时极其高效（比如你只需要'title'和'text'列，不需要读'url'和'length'列）。更重要的是，Parquet文件包含schema信息，Spark可以直接推断列类型，不需要额外定义。Dolma内部管线全部使用Parquet格式，因为它的分析性和压缩率都远优于JSON Lines。</p>
+
+        <p><strong>Arrow</strong>——内存列式格式。Arrow的设计目标是消除数据在不同系统之间传递时的序列化/反序列化开销。在严格意义Arrow上不属于"存储格式"（没有持久化文件格式），但Arrow的IPC（进程间通信）格式正在成为高性能数据管线的选择。当你的数据处理引擎和机器学习框架都支持Arrow时，数据可以零拷贝地从Spark传递到PyTorch。</p>
+
+        <p>来看看三种格式在真实场景中的存储对比：</p>
+
+        <pre><code># 以FineWeb的一个子集为例（约100万条文档，总字符数约5亿）
+# 存储大小对比：
+
+# JSON Lines (gzip压缩)
+$ du -sh fineweb_sample.jsonl.gz
+1.2G    fineweb_sample.jsonl.gz
+
+# Parquet (zstd压缩, snappy默认)
+$ du -sh fineweb_sample.parquet
+487M    fineweb_sample.parquet
+
+# Parquet列子集: 只读text和quality_score列
+# 由于列式存储，实际IO减少约60%
+$ du -sh fineweb_sample_text_only.parquet
+195M    fineweb_sample_text_only.parquet
+
+# Arrow IPC (内存中)
+# 约1.8GB未压缩，但无需反序列化直接可用
+# PyArrow 零拷贝读取到 Pandas/Numpy
+import pyarrow.parquet as pq
+table = pq.read_table("fineweb_sample.parquet", columns=["text"])
+# → 零拷贝，无Python对象开销</code></pre>
+
+        <p>我的建议是：<strong>处理中用Parquet，发布用JSON Lines</strong>。内部管线各阶段的中间数据用Parquet存储，充分利用它的压缩率、列式读取和schema约束能力。但最终对外发布的数据集用JSON Lines + gzip/zstd压缩，因为社区工具的兼容性更好。FineWeb就是这么做的——内部管线用Parquet，发布的FineWeb和FineWeb-Edu数据集是JSON Lines格式。</p>
+
+        <h2>压缩策略</h2>
+
+        <p>在LLM数据工程中，压缩不仅仅是"省点硬盘空间"的问题——它直接影响了I/O吞吐、网络带宽和计算成本。选择合适的压缩算法，常常是性价比最高的性能优化手段。</p>
+
+        <p><strong>gzip</strong>——经典选择，普及度最高。压缩比在4-5x左右，压缩和解压速度中等。Common Crawl的原始WARC文件全部使用gzip压缩。如果你的数据要长期存档，gzip是安全的选择——20年后的任何系统都能解压gzip文件。</p>
+
+        <p><strong>zstd</strong>——2024-2026年数据工程的事实标准。由Facebook开源的zstd在压缩比和解压速度上都超越了gzip。在压缩级别=3（默认）时，zstd的压缩比能达到3-10x（取决于数据类型），解压速度是gzip的3-5倍。FineWeb团队在论文中提到，他们将整个管线的压缩方案从gzip切换到zstd后，I/O吞吐提升了40%以上。</p>
+
+        <p><strong>lz4</strong>——解压速度最快的方案，但压缩比一般（2-3x）。适合需要频繁读写的中间数据场景，比如Spark的shuffle数据。lz4的解压速度可以达到数GB/s，几乎是内存带宽的极限。</p>
+
+        <div class="tip">
+            <strong>zstd 是2024-2026年数据工程的事实标准压缩算法。</strong> 如果你在2026年启动一个新的数据工程管线，默认选择应该是zstd（压缩级别3-6）。CCNet团队在2019年使用的gzip已有性能瓶颈，而zstd在压缩比和解压速度上都提供了更优的帕累托前沿。大多数现代工具（Spark 3.4+、Dask 2024+、PyArrow 14+）都原生支持zstd。设置方式：<code>spark.conf.set("spark.io.compression.codec", "zstd")</code>。
+        </div>
+
+        <h2>数据目录和版本管理</h2>
+
+        <p>当你的数据集有几百个文件、跨越多个清洗版本时，文件组织方式直接决定了可维护性。混乱的目录结构会让后续的数据排查变成噩梦。</p>
+
+        <p>行业最佳实践是<strong>按日期/版本分层组织</strong>目录结构。来看看Dolma的目录组织方式：</p>
+
+        <pre><code>s3://dolma-data/
+├── raw/                          # 原始数据
+│   └── common-crawl/
+│       ├── CC-MAIN-2024-10/      # 按快照组织
+│       ├── CC-MAIN-2024-18/
+│       └── CC-MAIN-2024-50/
+├── intermediate/                 # 中间处理结果
+│   └── v1.2/                     # 流水线版本
+│       ├── extracted/            # 正文提取后
+│       │   ├── CC-MAIN-2024-10/
+│       │   └── CC-MAIN-2024-18/
+│       ├── lang-filtered/        # 语言过滤后
+│       └── deduped/              # 去重后
+├── curated/                      # 最终成品
+│   ├── v2.0/                     # 数据集版本
+│   │   ├── en/                   # 按语言
+│   │   │   ├── train/           # 分训练/验证/测试
+│   │   │   ├── validation/
+│   │   │   └── test/
+│   │   ├── zh/
+│   │   └── code/
+│   └── v2.1/
+└── manifests/                    # 校验和清单
+    ├── v2.0.manifest.json
+    └── v2.1.manifest.json</code></pre>
+
+        <p>每个处理步骤的输出都会附带一个<strong>manifest清单文件</strong>，记录该目录下所有文件的校验和（SHA-256）、文件大小和记录数。这听起来很繁琐，但当你需要回答"v2.0数据集和v2.1数据集到底差在哪里"时，manifest文件就是你的救命稻草。FineWeb团队甚至为每个快照的每个清洗版本都保留了manifest，使得FineWeb-Edu的数据选择过程可以完全审计。</p>
+
+        <div class="highlight">
+            <strong>数据资产管理：</strong> 数据管线中的"数据资产管理"和代码资产管理一样重要。你的代码可能用git管理得井井有条，但如果数据文件的命名是output_v3_final_final2.parquet，那数据部分的混乱就会拖垮整个项目的可维护性。为每个数据集建立版本号、维护变更日志、记录生成参数——这些看似"额外"的工作，在数据管线的生命周期中最终会带来10倍的回报。
+        </div>
+
+        <p>存储和计算都搭建好了之后，下一个让人头疼的问题浮出水面：当有一天你需要回退到一个月前的数据集版本，或者别人想复现你三个月前的实验时，你能做到吗？要跑通一条完整的、端到端可复现的数据管线，比想象中要复杂得多。下一章我们就来讨论这个问题：流水线的可复现性。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

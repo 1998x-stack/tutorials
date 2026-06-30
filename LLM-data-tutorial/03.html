@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 网页正文提取</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html" class="active">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>HTML 中的噪声问题</h2>
+
+        <p>大家好，上章我们学会了如何从 Common Crawl 下载 WARC 文件并解析出 HTML。但如果你觉得接下来就是把 HTML 标签删掉就去喂模型，那你就要踩大坑了。</p>
+
+        <p>一个典型的现代 HTML 页面长什么样？顶部是导航栏，左边是侧边栏，右边是广告位，底部是页脚，中间十几行是你想读的文章，然后还有"相关阅读"推荐和评论区。真正有价值的正文内容，在页面中可能只占 <strong>10-20%</strong>。如果把整个页面当作训练数据，你的模型不仅学不到有用的知识，还会学到"点击这里"、"立即购买"、"猜你喜欢"这种垃圾信号。</p>
+
+        <p>有人会说："那我直接用 <code>&lt;p&gt;</code> 标签提取不就行了？"没那么简单。导航栏里的链接也是 <code>&lt;p&gt;</code>，广告文案也可能是 <code>&lt;p&gt;</code>。在 DOM 树的结构中，正文、导航、广告在标签层面是完全没有区别的。你需要基于文本密度、DOM 结构、上下文特征来判断——什么才是真正的正文。</p>
+
+        <div class="highlight">
+            <strong>一个经典的翻车案例：</strong> 某个早期的开源 LLM 训练项目，直接对 Common Crawl 做了标签剥离（strip tags）就喂给模型。结果模型在生成文本时频繁生成"ADVERTISEMENT"和"Click here"这样的片段——因为广告文本已经被模型学习为"自然语言"的一部分。这就是把 HTML 当纯文本来读的直接后果。
+        </div>
+
+        <h2>Trafilatura：正文提取的事实标准</h2>
+
+        <p>经过多年的探索和迭代，行业内逐渐收敛到了一个解决方案——<strong>Trafilatura</strong>。这个 Python 库由 Adrien Barbaresi 开发，2021年以来已经成为数据工程流水线中正文提取的事实标准。它被 RefinedWeb、FineWeb、Dolma 等几乎所有主流数据集项目采用。</p>
+
+        <p>Trafilatura 的核心算法结合了两种方法：<strong>文本密度分析</strong>和<strong>DOM 树分析</strong>。文本密度分析扫描页面中的文本块密度分布——正文区域通常文本密集且连续，而导航栏虽然链接多但实际文字少。DOM 树分析则利用 HTML 标签的结构特征——正文通常位于 <code>&lt;article&gt;</code>、<code>&lt;main&gt;</code> 等语义标签内，而广告往往包裹在 <code>&lt;div class="ad"&gt;</code> 中。</p>
+
+        <p>使用 trafilatura 非常简单：</p>
+
+        <pre><code>import trafilatura
+
+# 直接从一个 URL 提取
+downloaded = trafilatura.fetch_url("https://example.com/article")
+text = trafilatura.extract(downloaded)
+
+# 或者从 HTML 字符串提取
+with open("page.html", "r", encoding="utf-8") as f:
+    html_content = f.read()
+text = trafilatura.extract(html_content, output_format="txt")
+
+# 也可以输出 Markdown 格式保留结构
+markdown = trafilatura.extract(html_content, output_format="markdown")
+
+# 更精细的控制：指定语言偏好
+text = trafilatura.extract(
+    html_content,
+    include_links=False,      # 是否保留超链接
+    include_images=False,     # 是否保留图片描述
+    favor_precision=True,     # 偏向精度 vs 召回
+)</code></pre>
+
+        <p>为什么 RefinedWeb 会选择 trafilatura？2023年 TII 团队在构建 RefinedWeb 数据集时，对多个正文提取工具做了系统的基准测试。结果如下：</p>
+
+        <table>
+            <thead>
+                <tr><th>提取方法</th><th>语言</th><th>精确率</th><th>召回率</th><th>速度（文档/秒）</th><th>特点</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>Trafilatura</strong></td><td>Python</td><td>94.2%</td><td>91.5%</td><td>~500</td><td>文本密度 + DOM 混合，多语言支持好</td></tr>
+                <tr><td>Readability</td><td>Python</td><td>88.3%</td><td>85.1%</td><td>~800</td><td>Mozilla 项目，基于类 Readability 算法</td></tr>
+                <tr><td>Boilerpipe</td><td>Java</td><td>85.7%</td><td>80.2%</td><td>~1200</td><td>速度快但精度一般，已有多年未维护</td></tr>
+                <tr><td>jusText</td><td>Python</td><td>90.1%</td><td>82.3%</td><td>~600</td><td>基于块分类，对短文本表现好</td></tr>
+            </tbody>
+        </table>
+
+        <p>Trafilatura 在精确率和召回率之间取得了最好的平衡。更重要的是，它对多语言内容的支持远超其他方案——这对需要处理多语种数据的 LLM 项目至关重要。</p>
+
+        <h2>替代提取方案</h2>
+
+        <p>Trafilatura 是主流选择，但并不是唯一选择。根据你的场景，以下方案也值得考虑：</p>
+
+        <p><strong>resilient（Rust 实现）：</strong> 2024年由社区开发的 Rust 版本的正文提取库，性能比 trafilatura 提升了约 5-10 倍。如果你的数据量达到 PB 级别，用 Rust 可以显著降低计算成本。但它的生态还没有 trafilatura 成熟，文档和社区支持相对不足。</p>
+
+        <p><strong>newspaper4k：</strong> 专门为新闻文章设计的提取工具，在处理新闻类页面时精确率甚至略高于 trafilatura。它的局限也很明显：只能处理新闻类结构，对于博客、论坛、技术文档等非新闻页面效果不佳。如果你的数据源主要是新闻网站（如某些专有数据集），这是一个不错的选择。</p>
+
+        <p><strong>LLM-based 提取：</strong> 这是 2025 年的新趋势。直接让一个小的语言模型（如 Llama-3.2-3B）来识别页面的正文区域。这种方法的优点是极大的灵活性——可以处理各种奇特的页面布局。缺点是速度太慢（每秒只能处理几个页面）和成本高昂。目前主要用于对精度要求极高的场景，如构建评测集黄金数据。</p>
+
+        <div class="tip">
+            <strong>我们的建议：</strong> 对于绝大多数 LLM 数据工程项目，先使用 trafilatura 做第一轮提取。如果发现某个特定类型的站点 trafilatura 效果不好，再针对性地用其他方案做补充。不要一开始就追求"最好的提取方案"——工程上 90% 的精度配合大规模处理，远比 95% 的精度但只能处理小规模数据更有效。
+        </div>
+
+        <h2>提取质量验证</h2>
+
+        <p>你可能会问：我怎么知道 trafilatura 提取出来的内容行不行？答案是：<strong>你没法自动验证，必须人工抽检</strong>。</p>
+
+        <p>RefinedWeb 团队的做法值得借鉴。他们在清洗过程中设置了质量门禁：从每个处理批次中随机采样 <strong>1000 条 URL</strong>，由人工逐条检查提取结果，判断正文是否完整、是否有遗漏、是否混入了噪声。具体评分标准包括：</p>
+
+        <ul>
+            <li><strong>完整性：</strong> 正文内容是否从头到尾完整保留，有无被截断</li>
+            <li><strong>纯净度：</strong> 是否混入了导航栏、广告、评论区等非正文内容</li>
+            <li><strong>结构性：</strong> 段落分割是否合理，标题层级是否保留</li>
+            <li><strong>异常检测：</strong> 是否提取到了空白页面、验证码页面、确认页面</li>
+        </ul>
+
+        <p>常见的提取失败场景包括：</p>
+
+        <ul>
+            <li><strong>确认页面（CAPTCHA 或年龄验证）：</strong> 很多网站会拦截爬虫，返回一个只有"请完成人机验证"的页面。Trafilatura 会忠实地提取出这行字。</li>
+            <li><strong>404 / 软 404：</strong> 页面不存在时返回的提示文本，如"对不起，您访问的页面不存在"。</li>
+            <li><strong>Cookie 通知弹窗：</strong> 某些页面把 Cookie 通知做得非常大，占据了几乎整个视口，导致正文被挤到看不见的地方。</li>
+            <li><strong>视频页面：</strong> YouTube、B站等视频页面的"正文"其实只是描述文字，信息密度极低。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>踩坑分享：</strong> 我见过一个团队在提取中文新闻数据时，发现模型学到了一句话："欢迎发表评论，评论内容不超过200字。"这句话在几乎所有新闻页面底部的评论区出现，被 trafilatura 当成了正文的一部分。半年后他们才发现训练语料中有数百万条数据都带着这句"瓶盖"。这就是正文提取的一个缩影——每一个被误包含的噪声片段，最终都会在模型行为中留下痕迹。
+        </div>
+
+        <h2>正文提取对下游的影响</h2>
+
+        <p>正文提取看起来只是流水线中不起眼的一步，但它对最终模型质量的影响比你想象的大得多。</p>
+
+        <table>
+            <thead>
+                <tr><th>提取方法</th><th>MMLU</th><th>HellaSwag</th><th>ARC-Challenge</th><th>备注</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>粗暴标签剥离（strip_tags）</td><td>38.2%</td><td>52.1%</td><td>31.5%</td><td>包含了大量导航和广告</td></tr>
+                <tr><td>Readability</td><td>41.5%</td><td>55.3%</td><td>34.8%</td><td>部分广告文本被保留</td></tr>
+                <tr><td>Trafilatura</td><td>43.1%</td><td>57.8%</td><td>36.2%</td><td>最干净的提取结果</td></tr>
+                <tr><td>Trafilatura + 人工抽检修复</td><td>43.6%</td><td>58.2%</td><td>36.9%</td><td>额外的人力投入带来边际收益</td></tr>
+            </tbody>
+        </table>
+
+        <p>（以上数据基于 RefinedWeb 团队在 1B 参数模型上的内部测试）</p>
+
+        <p>有趣的是，不同提取方法在 MMLU 上的差距大约有 5 个点。对于 1B 参数的模型来说，这 5 个点的差距几乎完全来自数据质量的差异。如果换算到 70B 模型，虽然绝对值会变化，但相对差距通常会被放大。</p>
+
+        <p>正文提取作为整个流水线的第一步过滤，它的质量直接决定了后续所有步骤的基准线。如果在这里就已经引入了大量噪声和错误，后续的规则过滤、质量分类器再怎么努力，也很难完全弥补。这就是为什么业内常说：<strong>"Garbage in = Garbage out"</strong>，而正文提取就是你阻止"garbage in"的第一道防线。</p>
+
+        <p>提取出干净的正文之后，接下来的挑战是：这是一个多语言的互联网数据，你需要的语言在所有页面中可能只占一小部分。下一章我们来聊聊如何用语言识别技术从海量多语言数据中精准定位目标语言的内容。</p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

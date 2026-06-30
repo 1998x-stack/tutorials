@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 MinHash 近邻去重</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html" class="active">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>为什么需要模糊去重</h2>
+
+        <p>上一章我们聊了精确去重——用 SHA-1 哈希一模一样的内容。但现实世界中的数据重复，往往没有那么"耿直"。我给大家讲个真实的故事。</p>
+
+        <p>2023 年我在帮一个团队做中文语料清洗，跑了一遍精确去重后，发现数据量只减少了不到 10%。大家还挺高兴，觉得"我们数据质量不错嘛"。结果随便翻了几百篇文档，发现大量近乎相同的文章——同一篇新闻稿被不同网站转载，原文只加了一行"本文转载自XXX"；同一篇博客被复制到多个平台，每篇末尾多了"欢迎关注我的公众号"；同一段维基百科的内容被多个问答网站拿去当"原创"答案。精确去重完全抓不到这些漏网之鱼。</p>
+
+        <p><strong>模糊去重</strong>要解决的就是这个问题：不要求内容完全一样，只要"足够相似"就认为是重复。TII 的 RefinedWeb 团队在构建 C4 替代品时做了一个实验：先用精确去重去掉完全相同的文档，再上 MinHash 模糊去重，结果又额外去掉了约 50% 的冗余内容。也就是说，只做精确去重可能有一半的重复被漏掉了！</p>
+
+        <p>为什么会有这么多近似重复？想想看，一个热门事件发生后，各大媒体都会跟进报道——虽然用词不同、段落顺序不同，但核心信息几乎一样。这些"同质化"内容如果全部喂给模型，除了消耗 token 预算，并不会带来新的知识增益。模糊去重的目标，就是识别并去除这类"信息等价"的重复文档。</p>
+
+        <div class="highlight">
+            <strong>核心洞察：</strong> 精确去重抓的是"一模一样"，模糊去重抓的是"大同小异"。在大规模语料中，后者才是真正的"重头戏"——通常能额外去除 30-50% 的冗余内容。
+        </div>
+
+        <h2>MinHash 算法原理</h2>
+
+        <p>要去除近似重复，首先要定义什么叫"相似"。信息检索领域有一个经典指标——<strong>Jaccard 相似度</strong>：两个集合的交集大小除以并集大小。如果两篇文档的 Jaccard 相似度接近 1，说明它们高度重叠。</p>
+
+        <p>但问题来了：文档是文本，不是集合。要把文档变成集合，需要做 <strong>shingling</strong>——将文档切分成 n-gram（通常是单词级别的 5-gram 或字符级别的 13-gram），每个 n-gram 作为一个集合元素。一篇文章可能产生几十万个 shingle，直接算两两 Jaccard 在工程上行不通。</p>
+
+        <p>这就是 <strong>MinHash</strong> 的用武之地。它的核心思想很巧妙：用多个哈希函数把文档的 shingle 集合压缩成一个固定长度的"签名"。具体来说，对于文档 D 的 shingle 集合 S，用 k 个不同的哈希函数 h₁, h₂, ..., h_k，每个哈希函数对 S 中每个元素计算哈希值，取最小值作为该哈希函数的签名值。这样，一篇文档就被表示成了一个长度为 k 的签名向量。</p>
+
+        <p>MinHash 有一个非常漂亮的数学性质：<strong>两个文档签名向量中对应位置相等的比例，就是它们 Jaccard 相似度的无偏估计</strong>。换句话说，没必要直接算 Jaccard——比较签名就够了。</p>
+
+        <pre><code>import hashlib
+
+def minhash_signature(shingles: set, num_hashes: int = 128) -> list:
+    """计算文档的 MinHash 签名向量
+
+    Args:
+        shingles: 文档的 shingle 集合 (n-gram 集合)
+        num_hashes: 哈希函数个数，即签名长度
+
+    Returns:
+        长度为 num_hashes 的签名向量
+    """
+    # 预定义哈希函数的种子
+    seeds = list(range(num_hashes))
+    signature = []
+
+    for seed in seeds:
+        min_hash = float('inf')
+        for shingle in shingles:
+            # 用不同的种子生成不同的哈希函数
+            h = hashlib.md5(
+                f"{seed}:{shingle}".encode()
+            ).hexdigest()
+            h_int = int(h, 16)
+            if h_int < min_hash:
+                min_hash = h_int
+        signature.append(min_hash)
+
+    return signature
+
+def jaccard_estimate(sig_a: list, sig_b: list) -> float:
+    """用 MinHash 签名估计 Jaccard 相似度"""
+    matches = sum(1 for a, b in zip(sig_a, sig_b) if a == b)
+    return matches / len(sig_a)
+
+# 示例：两篇相似文档的签名比较
+doc_a = {"machine", "learning", "data", "model", "training"}
+doc_b = {"machine", "learning", "data", "inference", "deployment"}
+
+sig_a = minhash_signature(doc_a, num_hashes=128)
+sig_b = minhash_signature(doc_b, num_hashes=128)
+
+print(f"估计 Jaccard: {jaccard_estimate(sig_a, sig_b):.3f}")
+# 输出约 0.6，与真实 Jaccard (3/7 ≈ 0.429) 接近但不完全一致</code></pre>
+
+        <h2>Locality-Sensitive Hashing (LSH)</h2>
+
+        <p>MinHash 把文档从变长的 shingle 集合压缩成了固定长度的签名向量，但还有一个根本问题没有解决：如果要在一百万篇文档中找相似对，仍然需要做约 5000 亿次签名比较。O(n²) 的复杂度在任何规模下都是不可接受的。</p>
+
+        <p><strong>Locality-Sensitive Hashing（局部敏感哈希，LSH）</strong> 就是来拯救这个问题的。它的思路非常巧妙：把签名向量分成 b 个 band，每个 band 有 r 行（即 b × r = k，k 是签名长度）。对每个 band 单独做一次哈希——只有某个 band 的哈希值完全相同的文档才会被放到同一个桶里，成为"候选对"。</p>
+
+        <p>这里巧妙的点是概率：两篇文档在某一个 band 中完全一致的概率是 Jaccard 相似度的 r 次方。如果它们有一个 band 被分到同一个桶里，就进入候选集做精细比较。越是相似的文档，进入候选集的概率越高。通过调整 b 和 r，我们可以精确控制"什么样的相似度会被捕获"。</p>
+
+        <table>
+            <thead>
+                <tr><th>b（band 数）</th><th>r（每 band 行数）</th><th>阈值 s ≈ (1/b)^(1/r)</th><th>召回率（@相似度 0.8）</th><th>精度</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>20</td><td>6</td><td>0.72</td><td>~95%</td><td>中等（较多候选对）</td></tr>
+                <tr><td>16</td><td>8</td><td>0.78</td><td>~90%</td><td>较高</td></tr>
+                <tr><td>10</td><td>13</td><td>0.85</td><td>~75%</td><td>非常高（候选对少）</td></tr>
+                <tr><td>8</td><td>16</td><td>0.87</td><td>~65%</td><td>极高</td></tr>
+            </tbody>
+        </table>
+
+        <p>实践中，如果希望捕获相似度 > 0.8 的重复对，通常设置 b=16, r=8 或 b=20, r=6。如果需要更高的召回率就多用 band，需要更高的精度就多用 row。这是一个经典的 tradeoff。</p>
+
+        <div class="highlight">
+            <strong>工程之美：</strong> MinHash + LSH 将去重复杂度从 O(n²) 降到接近 O(n)，是支撑 PB 级数据去重的核心技术。没有 LSH，MinHash 只是一个"比 O(n²) 快一点的 O(n²)"；有了 LSH，它才能真正在万亿 token 语料上跑起来。
+        </div>
+
+        <h2>MinHash 在 RefinedWeb 和 Dolma 中的实现</h2>
+
+        <p>理论讲完了，来看看工业界怎么用。RefinedWeb（TII, 2023）的 MinHash 配置非常典型：使用字符级别的 5-gram 作为 shingle，128 个 MinHash 签名，然后通过 LSH 分桶。他们的目标是捕获相似度 > 0.8 的近似重复对。经过这一轮处理，语料中约 50% 的冗余文档被移除。</p>
+
+        <p>Dolma（AI2, 2023）走的是另一条路线：直接用 Python 生态中最流行的 MinHash 库——<strong>datasketch</strong>。这个库封装了 MinHash 和 LSH 的完整实现，并且支持在 Spark 上分布式运行。</p>
+
+        <pre><code>from datasketch import MinHash, MinHashLSH
+
+def build_minhash_lsh(documents, threshold=0.8, num_perm=128):
+    """构建 MinHash LSH 索引"""
+
+    lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
+
+    for doc_id, text in documents.items():
+        m = MinHash(num_perm=num_perm)
+        # 生成 5-gram shingle
+        for i in range(len(text) - 4):
+            shingle = text[i:i+5]
+            m.update(shingle.encode('utf-8'))
+        lsh.insert(doc_id, m)
+
+    return lsh
+
+def find_near_duplicates(lsh, documents):
+    """找出所有近似重复对"""
+    duplicates = set()
+
+    for doc_id, text in documents.items():
+        m = MinHash(num_perm=128)
+        for i in range(len(text) - 4):
+            shingle = text[i:i+5]
+            m.update(shingle.encode('utf-8'))
+
+        # 查询 LSH 索引，返回候选邻居
+        result = lsh.query(m)
+        # 排除自身
+        for neighbor in result:
+            if neighbor != doc_id:
+                # 保留文档 ID 对，小的在前
+                pair = (min(doc_id, neighbor), max(doc_id, neighbor))
+                duplicates.add(pair)
+
+    return duplicates</code></pre>
+
+        <div class="tip">
+            <strong>工程建议：</strong> datasketch 库是 Python 生态最成熟的 MinHash 实现，支持从单机到 Spark 分布式的无缝扩展。如果你的语料规模在百万文档级别，单机的 datasketch 就够用；如果是十亿级别，需要用 Spark 版本的 <code>datasketch.lean_storage</code> 或者自己实现分区 LSH。
+        </div>
+
+        <h2>去重效果的评估</h2>
+
+        <p>去重不是"做完就完事了"——你怎么知道去重做得好不好？直觉上，去重后数据量减少是好事，但减少多少算"刚好"？</p>
+
+        <p>RefinedWeb 团队做了一个非常系统的评估：他们用去重前后的数据分别训练模型，然后在 10 个不同的 benchmark 上对比效果。结果是——<strong>去重后训练的模型在大多数 benchmark 上表现更好</strong>，尤其是在 MMLU 和 HellaSwag 这类知识密集型任务上提升明显。原因是去重让模型在相同的 token 预算内接触到了更多元的知识，而不是被重复信息稀释。</p>
+
+        <p>但也有例外。在 TriviaQA 这类"背诵型"任务上，去重可能会轻微降低性能——因为有些"重复"其实是考试内容在不同网页中的自然复述，这些复述恰好帮助了模型记忆。</p>
+
+        <div class="warning">
+            <strong>一个重要的教训：</strong> 过度去重可能适得其反。我在实际项目中就踩过这个坑——对一批学术论文做 MinHash 去重，结果把同一篇论文的不同版本（预印本、正式发表、开放获取版）当成"近似重复"删掉了。这些不同版本其实包含了审稿意见带来的修改，信息密度很高。解决方案是把去重阈值从 0.8 调高到 0.9，保留那些"看起来像但实际有差异"的文档。
+        </div>
+
+        <p>总结一下 MinHash 的核心要点：它是精确去重的完美补充，专门解决"几乎相同"的场景。与精确去重配合使用，通常在 Web 语料上能额外去除 30-50% 的冗余。下一章我们将讨论去重的一个更深层的设计维度——不仅仅是"去不去重"，而是"在哪个粒度上去重"。文档级、段落级、还是行级？不同的粒度有不同的取舍，我们下一章细聊。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

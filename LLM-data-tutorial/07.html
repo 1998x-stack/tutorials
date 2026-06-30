@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 精确去重</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html" class="active">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>重复数据有多严重</h2>
+
+        <p>大家好，这一章我们聊一个看起来无趣但实际影响巨大的话题——去重。</p>
+
+        <p>互联网数据的重复率有多高？哪怕你自己没有处理过 Common Crawl，也可以猜到一个大概：同一个新闻被几十家媒体转载，同一个技术博客在不同平台上反复发布，同一个 CMS 系统生成的模板页面结构完全相同。在实际数据中，Common Crawl 的文档级重复率高达 <strong>50-70%</strong>。</p>
+
+        <p>这意味着什么？假设你在 300TB 的原始数据上做了一轮规则过滤，剩下 60TB 左右的文本数据。其中可能还有 30-40TB 是完全重复的。如果用这些数据训练模型，模型在 40% 的训练时间里只是在反复记忆同一个内容——这是对计算资源的巨大浪费。</p>
+
+        <div class="highlight">
+            <strong>CCNet 的惊人发现：</strong> 当 CCNet 团队在 2020 年对 Common Crawl 执行第一轮 SHA-1 哈希去重时，他们发现文档的文本量减少了约 70%——去掉的绝大多数是 boilerplate（模板页面）和导航栏。也就是说，Common Crawl 中有将近三分之二的文本内容是"几乎无用"的。这说明了去重是提高训练数据质量的"最经济的方式"之一——不像质量分类器需要 GPU，不像困惑度过滤需要加载模型，去重只需要一个哈希函数和一个哈希表。
+        </div>
+
+        <p>更值得警惕的是，重复数据不仅浪费了计算资源，还会 <strong>扭曲模型的概率分布</strong>。如果一个句子在数据集中出现了 1000 次，模型就会认为这个句子的出现概率是其他句子的 1000 倍。如果这 1000 次恰巧是同一个广告文案，那模型学到的就是"在自然语言中，这个广告词出现的概率极高"。这就是为什么不经去重的模型更容易生成模板化的、重复的文本。</p>
+
+        <h2>SHA-1 精确去重</h2>
+
+        <p>精确去重的核心思想非常简单：对每个文档（或段落）计算一个哈希值，如果哈希值相同，就视为重复内容，只保留一个副本。</p>
+
+        <p>为什么选 SHA-1 而不是 MD5？虽然 MD5 更快，但 SHA-1 在 PB 级数据中碰撞概率更低——在 10^15 次操作级别才会出现一次碰撞，这对于任何现有的 LLM 数据集都绰绰有余了。另外，SHA-1 是一个加密学哈希函数，对输入的微小变化极度敏感——"Hello"和"Hello "（多了个空格）会产生完全不同的哈希值。</p>
+
+        <pre><code>import hashlib
+
+def compute_sha1(text: str) -> str:
+    """计算文本的 SHA-1 哈希值"""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+class ExactDeduplicator:
+    """基于 SHA-1 的精确去重器"""
+    def __init__(self):
+        self.seen_hashes = set()
+
+    def is_duplicate(self, text: str) -> bool:
+        """判断文本是否已经出现过"""
+        text_hash = compute_sha1(text)
+        if text_hash in self.seen_hashes:
+            return True
+        self.seen_hashes.add(text_hash)
+        return False
+
+    def deduplicate_documents(self, documents: list[str]) -> list[str]:
+        """对文档列表去重，保持原始顺序"""
+        unique = []
+        for doc in documents:
+            if not self.is_duplicate(doc):
+                unique.append(doc)
+        return unique
+
+# 使用示例
+dedup = ExactDeduplicator()
+docs = [
+    "人工智能是未来的趋势。",
+    "深度学习改变了 NLP 领域。",
+    "人工智能是未来的趋势。",  # 重复
+    "人工智能是未来的趋势！",  # 标点不同，不算重复
+]
+result = dedup.deduplicate_documents(docs)
+print(f"去重前: {len(docs)} 篇, 去重后: {len(result)} 篇")
+# 输出: 去重前: 4 篇, 去重后: 3 篇</code></pre>
+
+        <p>这段代码非常简单，但在 TB 级数据中会遇到一个现实问题：<code>seen_hashes</code> 这个集合会变得非常大。如果你处理的文档数量是 10 亿，每个 SHA-1 哈希是 40 字节的十六进制字符串，那么整个哈希表需要大约 40GB 的内存。这对于单机来说是可行的，但在分布式环境中，每个 worker 需要共享这个哈希表——这就引入了分布式一致性的问题。</p>
+
+        <p>解决方法是使用 <strong>分片（sharding）</strong>：对文档的哈希值取模，把文档分配到不同的处理分片中。每个分片只维护自己的哈希集合，互不干扰。当所有分片处理完成后，合并结果即可。这样做的好处是每个分片的内存需求只有总体的 1/N，而且可以完全并行处理。</p>
+
+        <div class="tip">
+            <strong>工程优化：</strong> 如果你处理的文档数超过 10 亿，一个实用的技巧是：先用 URL 去重（比内容哈希便宜得多）把明显重复的 URL 过滤掉，这样进入内容哈希阶段的文本量可能只有原来的 30-50%。再做内容哈希时，需要维护的哈希表大小会大大降低。
+        </div>
+
+        <h2>Bloom Filter 在大规模去重中的应用</h2>
+
+        <p>当数据量太大，哈希表无法完全放入内存时，Bloom Filter 就派上用场了。它用概率换空间——允许少量误判（false positive，即把不重复的文档误判为重复），但决不会漏掉任何真正的重复（没有 false negative）。</p>
+
+        <p>下面是一个内存占用的对比：</p>
+
+        <table>
+            <thead>
+                <tr><th>方法</th><th>内存占用（10 亿文档）</th><th>误判率</th><th>漏判率</th><th>适用场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>HashSet + SHA-1</td><td>~40 GB</td><td>0%</td><td>0%</td><td>文档量 &lt; 5 亿，单机可用</td></tr>
+                <tr><td>Bloom Filter（1% 误判率）</td><td>~2.4 GB</td><td>~1%</td><td>0%</td><td>需要精确去重，但内存有限</td></tr>
+                <tr><td>Bloom Filter（5% 误判率）</td><td>~1.2 GB</td><td>~5%</td><td>0%</td><td>大规模去重，允许少量误删</td></tr>
+            </tbody>
+        </table>
+
+        <p>在实际使用中，Bloom Filter 最典型的用法是作为"预过滤器"：先用 Bloom Filter 做一次粗略去重（可能会误杀 1-5% 的文档，但消耗极少的内存），对 Bloom Filter 判定为"不重复"的文档，再用精确哈希表做二次确认。这种级联设计结合了两者的优势——Bloom Filter 的低内存和哈希表的零误判。</p>
+
+        <h2>段落级 vs 文档级去重</h2>
+
+        <p>前面说的都是"文档级去重"——对整篇文档计算一个哈希值。但很多情况下，两个文档的大部分内容相同，只有个别段落不同。这时候文档级去重就没法处理了。</p>
+
+        <p>CCNet 引入了一个更细粒度的方案——<strong>段落级去重</strong>。将文档按空行或段落标记分割成段落，对每个段落独立计算 SHA-1 哈希。新文档中的段落，如果哈希值已经出现过，就只保留未出现过的段落（或直接丢弃整篇文档，取决于配置）。</p>
+
+        <table>
+            <thead>
+                <tr><th>维度</th><th>文档级去重</th><th>段落级去重</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>去重粒度</td><td>整篇文档一个哈希</td><td>每个段落一个哈希</td></tr>
+                <tr><td>实现复杂度</td><td>低：一次哈希计算</td><td>高：需分段计算 + 段落重组</td></tr>
+                <tr><td>额外 tokens 去除率</td><td>基线</td><td>比文档级多 15-20%</td></tr>
+                <tr><td>存储开销</td><td>低（文档数 = 哈希数）</td><td>高（段落数 = 3-10 倍于文档数）</td></tr>
+                <tr><td>误杀风险</td><td>低（极少碰撞）</td><td>中（短段落碰撞概率更高）</td></tr>
+                <tr><td>典型保留率</td><td>40-50%</td><td>25-35%</td></tr>
+            </tbody>
+        </table>
+
+        <p>段级的去重比文档级多去除了 <strong>15-20%</strong> 的 tokens。这些多去除的 tokens 主要是哪些？是那些"通用的段落"——比如文章底部的"关于我们"、版权声明、固定的作者简介等。这些内容在文档级去重中因为和其他内容拼在一起而逃过一劫，在段落级去重中就无处遁形了。</p>
+
+        <div class="tip">
+            <strong>最佳实践：</strong> 大多数现代流水线采用"多粒度组合"策略——先做段落级去重去除模板片段，再做文档级去重去除完全相同的整篇文档。这种组合可以在几乎不增加计算量的情况下，最大化去重效果。FineWeb 和 Dolma 都采用了这种两阶段方案。
+        </div>
+
+        <h2>精确去重的陷阱</h2>
+
+        <p>精确去重看起来简单，但实际操作中有几个容易踩的坑。</p>
+
+        <div class="warning">
+            <strong>陷阱一：不要对代码类数据做行级去重。</strong> 代码中有大量重复的模式——import 语句、函数签名、循环结构。如果对代码按行去重，会严重破坏代码的完整性和可读性。更糟糕的是，删除重复的 import 行会导致代码无法运行。对于代码数据，应该以完整文件或函数为粒度去重，而不是行级。
+        </div>
+
+        <p><strong>陷阱二：数字、日期等会导致较高的"假阳性"率。</strong> 想象一下，一篇文档中包含"2024年3月15日"这个日期，另一篇文档的唯一相同之处就是同一个日期。如果做段落级去重，这种包含日期或数字的短段落很容易因为哈希值一致而被误杀。一个常见的缓解方案是"规范化"——在哈希计算前，将数字和日期替换为占位符（如 <code>__DATE__</code>、<code>__NUM__</code>），然后再计算哈希。</p>
+
+        <p><strong>陷阱三：去重会不成比例地减少低资源语言的数据量。</strong> 低资源语言的数据本身就很少，其中可能还有相当一部分是重复的翻译内容。做过段落级去重后，某些低资源语言的数据可能锐减 50% 以上。如果你在构建多语言模型，需要对低资源语言使用不同的去重策略——比如只做文档级去重，或者放宽段落级去重的阈值。</p>
+
+        <p>精确去重虽然强大，但它有一个根本性的局限：<strong>只能找到完全相同的文本</strong>。一个字符的差异——多一个空格、一个标点符号不同——就会产生完全不同的哈希值。但在互联网数据中，更多的重复是"近乎相同"的：同一篇新闻被不同网站转载，做了小幅修改；同一篇博客在不同的 CMS 中被重新格式化了。这些"近似重复"需要另一种技术来解决——MinHash 近邻去重。这正是我们下一章的主题。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

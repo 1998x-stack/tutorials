@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 评测集去污染</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html" class="active">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>数据污染问题</h2>
+
+        <p>设想这样一个场景：你花了几百万美元训练了一个 LLM，在 MMLU 上取得了 85% 的惊人成绩，准备发 paper 庆祝。结果有人发现——你的训练数据里包含了 MMLU 的测试题目。模型不是"学会了推理"，而是"记住了答案"。</p>
+
+        <p>这听起来像是一个极端的假设，但现实比小说更离奇。GPT-3 论文中就已经讨论过这个问题——他们发现 Common Crawl 中包含了多个标准 NLP 评测集（如 SQuAD、MNLI）的测试数据。这些评测集本身就是 Web 页面（如 arXiv 论文），被 Crawl 抓取后混入了训练数据。</p>
+
+        <p>更令人震惊的是 Dolma 团队的发现。AI2 在构建 Dolma 语料库时做了系统的去污染分析，结果发现大量与 MMLU 高度重叠的样本。MMLU 的题目来自教科书和学术网站——而这些正是高质量数据过滤策略会"主动保留"的内容。换句话说，<strong>越努力筛选高质量数据，越可能不小心混入评测集内容。</strong></p>
+
+        <p>这就是数据污染（data contamination）问题的核心矛盾：高质量数据过滤和评测集去污染，在目标上存在冲突。</p>
+
+        <h2>n-gram 重叠检测</h2>
+
+        <p>检测数据污染的标准方法是 <strong>n-gram 重叠检测</strong>。思路很简单：如果训练数据和评测数据共享了足够长的连续子串，就判定为"污染"。</p>
+
+        <p>最常用的设置是 13-gram 重叠检测（在字符级别）。为什么是 13？13 个字符大约相当于 2-3 个英文单词或 4-6 个中文字符。如果两段文本共享超过 13 个字符的完整子串，它们几乎不可能是"巧合"——必定是某种形式的复制或迁移。</p>
+
+        <p>也有团队使用更保守的 8-gram 设置（Dolma 就是 8-gram），这样可以捕获更多的潜在污染，但也会增加误报率。</p>
+
+        <pre><code>def detect_contamination(train_doc: str, benchmark_data: list, n=13):
+    """检测训练文档是否包含评测集数据的 n-gram 重叠
+
+    Args:
+        train_doc: 训练文档文本
+        benchmark_data: 评测集样本列表（每个样本是 dict: {question, answer}）
+        n: n-gram 长度
+
+    Returns:
+        (是否污染, 重叠的评测样本, 最长重叠 n-gram 长度)
+    """
+    def get_ngrams(text, n):
+        return {text[i:i+n] for i in range(len(text) - n + 1)}
+
+    train_ngrams = get_ngrams(train_doc, n)
+
+    for sample in benchmark_data:
+        benchmark_text = sample["question"] + " " + sample.get("answer", "")
+
+        # 计算 n-gram 交集
+        bench_ngrams = get_ngrams(benchmark_text, n)
+        overlap = train_ngrams & bench_ngrams
+
+        if len(overlap) >= 1:
+            # 提取最长的重叠子串（用于人工审核）
+            max_overlap_len = max(len(s) for s in overlap) + n - 1
+            return True, sample, max_overlap_len
+
+    return False, None, 0
+
+
+# 对 Dolma 语料进行去污染检查
+benchmarks = {
+    "mmlu": load_mmlu(),
+    "hellaswag": load_hellaswag(),
+    "arc": load_arc_challenge(),
+}
+
+contamination_report = {}
+for bench_name, samples in benchmarks.items():
+    contaminated_count = 0
+    for doc_id, doc_text in tqdm(dolma_docs.items()):
+        is_contam, sample, overlap = detect_contamination(
+            doc_text, samples, n=8
+        )
+        if is_contam:
+            contaminated_count += 1
+    contamination_report[bench_name] = contaminated_count</code></pre>
+
+        <p>Dolma 团队使用 8-gram 检测后，各评测集与训练数据的重叠情况如下：</p>
+
+        <table>
+            <thead>
+                <tr><th>评测集</th><th>总样本数</th><th>污染样本数</th><th>污染率</th><th>最高重叠长度</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>MMLU</td><td>14,042</td><td>1,873</td><td>13.3%</td><td>212 字符</td></tr>
+                <tr><td>HellaSwag</td><td>10,042</td><td>429</td><td>4.3%</td><td>87 字符</td></tr>
+                <tr><td>ARC-Challenge</td><td>1,172</td><td>84</td><td>7.2%</td><td>156 字符</td></tr>
+                <tr><td>TruthfulQA</td><td>817</td><td>23</td><td>2.8%</td><td>45 字符</td></tr>
+            </tbody>
+        </table>
+
+        <p>可以看到，MMLU 的污染率非常高——超过 13% 的测试样本在训练数据中"见过"。这意味着如果你不处理数据污染，MMLU 上报告的分数可能有相当大的"水分"。</p>
+
+        <h2>去污染的实际策略</h2>
+
+        <p>检测到污染后，下一步是处理。行业内有三种主要策略：</p>
+
+        <p><strong>策略一：基于子串匹配的严格去污染</strong>。如果一篇训练文档包含了完整的评测集问题（或者连续 50+ 字符的重叠），就认为该文档被污染，整个文档被移除。这是最激进的方法，也是 Dolma 的默认策略。</p>
+
+        <p><strong>策略二：基于模糊匹配的宽松去污染</strong>。语义相似但不完全相同的变体——比如同一个问题被改写成了不同的措辞——也会被视作污染。这种检测更困难，通常需要 embedding 相似度检索（如将文档和评测集问题编码为向量，计算余弦相似度）。</p>
+
+        <p><strong>策略三：部分删除（温和策略）</strong>。不删除整篇文档，只删除与评测集重叠的句子或段落。这可以保留文档中其他有价值的内容，但实现更复杂——需要精确定位重叠区域。</p>
+
+        <div class="highlight">
+            <strong>残酷的现实：</strong> 去污染是"防君子不防小人"。13-gram 或 8-gram 检测只能捕获"一字不差"的复制，对于"改写了措辞但意思一样"的污染毫无办法——而这恰恰是人类评测者最容易作弊的方式。模糊匹配虽然理论上更强大，但计算成本高好几个数量级。行业目前的共识是：不完美的去污染仍然是必须做的，基线级别的 13-gram 检测是底线。
+        </div>
+
+        <h2>去污染的代价</h2>
+
+        <p>去污染不是没有代价的。当你删除一篇"被污染"的训练文档时，也在删除其中的非污染部分。Dolma 的分析显示，被标记为污染的文档中，平均只有 15-30% 的内容实际与评测集重叠，其余 70-85% 是正常内容。</p>
+
+        <p>另一个问题是<strong>过度去污染导致的安全感幻觉</strong>。如果模型是真的"学会"了某个领域知识而非"记住"了题目，那包含一些与评测集"看起来相似"的训练数据其实是合理的。比如，MMLU 的题目来自教科书，而训练数据中也包含教科书——这不是"作弊"，而是正常学习。但现有的 n-gram 方法无法区分"学到了知识"和"记住了答案"。</p>
+
+        <p>更有趣的是开卷 vs 闭卷的争论：在实际使用中，很多 LLM 被设计为配合搜索引擎或 RAG 系统工作，它们本来就应该具备"查找已有信息"的能力。对于这些场景，训练数据包含评测集内容的"污染"反而变成了"合理的预训练曝光"。</p>
+
+        <div class="tip">
+            <strong>开源透明：</strong> The Pile 团队践行了开放科学的最佳实践——他们不仅开源了去污染工具（在 GitHub 上可以找到 pile_dedup 仓库），还公开了所有被污染文档的 ID 列表。这样其他研究者可以精确知道哪些数据被移除了，也可以自行决定是否要对某些"轻度污染"网开一面。这种透明度在去污染工作中至关重要，因为不同项目对"污染"的接受程度不同。
+        </div>
+
+        <p>评测集去污染是现代 LLM 评估体系中不可或缺的一环。不做去污染的模型分数，就像没有对照组的实验——你永远不知道模型的真实能力是多少。好在 n-gram 检测实现简单、成本低，属于"低成本高回报"的数据工程步骤。</p>
+
+        <p>经过清洗、去重、质量过滤和去污染后，每一篇保留下来的训练数据都经过了层层考验。但还有一个关键决策没有做：这些来自不同源头的数据，<strong>应该按什么比例混合在一起？</strong>Web 数据、代码、书籍、论文、Wikipedia——每种来源贡献的知识类型不同，如何搭配才能让模型全面发展？这就是下一章的主题——多源数据混合配比。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

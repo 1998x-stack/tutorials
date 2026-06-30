@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 Tokenization 与 BPE</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html" class="active">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>为什么数据工程师需要懂 Tokenization</h2>
+
+        <p>大家好。走到第五部分，我们的视角要做一个重要的切换。前面 18 章我们一直在讲"如何从网页中筛选出高质量文本"，仿佛只要文本够干净、够多，模型就能学好。但这里有一个隐蔽的桥梁，决定了你的数据在进入模型之前最后一道转化是否成功——Tokenization。</p>
+
+        <p>Tokenization 是将原始文本转换为整数序列的过程，是文本与神经网络之间唯一的接口。模型看到的不再是汉字、单词或标点，而是一串 token ID。你可以把它理解成一道翻译工序：把人类语言翻译成模型能"消化"的数字语言。</p>
+
+        <p>这道工序的质量直接决定了模型的"视野"。在 Transformer 架构中，context window 是按 token 数量来计算的——一个 4096 窗口的模型最多只能看 4096 个 token。如果你用的 tokenizer 把一个中文句子拆成 20 个 token，而另一种分词方案只拆成 10 个，那后者在相同窗口下能"看见"的信息量就是前者的两倍。这就是为什么数据工程师必须理解 tokenization——我们准备数据时的文档分块逻辑、序列长度配置、特殊 token 处理，全都建立在 tokenizer 的行为之上。</p>
+
+        <p>2025 年发生了一件让整个社区印象深刻的事。某个团队在复现 Llama-3 训练时，发现他们的训练效率始终达不到 Meta 报告的水平。排查了分布式策略、优化器配置、数据加载——折腾了两周。最后发现，问题出在他们用的 tokenizer 词表版本不对：他们用了一个社区微调的 tokenizer，词表大小和搭配的 embedding 矩阵与模型架构不匹配，导致每次 forward pass 的 embedding lookup 多了一个维度变换的隐形成本。这个教训说明了一个道理：Tokenization 不是模型训练中一个可以"随便选个现成的就行"的步骤，它直接影响训练效率和模型能力。</p>
+
+        <h2>Byte-level BPE 原理</h2>
+
+        <p>目前大模型中最主流的 tokenization 方案是 Byte-level BPE（Byte Pair Encoding）。它由 Sennrich 等人在 2016 年提出，后经 GPT-2 改进为 byte-level 版本，并被几乎所有现代 LLM（GPT-4、Llama-3、Qwen-2 等）采用。</p>
+
+        <p>BPE 的核心思想很直观：从最细粒度的单元开始，逐步合并最频繁出现的相邻单元对，直到达到目标词表大小。Byte-level 版本更进一步，它的起点是 256 个字节值（0x00 到 0xFF），而不是字符或单词。这意味着它天然能处理任何语言的文本——汉语、阿拉伯语、Emoji——一个字节都不漏。</p>
+
+        <pre><code># Byte-level BPE 训练过程的简化实现
+from collections import Counter
+import itertools
+
+def train_bpe(texts, vocab_size=32768):
+    # 第一步：将每个文本编码为字节序列
+    tokens = [list(text.encode("utf-8")) for text in texts]
+
+    # 统计初始词频（每个字节是一个初始 token）
+    vocab = {i: bytes([i]) for i in range(256)}
+    merges = []
+
+    while len(vocab) &lt; vocab_size:
+        # 统计所有相邻 token pair 的频率
+        pairs = Counter()
+        for token_seq in tokens:
+            for i in range(len(token_seq) - 1):
+                pairs[(token_seq[i], token_seq[i+1])] += 1
+
+        if not pairs:
+            break
+
+        # 找到最频繁的 pair
+        most_common = pairs.most_common(1)[0][0]
+        new_id = len(vocab)
+        vocab[new_id] = vocab[most_common[0]] + vocab[most_common[1]]
+        merges.append(most_common)
+
+        # 用新 token 替换序列中所有的该 pair
+        new_tokens = []
+        for token_seq in tokens:
+            new_seq = []
+            i = 0
+            while i &lt; len(token_seq):
+                if (i &lt; len(token_seq) - 1 and
+                    token_seq[i] == most_common[0] and
+                    token_seq[i+1] == most_common[1]):
+                    new_seq.append(new_id)
+                    i += 2
+                else:
+                    new_seq.append(token_seq[i])
+                    i += 1
+            new_tokens.append(new_seq)
+        tokens = new_tokens
+
+    return vocab, merges</code></pre>
+
+        <p>你可能会问：为什么不直接用单词作为基本单元？原因很简单——英文单词太多了。英文有几十万个常用词，加上各种形态变化（run、runs、running、ran），词表会膨胀到不切实际的大小。而基于字节的 BPE 能从 <strong>256 个初始 token</strong> 开始，通过合并学到所有有用的子词单元（subword units）。它自动学会了常见词根、前缀、后缀，比如 "un"、"able"、"ing"，以及中文的常见字和词。任何不在训练语料中的词（OOV，Out-of-Vocabulary）都可以被拆解成更小的 token 来表示——这是 BPE 最优雅的特性。</p>
+
+        <h2>SentencePiece 和 HuggingFace Tokenizers</h2>
+
+        <p>在工程实践中，我们不会自己实现 BPE 训练——有两个成熟的开源工具可以高效完成这项工作。</p>
+
+        <p><strong>SentencePiece</strong> 是 Google 开发的 tokenizer 训练工具包。它的独特之处在于直接将原始文本（不需要预分词）作为输入，内部处理所有语言的分词逻辑。它支持 BPE 和 unigram 两种算法。T5、Gemma、Gemini 等 Google 系模型都使用 SentencePiece 训练 tokenizer。</p>
+
+        <p><strong>HuggingFace Tokenizers</strong> 则用 Rust 实现，提供了极致的训练和推理速度。它的 BPE 训练速度比纯 Python 实现快数百倍，可以在几分钟内完成对一个数十 GB 语料的 tokenizer 训练。Llama、Mistral、Qwen 等开源社区模型大多基于 HuggingFace Tokenizers 库。</p>
+
+        <pre><code># 使用 HuggingFace Tokenizers 训练 BPE tokenizer
+from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
+
+# 初始化一个 BPE tokenizer，从字节级别开始
+tokenizer = Tokenizer(models.BPE())
+
+# 设置预分词器：字节级别预分词
+tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+
+# 配置训练器
+trainer = trainers.BpeTrainer(
+    vocab_size=32768,          # 目标词表大小
+    special_tokens=["&lt;pad&gt;", "&lt;bos&gt;", "&lt;eos&gt;", "&lt;unk&gt;"],
+    min_frequency=2,           # 合并 pair 的最低频率
+    show_progress=True
+)
+
+# 在语料上训练
+files = ["/path/to/cleaned_corpus_01.txt",
+         "/path/to/cleaned_corpus_02.txt"]
+tokenizer.train(files, trainer)
+
+# 保存和加载
+tokenizer.save("my_llm_tokenizer.json")
+loaded = Tokenizer.from_file("my_llm_tokenizer.json")
+
+# 测试
+output = loaded.encode("深度学习中的数据工程")
+print(f"Tokens: {output.tokens}")
+print(f"IDs: {output.ids}")</code></pre>
+
+        <p>选择训练语料时有一个容易被忽视的要点：tokenizer 是在一个专门的语料上训练得到的，它和 LLM 的预训练语料可以不同。实际上，tokenizer 的训练语料通常比 LLM 预训练语料小得多——几十 GB 到几百 GB 就足够了。</p>
+
+        <div class="tip">
+            <strong>关键理解：</strong> Tokenizer 是独立于 LLM 的模块——它在一个全新的语料上训练，不依赖于模型架构。你可以训练一个 tokenizer，然后用在不同大小的模型上（只要 embedding 维度匹配）。但是请注意，tokenizer 一旦训练完成并开始预训练，之后更换 tokenizer 就意味着需要重新训练整个模型。
+        </div>
+
+        <h2>预处理：连接、分块和注意力掩码</h2>
+
+        <p>有了 tokenizer 之后，下一步就是如何把我们清洗好的文档集合变成模型需要的训练 batch。对于 Causal LM（因果语言模型，即自回归模型），这个流程是：</p>
+
+        <p><strong>Tokenize → 用 EOS 连接文档 → 切分成固定长度 block → 构造 attention mask</strong></p>
+
+        <pre><code># Causal LM 的 batch preparation 实现
+import torch
+
+def prepare_causal_lm_batch(
+    documents: list[str],
+    tokenizer,
+    seq_length: int = 4096,
+    eos_token_id: int = 2,
+    stride: int = 512
+):
+    """
+    将文档列表转换为 Causal LM 训练 batch。
+    使用 stride 来生成有重叠的序列段，最大化数据利用率。
+    """
+    # 1. 将所有文档 tokenize，用 EOS 连接
+    all_token_ids = []
+    for doc in documents:
+        ids = tokenizer.encode(doc)
+        all_token_ids.extend(ids)
+        all_token_ids.append(eos_token_id)  # 文档间分隔
+
+    # 2. 切分成固定长度的 block（带 stride）
+    blocks = []
+    start = 0
+    while start + seq_length &lt;= len(all_token_ids):
+        block = all_token_ids[start:start + seq_length]
+        blocks.append(block)
+        start += stride
+
+    # 最后一个不足长度的 block 丢弃或 pad
+    # 3. 构造 input_ids 和 labels（Causal LM 是 predict next token）
+    input_ids = torch.tensor(blocks, dtype=torch.long)
+    labels = input_ids.clone()
+
+    # 4. 构造 attention mask —— 重要！
+    # 对于 packing（多个文档在一个 block 中）的情况，
+    # 我们需要确保模型不会跨文档边界看
+    attention_mask = torch.ones_like(input_ids)
+
+    return input_ids, labels, attention_mask</code></pre>
+
+        <p><strong>Doc bleed 问题</strong>：当我们在一个 batch 中"packing"多个短文档时（尤其是代码片段或短文本），一个 sequence 可能包含文档 A 的结尾和文档 B 的开头。如果不做特殊处理，模型在预测文档 B 的第一个 token 时，可以"看到"文档 A 的内容——这被称为 doc bleed。正确的做法是在 packing 时设置 attention mask，让每个 token 只能看到同文档内的 token。</p>
+
+        <div class="warning">
+            <strong>关于 Attention Mask 的陷阱：</strong> 许多开源实现（包括一些早期版本的训练框架）在文档 packing 时简单地使用全 1 的 attention mask，这意味着模型在 cross-document boundary 上会"偷看"后一个文档的内容。虽然大多数情况下这个影响不大（每个 block 千万级别的 token 中只有几十个边界），但对于需要精确文档级别理解的场景（如多文档阅读理解），这个细节可能影响模型能力。正确的做法是：实现文档级别的 attention mask，将跨文档的 attention 置为 -inf。
+        </div>
+
+        <h2>中文 Tokenization 的特殊性</h2>
+
+        <p>中文 Tokenization 和英文有本质区别：英文天然以空格分词，但中文没有明显的词边界。在 byte-level BPE 下，一个中文字通常占 1 到 2 个 token（视具体词表而定），而相同的语义在英文中可能只需要 0.5 个 token。这意味着在同样的 token 预算下，中文模型"看到"的信息更少。</p>
+
+        <p>Llama-3 的 128K 超大词表显著改善了多语言的表示效率。与 Llama-2 的 32K 词表相比，Llama-3 对中文文本的 tokenization 效率提升了约 30%——同样的中文句子，Llama-2 可能需要 15 个 token，而 Llama-3 只用 10 个左右。这就是词表大小直接影响模型"视野"的实证。</p>
+
+        <table>
+            <thead>
+                <tr><th>模型</th><th>Tokenizer</th><th>词表大小</th><th>中文 token 效率</th><th>备注</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>GPT-2</td><td>BPE (char-level)</td><td>50,257</td><td>~2.5 chars/token</td><td>对中文支持较差</td></tr>
+                <tr><td>Llama-2</td><td>BPE (byte-level)</td><td>32,000</td><td>~1.8 chars/token</td><td>中英文混合效率一般</td></tr>
+                <tr><td>Llama-3</td><td>BPE (byte-level)</td><td>128,000</td><td>~2.5 chars/token</td><td>大幅改善中文效率</td></tr>
+                <tr><td>Qwen-2.5</td><td>BPE (byte-level)</td><td>151,936</td><td>~3.0 chars/token</td><td>专门优化中文</td></tr>
+                <tr><td>DeepSeek-V3</td><td>BPE (byte-level)</td><td>128,000</td><td>~2.8 chars/token</td><td>多语言平衡优化</td></tr>
+                <tr><td>Yi-1.5</td><td>BPE (byte-level)</td><td>64,000</td><td>~2.2 chars/token</td><td>中英双语优化</td></tr>
+            </tbody>
+        </table>
+
+        <p>多语言 tokenizer 面临的核心挑战是"语言之间的公平性"。如果一个 tokenizer 是在 90% 英文、5% 中文、5% 其他语言的语料上训练的，那么英文单词会获得更多的 merge 机会，英文的 token 效率自然最高。中文和日文等非拉丁语言在这种不平衡下，每个字的 token 数会比英文多 30-50%。这直接导致中文用户在同样 context window 下能处理的文本量只有英文用户的 60-70%。</p>
+
+        <p>解决这个问题的方法包括：在 tokenizer 训练时对不同语言进行上采样，或者像 Llama-3 那样使用超大词表给每语言留出充足的合并空间。更激进的做法是训练语言专用 tokenizer，然后通过某种融合机制合并——但这种方法工程复杂度高，目前还没有被主流方案采纳。</p>
+
+        <p>理解了 tokenization 如何影响模型的数据视野之后，下一个自然的问题就是：词表到底应该有多大？更大的词表带来更高的 token 效率，但也意味着更大的 embedding 参数矩阵。如何在这两者之间找到最优平衡点？下一章我们将深入探讨词表的设计原则和优化策略。</p>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

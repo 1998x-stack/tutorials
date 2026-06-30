@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 分布式数据处理架构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 LLM数据工程概述</a></li>
+            <li><a href="02.html">第2章 Common Crawl 数据采集</a></li>
+            <li><a href="03.html">第3章 网页正文提取</a></li>
+            <li><a href="04.html">第4章 语言识别与过滤</a></li>
+            <li><a href="05.html">第5章 启发式规则过滤</a></li>
+            <li><a href="06.html">第6章 URL与域名过滤</a></li>
+            <li><a href="07.html">第7章 精确去重</a></li>
+            <li><a href="08.html">第8章 MinHash 近邻去重</a></li>
+            <li><a href="09.html">第9章 多粒度去重策略</a></li>
+            <li><a href="10.html">第10章 困惑度质量过滤</a></li>
+            <li><a href="11.html">第11章 教育质量分类器</a></li>
+            <li><a href="12.html">第12章 LLM辅助数据标注</a></li>
+            <li><a href="13.html">第13章 评测集去污染</a></li>
+            <li><a href="14.html">第14章 多源数据混合配比</a></li>
+            <li><a href="15.html" class="active">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 大规模数据存储</a></li>
+            <li><a href="17.html">第17章 流水线可复现性</a></li>
+            <li><a href="18.html">第18章 数据质量评估体系</a></li>
+            <li><a href="19.html">第19章 Tokenization 与 BPE</a></li>
+            <li><a href="20.html">第20章 词表设计与优化</a></li>
+            <li><a href="21.html">第21章 合成数据生成</a></li>
+            <li><a href="22.html">第22章 领域适配数据策略</a></li>
+            <li><a href="23.html">第23章 DataTrove 流水线实战</a></li>
+            <li><a href="24.html">第24章 Dolma 工具链全解析</a></li>
+            <li><a href="25.html">第25章 六大清洗范式对比</a></li>
+            <li><a href="26.html">第26章 自动化数据准备系统</a></li>
+            <li><a href="27.html">第27章 在线数据选择与动态配比</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>数据工程的算力挑战</h2>
+
+        <p>大家好。前几章我们一直在讨论数据清洗的"算法"层面——怎么去重、怎么过滤、怎么配比。但从今天开始，我们要面对一个更现实的问题：这些算法在几百TB甚至PB级的数据上，到底怎么跑起来的？</p>
+
+        <p>你可能会想：一条去重逻辑不过几十行Python代码，直接写个脚本在服务器上一跑不就完事了？但当你面对的数据不是几千条，而是几十亿条文档的时候，一切都会变得不一样。</p>
+
+        <p>让我们先来看两个真实数据点。Meta AI的CCNet团队在2020年发表论文时提到，他们处理一个Common Crawl快照（约20TB WARC数据），需要动用<strong>5000个CPU核心</strong>，跑<strong>8.5个小时</strong>。这意味着单次处理消耗约42,500 CPU·小时，按云服务器的价格算，单次快照的算力成本就在数千美元。而这是2020年的数字——当时的数据处理流程还相对简单。</p>
+
+        <p>到了2024年，HuggingFace的FineWeb团队把标准提高到了另一个量级。他们使用<strong>2000+核心</strong>的Spark集群，处理了整整<strong>96个</strong>Common Crawl快照。每个快照历经十多道清洗工序，整个项目消耗的算力是CCNet的几十倍。而这，才是一个现代高质量数据集的标准配置。</p>
+
+        <p>所以结论很明确：<strong>单机处理LLM训练数据根本不是选项</strong>。没有分布式计算架构，数据工程的每一步都会成为瓶颈。这一章我们就来深入聊聊，支撑现代数据管线运转的分布式计算基础设施。</p>
+
+        <div class="highlight">
+            <strong>算力量级感受：</strong> 如果你用一台32核的服务器处理一个Common Crawl快照的完整清洗流程，预计需要运行超过20天。如果整个过程线性扩展（实际上很多环节并不能线性扩展），96个快照需要超过5年。分布式不是锦上添花，而是生死存亡的问题。
+        </div>
+
+        <h2>Spark 生态</h2>
+
+        <p>如果你去翻阅任何一篇LLM数据工程论文，从C4到CCNet、从RefinedWeb到FineWeb、从Dolma到DCLM，你会发现一个共同的技术栈选型：<strong>Apache Spark</strong>。</p>
+
+        <p>为什么Spark能成为web语料清洗的工业标准？理由有三。第一，Spark的RDD（弹性分布式数据集）抽象天然适合WARC记录的批量处理——每条WARC记录是一个独立的文档，处理逻辑天然是map操作。第二，Spark的DataFrame API提供了丰富的结构化数据操作，过滤、聚合、Join都是现成的。第三，Spark生态与HDFS、S3等存储系统深度集成，读写效率经过了PB级实践的检验。</p>
+
+        <p>一个典型的Spark处理WARC流程大致长这样：</p>
+
+        <pre><code>from pyspark.sql import SparkSession
+from warcio import WARCReader
+import io
+
+spark = SparkSession.builder \
+    .appName("WARC-Pipeline") \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .config("spark.executor.memory", "16g") \
+    .config("spark.executor.cores", "4") \
+    .config("spark.shuffle.compress", "true") \
+    .config("spark.io.compression.codec", "zstd") \
+    .getOrCreate()
+
+# 读取S3上的WARC文件列表
+warc_paths = spark.sparkContext.textFile("s3://commoncrawl/crawl-data/CC-MAIN-2024-50/warc.paths.gz")
+
+def process_warc(path):
+    """从WARC文件提取正文并进行基础清洗"""
+    response = requests.get(f"https://data.commoncrawl.org/{path}")
+    stream = io.BytesIO(response.content)
+    results = []
+    for record in WARCReader(stream):
+        if record.rec_type == "response" and record.http_headers:
+            url = record.rec_headers.get("WARC-Target-URI", "")
+            html = record.content_stream().read().decode("utf-8", errors="replace")
+            text = trafilatura.extract(html)
+            if text and len(text) > 200:
+                results.append((url, text, len(text)))
+    return results
+
+# 并行处理所有WARC文件
+documents = warc_paths.flatMap(process_warc).toDF(["url", "text", "length"])
+
+# 基础过滤
+filtered = documents.filter(
+    (documents.length >= 500) & (documents.length <= 100000)
+)
+
+# 写入Parquet
+filtered.write.mode("overwrite").parquet("s3://my-bucket/cleaned-output/")</code></pre>
+
+        <p>当然，Spark不是这个领域的唯一选择。近年来Dask和Ray也获得了不少关注，尤其是在Python生态中。下面是三种主流框架的核心对比：</p>
+
+        <table>
+            <thead>
+                <tr><th>特性</th><th>Spark</th><th>Dask</th><th>Ray</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>核心抽象</td><td>RDD / DataFrame</td><td>并行DataFrame / Bag</td><td>Task / Actor</td></tr>
+                <tr><td>学习曲线</td><td>中等（需要理解shuffle机制）</td><td>低（API接近Pandas/NumPy）</td><td>中等（Actor模型需额外学习）</td></tr>
+                <tr><td>生态成熟度</td><td>极高（十亿级部署验证）</td><td>较高（数据科学场景广泛）</td><td>中等（RL/训练场景为主）</td></tr>
+                <tr><td>Shuffle性能</td><td>优秀（成熟的分桶和排序机制）</td><td>良好（但大规模shuffle有瓶颈）</td><td>一般（非原生设计目标）</td></tr>
+                <tr><td>数据工程采纳率</td><td>~90%（工业标准）</td><td>~7%（小规模探索）</td><td>~3%（实验性场景）</td></tr>
+                <tr><td>典型用户</td><td>CCNet, RefinedWeb, FineWeb, Dolma</td><td>部分中小型团队</td><td>Anyscale、训练管线团队</td></tr>
+            </tbody>
+        </table>
+
+        <p>从表格可以看出，Spark在当前的数据工程领域占据绝对主导地位。这不是说Dask或Ray不好——它们在特定场景下（比如小规模探索、RL训练数据生成）各有优势。但当你要处理数百TB的Common Crawl数据时，Spark是你的朋友。</p>
+
+        <h2>数据分区策略</h2>
+
+        <p>在分布式系统中，数据怎么切分（partitioning）直接决定了计算效率。分区分得好，任务就是线性的；分得不好，数据倾斜会带来灾难性的性能下降。LLM数据管线中有几种典型的分区策略：</p>
+
+        <p><strong>按快照分区。</strong>这是最自然的方式。每个Common Crawl快照是一个独立的WARC文件集合，天然可以作为独立分区。CCNet和FineWeb都是这么做的——每增加一个新快照，就增加一个作业（job）处理它。优点是各分区之间完全独立，一个快照失败不影响其他快照；缺点是无法跨快照做去重（因为去重需要全局信息）。</p>
+
+        <p><strong>按语言分区。</strong>在语言识别步骤之后，按照识别结果（en、zh、de、fr…）将文档分到不同的输出目录。这样后续的语言特定处理（比如英文过滤规则和中文过滤规则不同）可以在各自的数据集上独立进行。FineWeb-Edu的LLM质量标注阶段，也是按照语言分桶后再交给LLM评分，因为每个语言的"教育质量"标准不同。</p>
+
+        <p><strong>按哈希分区。</strong>在做MinHash去重时，需要按MinHash签名进行分区，让具有相似签名的文档落在同一个分区内。这种分区法通常用Spark的repartitionByRange基于MinHash签名向量做范围分区。分区键的设计直接影响去重效果——如果分区不合理，相似文档被分到不同分区，去重就会漏掉重复。</p>
+
+        <div class="tip">
+            <strong>最佳分区大小的经验法则：</strong> 单个分区处理时间应该控制在10-30分钟。太大则任务失败后重试成本高，太小则任务调度和shuffle的开销占比过高。通常每个分区的数据量控制在128MB-1GB（经过压缩后），对应Spark上大约是block size × 期望并行度。FineWeb团队的实践中，每个executor分配4核16GB内存，处理约200MB压缩后的WARC数据是最佳点。
+        </div>
+
+        <h2>容错与检查点</h2>
+
+        <p>分布式系统的美好愿景是"线性扩展"。但现实往往很骨感——当你用几千个核心日夜不停地跑数据时，<strong>各种异常是常态，不是意外</strong>。</p>
+
+        <p>Web数据的不确定性尤其突出。WARC文件损坏、HTTP请求超时、DNS解析失败、HTML解析器崩溃——CCNet团队在论文中提到，即使经过精心构造，每次运行仍然会有0.1-0.5%的记录因各种原因处理失败。在几千亿条记录中，这意味着几十万次失败。如果你的系统不能优雅地处理这些异常，整个管线就会频繁中断。</p>
+
+        <p>解决之道是两个基本机制。<strong>Checkpoint</strong>是在处理过程中定期保存中间状态。Spark提供了内置的checkpoint机制：</p>
+
+        <pre><code># 在关键步骤后设置检查点
+df_cleaned = df \
+    .filter(heuristic_filter_udf) \
+    .checkpoint(eager=True)  # 触发checkpoint，保存中间结果到存储
+
+df_deduped = df_cleaned \
+    .transform(minhash_dedup) \
+    .checkpoint(eager=True)
+
+# 如果后续步骤失败，可以从上一个checkpoint恢复
+# spark.read.parquet("checkpoint-path")</code></pre>
+
+        <p><strong>幂等性（idempotency）</strong>是另一个关键设计原则。对同一个输入分片执行多次清洗流水线，应该得到完全相同的输出。这确保了在发生故障后重新处理时，结果不会出现不一致。幂等性要求每个处理步骤都是确定性的——不依赖随机数、不依赖运行时序、不依赖外部状态的变动。当我们需要"退回到上一版本"时，幂等性让整个回滚过程变得安全可靠。</p>
+
+        <div class="warning">
+            <strong>分布式处理中的"至少一次"语义：</strong> 宁可重复处理不要遗漏。在LLM数据场景中，重复处理几条记录可能导致训练集中出现少量重复文档，这通常可以接受（因为训练数据本身就有冗余度）。但如果遗漏了数据，可能导致某些类别的文档占比系统性偏低——这种偏差往往更难发现、更难修复。因此，建议将每个分片的处理状态记录在数据库中，采用"至少一次"的语义确保每一条记录都被处理到。
+        </div>
+
+        <h2>云计算 vs 自有集群</h2>
+
+        <p>搞清楚了要什么架构，下一个问题是：在哪儿跑？用云还是自建集群？</p>
+
+        <p>云计算的优势显而易见：<strong>弹性伸缩、按需付费</strong>。FineWeb团队选择了AWS S3 + EMR（Elastic MapReduce）的方案。他们只需要在需要处理数据时启动一个大型Spark集群，处理完就释放，不需要维护固定硬件。S3上的数据持久存储，EMR的计算资源随用随开，成本模型非常灵活。</p>
+
+        <p>但云也有云的烦恼。最核心的问题是数据出站费用——当你的数据集有几百TB甚至PB级时，从云存储下载数据的费用会让财务团队皱眉头。另外，对于长期运行的数据管线，云实例的价格比同等配置的裸机服务器贵3-5倍。</p>
+
+        <p>自有集群则反之。AI2的Dolma团队采用了混合策略：部分工作在自己的内部集群上运行（利用已有的GPU/CPU节点），部分工作借道AWS。Dolma的3万亿token语料处理过程中，内部集群承担了大部分CPU密集型任务（如正文提取、规则过滤），而需要与S3上的Common Crawl数据紧密耦合的任务则在AWS上运行。</p>
+
+        <table>
+            <thead>
+                <tr><th>考量维度</th><th>云计算（AWS EMR）</th><th>自有集群</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>初始投入</td><td>零（按使用付费）</td><td>高（硬件采购几十万到几百万）</td></tr>
+                <tr><td>弹性伸缩</td><td>优秀（分钟级扩缩）</td><td>有限（受物理容量限制）</td></tr>
+                <tr><td>单位计算成本</td><td>较高（溢价30-50%）</td><td>较低（一次性摊销后）</td></tr>
+                <tr><td>数据安全</td><td>依赖云服务商策略</td><td>完全自主控制</td></tr>
+                <tr><td>运维复杂度</td><td>低（托管服务）</td><td>高（自建IDC运维）</td></tr>
+                <tr><td>网络带宽</td><td>极高（与S3内网互联）</td><td>受限于机房带宽</td></tr>
+                <tr><td>适用场景</td><td>突发大规模处理、多项目共享</td><td>长期稳定运行的管线</td></tr>
+                <tr><td>典型团队</td><td>FineWeb, CCNet, RefinedWeb</td><td>Dolma (混合), Google (内部)</td></tr>
+            </tbody>
+        </table>
+
+        <p>对于个人开发者或小型团队，我建议优先考虑云计算方案。AWS的免费额度加上S3的低成本存储，足以支撑中小规模的探索性工作。当你的数据管线变成日常任务、规模稳定在PB以上时，再考虑自有集群的经济性。</p>
+
+        <p>搞定了"怎么算"，下一个问题自然就是"算出来的数据放哪儿"。处理中的中间结果、最终的训练token——每个阶段的数据存储都有不同的策略和挑战。这就是下一章我们要聊的：大规模数据存储。</p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

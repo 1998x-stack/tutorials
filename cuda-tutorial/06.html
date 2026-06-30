@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 内存模型基础</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html" class="active">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>内存模型基础</h2>
+
+        <p>大家好，我是你们的讲师。在GPU编程中有一个广为人知的说法：<strong>你99%的性能优化问题，归根结底都是内存访问问题</strong>。计算本身在GPU上几乎是"免费"的——一个FMA（融合乘加）指令只消耗1-2个周期。但一次全局内存访问需要400-800个周期。如果你的kernel把大部分时间花在等数据上，那么再多的并行也无济于事。</p>
+
+        <p>这一章，我带你系统了解CUDA的内存模型——全局内存、共享内存、寄存器、常量内存、纹理内存各有什么特点，以及最重要的：如何写出对内存友好的访问模式。</p>
+
+        <h3>内存类型总览</h3>
+
+        <p>第3章我们粗略提过内存层次，现在是时候系统梳理了。CUDA程序可以访问的内存类型如下：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>内存类型</th>
+                    <th>作用域</th>
+                    <th>生命周期</th>
+                    <th>速度</th>
+                    <th>大小</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>寄存器</td>
+                    <td>单个线程</td>
+                    <td>线程生命周期</td>
+                    <td>~1 cycle</td>
+                    <td>255个/线程 (CC 8.0)</td>
+                    <td>最快的存储，线程私有</td>
+                </tr>
+                <tr>
+                    <td>局部内存</td>
+                    <td>单个线程</td>
+                    <td>线程生命周期</td>
+                    <td>~400 cycles</td>
+                    <td>无限制（但很慢）</td>
+                    <td>寄存器溢出的"备胎"，物理上在全局内存中</td>
+                </tr>
+                <tr>
+                    <td>共享内存</td>
+                    <td>单个block</td>
+                    <td>block生命周期</td>
+                    <td>~5 cycles</td>
+                    <td>~48-164 KB/SM</td>
+                    <td>block内线程间的通信渠道，片上存储</td>
+                </tr>
+                <tr>
+                    <td>全局内存</td>
+                    <td>所有线程 + Host</td>
+                    <td>程序控制</td>
+                    <td>~400-800 cycles</td>
+                    <td>4-80 GB</td>
+                    <td>最大的存储池，但最慢</td>
+                </tr>
+                <tr>
+                    <td>常量内存</td>
+                    <td>所有线程 + Host</td>
+                    <td>程序控制</td>
+                    <td>~5 cycles (cache hit)</td>
+                    <td>64 KB</td>
+                    <td>只读，硬件广播优化，适合所有线程读相同数据</td>
+                </tr>
+                <tr>
+                    <td>纹理内存</td>
+                    <td>所有线程 + Host</td>
+                    <td>程序控制</td>
+                    <td>~100-400 cycles</td>
+                    <td>取决于全局内存</td>
+                    <td>只读，有专用的缓存，适合空间局部性强的访问</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>黄金法则：</strong> 尽可能将频繁访问的数据放在层次结构中尽可能低（靠近计算单元）的位置。一个典型的策略是：<strong>全局内存 → 共享内存 → 寄存器</strong>，每步都是几十到几百倍的性能差异。
+        </div>
+
+        <h3>全局内存与合并访问</h3>
+
+        <p>全局内存（global memory）是CUDA程序中最常用、但也是最慢的内存。然而，并不是所有对全局内存的访问都一样慢——关键在于<strong>合并访问</strong>（coalesced access）。</p>
+
+        <p>当同一个warp（32个线程）同时发出内存请求时，硬件会尝试将这些请求<strong>合并</strong>成尽可能少的、高效的内存事务。如果32个线程访问的地址是连续的（比如线程0访问a[0]，线程1访问a[1]，以此类推），那么硬件可以用一个宽128字节的内存事务搞定——这是最理想的情况。</p>
+
+        <p>但如果地址是分散的（比如线程0访问a[0]，线程1访问a[32]，线程2访问a[64]），硬件可能需要32个独立的内存事务——效率降低32倍。</p>
+
+        <pre><code>// 合并访问 —— 高效
+__global__ void coalesced_kernel(float *data, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; n) {
+        // 线程0 访问 data[0], 线程1 访问 data[1], ...
+        // 连续地址 —— 完美合并访问
+        data[idx] = data[idx] * 2.0f;
+    }
+}
+
+// 非合并访问 —— 低效
+__global__ void strided_kernel(float *data, int n, int stride) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx * stride &lt; n) {
+        // 线程0 访问 data[0], 线程1 访问 data[stride], ...
+        // 地址间隔 stride —— 无法合并
+        data[idx * stride] = data[idx * stride] * 2.0f;
+    }
+}</code></pre>
+
+        <p>下面是一个实验数据——在A100上对同一个数组做同样的操作，仅因为访问模式不同：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>访问模式</th>
+                    <th>步长</th>
+                    <th>有效带宽 (GB/s)</th>
+                    <th>效率</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>连续（合并）</td>
+                    <td>1</td>
+                    <td>~1550</td>
+                    <td>100%</td>
+                </tr>
+                <tr>
+                    <td>间隔</td>
+                    <td>2</td>
+                    <td>~775</td>
+                    <td>50%</td>
+                </tr>
+                <tr>
+                    <td>间隔</td>
+                    <td>4</td>
+                    <td>~387</td>
+                    <td>25%</td>
+                </tr>
+                <tr>
+                    <td>随机</td>
+                    <td>—</td>
+                    <td>~50-200</td>
+                    <td>3-13%</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>直观理解：</strong> 把合并访问想象成"在图书馆按编号顺序取书"——你推着车沿书架走一趟就能取完所有书。非合并访问则是"随机在不同书架上各取一本"——你需要在书架间来回跑，大部分时间花在路上而不是看书本内容上。
+        </div>
+
+        <h3>寄存器与局部内存</h3>
+
+        <p>寄存器是GPU上最快的存储——没有之一。每个线程可以使用的寄存器数量由硬件决定（例如在CC 8.0上最多255个）。如果你的kernel使用的寄存器数量超过了限制，编译器会把超出的部分"溢出"到<strong>局部内存</strong>（local memory）中。局部内存物理上存在全局内存里，速度相差两个数量级。</p>
+
+        <p>如何检查寄存器使用量？</p>
+
+        <pre><code># 编译时查看寄存器统计
+nvcc --ptxas-options=-v -arch=sm_80 -o mykernel mykernel.cu
+
+# 输出示例：
+# ptxas info: Used 32 registers, 8192 bytes smem, 320 bytes cmem[0]</code></pre>
+
+        <p>"Used 32 registers"说明每个线程用了32个寄存器。如果它超过255，就会开始spill。即使没有超过，高寄存器使用也会降低每个SM能容纳的线程数（因为寄存器文件是SM上的固定资源），从而影响占用率。</p>
+
+        <pre><code>// 容易导致寄存器溢出的模式 —— 在kernel内声明大数组
+__global__ void bad_kernel(float *data) {
+    // 这个数组看似在"栈上"，但实际上它需要的寄存器太多
+    // 编译器被迫将其放入local memory（慢！）
+    float temp[256];
+    for (int i = 0; i &lt; 256; i++) {
+        temp[i] = data[i * 1000];  // 各种计算...
+    }
+    // ...
+}
+
+// 更好的方式 —— 用小数组，复用寄存器
+__global__ void better_kernel(float *data) {
+    float sum = 0.0f;           // 1个寄存器
+    for (int i = 0; i &lt; 256; i++) {
+        sum += data[i * 1000];  // 循环中复用同一个寄存器
+    }
+    // ...
+}</code></pre>
+
+        <div class="highlight">
+            <strong>255个寄存器的上限意味着什么？</strong> 假设你的kernel每个线程用32个寄存器（很常见），那么在A100（每个SM 65536个寄存器）上，一个SM最多可容纳 65536 / 32 = 2048 个线程。如果每个线程用128个寄存器，则最多容纳 65536 / 128 = 512 个线程——占用率从100%降到了25%。这就是为什么"降低寄存器使用量"是CUDA优化的重要目标之一。
+        </div>
+
+        <p>降低寄存器使用量的常用技巧：</p>
+        <ul>
+            <li>将多次使用的子表达式提取为临时变量（编译器已经做了很多，但手动做有时也有帮助）</li>
+            <li>使用 <code>-maxrregcount=N</code> 编译选项强制限制每个线程的寄存器数（但过度限制会导致更多spilling，反而更慢）</li>
+            <li>用共享内存替代线程私有的大数组</li>
+        </ul>
+
+        <h3>统一内存（Unified Memory）入门</h3>
+
+        <p>从CUDA 6.0开始，NVIDIA引入了<strong>统一内存</strong>（Unified Memory, UM），通过 <code>cudaMallocManaged()</code> 分配一段CPU和GPU都可以直接访问的内存。你不再需要手动调用 <code>cudaMemcpy</code> 搬运数据——系统会自动管理数据迁移。</p>
+
+        <pre><code>// 统一内存示例 —— 不需要手动拷贝
+#include &lt;stdio.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+__global__ void vecAdd(float *a, float *b, float *c, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+
+int main() {
+    int n = 1 &lt;&lt; 20;
+    size_t bytes = n * sizeof(float);
+
+    // 使用 cudaMallocManaged 代替 cudaMalloc + malloc
+    float *a, *b, *c;
+    cudaMallocManaged(&amp;a, bytes);
+    cudaMallocManaged(&amp;b, bytes);
+    cudaMallocManaged(&amp;c, bytes);
+
+    // Host端初始化 —— 直接在CPU上访问
+    for (int i = 0; i &lt; n; i++) {
+        a[i] = i * 1.0f;
+        b[i] = (n - i) * 1.0f;
+    }
+
+    // 启动内核 —— 系统自动将数据迁移到GPU
+    int blockSize = 256;
+    int gridSize = (n + blockSize - 1) / blockSize;
+    vecAdd&lt;&lt;&lt;gridSize, blockSize&gt;&gt;&gt;(a, b, c, n);
+
+    // 等待GPU完成，然后访问结果
+    cudaDeviceSynchronize();
+
+    // Host端验证 —— 系统自动将结果迁移回CPU
+    for (int i = 0; i &lt; 10; i++) {
+        printf("c[%d] = %f\n", i, c[i]);
+    }
+
+    cudaFree(a);
+    cudaFree(b);
+    cudaFree(c);
+    return 0;
+}</code></pre>
+
+        <p>统一内存的原理是<strong>按页迁移</strong>（page fault driven migration）。当GPU访问一个尚未在显存中的页面时，触发page fault，驱动把该页从CPU内存拷贝到显存。当CPU访问一个在显存中的页面时，同样触发page fault使数据迁移回来。</p>
+
+        <div class="tip">
+            <strong>什么时候用统一内存？</strong> UM非常适合<strong>原型开发</strong>——省去了繁琐的手动内存管理，代码更干净。对于<strong>不规则的数据访问模式</strong>（如树、图、稀疏数据），UM也比手动管理更简单。但在追求极致性能的生产环境中，UM的开销（page fault处理）可能是不可接受的。另外，<strong>CPU端的多线程访问UM需要格外小心</strong>——多个CPU线程同时修改UM数据可能导致数据竞争。
+        </div>
+
+        <h3>常见内存错误</h3>
+
+        <p>内存相关的bug在CUDA中最为常见，也最难排查。下面是我亲身经历的一个典型故事：</p>
+
+        <p>几年前我在开发一个物理模拟程序，使用 <code>cudaMallocManaged</code> 分配了一个粒子位置数组。Host端一个线程负责生成新粒子（写数组），Device端并行计算粒子运动（读写数组）。程序看起来运行正常，但结果总是"差不多对但偶尔有偏差"。我花了将近一周定位问题：<strong>数据竞争</strong>——CPU端的写操作和GPU端的读操作可能同时发生（通过page fault机制），导致GPU读到一半更新的数据。</p>
+
+        <p>这就是使用UM在CPU多线程场景下的一个经典陷阱：UM的page granularity是4KB，如果CPU和GPU同时访问同一个4KB页面内的不同位置，硬件无法提供一致性保证。修复方法是使用 <code>cudaMemAdvise()</code> 和 <code>cudaMemPrefetchAsync()</code> 来显式引导数据放置和迁移策略——或者干脆回到手动 <code>cudaMalloc</code>/<code>cudaMemcpy</code> 的老路。</p>
+
+        <div class="warning">
+            <strong>非法内存访问（Illegal Memory Access）</strong> 可能是最容易"无声"的CUDA错误。它通常不会立即崩溃——而是在你完全没料到的时候给你一个莫名其妙的错误。常见的触发场景：数组越界、未初始化的指针、释放后使用等。最可怕的是：如果越界写入的内存刚好被其他有效数据占用，你的程序会"正常工作"但产生错误结果，且没有任何错误提示。这就是为什么我反复强调：<strong>每个内存访问都要做边界检查，每个CUDA API调用都要检查返回值</strong>。
+        </div>
+
+        <p>好，这一章我们覆盖了CUDA内存模型的全局图景——从最快的寄存器到最慢的全局内存，从合并访问的统一内存，再到常见的陷阱和典型踩坑案例。但有一个非常重要的内存类型我们只是提到了名字：<strong>共享内存</strong>（shared memory）。它是CUDA性能优化的绝对核心，值得用一整章的篇幅来深入探讨。这就是下一章的内容。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

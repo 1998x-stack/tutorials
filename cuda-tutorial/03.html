@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 GPU硬件架构概览</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html" class="active">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>GPU硬件架构概览</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们搭好了开发环境，你现在应该在终端里敲 <code>nvcc --version</code> 能看到输出了。但在写第一行CUDA代码之前，我们需要先回答一个关键问题：GPU内部到底长什么样？</p>
+
+        <p>很多初学者犯的一个错误是：把GPU当作"更快一点的CPU"来编程。你把for循环拆成线程，以为线程越多就越快——结果发现性能不如预期，甚至更慢。原因很简单：GPU和CPU的架构设计哲学完全不同。不理解硬件就把代码往上堆，等于蒙着眼开车。这一章，我们打开引擎盖，看看GPU这颗"计算引擎"的内部构造。</p>
+
+        <h3>SM（流式多处理器）内部结构</h3>
+
+        <p>GPU的核心构成单元是<strong>SM</strong>（Streaming Multiprocessor，流式多处理器）。你可以把SM理解为一个"迷你计算单元"——每个SM内部有自己的CUDA核心、寄存器文件、共享内存、warp调度器，以及可选的Tensor Core。一张GPU芯片由几十到数百个这样的SM组成，它们并行工作，构成GPU强大的计算能力。</p>
+
+        <p>下图描述了一个典型SM的内部布局（以Ampere架构GA100为例），虽然没有真正的图片，但这个结构图能帮你在脑海中建立印象：</p>
+
+        <pre><code>┌──────────────────────────────────────────┐
+│                  SM                        │
+├──────────────────────────────────────────┤
+│  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐    │
+│  │Warp  │ │Warp  │ │Warp  │ │Warp  │    │
+│  │Sched │ │Sched │ │Sched │ │Sched │    │
+│  │  0   │ │  1   │ │  2   │ │  3   │    │
+│  └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘    │
+│  ┌──┴────────┴────────┴────────┴───┐     │
+│  │     Register File (65536条)      │     │
+│  ├──────────────────────────────────┤     │
+│  │  ┌────────────────────────────┐  │     │
+│  │  │   CUDA Cores (64个)         │  │     │
+│  │  ├────────────────────────────┤  │     │
+│  │  │   Tensor Cores (4个)        │  │     │
+│  │  ├────────────────────────────┤  │     │
+│  │  │   L1 / Shared Memory       │  │     │
+│  │  │   (最高192 KB)              │  │     │
+│  │  └────────────────────────────┘  │     │
+│  └──────────────────────────────────┘     │
+└──────────────────────────────────────────┘</code></pre>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>组件</th>
+                    <th>作用</th>
+                    <th>对开发者的意义</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Warp调度器</td>
+                    <td>管理warp的执行顺序，每个周期选择一个待执行的warp发射指令</td>
+                    <td>SM内有多个调度器意味着可以隐藏延迟——一个warp在等数据时换另一个上</td>
+                </tr>
+                <tr>
+                    <td>CUDA Core</td>
+                    <td>执行标量浮点和整数运算的基本单元</td>
+                    <td>我们写的kernel大部分指令都在这里执行</td>
+                </tr>
+                <tr>
+                    <td>Tensor Core</td>
+                    <td>专门执行小矩阵乘累加（如4×4×4）的硬件单元</td>
+                    <td>在AI和HPC任务中，Tensor Core的吞吐是CUDA Core的数十倍</td>
+                </tr>
+                <tr>
+                    <td>寄存器文件</td>
+                    <td>每个SM内最快的存储，供该SM上所有线程使用</td>
+                    <td>寄存器数量有限——用多了会导致spilling，性能断崖下降</td>
+                </tr>
+                <tr>
+                    <td>L1/共享内存</td>
+                    <td>低延迟、高带宽的片上存储，可配置为L1缓存或共享内存</td>
+                    <td>合理使用共享内存是优化的核心手段（第8章详述）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>一个关键数字：</strong> 在A100上，每个SM有65536个寄存器。听起来很多，但如果每个线程用64个寄存器，一个SM上的2048个线程就需要131072个寄存器——超出部分只能"溢出"（spill）到L1缓存甚至全局内存，性能会下降一个数量级。所以，<strong>减少每个线程的寄存器使用量</strong>是优化的重要方向。
+        </div>
+
+        <h3>内存层次全景图</h3>
+
+        <p>GPU的内存层次是理解"为什么GPU编程需要特殊技巧"的核心。从最快到最慢，GPU的内存体系如下：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>内存类型</th>
+                    <th>延迟</th>
+                    <th>带宽</th>
+                    <th>作用域</th>
+                    <th>容量</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>寄存器</td>
+                    <td>~1 cycle</td>
+                    <td>极高</td>
+                    <td>单个线程</td>
+                    <td>255个/线程（最大）</td>
+                </tr>
+                <tr>
+                    <td>共享内存</td>
+                    <td>~5 cycles</td>
+                    <td>极高</td>
+                    <td>单个线程块</td>
+                    <td>~48-164 KB/SM</td>
+                </tr>
+                <tr>
+                    <td>L1缓存</td>
+                    <td>~5-10 cycles</td>
+                    <td>~TB/s级</td>
+                    <td>单个SM</td>
+                    <td>~128-256 KB/SM</td>
+                </tr>
+                <tr>
+                    <td>L2缓存</td>
+                    <td>~200 cycles</td>
+                    <td>~TB/s级</td>
+                    <td>整颗GPU芯片</td>
+                    <td>~6-40 MB</td>
+                </tr>
+                <tr>
+                    <td>全局内存</td>
+                    <td>~400-800 cycles</td>
+                    <td>~2 TB/s (H100)</td>
+                    <td>所有线程 + Host</td>
+                    <td>~4-80 GB</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>寄存器是最快的，但每个线程只有255个——用完了就溢出到local memory。</strong> 而local memory本质上存在全局内存里，延迟是寄存器的400倍以上。所以当你写kernel时，如果在函数内声明了一个大数组，表面上它"在寄存器里"，实际上编译后很可能已经被搬到了local memory。使用 <code>--ptxas-options=-v</code> 编译可以看到寄存器溢出情况。
+        </div>
+
+        <p>记住一个原则：<strong>让数据尽可能待在高速存储中</strong>。能放寄存器的放寄存器，需要在线程间共享的放共享内存，最后才是全局内存。这个原则贯穿了CUDA性能优化的方方面面。</p>
+
+        <h3>计算能力（Compute Capability）详解</h3>
+
+        <p>CUDA中有一个非常重要的概念叫<strong>计算能力</strong>（Compute Capability，简称CC），用 <code>主版本.次版本</code> 表示，比如 <code>8.0</code>、<code>8.9</code>。计算能力不是"算力"——它更像一个"Feature Flag集"，告诉你的代码：这块GPU支持哪些硬件特性。下面是最主要架构的CC映射：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>架构</th>
+                    <th>CC</th>
+                    <th>代表设备</th>
+                    <th>关键新特性</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Tesla</td>
+                    <td>1.0</td>
+                    <td>G80</td>
+                    <td>CUDA诞生</td>
+                </tr>
+                <tr>
+                    <td>Fermi</td>
+                    <td>2.0</td>
+                    <td>GTX 480 / GTX 580</td>
+                    <td>ECC支持、真正的C++类/继承</td>
+                </tr>
+                <tr>
+                    <td>Kepler</td>
+                    <td>3.0 / 3.5</td>
+                    <td>GTX 680 / K20</td>
+                    <td>Dynamic Parallelism、Hyper-Q</td>
+                </tr>
+                <tr>
+                    <td>Maxwell</td>
+                    <td>5.0 / 5.2</td>
+                    <td>GTX 980 / M40</td>
+                    <td>共享内存与L1分离</td>
+                </tr>
+                <tr>
+                    <td>Pascal</td>
+                    <td>6.0 / 6.1</td>
+                    <td>GTX 1080 / P100</td>
+                    <td>Unified Memory、NVLink</td>
+                </tr>
+                <tr>
+                    <td>Volta</td>
+                    <td>7.0</td>
+                    <td>V100</td>
+                    <td>Tensor Core 1代、独立线程调度</td>
+                </tr>
+                <tr>
+                    <td>Turing</td>
+                    <td>7.5</td>
+                    <td>RTX 2080 / T4</td>
+                    <td>RT Core、Turing Tensor Core</td>
+                </tr>
+                <tr>
+                    <td>Ampere</td>
+                    <td>8.0 / 8.6 / 8.9</td>
+                    <td>A100 / RTX 3090</td>
+                    <td>3代Tensor Core、MIG、BF16、TF32、稀疏化</td>
+                </tr>
+                <tr>
+                    <td>Ada Lovelace</td>
+                    <td>8.9</td>
+                    <td>RTX 4090</td>
+                    <td>4代Tensor Core、FP8、光流加速器</td>
+                </tr>
+                <tr>
+                    <td>Hopper</td>
+                    <td>9.0</td>
+                    <td>H100 / H200</td>
+                    <td>Transformer Engine、DPX指令、4代Tensor Core、FP8</td>
+                </tr>
+                <tr>
+                    <td>Blackwell</td>
+                    <td>10.0</td>
+                    <td>B200 / B100</td>
+                    <td>双芯片设计、FP4、5代NVLink</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>用 <code>nvcc -arch=sm_XX</code> 指定目标架构。比如要为A100（CC 8.0）编译，用 <code>-arch=sm_80</code>。如果你的代码要兼容多种GPU，可以用 <code>-gencode</code> 生成多个架构的cubin（二进制代码）和PTX（中间代码），让驱动在运行时选择最合适的版本。</p>
+
+        <div class="tip">
+            <strong>向下兼容原则：</strong> CUDA有很强的向下兼容性。为CC 7.0编译的代码可以在CC 8.0、9.0的GPU上运行。反过来不行——为CC 9.0编译的二进制不能跑在CC 8.0的卡上。所以如果你要发布一个库给用户，通常选择较低的CC作为目标（比如7.0），确保兼容大多数GPU。
+        </div>
+
+        <h3>Warp与线程调度</h3>
+
+        <p>现在我们来谈一个GPU编程中最核心也最容易被误解的概念：<strong>Warp</strong>。</p>
+
+        <p>一个warp由<strong>32个线程</strong>组成，它是GPU调度和执行的最小单位。你写kernel时启动的成千上万个线程，在硬件层面被组织成warp来管理。每32个连续线程（按 <code>threadIdx</code> 排列）形成一个warp。SM上的warp调度器每个周期选择一个就绪的warp，发射一条指令——这32个线程同时执行相同的指令，操作各自的数据。</p>
+
+        <p>这就是<strong>SIMT</strong>（Single Instruction, Multiple Threads）执行模型。和CPU的SIMD（如AVX-512）不同，SIMT允许每个线程有自己的程序计数器、寄存器和执行路径。但这有一个重要陷阱——<strong>warp divergence</strong>（warp分支发散）：</p>
+
+        <pre><code>// warp divergence 示例：同一个warp内的线程走了不同的分支
+__global__ void divergence_kernel(float *data, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; n) {
+        if (data[idx] &gt; 0.0f) {
+            // 路径A：正数处理
+            data[idx] = sqrtf(data[idx]);
+        } else {
+            // 路径B：非正数处理
+            data[idx] = 0.0f;
+        }
+    }
+}</code></pre>
+
+        <p>当同一个warp内的32个线程面对同一个 <code>if</code> 语句时，如果有的走 <code>then</code> 有的走 <code>else</code>，硬件会<strong>串行执行</strong>两个分支：先执行路径A的同时屏蔽掉走B的线程，再执行路径B的同时屏蔽掉走A的线程。这意味着warp的吞吐量降为原来的一半。</p>
+
+        <p>真实的故事：我参与过一个项目，团队花了两周优化一个kernel，各种内存访问都调好了，但性能始终上不去。最后用Nsight看warp分析发现，一个看似无害的 <code>if-else</code> 导致了严重的warp divergence——因为数据是按类别排序的，相邻线程的数据恰好属于不同类别。解决方案很简单：<strong>重新排列数据</strong>，让相同类别的数据连续存放，这样每个warp内的32个线程走同一个分支。改完性能提升了40%。</p>
+
+        <div class="warning">
+            <strong>这不是说不要用if：</strong> 如果32个线程全部走同一分支，就不会有性能损失。问题只出现在同一个warp内的线程走了不同分支。所以一个重要的优化思路是：尽量保证同一个warp内线程的数据访问模式一致——这在CUDA社区被称为"warp-coherent"编程。
+        </div>
+
+        <h3>Tensor Core简介</h3>
+
+        <p>最后，简要提一下Tensor Core——它可能是过去十年GPU架构中最重要的创新。Tensor Core是专门为<strong>矩阵乘累加</strong>（D = A × B + C）设计的硬件单元。在Volta架构（V100）中首次引入，后来每一代都大幅增强。</p>
+
+        <p>Tensor Core和CUDA Core的工作方式不同：CUDA Core每次执行一个标量操作（如两个float相加），而Tensor Core一次执行一个小矩阵的乘法——比如在Volta上是4×4×4的FP16矩阵乘法。这个"一次性搞定4×4矩阵乘法"的能力，让Tensor Core的吞吐量比CUDA Core高出8-16倍（取决于精度）。</p>
+
+        <p>Tensor Core并非自动使用——你需要在代码中显式调用。有两种方式：</p>
+
+        <ul>
+            <li><strong>直接编程</strong>：通过CUDA C++的warp矩阵函数（<code>nvcuda::wmma</code> 命名空间）手动调用Tensor Core。适合需要精细控制的场景</li>
+            <li><strong>通过cuBLAS等库</strong>：大多数情况下，你不需要直接写Tensor Core代码——cuBLAS、cuDNN等库在底层已经为你做了这件事</li>
+        </ul>
+
+        <div class="tip">
+            <strong>Tensor Core的精度注意事项：</strong> Tensor Core支持多种精度模式——FP16、BF16、TF32（Ampere引入）、INT8、INT4、FP8（Hopper引入）。精度越低吞吐越高，但你可能需要关注数值精度对模型收敛的影响。其中TF32是个很好的"甜点"：在A100上，TF32 Tensor Core的吞吐量是FP32 CUDA Core的8倍，而精度几乎无损。
+        </div>
+
+        <p>好，这一章我们了解了GPU的内部结构——SM、内存层次、计算能力、warp调度和Tensor Core。有了这些硬件知识，下一章我们终于可以写第一个真正的CUDA kernel了——一个简单的向量加法。不会很长，但它将是你亲手写出的第一行在GPU上并行执行的代码。</p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 第一个CUDA内核</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html" class="active">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第一个CUDA内核</h2>
+
+        <p>大家好，我是你们的讲师。前两章我们做了两件事：搭好了CUDA开发环境，了解了GPU的内部构造。现在，是时候亲手写一段在GPU上跑的代码了。</p>
+
+        <p>在编程世界里，每个新领域的第一个程序都有一个传统——"Hello, World!"。在CUDA的世界里，这个位置属于<strong>向量加法</strong>（vector addition）。它简单到不能再简单：两个等长数组对应元素相加。但它包含了CUDA编程的所有核心要素：内核函数定义、内存管理、数据搬运、内核启动、结果回传。可以说，你搞懂了向量加法，就搞懂了CUDA编程80%的基本流程。</p>
+
+        <h3><code>__global__</code> 与内核启动语法 <code>&lt;&lt;&lt;&gt;&gt;&gt;</code></h3>
+
+        <p>先看一个最精简的CUDA内核和它的启动代码：</p>
+
+        <pre><code>// 一个极简的CUDA内核——向量加法
+__global__ void vecAdd(float *a, float *b, float *c) {
+    // 计算当前线程负责的元素的全局索引
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    c[idx] = a[idx] + b[idx];
+}
+
+int main() {
+    // ... 内存分配、数据准备 ...
+
+    // 启动内核：1个grid，256个block，每个block256个线程
+    vecAdd&lt;&lt;&lt;256, 256&gt;&gt;&gt;(d_a, d_b, d_c);
+
+    // ... 结果回传、清理 ...
+}</code></pre>
+
+        <p>这里有三个关键元素需要理解：</p>
+
+        <ul>
+            <li><strong><code>__global__</code></strong>：函数限定符，告诉编译器这个函数是一个可以在GPU上执行、从CPU端调用的内核。它返回类型必须是 <code>void</code>。</li>
+            <li><strong><code>&lt;&lt;&lt;gridDim, blockDim&gt;&gt;&gt;</code></strong>：内核启动的三尖括号语法。第一个参数是网格维度（多少个线程块），第二个参数是块维度（每个块多少个线程）。<code>&lt;&lt;&lt;256, 256&gt;&gt;&gt;</code> 意味着总共 <code>256 × 256 = 65536</code> 个线程。</li>
+            <li><strong><code>threadIdx</code> / <code>blockIdx</code> / <code>blockDim</code></strong>：CUDA内置变量，用于让每个线程知道自己的"身份"。我们将在第5章深入讨论它们。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>三尖括号扩展：</strong> <code>&lt;&lt;&lt;grid, block, sharedMemPerBlock, stream&gt;&gt;&gt;</code> 实际上有四个参数。后两个是可选的——<code>sharedMemPerBlock</code> 指定动态共享内存大小（第8章），<code>stream</code> 指定执行流（第12章）。在深入学习之前，只关心前两个就够了。
+        </div>
+
+        <h3>Host与Device代码分离</h3>
+
+        <p>CUDA程序中有两个截然不同的"世界"：<strong>Host</strong>（CPU及其内存）和 <strong>Device</strong>（GPU及其显存）。函数和变量可以用限定符表明它们属于哪个世界：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>限定符</th>
+                    <th>在哪执行</th>
+                    <th>从哪调用</th>
+                    <th>典型用途</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>__global__</code></td>
+                    <td>Device</td>
+                    <td>Host ↔ Device (CC 3.5+)</td>
+                    <td>内核函数——入口点</td>
+                </tr>
+                <tr>
+                    <td><code>__device__</code></td>
+                    <td>Device</td>
+                    <td>Device only</td>
+                    <td>GPU上的辅助函数，只能被内核或其他device函数调用</td>
+                </tr>
+                <tr>
+                    <td><code>__host__</code></td>
+                    <td>Host</td>
+                    <td>Host only</td>
+                    <td>CPU上的普通函数（这是默认值）</td>
+                </tr>
+                <tr>
+                    <td><code>__host__ __device__</code></td>
+                    <td>两者</td>
+                    <td>两者</td>
+                    <td>可以同时在CPU和GPU上编译执行的函数</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>由于Host和Device有各自独立的内存空间，我们必须用CUDA API管理数据搬运。三个最核心的API是：</p>
+
+        <ul>
+            <li><strong><code>cudaMalloc()</code></strong>：在Device上分配显存</li>
+            <li><strong><code>cudaMemcpy()</code></strong>：在Host和Device之间拷贝数据，需要指定方向</li>
+            <li><strong><code>cudaFree()</code></strong>：释放Device上的显存</li>
+        </ul>
+
+        <p>下面是一个完整的向量加法程序：</p>
+
+        <pre><code>// vecAdd.cu —— 完整的向量加法示例
+#include &lt;stdio.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+// GPU内核：向量加法
+__global__ void vecAdd(float *a, float *b, float *c, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; n) {          // 边界检查
+        c[idx] = a[idx] + b[idx];
+    }
+}
+
+int main() {
+    int n = 1 &lt;&lt; 20;        // 1048576 个元素
+    size_t bytes = n * sizeof(float);
+
+    // 1. 分配Host内存并填充数据
+    float *h_a = (float*)malloc(bytes);
+    float *h_b = (float*)malloc(bytes);
+    float *h_c = (float*)malloc(bytes);
+    for (int i = 0; i &lt; n; i++) {
+        h_a[i] = i * 1.0f;
+        h_b[i] = (n - i) * 1.0f;
+    }
+
+    // 2. 分配Device内存
+    float *d_a, *d_b, *d_c;
+    cudaMalloc(&amp;d_a, bytes);
+    cudaMalloc(&amp;d_b, bytes);
+    cudaMalloc(&amp;d_c, bytes);
+
+    // 3. 从Host拷贝到Device
+    cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice);
+
+    // 4. 启动内核
+    int blockSize = 256;
+    int gridSize = (n + blockSize - 1) / blockSize;  // 向上取整
+    vecAdd&lt;&lt;&lt;gridSize, blockSize&gt;&gt;&gt;(d_a, d_b, d_c, n);
+
+    // 5. 结果拷回Host
+    cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
+
+    // 6. 验证结果
+    for (int i = 0; i &lt; 10; i++) {
+        printf("h_c[%d] = %f (期望 %f)\n", i, h_c[i], h_a[i] + h_b[i]);
+    }
+
+    // 7. 清理
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+    free(h_a);
+    free(h_b);
+    free(h_c);
+
+    return 0;
+}</code></pre>
+
+        <div class="highlight">
+            <strong>注意观察流程：</strong> 这是一个固定的七步模式——<strong>分配Host内存 → 分配Device内存 → Host到Device拷贝 → 启动内核 → Device到Host拷贝 → 验证 → 清理</strong>。未来几乎所有CUDA程序都遵循这个流程，不同的只是kernel内部的逻辑。
+        </div>
+
+        <h3>CUDA错误检查</h3>
+
+        <p>我刚学CUDA时犯过的最严重的错误是：<strong>从来不检查错误</strong>。CUDA API函数大部分返回 <code>cudaError_t</code> 类型，但很多人（包括曾经的我）会直接忽略返回值——毕竟CPU编程里malloc不检查返回值也挺常见的不是吗？</p>
+
+        <p>但GPU编程不一样。一个错误可能发生在调用之后的任意时刻（因为kernel是异步启动的），如果不显式检查，你很可能在错误发生很久之后才从"奇怪的结果"中发现问题。最好的习惯是：<strong>每次CUDA调用都检查错误</strong>。下面是一个通用的错误检查宏：</p>
+
+        <pre><code>// cuda_error.h —— 错误检查宏
+#include &lt;stdio.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define CUDA_CHECK(call) do {                                \
+    cudaError_t err = call;                                  \
+    if (err != cudaSuccess) {                                \
+        fprintf(stderr, "CUDA Error at %s:%d — %s\n",       \
+                __FILE__, __LINE__,                          \
+                cudaGetErrorString(err));                    \
+        exit(err);                                           \
+    }                                                        \
+} while(0)
+
+// 使用示例
+CUDA_CHECK(cudaMalloc(&amp;d_a, bytes));
+CUDA_CHECK(cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice));
+vecAdd&lt;&lt;&lt;gridSize, blockSize&gt;&gt;&gt;(d_a, d_b, d_c, n);
+
+// 异步错误需要手动检查
+CUDA_CHECK(cudaDeviceSynchronize());
+CUDA_CHECK(cudaGetLastError());  // 捕获启动参数错误</code></pre>
+
+        <div class="tip">
+            <strong>记住：kernel启动本身不会报错！</strong> 如果内核启动参数非法（比如blockSize超过设备限制），<code>&lt;&lt;&lt;&gt;&gt;&gt;</code> 不会返回错误——错误会被"记录"下来，直到你调用 <code>cudaGetLastError()</code> 或下一次CUDA API调用时才会暴露。所以 <code>cudaGetLastError()</code> 加上 <code>cudaDeviceSynchronize()</code> 是最好的"查漏"组合。
+        </div>
+
+        <h3>编译与运行流程</h3>
+
+        <p>你写好的 <code>.cu</code> 文件需要经过nvcc编译才能运行。nvcc的工作流程分为两步：</p>
+
+        <ol>
+            <li><strong>前端（离线编译）</strong>：nvcc将 <code>.cu</code> 文件的GPU代码编译成PTX（Parallel Thread Execution，一种虚拟指令集架构），同时将CPU代码部分传递给宿主C++编译器（gcc/clang/MSVC）</li>
+            <li><strong>后端（运行时编译）</strong>：当程序运行时，NVIDIA驱动将PTX"即时编译"（JIT）成目标GPU的机器码（cubin）。这允许同一个PTX在不同的GPU架构上运行</li>
+        </ol>
+
+        <p>常用的编译命令和选项：</p>
+
+        <pre><code># 基本编译
+nvcc -o vecAdd vecAdd.cu
+
+# 指定计算能力（推荐）
+nvcc -arch=sm_80 -o vecAdd vecAdd.cu
+
+# 查看寄存器使用量和shared memory使用量
+nvcc -arch=sm_80 --ptxas-options=-v -o vecAdd vecAdd.cu
+
+# 生成PTX中间代码（不生成最终二进制）
+nvcc -arch=sm_80 -ptx vecAdd.cu
+
+# 同时为多个架构生成代码
+nvcc -gencode arch=compute_80,code=sm_80 \
+      -gencode arch=compute_90,code=sm_90 \
+      -o vecAdd vecAdd.cu
+
+# 优化级别（-O2是默认）
+nvcc -O3 -arch=sm_80 -o vecAdd vecAdd.cu
+
+# 保留GPU代码在PTX中（向后兼容）
+nvcc -gencode arch=compute_80,code=sm_80 \
+      -gencode arch=compute_80,code=compute_80 \
+      -o vecAdd vecAdd.cu</code></pre>
+
+        <p><code>--ptxas-options=-v</code> 这个选项特别有用——它会在编译时打印出每个kernel的寄存器使用量、共享内存使用量、以及是否有寄存器溢出（spill）。这个信息对性能优化至关重要，我们会在后续章节反复用到它。</p>
+
+        <h3>第一个踩坑故事</h3>
+
+        <p>我的第一个CUDA程序是一个向量加法。当时我写的时候漏掉了第三个参数 <code>cudaMemcpyHostToDevice</code> ——实际上我写的是 <code>cudaMemcpy(d_a, h_a, bytes, cudaMemcpyDeviceToHost)</code>，就是把方向搞反了。更糟的是，我没有检查返回值。结果呢？程序正常运行，没有崩溃，没有任何错误信息——但输出结果全部是0。</p>
+
+        <p>我花了整整一个下午去检查kernel逻辑、检查索引计算、检查线程数量——就是没想到去检查 <code>cudaMemcpy</code> 的方向。最后是一个同事路过看了一眼代码，说了一句："你这数据拷贝方向是不是反了？" 改完，结果正确。</p>
+
+        <p>这个教训我至今记忆犹新：<strong>CUDA程序99%的错误都出在Host-Device数据管理上，而不是kernel逻辑本身</strong>。从那以后我形成了两个习惯：一是永远用CUDA_CHECK宏包裹每个API调用；二是在写任何CUDA程序时，先让程序跑通"最小正确性验证"（比如打印前几个元素的值），再做任何优化。</p>
+
+        <div class="warning">
+            <strong>永远不要假设数据已经在Device上了。</strong> 这是一个经典的思维陷阱：你刚做了一次 <code>cudaMemcpy</code> 把数据拷到了Device，但在下次kernel启动前，Host端的代码又修改了Host上的数据——然后你想当然地以为Device上的数据还是最新的。不是的。Host和Device是两个独立的内存空间，修改一端不会自动同步到另一端。如果记不清当前数据在哪一端，用 <code>cudaMemcpy</code> 显式同步一次。
+        </div>
+
+        <p>好，你已经亲手写出了第一个CUDA程序并成功运行了它。下一章，我们将深入线程层次结构——grid、block、thread到底如何组织，索引怎么算，以及那些让初学者头疼的边界条件和block size选择策略。搞清楚这些，你以后写kernel就不会再"迷路"了。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

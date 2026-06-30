@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 多速率信号处理 (二)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🎛️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 数字信号处理导论</a></li>
+            <li><a href="02.html">第2章 离散时间信号</a></li>
+            <li><a href="03.html">第3章 离散时间系统</a></li>
+            <li><a href="04.html">第4章 采样定理</a></li>
+            <li><a href="05.html">第5章 Z变换</a></li>
+            <li><a href="06.html">第6章 频域分析</a></li>
+            <li><a href="07.html">第7章 离散傅里叶变换 (DFT)</a></li>
+            <li><a href="08.html">第8章 快速傅里叶变换 (FFT)</a></li>
+            <li><a href="09.html">第9章 FIR滤波器设计</a></li>
+            <li><a href="10.html">第10章 IIR滤波器设计</a></li>
+            <li><a href="11.html">第11章 滤波器结构</a></li>
+            <li><a href="12.html">第12章 多速率信号处理 (一)</a></li>
+            <li><a href="13.html" class="active">第13章 多速率信号处理 (二)</a></li>
+            <li><a href="14.html">第14章 统计信号处理基础</a></li>
+            <li><a href="15.html">第15章 自适应滤波器</a></li>
+            <li><a href="16.html">第16章 高级自适应算法</a></li>
+            <li><a href="17.html">第17章 谱估计进阶</a></li>
+            <li><a href="18.html">第18章 时频分析</a></li>
+            <li><a href="19.html">第19章 MATLAB/Python DSP仿真</a></li>
+            <li><a href="20.html">第20章 定点DSP实现</a></li>
+            <li><a href="21.html">第21章 嵌入式DSP芯片开发</a></li>
+            <li><a href="22.html">第22章 FPGA上的DSP</a></li>
+            <li><a href="23.html">第23章 音频信号处理</a></li>
+            <li><a href="24.html">第24章 通信数字信号处理</a></li>
+            <li><a href="25.html">第25章 图像信号处理</a></li>
+            <li><a href="26.html">第26章 AI+DSP融合</a></li>
+            <li><a href="27.html">第27章 软件无线电 (SDR)</a></li>
+            <li><a href="28.html">第28章 综合项目：实时音频处理器</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第13章 多速率信号处理 (二)</h2>
+
+        <p>上一章我们学会了抽取、内插和多相分解——多速率信号处理的三大基础工具。但实际工程中，你很少会只用"一个滤波器+一种抽取"的简单方案。现实世界的高倍率采样率转换（比如从122.88MHz降到48kHz，超过2560倍）需要的是<strong>多级级联</strong>的策略：每一级做一小部分抽取，用最适合该级速率的滤波器结构。</p>
+
+        <p>什么滤波器最适合做高倍率抽取？答案是本章的主角们：<strong>CIC滤波器</strong>（无乘法器、仅加法和延迟）、<strong>半带滤波器</strong>（一半系数为零），以及它们构成的<strong>多级抽取链</strong>。最后我们还会介绍一个重要的多速率系统概念——<strong>正交镜像滤波器组（QMF）</strong>。</p>
+
+        <div class="highlight">
+            <strong>💡 核心洞察：</strong>多速率信号处理的最大智慧不在于"怎么降采样"，而在于"怎么把降采样流程拆成多级以最小化总计算量"。一个256倍抽取如果用单级方案可能需要几千阶FIR，总计算量巨大；但如果分解成CIC(×16)→Half-Band(×4)→FIR(×4)的三级方案，总计算量可能不到单级的1%。这是多速率工程最令人惊叹的地方。
+        </div>
+
+        <h3>13.1 CIC滤波器：无乘法器的奇迹</h3>
+
+        <p>CIC（Cascaded Integrator-Comb，级联积分梳状）滤波器是多速率信号处理中最"优雅"的发明之一，最早由Eugene Hogenauer在1981年提出。它的最大特点是：<strong>不需要任何乘法器，只需要加法和延迟</strong>——乘法器是FPGA和ASIC上最昂贵的资源（面积和功耗），而CIC在逻辑上几乎"免费"。</p>
+
+        <p>CIC滤波器的结构分为两部分：</p>
+
+        <ul>
+            <li><strong>积分器（Integrator）部分：</strong>y[n] = y[n-1] + x[n]——就是一个累加器。频率响应是低通的，增益在零频处最大。</li>
+            <li><strong>梳状（Comb）部分：</strong>y[n] = x[n] - x[n-M]——一个延迟M个样本的差分器。频率响应是周期性的陷波形状。</li>
+        </ul>
+
+        <p>单级CIC的传输函数：</p>
+
+        <pre><code>H(z) = (1 - z^{-M}) / (1 - z^{-1}) = Σ_{k=0}^{M-1} z^{-k}</code></pre>
+
+        <p>有趣的是：单级CIC等价于一个长度为M的<strong>移动平均滤波器</strong>（Moving Average）。它的频率响应是|sin(ωM/2) / sin(ω/2)|的形状——在零频处增益为M，第一零点在ω=2π/M处。</p>
+
+        <p>在实际工程中，几乎不会使用单级CIC——因为它的阻带衰减太差了（只有约13dB）。通常的做法是<strong>级联N级CIC</strong>，阻带衰减可以提升到大约N×13dB。比如4级CIC提供了约52dB的阻带衰减，已经可以满足大多数应用的需求。</p>
+
+        <pre><code># N级CIC抽取器的结构：
+x[n] → [积分器]×N → [↓M] → [梳状]×N → y[n]
+       (高速率端)          (低速率端)</code></pre>
+
+        <p>积分器工作在高速率端（ADC采样率），梳状器工作在低速率端（抽取后）。这种"把一半运算放在低速率端"的安排，正是多速率设计思想的体现。</p>
+
+        <div class="tip">
+            <strong>🔧 工程案例：</strong>在ΣΔ ADC（如TI的ADS127L01）中，CIC抽取滤波器是标配。ΣΔ调制器以极高过采样率（如64×或128×）产生1位数据流，然后CIC抽取器把这些高速1位流降采样到奈奎斯特率。为什么用CIC？因为1位流乘以系数只需要符号选择——乘法器完全多余，加法器和寄存器足矣。CIC也是软件无线电（SDR）前端的标准滤波器。
+        </div>
+
+        <h3>13.2 半带滤波器（Half-Band Filter）</h3>
+
+        <p>半带滤波器是一种特殊的FIR滤波器，设计用于<strong>2倍抽取</strong>（M=2）。它的特殊性质：</p>
+
+        <ul>
+            <li>近一半的系数为零：h[奇数索引] = 0（除了中心系数）；</li>
+            <li>通带和阻带对称：通带截止频率ω_p和阻带起始频率ω_s关于π/2对称，且ω_p + ω_s = π；</li>
+            <li>通带波纹和阻带波纹相等。</li>
+        </ul>
+
+        <p>由于近一半系数为零，半带滤波器的计算量只有同等长度FIR的一半。加上多相分解后，2倍抽取的半带滤波器可以做到只有约N/4次乘加/输出样本——非常高效。</p>
+
+        <p>半带滤波器在2的幂次抽取链（8倍、16倍、32倍等）中应用极广。一个典型的链路是：先用CIC做高倍率粗抽取，然后用半带滤波器做后续的2倍抽取，最后用FIR做精抽取。每一级的抽取倍数都不大（通常是2倍），但滤波器设计简单、计算量小。</p>
+
+        <pre><code># Python设计半带滤波器示例
+from scipy import signal
+
+# 设计一个半带低通滤波器，归一化截止频率0.45
+# 半带要求截止频率在0.25-0.5之间，且通带阻带对称
+taps = signal.firwin(31, 0.45, window='hamming')
+# 验证：偶数索引的系数应当基本为零
+print(taps[1::2])  # 应该接近0</code></pre>
+
+        <h3>13.3 多级抽取系统设计</h3>
+
+        <p>现在让我们把CIC和半带滤波器组合起来，设计一个<strong>完整的多级抽取系统</strong>。以SDR接收机中常见的抽取链为例：</p>
+
+        <p>目标：从122.88MHz ADC采样率，降采样到48kHz基带采样率，总抽取因子为2560。如果只用单级抽取（一个滤波器+2560倍下采样），抗混叠滤波器的过渡带将极其陡峭，需要上万阶FIR——物理上不可能实现。</p>
+
+        <p>多级方案：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>级</th>
+                    <th>滤波器类型</th>
+                    <th>抽取倍数</th>
+                    <th>输出采样率</th>
+                    <th>滤波器长度</th>
+                    <th>计算量占比</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>1</td>
+                    <td>CIC（4级）</td>
+                    <td>×64</td>
+                    <td>1.92 MHz</td>
+                    <td>无乘法器</td>
+                    <td>~5%</td>
+                </tr>
+                <tr>
+                    <td>2</td>
+                    <td>半带FIR</td>
+                    <td>×2</td>
+                    <td>960 kHz</td>
+                    <td>~16阶</td>
+                    <td>~10%</td>
+                </tr>
+                <tr>
+                    <td>3</td>
+                    <td>半带FIR</td>
+                    <td>×2</td>
+                    <td>480 kHz</td>
+                    <td>~24阶</td>
+                    <td>~15%</td>
+                </tr>
+                <tr>
+                    <td>4</td>
+                    <td>半带FIR</td>
+                    <td>×2</td>
+                    <td>240 kHz</td>
+                    <td>~32阶</td>
+                    <td>~20%</td>
+                </tr>
+                <tr>
+                    <td>5</td>
+                    <td>FIR通道均衡</td>
+                    <td>×2</td>
+                    <td>120 kHz</td>
+                    <td>~64阶</td>
+                    <td>~30%</td>
+                </tr>
+                <tr>
+                    <td>6</td>
+                    <td>FIR精抽取</td>
+                    <td>×2.5</td>
+                    <td>48 kHz</td>
+                    <td>~128阶</td>
+                    <td>~20%</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>总计算量约为单级方案的1/500。而且CIC级完全不消耗乘法器，半带级因为半数为零系数效率加倍。这就是多级设计的威力。</p>
+
+        <div class="warning">
+            <strong>⚠️ 踩坑实录：</strong>曾经有一个团队在设计CIC+Half-Band抽取链时，忽略了CIC滤波器的<strong>增益补偿</strong>。CIC的直流增益为M^N（M为抽取倍数，N为级数）。以M=64、N=4为例，直流增益是64^4 = 16,777,216。如果不做数字增益补偿（用移位或乘法），后续几级的信号会直接溢出。更隐蔽的问题是：CIC的幅频响应在通带内并不平坦（有滚降），所以CIC后面通常需要接一个<strong>CIC补偿滤波器</strong>（CIC Compensation Filter）来矫正通带滚降。忘记补偿导致结果信号带内平坦度严重超标——这在通信系统中会导致星座图畸变。
+        </div>
+
+        <h3>13.4 两通道正交镜像滤波器组（QMF）</h3>
+
+        <p>QMF（Quadrature Mirror Filter）是多通道信号分解和合成的核心概念。一个两通道QMF系统包含：</p>
+
+        <ul>
+            <li><strong>分析滤波器组（Analysis Bank）：</strong>H₀(z)（低通）和H₁(z)（高通），将输入信号分为低频和高频子带。</li>
+            <li><strong>下采样：</strong>每个子带做2倍抽取。</li>
+            <li><strong>上采样：</strong>处理完后做2倍内插。</li>
+            <li><strong>综合滤波器组（Synthesis Bank）：</strong>G₀(z)（低通）和G₁(z)（高通），合并子带。</li>
+        </ul>
+
+        <p>QMF的条件：H₁(z) = H₀(-z)（即H₁在频域上是对H₀的镜像）。综合滤波器的选择要使得整个系统实现<strong>完美重构</strong>（Perfect Reconstruction）——输出等于输入的延迟版本，没有混叠失真。</p>
+
+        <pre><code>分析端：             综合端：
+x[n] → [H₀(z)] → [↓2] → ...处理... → [↑2] → [G₀(z)] → ┐
+      → [H₁(z)] → [↓2] → ...处理... → [↑2] → [G₁(z)] → ├→ ŷ[n] ≈ x[n-Δ]</code></pre>
+
+        <p>完美重构的条件（忽略延迟）：</p>
+
+        <pre><code>G₀(z) = H₁(-z),  G₁(z) = -H₀(-z)
+H₀(z)·H₁(-z) + H₁(z)·H₀(-z) = 0      （混叠消除条件）
+H₀(z)·G₀(z) + H₁(z)·G₁(z) = 2z^{-D}  （无失真条件）</code></pre>
+
+        <p>QMF组的主要应用：</p>
+
+        <ul>
+            <li><strong>子带编码（Subband Coding）：</strong>MPEG音频编码器将音频信号分解为32个子带，每个子带独立量化——人耳对不同频率的量化噪声敏感度不同，子带编码可以利用这个特性优化比特分配。</li>
+            <li><strong>数字信道化（Digital Channelization）：</strong>SDR接收机中，用一个滤波器组把宽带信号一次分解为多个窄带通道，同时解调多个信道。</li>
+            <li><strong>小波变换：</strong>经典的离散小波变换（DWT）本质上就是多级QMF结构的级联。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>🔧 知识延伸：</strong>上面讲的两通道QMF只是最简单的滤波器组。在更高级的应用中（如MPEG-AAC、Opus音频编码），系统会使用<strong>MDCT</strong>（改进型离散余弦变换）滤波器组，它是余弦调制的滤波器组（Cosine-Modulated Filter Bank），通道数高达1024，并且支持窗口切换。这些内容已经进入了更深的音频编码领域——如果你想深入学习，第23章"音频信号处理"会进一步展开。
+        </div>
+
+        <h3>13.5 本章小结</h3>
+
+        <p>这一章我们做了以下几件事：</p>
+
+        <ul>
+            <li>介绍了CIC滤波器——无乘法器的奇迹，推导了其积分器+梳状器的结构和级联方案，以及它在ΣΔ ADC中的应用；</li>
+            <li>介绍了半带滤波器——近一半系数为零的特性以及它在2倍抽取中的高效性；</li>
+            <li>给出了一个完整的多级抽取系统设计（122.88MHz→48kHz，2560倍抽取），展示了CIC→Half-Band→FIR的经典级联方案，并以一个CIC增益补偿踩坑故事为鉴；</li>
+            <li>讲解了两通道QMF滤波器组——从分析/综合滤波器组的结构到完美重构条件，再到SDR信道化和MPEG音频编码的应用。</li>
+        </ul>
+
+        <p>至此，我们完成了多速率信号处理的两章内容。你学到的不仅是"如何改变采样率"，更是"如何高效地改变采样率"——这在实际工程中的价值远大于看起来的复杂度。从下一章开始，我们将进入一个全新的领域——<strong>统计信号处理</strong>。</p>
+
+        <p>我们下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

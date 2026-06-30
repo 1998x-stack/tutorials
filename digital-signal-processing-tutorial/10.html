@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 IIR滤波器设计</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🎛️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 数字信号处理导论</a></li>
+            <li><a href="02.html">第2章 离散时间信号</a></li>
+            <li><a href="03.html">第3章 离散时间系统</a></li>
+            <li><a href="04.html">第4章 采样定理</a></li>
+            <li><a href="05.html">第5章 Z变换</a></li>
+            <li><a href="06.html">第6章 频域分析</a></li>
+            <li><a href="07.html">第7章 离散傅里叶变换 (DFT)</a></li>
+            <li><a href="08.html">第8章 快速傅里叶变换 (FFT)</a></li>
+            <li><a href="09.html">第9章 FIR滤波器设计</a></li>
+            <li><a href="10.html" class="active">第10章 IIR滤波器设计</a></li>
+            <li><a href="11.html">第11章 滤波器结构</a></li>
+            <li><a href="12.html">第12章 多速率信号处理 (一)</a></li>
+            <li><a href="13.html">第13章 多速率信号处理 (二)</a></li>
+            <li><a href="14.html">第14章 统计信号处理基础</a></li>
+            <li><a href="15.html">第15章 自适应滤波器</a></li>
+            <li><a href="16.html">第16章 高级自适应算法</a></li>
+            <li><a href="17.html">第17章 谱估计进阶</a></li>
+            <li><a href="18.html">第18章 时频分析</a></li>
+            <li><a href="19.html">第19章 MATLAB/Python DSP仿真</a></li>
+            <li><a href="20.html">第20章 定点DSP实现</a></li>
+            <li><a href="21.html">第21章 嵌入式DSP芯片开发</a></li>
+            <li><a href="22.html">第22章 FPGA上的DSP</a></li>
+            <li><a href="23.html">第23章 音频信号处理</a></li>
+            <li><a href="24.html">第24章 通信数字信号处理</a></li>
+            <li><a href="25.html">第25章 图像信号处理</a></li>
+            <li><a href="26.html">第26章 AI+DSP融合</a></li>
+            <li><a href="27.html">第27章 软件无线电 (SDR)</a></li>
+            <li><a href="28.html">第28章 综合项目：实时音频处理器</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第10章 IIR滤波器设计</h2>
+
+        <p>上一章我们详细讲了FIR滤波器——它稳定、线性相位、但需要较高的阶数。现在来想一个场景：你是一个TWS耳机的固件工程师，负责实现在ANC（主动降噪）系统中处理低频噪声（50Hz-500Hz）的滤波器。芯片的MIPS预算非常紧张——留给滤波器的只有不到1MIPS（每秒一百万次指令）。如果用FIR实现一个过渡带足够陡的低通，可能需要128阶甚至256阶，每个样本128次乘加——直接超预算。怎么办？</p>
+
+        <p>答案就是<strong>IIR滤波器</strong>（Infinite Impulse Response，无限冲激响应滤波器）。IIR和FIR的关键区别在于：<strong>它有反馈</strong>。输出不仅取决于当前和过去的输入，还取决于过去的输出。这个反馈赋予了IIR一个奇妙的特性——<strong>用很低的阶数（通常是4-8阶）就能实现FIR需要上百阶才能做到的过渡带陡峭度</strong>。</p>
+
+        <div class="highlight">
+            <strong>💡 核心认知：</strong>IIR用"反馈"换"效率"。因为输出回送到输入，一个二阶IIR节（Biquad）的过渡带陡峭度可以匹敌几十阶FIR。代价是：相位非线性、可能不稳定、对有限字长效应更敏感。在工程上，IIR是一把锋利的刀——用得好省电省内存，用不好会"割伤"自己。
+        </div>
+
+        <h3>10.1 经典模拟滤波器原型</h3>
+
+        <p>数字IIR滤波器设计的一个"祖传手艺"是：先设计一个模拟低通原型滤波器，再用某种变换把它映射到数字域。为什么绕这么大一圈？因为模拟滤波器理论在1940-1960年代已经非常成熟了——Butterworth、Chebyshev、Elliptic这些经典设计有其最优的数学性质，我们直接"借用"过来就好。</p>
+
+        <p>四种最经典的模拟原型（以低通为例）：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>类型</th>
+                    <th>通带特性</th>
+                    <th>阻带特性</th>
+                    <th>过渡带</th>
+                    <th>特点总结</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Butterworth</strong></td>
+                    <td>最平坦（无波纹）</td>
+                    <td>单调衰减</td>
+                    <td>最宽</td>
+                    <td>"最温和"的滤波器，适合不需要尖锐截止的场景</td>
+                </tr>
+                <tr>
+                    <td><strong>Chebyshev I</strong></td>
+                    <td>等波纹</td>
+                    <td>单调衰减</td>
+                    <td>中等</td>
+                    <td>允许通带有波纹换取更陡的过渡带</td>
+                </tr>
+                <tr>
+                    <td><strong>Chebyshev II</strong></td>
+                    <td>单调</td>
+                    <td>等波纹</td>
+                    <td>中等</td>
+                    <td>阻带有波纹，通带无波纹（较少用）</td>
+                </tr>
+                <tr>
+                    <td><strong>Elliptic（椭圆）</strong></td>
+                    <td>等波纹</td>
+                    <td>等波纹</td>
+                    <td>最窄</td>
+                    <td>给定阶数下过渡带最陡，但通带阻带都有波纹</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>选择原则很直接：如果通带纹波和阻带衰减都不是大问题，选Butterworth最安全。如果MIPS极其紧张需要最小阶数，选Elliptic。Chebyshev I是折中方案。</p>
+
+        <h3>10.2 双线性变换法（Bilinear Transform, BLT）</h3>
+
+        <p>双线性变换是将模拟滤波器映射到数字滤波器的最常用方法。它的核心是一个代换公式：</p>
+
+        <pre><code>s = (2/T) · (1 - z^{-1}) / (1 + z^{-1})</code></pre>
+
+        <p>其中T是采样周期（T=1/f_s）。代入模拟滤波器的系统函数H_a(s)，得到数字滤波器的H(z)。</p>
+
+        <p>这个变换有一个美妙的性质：它把模拟s平面的<strong>整个虚轴</strong>（jΩ轴，即模拟频率轴）映射到数字z平面的<strong>单位圆</strong>（e^{jω}），而且是一一对应的。这意味着双线性变换不会产生混叠——这是它比下一节讲的"冲激响应不变法"最大的优势。</p>
+
+        <p>但代价是：<strong>频率轴被"压缩"（扭曲）了</strong>。模拟频率Ω和数字频率ω之间的关系是：</p>
+
+        <pre><code>Ω = (2/T) · tan(ω/2)    （预畸变公式）</code></pre>
+
+        <p>也就是说，你在设计模拟原型时指定的截止频率，经过双线性变换后会偏移到另一个位置。所以必须在设计模拟原型之前<strong>先做频率预畸变</strong>（pre-warping）：</p>
+
+        <pre><code>1. 确定数字截止频率 ω_c = 2π · f_c / f_s
+2. 计算预畸变后的模拟截止频率 Ω_c = (2/T) · tan(ω_c/2)
+3. 用 Ω_c 设计模拟原型 H_a(s)
+4. 代入 s = (2/T) · (1-z^{-1})/(1+z^{-1}) 得到 H(z)</code></pre>
+
+        <div class="tip">
+            <strong>🔧 工程实操：</strong>在实际开发中，你几乎不需要手动做这个步骤。Python的 scipy.signal 提供了一站式设计函数：
+            <pre><code>from scipy import signal
+# 4阶Butterworth低通，截止频率1000Hz，采样率44100Hz
+b, a = signal.butter(4, 1000, btype='low', fs=44100)
+# 4阶Chebyshev I，通带波纹1dB
+b, a = signal.cheby1(4, 1, 1000, btype='low', fs=44100)
+# 4阶椭圆，通带波纹1dB，阻带衰减40dB
+b, a = signal.ellip(4, 1, 40, 1000, btype='low', fs=44100)</code></pre>
+            scipy内部自动完成了频率预畸变和双线性变换。
+        </div>
+
+        <h3>10.3 冲激响应不变法</h3>
+
+        <p>冲激响应不变法（Impulse Invariance）的思路更"直接"：对模拟滤波器的冲激响应h_a(t)进行<strong>等间隔采样</strong>，得到数字滤波器的冲激响应h[n] = T · h_a(nT)。</p>
+
+        <p>这样得到的数字滤波器的频率响应就是模拟频率响应的"周期延拓"——这恰好是采样定理在频域的表述。因此冲激响应不变法<strong>必然存在频谱混叠</strong>，除非模拟滤波器本身的频率响应在超过f_s/2后已经衰减到可以忽略的程度。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>对比项</th>
+                    <th>双线性变换</th>
+                    <th>冲激响应不变法</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>混叠</td>
+                    <td>无（频率轴压缩）</td>
+                    <td>有（除非带限足够好）</td>
+                </tr>
+                <tr>
+                    <td>频率轴关系</td>
+                    <td>非线性（Ω ∝ tan(ω/2)）</td>
+                    <td>线性（Ω = ω/T）</td>
+                </tr>
+                <tr>
+                    <td>适用滤波器类型</td>
+                    <td>低通、高通、带通、带阻</td>
+                    <td>低通、带通（高通不行）</td>
+                </tr>
+                <tr>
+                    <td>工程使用率</td>
+                    <td>~90%（主流）</td>
+                    <td>~10%（仅特定场景）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>冲激响应不变法的一个优点（也是它仅存的优势）是保持了<strong>时域形状</strong>——如果你需要数字滤波器的冲激响应和模拟滤波器"长得像"，这是唯一的选择。但在绝大多数工程场景下，双线性变换是更稳健的选择。</p>
+
+        <h3>10.4 典型IIR设计流程</h3>
+
+        <p>完整的设计一个Butterworth低通滤波器在Python中只需要四行代码，但理解每行背后发生了什么才是重点。为了让你既会用又会调，整个流程拆解如下：</p>
+
+        <pre><code># 第1步：确定技术指标
+fs = 44100          # 采样率 44.1kHz
+f_c = 1000          # 截止频率 1kHz
+f_stop = 3000       # 阻带起始频率 3kHz
+A_pass = 1          # 通带最大衰减 1dB
+A_stop = 40         # 阻带最小衰减 40dB
+
+# 第2步：计算所需阶数
+# butterord 会根据指标自动计算最小阶数
+N, Wn = signal.buttord(f_c, f_stop, A_pass, A_stop, fs=fs)
+
+# 第3步：设计滤波器
+b, a = signal.butter(N, Wn, btype='low', fs=fs)
+
+# 第4步：验证（画幅频响应）
+w, h = signal.freqz(b, a, fs=fs)
+# 检查: 在 f_c 处衰减是否 ≤1dB？在 f_stop 处衰减是否 ≥40dB？</code></pre>
+
+        <p>如果你使用的是MATLAB，流程完全相同——只是函数名略有不同（buttord、butter等）。无论用哪种工具，关键都在于<strong>验证</strong>：不要相信设计函数一次给出的结果，一定要画出频率响应确认指标满足。</p>
+
+        <div class="warning">
+            <strong>⚠️ 踩坑实录：</strong>一次我在做一个车载音响系统的EQ算法，用scipy.signal.butter设计了一个8阶Butterworth低通，仿真通过后直接部署到嵌入式平台。结果一跑起来，音频输出在切换音源时有明显的"噗噗"声。示波器一看——滤波器输出在切换瞬间出现了衰减振荡，持续了将近50ms才稳定。后来发现是高阶IIR滤波器对初始条件敏感：滤波器的状态变量（delay line）在切换音源时被重置为零，而IIR的反馈结构需要一个"预热"过程。解决方案很简单：在切换时不重置状态变量，或者对状态变量做渐变衰减。
+        </div>
+
+        <h3>10.5 IIR vs FIR：选型决策表</h3>
+
+        <p>这是数字信号处理工程中最常见的"二选一"问题。我整理了一张综合对比表，你可以在设计滤波器时对照参考：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>FIR</th>
+                    <th>IIR</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>稳定性</strong></td>
+                    <td>绝对稳定（无极点）</td>
+                    <td>需验证（极点在单位圆内才稳定）</td>
+                </tr>
+                <tr>
+                    <td><strong>相位</strong></td>
+                    <td>可做到严格线性相位</td>
+                    <td>非线性相位（可通过全通均衡补偿）</td>
+                </tr>
+                <tr>
+                    <td><strong>过渡带陡峭度</strong></td>
+                    <td>需要高阶数</td>
+                    <td>低阶即可做到陡峭过渡带</td>
+                </tr>
+                <tr>
+                    <td><strong>计算量（同等指标）</strong></td>
+                    <td>高（通常几十到几百阶）</td>
+                    <td>低（通常4-8阶）</td>
+                </tr>
+                <tr>
+                    <td><strong>延迟（群延迟）</strong></td>
+                    <td>固定（N/2个样本）</td>
+                    <td>频率相关（通常较小）</td>
+                </tr>
+                <tr>
+                    <td><strong>对有限字长敏感度</strong></td>
+                    <td>低</td>
+                    <td>高（定点实现时需特别小心）</td>
+                </tr>
+                <tr>
+                    <td><strong>设计直观性</strong></td>
+                    <td>中等（窗函数法较直觉）</td>
+                    <td>低（需要模拟原型知识）</td>
+                </tr>
+                <tr>
+                    <td><strong>适用场景</strong></td>
+                    <td>音频处理、通信脉冲整形</td>
+                    <td>ANC降噪、窄带滤波、生物信号</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>一个经验法则：<strong>如果你不确定选哪个，先试FIR</strong>。FIR的"绝对稳定"和"线性相位"让它在大多数场景下都是更安全的选择。只有当你明确遇到MIPS预算不足或延迟要求极致的场景时，再换IIR。在我们的ANC降噪案例中，因为延迟不能超过20μs且MIPS极度有限，IIR是唯一可行的方案。</p>
+
+        <h3>10.6 本章小结</h3>
+
+        <p>这一章我们做了以下几件事：</p>
+
+        <ul>
+            <li>通过TWS耳机ANC降噪的MIPS预算案例，引出了IIR滤波器的核心优势——高效率低阶数；</li>
+            <li>介绍了四种经典模拟滤波器原型（Butterworth/Chebyshev I&II/Elliptic）及其特性对比；</li>
+            <li>重点推导了双线性变换法——从预畸变公式到完整设计流程；</li>
+            <li>介绍了冲激响应不变法及其混叠问题，并与双线性变换做了对比；</li>
+            <li>给出了一个完整的Python/MATLAB设计流程和一个因状态变量初始化导致"噗噗"声的踩坑故事；</li>
+            <li>给出了FIR vs IIR的全面选型决策表和一个经验法则。</li>
+        </ul>
+
+        <p>从这一章开始，你具备了数字滤波器设计的两种核心武器——FIR和IIR。但有了滤波器系数只是一半的工作，另一半是<strong>如何高效、稳定地在硬件上实现这个滤波器</strong>。不同的实现结构（直接型、级联型、并联型）对量化误差、运算速度和稳定性有着天壤之别的影响。</p>
+
+        <p>下一章<strong>滤波器结构</strong>，我们将深入这个"另一半"的世界。</p>
+
+        <p>我们下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

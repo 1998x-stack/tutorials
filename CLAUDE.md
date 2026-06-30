@@ -62,9 +62,10 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `antenna-propagation-tutorial/` | 电波传播与天线 | 28 | `https://1998x-stack.github.io/antenna-propagation-tutorial/` |
 | `sensor-network-tutorial/` | 传感网技术 | 28 | `https://1998x-stack.github.io/sensor-network-tutorial/` |
 
-### 经济 / 金融 (8)
+### 经济 / 金融 (9)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
+| `investment-tutorial/` | 投资学 | 28 | `https://1998x-stack.github.io/investment-tutorial/` |
 | `economics-principles-tutorial/` | 经济学原理 | 28 | `https://1998x-stack.github.io/economics-principles-tutorial/` |
 | `macroeconomics-tutorial/` | 宏观经济学 | 28 | `https://1998x-stack.github.io/macroeconomics-tutorial/` |
 | `microeconomics-tutorial/` | 微观经济学 | 28 | `https://1998x-stack.github.io/microeconomics-tutorial/` |

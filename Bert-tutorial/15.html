@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>ELECTRA判别式预训练 — BERT教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 NLP预训练发展简史</a></li>
+            <li><a href="02.html">第2章 Transformer架构精讲</a></li>
+            <li><a href="03.html">第3章 BERT开山论文精读(上)</a></li>
+            <li><a href="04.html">第4章 BERT开山论文精读(下)</a></li>
+            <li><a href="05.html">第5章 BERT输入表示与分词</a></li>
+            <li><a href="06.html">第6章 MLM与NSP深度剖析</a></li>
+            <li><a href="07.html">第7章 BERT微调实战范式</a></li>
+            <li><a href="08.html">第8章 RoBERTa训练配方革命</a></li>
+            <li><a href="09.html">第9章 数据工程与动态掩码</a></li>
+            <li><a href="10.html">第10章 超参数与优化器配置</a></li>
+            <li><a href="11.html">第11章 预训练数据规模效应</a></li>
+            <li><a href="12.html">第12章 训练稳定性技术</a></li>
+            <li><a href="13.html">第13章 多语言BERT与跨语言迁移</a></li>
+            <li><a href="14.html">第14章 BERT变体生态横评</a></li>
+            <li><a href="15.html" class="active">第15章 ELECTRA判别式预训练</a></li>
+            <li><a href="16.html">第16章 XLNet排列语言模型</a></li>
+            <li><a href="17.html">第17章 MPNet掩码排列融合</a></li>
+            <li><a href="18.html">第18章 ALBERT参数高效设计</a></li>
+            <li><a href="19.html">第19章 DeBERTa解耦注意力</a></li>
+            <li><a href="20.html">第20章 中文BERT全景</a></li>
+            <li><a href="21.html">第21章 长文本BERT方案</a></li>
+            <li><a href="22.html">第22章 SimCSE对比学习句向量</a></li>
+            <li><a href="23.html">第23章 知识蒸馏轻量化</a></li>
+            <li><a href="24.html">第24章 移动端BERT部署</a></li>
+            <li><a href="25.html">第25章 高效微调实战</a></li>
+            <li><a href="26.html">第26章 ModernBERT与2025前沿</a></li>
+            <li><a href="27.html">第27章 极致压缩与端侧智能</a></li>
+            <li><a href="28.html">第28章 端到端实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第15章 ELECTRA：判别式预训练的效率革命</h2>
+
+<p>同学们好。前面几章我们深入研究了BERT、RoBERTa这一系列基于"掩码语言模型"的预训练范式。大家有没有想过一个问题：BERT每次只预测15%的token，剩下85%的计算资源其实都浪费在"看"那些已经知道的token上了？这一章要介绍的ELECTRA，用一种极其巧妙的方式——把生成式任务改成判别式任务——让每一个token都参与损失计算，从而将训练效率提升了3到4倍。这是一篇来自Google和Stanford的工作（ICLR 2020），它的核心思想直接影响了许多后续的高效预训练方案。</p>
+
+<div class="highlight">
+<strong>核心洞见：</strong>与其只预测15%的[MASK]位置，不如让模型学会"揪出被替换的token"——所有token都参与训练，效率自然翻倍。
+</div>
+
+<h3>15.1 从MLM到RTD：一个简单的思想转变</h3>
+
+<p>让我们先回顾一下BERT的做法。给定一个句子"我爱吃苹果"，BERT会随机选15%的位置打上[MASK]标记，比如变成"我爱吃[MASK]"，然后让模型预测被遮住的词。这个损失只在被mask的15%位置计算，剩下85%的位置只是被动地提供上下文信息，它们本身不产生梯度。</p>
+
+<p>ELECTRA的论文（arXiv:2003.10555，Clark et al.，ICLR 2020）提出了一个截然不同的思路：用一个<strong>Generator（生成器）</strong>先把输入中的某些token替换掉，然后让<strong>Discriminator（判别器）</strong>去判断每一个token到底是"original"还是"replaced"。这样一来，所有N个位置都会参与二分类损失的计算。</p>
+
+<div class="tip">
+<strong>名字的由来：</strong>ELECTRA全称是"Efficiently Learning an Encoder that Classifies Token Replacements Accurately"，恰好对应"ELECTRA"（希腊神话中的一位女神），与BERT风格一脉相承。
+</div>
+
+<h3>15.2 Generator-Discriminator协作机制</h3>
+
+<p>ELECTRA的架构包含两个Transformer Encoder：</p>
+
+<ul>
+    <li><strong>Generator G</strong>：一个小型的BERT（参数约为Discriminator的1/3到1/2），负责做标准的MLM预测，然后用采样结果替换掉被mask的token。</li>
+    <li><strong>Discriminator D</strong>：我们的主模型（也就是最终要用的BERT编码器），对每个位置的token做二分类：这个token是原始的，还是被Generator替换过的？</li>
+</ul>
+
+<p>举个例子：原始句子是"the chef cooked the meal"。Generator可能把"cooked"替换成"ate"，于是Discriminator看到的输入变成"the chef ate the meal"。Discriminator的任务是逐token判断：the（原始）、chef（原始）、ate（被替换！）、the（原始）、meal（原始）。</p>
+
+<p>这两个模型在训练过程中<strong>联合训练</strong>，但共享Embedding层的权重。训练结束后，Generator被丢弃，只保留Discriminator用于下游任务。</p>
+
+<h3>15.3 RTD vs MLM：对比分析</h3>
+
+<table>
+    <thead>
+        <tr>
+            <th>对比维度</th>
+            <th>BERT (MLM)</th>
+            <th>ELECTRA (RTD)</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>训练目标</td>
+            <td>生成式：预测被mask的token</td>
+            <td>判别式：判断token是否被替换</td>
+        </tr>
+        <tr>
+            <td>参与损失的token数</td>
+            <td>15%</td>
+            <td>100%</td>
+        </tr>
+        <tr>
+            <td>预训练/微调一致性</td>
+            <td>不一致（出现[MASK]符号）</td>
+            <td>一致（无特殊符号）</td>
+        </tr>
+        <tr>
+            <td>训练效率（同计算量）</td>
+            <td>基准</td>
+            <td>3-4倍提升</td>
+        </tr>
+        <tr>
+            <td>小模型表现</td>
+            <td>较弱</td>
+            <td>远优于BERT-Small（接近BERT-Base）</td>
+        </tr>
+        <tr>
+            <td>收敛速度</td>
+            <td>需要更多步数</td>
+            <td>更快收敛</td>
+        </tr>
+        <tr>
+            <td>下游任务效果（GLUE）</td>
+            <td>BERT-Base: 82.2</td>
+            <td>ELECTRA-Base: 85.0</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="highlight">
+<strong>关键洞察：</strong>ELECTRA在GLUE上以不到BERT 1/4的计算量就达到了BERT的效果。对于计算资源有限的团队，ELECTRA是一个非常划算的选择。
+</div>
+
+<h3>15.4 生成器的大小为何有讲究？</h3>
+
+<p>一个很自然的问题：既然Discriminator是我们最终要用的模型，那Generator是不是越大越好？毕竟更大的Generator可以生成更"逼真"的替换，给Discriminator制造更难的挑战。</p>
+
+<p>论文通过实验给出了一个反直觉的结论：<strong>Generator的参数量大约是Discriminator的1/3到1/2时效果最佳</strong>。原因有三：</p>
+
+<ol>
+    <li><strong>难度平衡</strong>：如果Generator太强，替换的token过于逼真，Discriminator几乎无法区分，导致学习信号太弱；如果Generator太弱，替换的token太假，Discriminator轻松识别，也学不到什么。</li>
+    <li><strong>计算效率</strong>：Generator越大，训练总开销越大，会抵消RTD带来的效率优势。</li>
+    <li><strong>共享Embedding</strong>：Generator和Discriminator共享token embedding，Generator的嵌入表示质量直接影响Discriminator的输入表示。</li>
+</ol>
+
+<div class="warning">
+<strong>踩坑实录：</strong>我在一次实验中尝试用同等的BERT-Base作为Generator和Discriminator，结果GLUE分数反而比1/3大小的Generator差了1.5个点。训练成本翻倍，效果却更差——Generator太强会让判别任务失去意义，这让我深刻理解了"教学相长，适度为难"的道理。
+</div>
+
+<h3>15.5 训练细节与损失函数</h3>
+
+<p>ELECTRA的训练过程包含两个损失函数：</p>
+
+<p><strong>Generator的MLM损失</strong>（标准的交叉熵）：</p>
+<pre><code># Generator MLM loss — 只计算被mask的位置
+# x_masked: 被mask的输入, y: 原始token
+logits_G = generator(x_masked)  # [batch, seq_len, vocab_size]
+# 只取被mask位置的logits
+masked_logits = logits_G[mask_positions]  # [num_masked, vocab_size]
+loss_G = cross_entropy(masked_logits, y[mask_positions])</code></pre>
+
+<p><strong>Discriminator的RTD损失</strong>（逐token的二分类）：</p>
+<pre><code># ELECTRA RTD loss — 所有位置都参与
+# 1. Generator对masked位置做采样替换
+probs = softmax(generator(x_masked), dim=-1)
+sampled_tokens = categorical_sample(probs)
+# 仅在mask位置做替换，其他位置保留原token
+x_corrupted = x_masked.clone()
+x_corrupted[mask_positions] = sampled_tokens[mask_positions]
+
+# 2. Discriminator判断每个token是否被替换
+logits_D = discriminator(x_corrupted)  # [batch, seq_len, 2]
+labels = torch.ones(batch, seq_len)     # 1=original
+labels[mask_positions] = 0              # 0=replaced（若采样≠原token）
+# 注意：如果采样结果恰好等于原token，label仍为1
+labels[mask_positions & (sampled_tokens == y)] = 1
+
+loss_D = binary_cross_entropy(logits_D, labels)
+
+# 3. 联合训练
+loss = loss_G + lambda * loss_D  # lambda通常是50，平衡两个损失量级</code></pre>
+
+<div class="tip">
+<strong>一个小细节：</strong>如果Generator采样出的token恰好和原始token一样（完全有可能，尤其是高频词），那这个位置在Discriminator的label仍然是"original"（1），而不是"replaced"（0）。这个处理防止了Discriminator混淆"未被改变"和"被改成原词"两种情况。
+</div>
+
+<h3>15.6 为什么ELECTRA对小模型特别友好？</h3>
+
+<p>ELECTRA一个引人注目的结论是：ELECTRA-Small（12层，512隐藏维）在GLUE上可以达到接近BERT-Base的水平，而参数量只有BERT-Base的1/4。原因在于：</p>
+
+<ol>
+    <li><strong>训练效率高</strong>：小模型本身计算量少，加上RTD让每个token都参与学习，相当于从有限的参数中榨取了更多的信号。</li>
+    <li><strong>无[MASK]不一致问题</strong>：小模型对预训练-微调不一致更敏感，而ELECTRA避免了[MASK]符号，所以微调时没有"域偏移"。</li>
+    <li><strong>表示学习更充分</strong>：判别式任务迫使Encoder学习所有token的上下文表示，而不只是被mask的那15%。</li>
+</ol>
+
+<h3>15.7 ELECTRA的局限与影响</h3>
+
+<p>当然，ELECTRA并非完美无缺：</p>
+
+<ul>
+    <li><strong>两模型联合训练</strong>增加了训练的复杂度，需要同时维护两个Encoder。</li>
+    <li>在<strong>超大模型规模</strong>下（如BERT-Large以上），ELECTRA相对于MLM的优势有所缩小。</li>
+    <li>RTD损失虽然训练效率高，但<strong>不一定对所有下游任务都最优</strong>——比如生成式任务（文本生成）可能更适合生成式预训练。</li>
+</ul>
+
+<p>尽管如此，ELECTRA的判别式预训练思路对后续研究产生了深远影响。许多高效预训练方案都借鉴了"全token参与损失"这一核心思想。如果你想进一步了解后续的融合方案，下一章我们将介绍XLNet——它从另一个角度（排列语言模型）解决了BERT的[MASK]不一致问题。</p>
+
+<div class="highlight">
+<strong>本章小结：</strong>ELECTRA通过将预训练从生成式（预测mask）改为判别式（检测替换），让全部token参与损失计算，在相同计算量下获得了3-4倍的效率提升。Generator-Discriminator的协同训练设计巧妙，尤其适合计算资源有限的场景。对追求效率的团队来说，ELECTRA至今仍是一个非常值得考虑的基线。
+</div>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

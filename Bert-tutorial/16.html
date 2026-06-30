@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>XLNet排列语言模型 — BERT教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 NLP预训练发展简史</a></li>
+            <li><a href="02.html">第2章 Transformer架构精讲</a></li>
+            <li><a href="03.html">第3章 BERT开山论文精读(上)</a></li>
+            <li><a href="04.html">第4章 BERT开山论文精读(下)</a></li>
+            <li><a href="05.html">第5章 BERT输入表示与分词</a></li>
+            <li><a href="06.html">第6章 MLM与NSP深度剖析</a></li>
+            <li><a href="07.html">第7章 BERT微调实战范式</a></li>
+            <li><a href="08.html">第8章 RoBERTa训练配方革命</a></li>
+            <li><a href="09.html">第9章 数据工程与动态掩码</a></li>
+            <li><a href="10.html">第10章 超参数与优化器配置</a></li>
+            <li><a href="11.html">第11章 预训练数据规模效应</a></li>
+            <li><a href="12.html">第12章 训练稳定性技术</a></li>
+            <li><a href="13.html">第13章 多语言BERT与跨语言迁移</a></li>
+            <li><a href="14.html">第14章 BERT变体生态横评</a></li>
+            <li><a href="15.html">第15章 ELECTRA判别式预训练</a></li>
+            <li><a href="16.html" class="active">第16章 XLNet排列语言模型</a></li>
+            <li><a href="17.html">第17章 MPNet掩码排列融合</a></li>
+            <li><a href="18.html">第18章 ALBERT参数高效设计</a></li>
+            <li><a href="19.html">第19章 DeBERTa解耦注意力</a></li>
+            <li><a href="20.html">第20章 中文BERT全景</a></li>
+            <li><a href="21.html">第21章 长文本BERT方案</a></li>
+            <li><a href="22.html">第22章 SimCSE对比学习句向量</a></li>
+            <li><a href="23.html">第23章 知识蒸馏轻量化</a></li>
+            <li><a href="24.html">第24章 移动端BERT部署</a></li>
+            <li><a href="25.html">第25章 高效微调实战</a></li>
+            <li><a href="26.html">第26章 ModernBERT与2025前沿</a></li>
+            <li><a href="27.html">第27章 极致压缩与端侧智能</a></li>
+            <li><a href="28.html">第28章 端到端实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第16章 XLNet：排列语言模型与自回归预训练</h2>
+
+<p>同学们好。上一章我们学习了ELECTRA如何通过判别式预训练绕过[MASK]标记的问题。但BERT的[MASK]不一致问题还有另一个经典的解决方案——来自CMU和Google的XLNet（arXiv:1906.08237，Yang et al.，2019）。XLNet提出了一种优雅的数学思想：既然自回归模型（从左往右预测）天然没有[MASK]，那能不能让自回归模型也能捕捉双向上下文？答案是：把输入顺序<strong>打乱（Permutation）</strong>。</p>
+
+<div class="highlight">
+<strong>核心直觉：</strong>如果预测"我爱你"中的"爱"时，我们随机排列顺序，让"爱"有时能看到"我"（左侧），有时能看到"你"（右侧），那模型不就学会了利用双向信息吗？
+</div>
+
+<h3>16.1 排列语言模型的核心思想</h3>
+
+<p>传统自回归语言模型（如GPT系列）按照固定顺序从左到右生成token，只能看到当前token左侧的上下文。BERT通过[MASK]获得了双向信息，但带来了预训练-微调不一致。XLNet的排列语言模型（Permutation Language Model，PLM）试图兼得两者之长。</p>
+
+<p>具体做法是这样的：对于一个长度为N的序列，我们不再固定从左到右的因式分解顺序，而是随机采样一个排列（permutation），然后按照这个排列的顺序去预测每一个token。在预测第i个位置的token时，模型能看到排列中它前面的所有token——这些token可能来自原始序列的左侧也可能来自右侧。</p>
+
+<p>假设原始序列是 [x₁, x₂, x₃] = ["我", "爱", "你"]。可能的排列及对应的自回归分解如下：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>排列顺序</th>
+            <th>分解因式</th>
+            <th>预测"爱"时的上下文</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>[1, 2, 3]</td>
+            <td>p(x₁)p(x₂|x₁)p(x₃|x₁,x₂)</td>
+            <td>看到"我"（左侧）</td>
+        </tr>
+        <tr>
+            <td>[1, 3, 2]</td>
+            <td>p(x₁)p(x₃|x₁)p(x₂|x₁,x₃)</td>
+            <td>看到"我"和"你"（双向！）</td>
+        </tr>
+        <tr>
+            <td>[2, 1, 3]</td>
+            <td>p(x₂)p(x₁|x₂)p(x₃|x₁,x₂)</td>
+            <td>看不到"爱"自己（它在第一个位置）</td>
+        </tr>
+        <tr>
+            <td>[2, 3, 1]</td>
+            <td>p(x₂)p(x₃|x₂)p(x₁|x₂,x₃)</td>
+            <td>看到"我"和"你"（双向！）</td>
+        </tr>
+        <tr>
+            <td>[3, 1, 2]</td>
+            <td>p(x₃)p(x₁|x₃)p(x₂|x₁,x₃)</td>
+            <td>看到"我"和"你"（双向！）</td>
+        </tr>
+        <tr>
+            <td>[3, 2, 1]</td>
+            <td>p(x₃)p(x₂|x₃)p(x₁|x₂,x₃)</td>
+            <td>看到"你"（右侧）</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>在训练过程中，每个句子每次前向传播都会采样一个不同的排列。通过大量排列的"视角"，模型学会了在自回归框架下利用双向上下文信息。</p>
+
+<div class="tip">
+<strong>重要澄清：</strong>XLNet并<strong>不是</strong>真的把输入文本顺序打乱，而是通过注意力掩码（Attention Mask）来控制每个token能"看到"哪些其他token。输入序列的位置编码仍然保持原始顺序，只是注意力可见性按照排列来控制。
+</div>
+
+<h3>16.2 Two-Stream Self-Attention：实现排列的基石</h3>
+
+<p>要实现排列语言模型，一个技术难点出现了：如果我们用标准的Transformer自回归去预测x₂（在当前排列下x₂能看到x₁和x₃），标准自注意力对每个位置的计算同时包含该位置的内容信息和位置信息。但是在预测x₂时，我们不应该让模型"看到"x₂自己的内容——否则就成了"作弊"（拿答案预测答案）。</p>
+
+<p>XLNet的解决方案是<strong>双流自注意力（Two-Stream Self-Attention）</strong>：</p>
+
+<ul>
+    <li><strong>Content Stream（内容流）</strong>：标准的自注意力，每个位置能看见自己的内容。用于在预测<strong>其他</strong>位置时提供当前位置的完整表示。</li>
+    <li><strong>Query Stream（查询流）</strong>：每个位置只能看见自己的位置编码，看不到自己的内容。用于预测当前token时，提供"位置信息"但不提供"内容信息"。</li>
+</ul>
+
+<div class="highlight">
+<strong>一个比喻理解：</strong>假设你在参加一个填空游戏——"填出____里的词"。内容流让你看到所有已填的词；查询流告诉你"现在我正站在第3个空格的位置，我需要预测这个空格是什么词"——你知道自己在第几个位置，但还没看到自己该填什么。
+</div>
+
+<h3>16.3 Two-Stream Self-Attention代码示意</h3>
+
+<pre><code># XLNet Two-Stream Self-Attention 简化实现
+def two_stream_attention(q, k, v, pos_encoding, attention_mask, perm_mask):
+    """
+    q, k, v: 输入表示 [batch, seq_len, d_model]
+    perm_mask: 排列掩码 [batch, seq_len, seq_len], 1表示不可见, 0表示可见
+    """
+    batch, seq_len, d_model = q.shape
+
+    # Content stream: 标准的自注意力，可以看到所有位置（包括自己）
+    content = multi_head_attention(q, k, v, attention_mask)
+
+    # Query stream: 只能看到位置编码，不能看到内容
+    # 使用随机初始化的query向量（与位置相关）
+    query = query_projection(q)                 # Query stream Q
+    content_kv = content_projection(content)     # 内容流提供K, V
+
+    # 应用排列掩码：控制每个位置能"看到"哪些其他位置
+    # perm_mask[i][j] = 1 表示位置i看不到位置j
+    query_out = masked_attention(query, content_kv, perm_mask)
+
+    # 交替更新两个流（逐Transformer层）
+    # 第L层的content stream和query stream会相互影响
+    return content_out, query_out</code></pre>
+
+<div class="tip">
+<strong>理解关键：</strong>在最后一层，只有Query Stream的输出被用于预测当前token。Content Stream的输出用于为后续token提供上下文。这种设计确保了自回归预测的"因果性"——模型无法偷看未来的token。
+</div>
+
+<h3>16.4 Transformer-XL：长文本上下文扩展</h3>
+
+<p>除了排列语言模型，XLNet还集成了Transformer-XL的两项关键技术：</p>
+
+<ul>
+    <li><strong>Segment Recurrence（段循环）</strong>：在处理长文本时，将上一个segment的隐藏状态缓存下来，作为当前segment的扩展上下文。这使得XLNet可以处理比BERT更长距离的依赖（理论上无限制，实践中通常缓存2-4个segment）。</li>
+    <li><strong>Relative Position Encoding（相对位置编码）</strong>：与绝对位置编码不同，相对位置编码编码的是两个token之间的"距离"，而不是每个token的"绝对坐标"。这使得模型对序列长度变化更鲁棒，且能更好地泛化到未见过的长度。</li>
+</ul>
+
+<div class="warning">
+<strong>踩坑实录：</strong>我第一次使用XLNet做长文档分类时，天真地把整个文档塞进了一个样本。结果显存直接OOM，而且训练速度比BERT慢了好几倍。后来才意识到，Segment Recurrence并不是真的把整篇文档作为输入，而是用滑动窗口+缓存的方式处理。合理设置segment长度（通常是512或1024）和缓存大小（2个segment）才能兼顾效果和效率。
+</div>
+
+<h3>16.5 XLNet vs BERT vs GPT：三方对比</h3>
+
+<table>
+    <thead>
+        <tr>
+            <th>对比维度</th>
+            <th>BERT</th>
+            <th>GPT</th>
+            <th>XLNet</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>预训练方式</td>
+            <td>去噪自编码（MLM）</td>
+            <td>自回归（从左到右）</td>
+            <td>排列自回归（PLM）</td>
+        </tr>
+        <tr>
+            <td>上下文方向</td>
+            <td>双向</td>
+            <td>单向（左→右）</td>
+            <td>双向（通过排列实现）</td>
+        </tr>
+        <tr>
+            <td>[MASK]标记</td>
+            <td>有（预训练-微调不一致）</td>
+            <td>无</td>
+            <td>无</td>
+        </tr>
+        <tr>
+            <td>长文本处理</td>
+            <td>512 token上限</td>
+            <td>512 token上限（GPT-2扩展到1024）</td>
+            <td>Transformer-XL，支持更长</td>
+        </tr>
+        <tr>
+            <td>训练效率</td>
+            <td>基准</td>
+            <td>略快于BERT</td>
+            <td>慢于BERT（排列+双流注意力开销）</td>
+        </tr>
+        <tr>
+            <td>生成能力</td>
+            <td>不适合文本生成</td>
+            <td>原生支持</td>
+            <td>原生支持（自回归架构）</td>
+        </tr>
+        <tr>
+            <td>GLUE分数（Base）</td>
+            <td>82.2</td>
+            <td>—</td>
+            <td>85.0（与ELECTRA相当）</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>16.6 XLNet的局限与后续影响</h3>
+
+<p>XLNet提出的排列语言模型是一个理论上非常优雅的方案，但也有一些实践中需要注意的局限性：</p>
+
+<ul>
+    <li><strong>排列组合爆炸</strong>：虽然实际训练中每次都只采样一个排列，但从理论上说，排列空间是N!，模型需要足够多的步数才能充分看到各种可能的排列顺序。</li>
+    <li><strong>训练成本高</strong>：Two-Stream Self-Attention相当于每个Transformer层中做了两次注意力计算，带来了约2倍的计算开销。加上Transformer-XL的缓存机制，整体训练成本明显高于BERT。</li>
+    <li><strong>对短文本的优势不明显</strong>：排列语言模型在长文本场景下优势更突出（充分利用了双向上下文和Transformer-XL的长距离能力），对短文本任务提升有限。</li>
+</ul>
+
+<p>尽管如此，XLNet的两项技术遗产影响深远——Two-Stream Attention的设计启发了后续许多自回归预训练方案，而相对位置编码已成为现代Transformer架构（如T5、LLaMA）的标准配置。下一章我们将介绍MPNet，它试图融合BERT和XLNet各自的优势，在一个统一的框架中结合MLM的双向性和PLM的排列灵活性。</p>
+
+<div class="highlight">
+<strong>本章小结：</strong>XLNet通过排列语言模型解决了BERT的[MASK]不一致问题，让自回归模型在预训练阶段也能捕获双向上下文。Two-Stream Self-Attention是实现排列的核心技术，Transformer-XL的集成让其长文本处理能力远超BERT。虽然训练成本较高，但XLNet在多项基准上取得了当时的最佳表现。
+</div>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

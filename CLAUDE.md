@@ -89,12 +89,13 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 |-----------|-------|----------|-----|
 | `robotics-tutorial/` | 机器人学 | 28 | `https://1998x-stack.github.io/robotics-tutorial/` |
 
-### 算法 / 数据结构 (3)
+### 算法 / 数据结构 (4)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `data-structures-tutorial/` | 数据结构与算法 | 28 | `https://1998x-stack.github.io/data-structures-tutorial/` |
 | `path-planning-algorithms-tutorial/` | 路径规划算法 | 28 | `https://1998x-stack.github.io/path-planning-algorithms-tutorial/` |
 | `combinatorial-optimization-tutorial/` | 组合优化 | 28 | `https://1998x-stack.github.io/combinatorial-optimization-tutorial/` |
+| `leetcode-tutorial/` | LeetCode算法面试 | 28 | `https://1998x-stack.github.io/leetcode-tutorial/` |
 
 ### 编程语言 (1)
 | Directory | Topic | Chapters | URL |

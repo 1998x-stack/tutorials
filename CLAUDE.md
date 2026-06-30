@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 52 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 53 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
 ## Active Tutorials
 
-### AI / 数据科学 (16)
+### AI / 数据科学 (17)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `machine-learning-tutorial/` | 机器学习 | 28 | `https://1998x-stack.github.io/machine-learning-tutorial/` |
@@ -29,6 +29,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `llama-tutorial/` | LLaMA大模型技术 | 28 | `https://1998x-stack.github.io/llama-tutorial/` |
 | `deepseek-tutorial/` | DeepSeek模型系列 | 28 | `https://1998x-stack.github.io/deepseek-tutorial/` |
 | `yolo-tutorial/` | YOLO目标检测 | 28 | `https://1998x-stack.github.io/yolo-tutorial/` |
+| `MOE-tutorial/` | MoE混合专家模型 | 28 | `https://1998x-stack.github.io/MOE-tutorial/` |
 
 ### 数学基础 (9)
 | Directory | Topic | Chapters | URL |

@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 数据工程与动态掩码 — BERT教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 NLP预训练发展简史</a></li>
+            <li><a href="02.html">第2章 Transformer架构精讲</a></li>
+            <li><a href="03.html">第3章 BERT开山论文精读(上)</a></li>
+            <li><a href="04.html">第4章 BERT开山论文精读(下)</a></li>
+            <li><a href="05.html">第5章 BERT输入表示与分词</a></li>
+            <li><a href="06.html">第6章 MLM与NSP深度剖析</a></li>
+            <li><a href="07.html">第7章 BERT微调实战范式</a></li>
+            <li><a href="08.html">第8章 RoBERTa训练配方革命</a></li>
+            <li><a href="09.html" class="active">第9章 数据工程与动态掩码</a></li>
+            <li><a href="10.html">第10章 超参数与优化器配置</a></li>
+            <li><a href="11.html">第11章 预训练数据规模效应</a></li>
+            <li><a href="12.html">第12章 训练稳定性技术</a></li>
+            <li><a href="13.html">第13章 多语言BERT与跨语言迁移</a></li>
+            <li><a href="14.html">第14章 BERT变体生态横评</a></li>
+            <li><a href="15.html">第15章 ELECTRA判别式预训练</a></li>
+            <li><a href="16.html">第16章 XLNet排列语言模型</a></li>
+            <li><a href="17.html">第17章 MPNet掩码排列融合</a></li>
+            <li><a href="18.html">第18章 ALBERT参数高效设计</a></li>
+            <li><a href="19.html">第19章 DeBERTa解耦注意力</a></li>
+            <li><a href="20.html">第20章 中文BERT全景</a></li>
+            <li><a href="21.html">第21章 长文本BERT方案</a></li>
+            <li><a href="22.html">第22章 SimCSE对比学习句向量</a></li>
+            <li><a href="23.html">第23章 知识蒸馏轻量化</a></li>
+            <li><a href="24.html">第24章 移动端BERT部署</a></li>
+            <li><a href="25.html">第25章 高效微调实战</a></li>
+            <li><a href="26.html">第26章 ModernBERT与2025前沿</a></li>
+            <li><a href="27.html">第27章 极致压缩与端侧智能</a></li>
+            <li><a href="28.html">第28章 端到端实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第9章 数据工程与动态掩码</h2>
+
+<p>大家好，我是你们的讲师。上一章我们讲了RoBERTa的四大训练配方改进，其中有两项——海量数据和动态掩码——直接和"数据"相关。这一章我们就深入聊这两个话题。</p>
+
+<p>在NLP预训练的实践中，有一句老话值得刻在每台GPU服务器的机箱上：<strong>"垃圾数据训练不出好模型"</strong>。你可能觉得这是句正确的废话，但看看现实——很多团队花大价钱买GPU，却对数据清洗环节敷衍了事。结果就是：同样的模型架构、同样的训练参数，数据质量差的那个版本性能就是上不去。这就是所谓的<strong>数据"天花板效应"</strong>：模型能力的天花板，是由数据质量决定的，而不是模型架构。</p>
+
+<h3>9.1 数据质量的"天花板效应"</h3>
+
+<p>我们先理解一个关键概念。模型在预训练阶段学到的知识，本质上来自于训练数据中的统计规律。如果数据中存在噪声（比如HTML标签没清理干净、重复文本、低质量机器翻译），模型就会"学到"这些噪声模式，浪费模型容量去拟合无意义的信息。</p>
+
+<div class="highlight">
+    <strong>关键认识：</strong> 增加数据量≠提升模型性能。关键在于增加"高质量数据"的量。1GB精心清洗的语料远好于10GB未清洗的网络爬虫数据。在RoBERTa的160GB数据中，数据清洗和过滤的投入不亚于模型训练本身。
+</div>
+
+<h3>9.2 数据清洗策略</h3>
+
+<p>下面介绍一套标准的预训练数据清洗流程，这些方法在RoBERTa、T5、GPT-3等所有主流模型中都被广泛应用。</p>
+
+<h4>9.2.1 去重 (Deduplication)</h4>
+
+<p>互联网语料中充斥着大量重复内容——同一个新闻被多家媒体转载、同一篇文章在不同网站重复出现、模板化的页面（如"404 Not Found"）等。如果不做去重，模型会花费大量容量"记住"这些重复的短语，而不是学习语言的一般规律。</p>
+
+<p>去重的标准做法是<strong>MinHash + LSH (局部敏感哈希)</strong>，可以在线性时间内对TB级数据进行近似去重。</p>
+
+<pre><code>from datasketch import MinHash, LeanMinHash
+import hashlib
+
+def compute_minhash(text, num_perm=128):
+    """
+    计算文本的MinHash签名
+    用于后续的近似去重
+    """
+    m = MinHash(num_perm=num_perm)
+    # 对文本进行shingle（n-gram）分片
+    for i in range(len(text) - 5):
+        shingle = text[i:i+5].encode('utf-8')
+        m.update(shingle)
+    return m
+
+def deduplicate_corpus(documents, threshold=0.8, num_perm=128):
+    """
+    使用MinHash对文档集合进行去重
+    返回去重后的文档列表
+    """
+    # 计算每个文档的MinHash签名
+    signatures = []
+    for doc in documents:
+        sig = compute_minhash(doc, num_perm)
+        signatures.append(LeanMinHash(sig))
+
+    # 使用LSH进行近似去重
+    # 实际生产中使用Spark或Ray进行分布式处理
+    unique_docs = []
+    seen_hashes = set()
+
+    for i, doc in enumerate(documents):
+        doc_hash = hash(tuple(signatures[i].digest()))
+        # 检查是否与已有文档相似
+        is_duplicate = False
+        for seen_hash in seen_hashes:
+            # 计算Jaccard相似度
+            jaccard = signatures[i].jaccard(seen_hash)
+            if jaccard &gt; threshold:
+                is_duplicate = True
+                break
+
+        if not is_duplicate:
+            unique_docs.append(doc)
+            seen_hashes.add(doc_hash)
+
+    print(f"去重率: {(1 - len(unique_docs)/len(documents))*100:.1f}%")
+    return unique_docs
+</code></pre>
+
+<div class="warning">
+    <strong>踩坑实录：</strong> 我第一次做中文语料去重时，天真地以为直接用整篇文章的MD5就能搞定。结果发现同一篇新闻在A网站多了个"来源：XXX"的尾巴，在B网站少了最后一段——MD5完全不同！后来改用MinHash + 字符级5-gram，才真正把重复率从30%降到5%以下。别踩这个坑——<strong>近似去重比精确去重重要得多</strong>。
+</div>
+
+<h4>9.2.2 质量过滤</h4>
+
+<p>质量过滤的目标是剔除低质量的文本。业界有两种主流方法：</p>
+
+<table>
+    <thead>
+        <tr><th>方法</th><th>原理</th><th>优点</th><th>缺点</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>Perplexity-based过滤</td><td>用已有的语言模型计算文本的perplexity，得分越低（越"困惑"）越可能是噪声</td><td>无需标注数据，过滤粒度可控</td><td>依赖参考LM的质量，有领域偏差</td></tr>
+        <tr><td>Classifier-based过滤</td><td>训练一个二分类器（高质量 vs 低质量），对每个文档打分</td><td>准确率高，能捕捉复杂的质量信号</td><td>需要标注数据，有标注偏差</td></tr>
+        <tr><td>启发式规则过滤</td><td>基于规则的硬过滤：行长度阈值、标点符号比例、重复字符比例等</td><td>计算成本低，可解释性强</td><td>规则难以覆盖所有噪声类型</td></tr>
+    </tbody>
+</table>
+
+<h4>9.2.3 语言检测</h4>
+
+<p>如果做单语言模型（如只训练中文BERT），需要确保数据集中没有大量混入其他语言的文本。常用的语言检测工具是<strong>fastText的语言分类模型</strong>，覆盖176种语言，速度快、准确率高。</p>
+
+<h3>9.3 文档排序与FULL-SENTENCES策略</h3>
+
+<p>一个常被忽略但非常重要的细节：<strong>长文档优于短文档</strong>。原因很简单——长文档提供了更丰富的上下文信息，让模型能学到更长距离的依赖关系。RoBERTa在数据预处理时按文档长度对数据进行排序，并优先让模型看到更长的文档。</p>
+
+<p>同时，RoBERTa提出了<strong>FULL-SENTENCES</strong>策略来代替NSP：不再将两段句子拼接并预测它们是否相邻，而是简单地从一个或多个文档中连续取完整的句子，直到填满512个token的序列长度。这样一来：</p>
+
+<ul>
+    <li>取消了NSP的segment限制，模型不必再浪费容量在"判断句子关系"这个简单任务上</li>
+    <li>每个训练序列都能被充分利用（不会因为NSP而浪费大量训练信号）</li>
+    <li>跨文档的文本让模型接触更多样化的语言模式</li>
+</ul>
+
+<pre><code>def full_sentences_tokenizer(documents, tokenizer, max_length=512):
+    """
+    FULL-SENTENCES策略的核心实现：
+    从一个或多个文档中取完整的句子，拼满max_length
+    """
+    sequences = []
+    current_tokens = []
+
+    for doc in documents:
+        # 按句号、问号、感叹号等分句
+        sentences = split_sentences(doc)
+
+        for sentence in sentences:
+            sentence_tokens = tokenizer.encode(sentence, add_special_tokens=False)
+
+            # 如果单句已经超过max_length，直接截断作为独立序列
+            if len(sentence_tokens) &gt;= max_length - 2:
+                if current_tokens:
+                    # 先处理已有的累积tokens
+                    sequences.append(current_tokens)
+                    current_tokens = []
+                # 截断这个超长句子
+                sequences.append(sentence_tokens[:max_length - 2])
+                continue
+
+            # 如果加上当前句子会超长，先存当前序列，再开始新序列
+            if len(current_tokens) + len(sentence_tokens) &gt; max_length - 2:
+                sequences.append(current_tokens)
+                current_tokens = sentence_tokens.copy()
+            else:
+                current_tokens.extend(sentence_tokens)
+
+    # 最后一批不要落下
+    if current_tokens:
+        sequences.append(current_tokens)
+
+    return sequences
+</code></pre>
+
+<h3>9.4 动态掩码的工程实现</h3>
+
+<p>上一章我们提了动态掩码的理念，这里给出一个更完整、更接近生产环境的实现。动态掩码的核心价值在于：<strong>同样的数据在不同epoch中看到不同的掩码模式，大幅增加了数据的有效多样性。</strong></p>
+
+<pre><code>import torch
+import numpy as np
+
+class DynamicMaskingDataCollator:
+    """
+    HuggingFace Trainer兼容的动态掩码DataCollator
+    每次__call__都重新生成掩码pattern
+    """
+    def __init__(self, tokenizer, mlm_probability=0.15):
+        self.tokenizer = tokenizer
+        self.mlm_probability = mlm_probability
+        self.mask_token_id = tokenizer.mask_token_id
+        self.vocab_size = tokenizer.vocab_size
+        self.special_tokens = set(tokenizer.all_special_ids)
+
+    def __call__(self, examples):
+        # 从examples中提取input_ids并进行padding
+        batch = self.tokenizer.pad(
+            examples,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=512
+        )
+
+        input_ids = batch["input_ids"].clone()
+        labels = input_ids.clone()
+
+        # 为batch中的每个序列独立生成mask pattern
+        probability_matrix = torch.full(input_ids.shape, self.mlm_probability)
+
+        # 特殊token（[CLS], [SEP], [PAD]等）不参与mask
+        special_tokens_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        for special_id in self.special_tokens:
+            special_tokens_mask |= (input_ids == special_id)
+        probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+
+        # 二项分布采样mask位置
+        masked_indices = torch.bernoulli(probability_matrix).bool()
+
+        # labels中被mask的位置是原始token，其他位置设为-100（忽略）
+        labels[~masked_indices] = -100
+
+        # 80%替换为[MASK]
+        indices_replaced = torch.bernoulli(
+            torch.full(labels.shape, 0.8)
+        ).bool() &amp; masked_indices
+        input_ids[indices_replaced] = self.mask_token_id
+
+        # 10%替换为随机token
+        indices_random = torch.bernoulli(
+            torch.full(labels.shape, 0.5)  # 在剩余20%中的一半
+        ).bool() &amp; masked_indices &amp; ~indices_replaced
+        random_words = torch.randint(
+            self.vocab_size, labels.shape, dtype=torch.long
+        )
+        input_ids[indices_random] = random_words[indices_random]
+
+        # 剩下的10%保持不变（训练模型去预测没有被mask但又需要预测的词）
+        # 这已经是默认行为，不需要额外操作
+
+        batch["input_ids"] = input_ids
+        batch["labels"] = labels
+        return batch
+</code></pre>
+
+<div class="tip">
+    <strong>工程注意：</strong> 在分布式训练（多GPU/TPU）中，每个rank上的数据加载器都应该有独立的随机种子，否则所有GPU上生成的mask pattern会一模一样，动态掩码就失去了意义。可以在<code>DistributedSampler</code>中设置<code>seed</code>参数来确保每个epoch的shuffle顺序和mask pattern都不同。
+</div>
+
+<h3>9.5 数据配比的艺术</h3>
+
+<p>当你有多个数据源时，如何配比它们的比例是一个关键决策。RoBERTa团队使用了近似等量的数据配比（BookCorpus、CC-News、OpenWebText、Stories各约25%），但这个比例并不是通用的。</p>
+
+<table>
+    <thead>
+        <tr><th>数据源类型</th><th>特点</th><th>推荐配比</th><th>适用场景</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>书籍/长文</td><td>语法规范、长距离依赖丰富</td><td>20-30%</td><td>通用语言理解</td></tr>
+        <tr><td>新闻语料</td><td>事实性强、时效性好</td><td>20-30%</td><td>事实验证、问答</td></tr>
+        <tr><td>网页内容</td><td>领域多样、风格杂</td><td>30-40%</td><td>提升泛化性</td></tr>
+        <tr><td>对话/社交媒体</td><td>口语化、短句多</td><td>10-20%</td><td>对话理解、情感分析</td></tr>
+        <tr><td>代码/技术文档</td><td>结构化、逻辑性强</td><td>5-10%</td><td>代码理解、技术NLP</td></tr>
+    </tbody>
+</table>
+
+<p>一个实用的经验法则是：<strong>用"留出验证集"跟踪不同数据配比的效果</strong>。在训练过程中定期在验证集上计算loss，如果某个数据源的loss长期居高不下，说明该领域的语言模式模型还没学好，可以考虑适当增加该源的配比。</p>
+
+<h3>9.6 中文预训练数据源</h3>
+
+<p>如果你在构建中文BERT的预训练数据，下面是可用的主要数据源及其特点：</p>
+
+<table>
+    <thead>
+        <tr><th>数据源</th><th>规模估算</th><th>质量</th><th>获取难度</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>百度百科</td><td>~50GB</td><td>⭐⭐⭐⭐⭐ 极高</td><td>公开</td></tr>
+        <tr><td>知乎问答</td><td>~30GB</td><td>⭐⭐⭐⭐ 高</td><td>需爬取</td></tr>
+        <tr><td>新闻语料(新浪/腾讯等)</td><td>~100GB+</td><td>⭐⭐⭐⭐ 高</td><td>公开</td></tr>
+        <tr><td>微信公众号文章</td><td>~200GB+</td><td>⭐⭐⭐ 中等</td><td>需授权</td></tr>
+        <tr><td>中文维基百科</td><td>~5GB</td><td>⭐⭐⭐⭐⭐ 极高</td><td>公开</td></tr>
+        <tr><td>网络爬虫(CommonCrawl中文子集)</td><td>~1TB+</td><td>⭐⭐ 低-中</td><td>公开</td></tr>
+    </tbody>
+</table>
+
+<div class="highlight">
+    <strong>经验之谈：</strong> 对于中文BERT预训练，一个经典的配比是"百度百科(20%) + 知乎(20%) + 新闻(30%) + 中文维基(10%) + CommonCrawl中文(20%)"，既能保证基础质量，又有足够的多样性。如果你的任务偏正式（如法律、金融文本），就要增加百科和新闻的比例；如果面向社交媒体的内容分析，则增加知乎和社区的比例。
+</div>
+
+<h3>9.7 本章小结</h3>
+
+<p>数据工程是BERT预训练中最容易被低估的环节。一个好的数据管线（清洗→去重→过滤→配比→动态掩码）带来的收益，往往比花时间调几个超参数要大得多。这一章我们详细讲解了从原始语料到高质量训练数据的完整处理流程，以及动态掩码的工程实现。</p>
+
+<p>下一章，我们将进入<strong>超参数与优化器配置</strong>的世界——AdamW为什么比Adam好？学习率warmup和衰减策略怎么选？如何用分层学习率让微调效果更好？这些"调参"知识是通往BERT高手的必经之路。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

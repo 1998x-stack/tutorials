@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 超参数与优化器配置 — BERT教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 NLP预训练发展简史</a></li>
+            <li><a href="02.html">第2章 Transformer架构精讲</a></li>
+            <li><a href="03.html">第3章 BERT开山论文精读(上)</a></li>
+            <li><a href="04.html">第4章 BERT开山论文精读(下)</a></li>
+            <li><a href="05.html">第5章 BERT输入表示与分词</a></li>
+            <li><a href="06.html">第6章 MLM与NSP深度剖析</a></li>
+            <li><a href="07.html">第7章 BERT微调实战范式</a></li>
+            <li><a href="08.html">第8章 RoBERTa训练配方革命</a></li>
+            <li><a href="09.html">第9章 数据工程与动态掩码</a></li>
+            <li><a href="10.html" class="active">第10章 超参数与优化器配置</a></li>
+            <li><a href="11.html">第11章 预训练数据规模效应</a></li>
+            <li><a href="12.html">第12章 训练稳定性技术</a></li>
+            <li><a href="13.html">第13章 多语言BERT与跨语言迁移</a></li>
+            <li><a href="14.html">第14章 BERT变体生态横评</a></li>
+            <li><a href="15.html">第15章 ELECTRA判别式预训练</a></li>
+            <li><a href="16.html">第16章 XLNet排列语言模型</a></li>
+            <li><a href="17.html">第17章 MPNet掩码排列融合</a></li>
+            <li><a href="18.html">第18章 ALBERT参数高效设计</a></li>
+            <li><a href="19.html">第19章 DeBERTa解耦注意力</a></li>
+            <li><a href="20.html">第20章 中文BERT全景</a></li>
+            <li><a href="21.html">第21章 长文本BERT方案</a></li>
+            <li><a href="22.html">第22章 SimCSE对比学习句向量</a></li>
+            <li><a href="23.html">第23章 知识蒸馏轻量化</a></li>
+            <li><a href="24.html">第24章 移动端BERT部署</a></li>
+            <li><a href="25.html">第25章 高效微调实战</a></li>
+            <li><a href="26.html">第26章 ModernBERT与2025前沿</a></li>
+            <li><a href="27.html">第27章 极致压缩与端侧智能</a></li>
+            <li><a href="28.html">第28章 端到端实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第10章 超参数与优化器配置</h2>
+
+<p>大家好，我是你们的讲师。前面几章我们讲了模型架构、数据工程，但你是否遇到过这种情况：把RoBERTa的代码和数据管线都搭好了，开始训练——loss要么震荡得像过山车，要么纹丝不动像条死线？如果你遇到这个问题，大概率是超参数和优化器配置出了问题。</p>
+
+<p>BERT类模型的训练对超参数非常敏感。我见过不少团队花了几周时间收集数据、清洗预处理，结果因为learning rate设错了导致浪费了成百上千GPU时——这是个非常昂贵的"学费"。这一章我们就系统地过一遍BERT训练中涉及的关键超参数和优化器选择，帮助大家一次性搞定这些"隐形"的配置项。</p>
+
+<h3>10.1 AdamW vs Adam：权重衰减解耦</h3>
+
+<p>BERT原始论文使用的是Adam优化器。但后来社区发现：在Transformer架构中，<strong>AdamW显著优于Adam</strong>。AdamW的核心改进在于将权重衰减(weight decay)与自适应学习率解耦。</p>
+
+<p>在标准Adam中，权重衰减是叠加在梯度更新中的，等价于在loss中增加L2正则项。但问题是——Adam的自适应学习率会让不同参数的权重衰减幅度不一致，导致<strong>某些参数被过度正则化，某些正则化不足</strong>。AdamW将权重衰减单独拿出来，在参数更新时直接对参数本身进行衰减，而不通过梯度调整路径。</p>
+
+<pre><code># AdamW的更新规则伪代码
+import torch
+
+class SimpleAdamW:
+    """
+    AdamW核心逻辑：权重衰减与梯度更新解耦
+    """
+    def __init__(self, params, lr=1e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
+        self.params = list(params)
+        self.lr = lr
+        self.betas = betas
+        self.eps = eps
+        self.weight_decay = weight_decay
+        self.m = [torch.zeros_like(p) for p in self.params]
+        self.v = [torch.zeros_like(p) for p in self.params]
+        self.t = 0
+
+    def step(self):
+        self.t += 1
+        for i, p in enumerate(self.params):
+            if p.grad is None:
+                continue
+
+            grad = p.grad
+
+            # 步骤1: 更新动量项（Adam的一阶矩估计）
+            self.m[i] = self.betas[0] * self.m[i] + (1 - self.betas[0]) * grad
+            # 步骤2: 更新自适应学习率项（Adam的二阶矩估计）
+            self.v[i] = self.betas[1] * self.v[i] + (1 - self.betas[1]) * grad ** 2
+
+            # 步骤3: 偏差修正
+            m_hat = self.m[i] / (1 - self.betas[0] ** self.t)
+            v_hat = self.v[i] / (1 - self.betas[1] ** self.t)
+
+            # 步骤4: 梯度更新（Adam部分）
+            p.data -= self.lr * m_hat / (torch.sqrt(v_hat) + self.eps)
+
+            # 步骤5: 权重衰减（与梯度解耦，直接在参数上操作）
+            # 这是AdamW与Adam的关键区别
+            p.data -= self.lr * self.weight_decay * p.data
+</code></pre>
+
+<div class="highlight">
+    <strong>推荐配置：</strong> 对于BERT类模型的预训练和微调，AdamW是默认选择。PyTorch的<code>torch.optim.AdamW</code>和HuggingFace的<code>transformers.AdamW</code>都可以直接使用，注意设置<code>weight_decay=0.01</code>（预训练）或<code>weight_decay=0.1</code>（微调）。
+</div>
+
+<h3>10.2 学习率Warmup策略</h3>
+
+<p>为什么需要warmup？因为在训练刚开始时，模型参数是随机初始化的，梯度方向非常嘈杂。如果一上来就用较大的学习率，很容易让模型"跑偏"到loss landscape中不好的区域。Warmup让学习率从小逐步增大到目标值，让模型在早期有一个"稳定的预热期"。</p>
+
+<table>
+    <thead>
+        <tr><th>Warmup策略</th><th>公式</th><th>特点</th><th>推荐场景</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>线性Warmup</td><td>lr = lr_max * (step / warmup_steps)</td><td>简单直观，最常用</td><td>预训练、微调通用</td></tr>
+        <tr><td>余弦Warmup</td><td>lr = lr_max * (1 - cos(π * step / warmup_steps)) / 2</td><td>平滑上升，曲线更优雅</td><td>大batch预训练</td></tr>
+        <tr><td>恒定Warmup</td><td>前warmup_steps用恒定小lr，然后跳到目标lr</td><td>简单粗暴，但跳跃有风险</td><td>不推荐</td></tr>
+    </tbody>
+</table>
+
+<p>warmup步数通常设置为总训练步数的<strong>1%到10%</strong>。预训练一般取总步数的1-6%（比如100万步训练取1万步warmup），微调则warmup比例可以稍大，通常取10%。</p>
+
+<h3>10.3 学习率衰减策略</h3>
+
+<p>Warmup之后，学习率需要按照一定策略逐渐衰减到0（或接近0）。这个阶段的目标是：随着训练进行，越来越精细地"微调"参数。</p>
+
+<pre><code>from transformers import get_scheduler
+
+def get_lr_scheduler(optimizer, num_training_steps, config="linear"):
+    """
+    创建学习率调度器
+    """
+    if config == "linear":
+        # 线性衰减到0：最常用
+        return get_scheduler(
+            "linear",
+            optimizer=optimizer,
+            num_warmup_steps=int(0.06 * num_training_steps),
+            num_training_steps=num_training_steps
+        )
+    elif config == "cosine":
+        # 余弦衰减：先快后慢，在后期保持相对较大的lr
+        return get_scheduler(
+            "cosine",
+            optimizer=optimizer,
+            num_warmup_steps=int(0.06 * num_training_steps),
+            num_training_steps=num_training_steps
+        )
+    elif config == "constant":
+        # 恒定lr（不衰减）：只在极少场景下使用
+        return get_scheduler(
+            "constant",
+            optimizer=optimizer,
+            num_warmup_steps=int(0.06 * num_training_steps),
+            num_training_steps=num_training_steps
+        )
+    else:
+        raise ValueError(f"Unknown scheduler: {config}")
+</code></pre>
+
+<h4>三种衰减策略对比</h4>
+<ul>
+    <li><strong>线性衰减(Linear Decay)</strong>：最常用，效果稳定。学习率从峰值线性下降到近乎0。适合大多数预训练和微调场景。</li>
+    <li><strong>余弦衰减(Cosine Decay)</strong>：前期下降较慢，后期加速下降。在训练步数不足时效果更好，因为模型在后期还能以相对较大的lr继续学习。</li>
+    <li><strong>恒定lr</strong>：完全不衰减。虽然偶尔在少量微调（如只训练分类头几轮）时有效，但不推荐用于完整训练。</li>
+</ul>
+
+<div class="warning">
+    <strong>踩坑实录：</strong> 有一次我在微调情感分类模型时，用了cosine decay + 非常少的epoch（3个）。结果验证集准确率在第2个epoch达到顶峰，第3个epoch反而下降了——因为cosine decay在末端学习率太小，模型还没收敛就被"饿死"了。后来改为linear decay + early stopping，效果反而更好。记住：<strong>衰减策略的选择要和训练步数匹配</strong>。
+</div>
+
+<h3>10.4 LLRD：分层学习率衰减</h3>
+
+<p>BERT类模型的不同层级学习到的特征是不同层次的：底层学到的是通用的语法和词法特征，中层学到的语义特征，顶层学到的是任务相关的特征。所以，<strong>为所有层统一设置学习率是次优的</strong>。</p>
+
+<p><strong>LLRD (Layer-wise Learning Rate Decay)</strong> 的核心思想是：底层学习率小（保留通用特征），顶层学习率大（快速适应下游任务）。</p>
+
+<pre><code>from transformers import BertForSequenceClassification
+
+def apply_llrd(model, base_lr=2e-5, decay_factor=0.95):
+    """
+    为BERT模型应用分层学习率衰减(LLRD)
+    底层使用更小的lr，顶层使用更大的lr
+
+    参数:
+        model: BertForSequenceClassification实例
+        base_lr: 顶层（分类头）的基础学习率
+        decay_factor: 每向下一层学习率乘以的衰减系数
+    """
+    optimizer_grouped_parameters = []
+
+    # 1. 分类头（顶层）—— 使用完整的基础学习率
+    classifier_params = {
+        "params": model.classifier.parameters(),
+        "lr": base_lr,
+        "weight_decay": 0.01
+    }
+    optimizer_grouped_parameters.append(classifier_params)
+
+    # 2. BERT编码器层 —— 逐层递减
+    # BERT-Base有12层，第11层是顶层，第0层是底层
+    num_layers = model.config.num_hidden_layers
+
+    for layer_idx in range(num_layers):
+        layer = model.bert.encoder.layer[layer_idx]
+        # 底层(layer_idx=0)学习率最小: base_lr * decay_factor^11
+        # 顶层(layer_idx=11)学习率接近base_lr: base_lr * decay_factor^0
+        layer_lr = base_lr * (decay_factor ** (num_layers - 1 - layer_idx))
+
+        layer_params = {
+            "params": layer.parameters(),
+            "lr": layer_lr,
+            "weight_decay": 0.01
+        }
+        optimizer_grouped_parameters.append(layer_params)
+
+    # 3. Embedding层 —— 使用最小的学习率
+    embedding_params = {
+        "params": model.bert.embeddings.parameters(),
+        "lr": base_lr * (decay_factor ** num_layers),  # 最小lr
+        "weight_decay": 0.01
+    }
+    optimizer_grouped_parameters.append(embedding_params)
+
+    return torch.optim.AdamW(optimizer_grouped_parameters)
+</code></pre>
+
+<div class="tip">
+    <strong>使用建议：</strong> LLRD特别适用于以下场景：(1)预训练数据与下游任务数据差异大时（如用通用BERT做法律文本分类）；(2)只有少量标注数据进行微调时；(3)希望保留BERT的通用语言能力、只让顶层快速适配任务时。decay_factor通常设置在0.9-0.95之间，太小会让底层几乎学不到东西。
+</div>
+
+<h3>10.5 Batch Size效应</h3>
+
+<p>Batch Size的选择直接影响到训练速度、收敛质量和泛化性能。</p>
+
+<table>
+    <thead>
+        <tr><th>Batch Size</th><th>优点</th><th>缺点</th><th>典型配置</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>小 (16-64)</td><td>泛化性好，隐式正则化</td><td>梯度噪声大，训练慢</td><td>单GPU微调</td></tr>
+        <tr><td>中 (64-256)</td><td>训练效率好，稳定</td><td>中等</td><td>小规模预训练</td></tr>
+        <tr><td>大 (256-8192)</td><td>训练极快，梯度估计准确</td><td>泛化性可能下降，需要更大lr</td><td>大规模预训练</td></tr>
+    </tbody>
+</table>
+
+<p><strong>小batch vs 大batch的关键权衡：</strong> 当你扩大batch size时，需要同步增大学习率。一个经验法则是"线性缩放规则"：batch翻倍，lr也翻倍。但注意这个规则在大batch（>1024）时可能失效，需要配合warmup做更细致的调节。</p>
+
+<h3>10.6 Dropout配置</h3>
+
+<p>BERT中的Dropout主要应用于两个位置：<strong>Attention层</strong>和<strong>隐藏层</strong>。下面是经过大量实验验证的推荐配置：</p>
+
+<table>
+    <thead>
+        <tr><th>Dropout类型</th><th>BERT原始配置</th><th>2025推荐配置</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>Attention Dropout</td><td>0.1</td><td>0.1</td><td>对注意力权重矩阵施加dropout</td></tr>
+        <tr><td>Hidden Dropout</td><td>0.1</td><td>0.1</td><td>对全连接层输出施加dropout</td></tr>
+        <tr><td>Embedding Dropout</td><td>N/A</td><td>0.0-0.1</td><td>对token/position embedding施加dropout</td></tr>
+        <tr><td>Classifier Dropout</td><td>N/A</td><td>0.1-0.3</td><td>对下游任务分类头施加dropout</td></tr>
+    </tbody>
+</table>
+
+<h3>10.7 2025推荐配置总表</h3>
+
+<p>综合学术界和工业界的最佳实践，下面是一份经过验证的BERT超参数快速配置表：</p>
+
+<table>
+    <thead>
+        <tr><th>超参数</th><th>预训练(推荐)</th><th>微调(推荐)</th><th>备注</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>Optimizer</td><td>AdamW</td><td>AdamW</td><td>PyTorch原生实现</td></tr>
+        <tr><td>Peak Learning Rate</td><td>1e-4 (Base) / 3e-5 (Large)</td><td>2e-5 - 5e-5</td><td>大batch=l略大lr</td></tr>
+        <tr><td>Weight Decay</td><td>0.01</td><td>0.01 - 0.1</td><td>微调时可适当增大</td></tr>
+        <tr><td>Warmup Ratio</td><td>6% (of total steps)</td><td>10%</td><td>小数据集warmup比例可更大</td></tr>
+        <tr><td>LR Schedule</td><td>Linear Decay</td><td>Linear Decay</td><td>Cosine也可，但需更多steps</td></tr>
+        <tr><td>Batch Size</td><td>2048 - 8192</td><td>16 - 32</td><td>微调用小batch效果好</td></tr>
+        <tr><td>Max Epochs</td><td>N/A (按steps)</td><td>3 - 10</td><td>early stopping很重要</td></tr>
+        <tr><td>β₁, β₂ (Adam)</td><td>0.9, 0.999</td><td>0.9, 0.999</td><td>通用Adam默认值</td></tr>
+        <tr><td>ε (Adam)</td><td>1e-6</td><td>1e-8</td><td>更大的ε增加数值稳定性</td></tr>
+        <tr><td>Attention Dropout</td><td>0.1</td><td>0.1</td><td>不变</td></tr>
+        <tr><td>Hidden Dropout</td><td>0.1</td><td>0.1</td><td>不变</td></tr>
+        <tr><td>Gradient Clipping</td><td>1.0</td><td>1.0</td><td>基本必开</td></tr>
+        <tr><td>LLRD Factor</td><td>N/A</td><td>0.9 - 0.95</td><td>仅在微调时使用</td></tr>
+    </tbody>
+</table>
+
+<h3>10.8 贝叶斯超参搜索 vs 手动调参</h3>
+
+<p>当你有足够的计算资源时，<strong>贝叶斯超参搜索(Bayesian Optimization)</strong> 比手动调参更高效：</p>
+
+<ul>
+    <li><strong>贝叶斯搜索</strong>：使用高斯过程(GP)或TPE来建模超参数与验证集指标的关系，自动推荐下一组候选参数。3-5次迭代就能找到接近最优的配置。推荐工具：Optuna, Hyperopt, Weights & Biases Sweeps。</li>
+    <li><strong>手动调参</strong>：依赖经验和直觉。优势是可以结合对模型行为的理解，快速排除明显不合理的参数组合。对于有经验的工程师，手动调参 + 少量贝叶斯搜索的结合往往效果最好。</li>
+</ul>
+
+<p>一个实用的<strong>调参顺序</strong>：先定lr（最重要的参数）→ 再定batch size → 然后调整warmup和decay策略 → 最后才是weight decay和dropout等精细参数。</p>
+
+<div class="highlight">
+    <strong>建议：</strong> 无论你多么相信自己的直觉，至少对<strong>learning rate</strong>和<strong>warmup ratio</strong>做一次grid search或随机搜索。这两个参数对最终结果的影响最大，且它们的"最优值"在不同数据集上有显著差异。花半天时间搜索lr，可能省下几天的训练时间。
+</div>
+
+<h3>10.9 本章小结</h3>
+
+<p>超参数配置是BERT实践中最容易被忽视但又最关键的技术细节之一。从AdamW的权重衰减解耦，到LLRD的分层学习率设计，再到不同训练阶段的完整配置推荐——每一项背后都有深刻的理论依据和大量的实践经验。</p>
+
+<p>下一章我们将探讨一个更大的话题——<strong>预训练数据的规模效应</strong>。BERT真的欠训练了吗？Chinchilla定律在Encoder模型中如何体现？2T tokens的ModernBERT给了我们什么启示？</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

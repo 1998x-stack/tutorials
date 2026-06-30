@@ -29,6 +29,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `llama-tutorial/` | LLaMA大模型技术 | 28 | `https://1998x-stack.github.io/llama-tutorial/` |
 | `deepseek-tutorial/` | DeepSeek模型系列 | 28 | `https://1998x-stack.github.io/deepseek-tutorial/` |
 | `yolo-tutorial/` | YOLO目标检测 | 28 | `https://1998x-stack.github.io/yolo-tutorial/` |
+| `CV-tutorial/` | 计算机视觉经典模型 | 28 | `https://1998x-stack.github.io/CV-tutorial/` |
 | `MOE-tutorial/` | MoE混合专家模型 | 28 | `https://1998x-stack.github.io/MOE-tutorial/` |
 | `llm-agent-engineering-tutorial/` | 大模型工程实践：Agent框架 | 28 | `https://1998x-stack.github.io/llm-agent-engineering-tutorial/` |
 | `aigc-tutorial/` | AIGC生成模型 | 28 | `https://1998x-stack.github.io/aigc-tutorial/` |

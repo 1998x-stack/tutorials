@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 跳表与整数集合</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html" class="active">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第7章：跳表与整数集合</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们看完了字典——Redis 中最核心的"无序"哈希结构。但数据库世界除了"快速查找单个元素"之外，还有一个重要的需求：<strong>范围查询</strong>。比如"找出分数在 80 到 90 之间的所有用户"或者"获取排名前 10 的选手"——这些操作要求数据是有序的。</p>
+
+        <p>不同的数据库解决范围查询的方法各不相同：MySQL 用 B+ 树，LevelDB 用 LSM-Tree，而 Redis 则选择了<strong>跳表（skiplist）</strong>。为什么是跳表而不是红黑树？这个问题在技术社区中被问过无数次，antirez 的回答很直接：跳表实现更简单，范围查询更自然，对于 Redis 的 ZSET 场景来说足够快。在本章中，我们将深入 <code>t_zset.c</code> 和 <code>skiplist.c</code>，看看跳表是如何运作的，以及 Redis 为什么选择了这个"概率性"数据结构。</p>
+
+        <p>另外，我们还将研究 Redis 的另一个有序结构——<strong>整数集合（intset）</strong>。它是 Sorted Set 在元素全为整数且数量较少时的底层编码方案，采用动态升级策略，在紧凑性和性能之间取得了巧妙的平衡。</p>
+
+        <h2>跳表数据结构</h2>
+
+        <p>跳表的核心思想是在有序链表之上叠加多层"快速通道"，让搜索可以从最上层开始，跨越多个节点，快速定位到目标区域。Redis 的跳表定义如下：</p>
+
+        <pre><code>/* server.h 中的 zskiplist 和 zskiplistNode */
+typedef struct zskiplistNode {
+    sds ele;                      /* 成员对象（SDS 字符串） */
+    double score;                 /* 分值（排序依据） */
+    struct zskiplistNode *backward; /* 后退指针（指向前一个节点） */
+    struct zskiplistLevel {
+        struct zskiplistNode *forward; /* 前进指针 */
+        unsigned long span;           /* 跨度（到下一个节点的距离） */
+    } level[];                    /* 柔性数组，层高随机生成 */
+} zskiplistNode;
+
+typedef struct zskiplist {
+    struct zskiplistNode *header, *tail; /* 头节点和尾节点 */
+    unsigned long length;          /* 节点数量（不含头节点） */
+    int level;                     /* 当前最大层数 */
+} zskiplist;</code></pre>
+
+        <p>这里有几个关键设计点：</p>
+
+        <ul>
+            <li><strong>层高随机生成：</strong>每个节点在创建时随机决定层高。Redis 使用的策略是 <code>1/4 概率升级</code>——即从 level 1 开始，每次有 25% 的概率增加一层，直到达到上限（最大 64 层）。这意味着 75% 的节点只有 1 层，约 18.75% 的节点有 2 层，以此类推。</li>
+            <li><strong>span 字段：</strong>每个 level 的 forward 指针都关联了一个 span 值，表示沿着该 forward 指针跳过了多少个节点。这个设计使得 <code>ZRANK</code> 和 <code>ZREVRANK</code> 命令可以 O(log N) 计算出某个成员的排名，而无需遍历链表。</li>
+            <li><strong>backward 指针：</strong>只在 level 1 上存在后退指针，用于逆序遍历（<code>ZREVRANGE</code>）。高层的 backward 指针没有意义——因为高层是用于"跨越"而不是"精确前进"的。</li>
+            <li><strong>柔性数组 level[]：</strong>每个节点的 level 数组长度在创建时决定，不占用结构体固定空间，通过 <code>zmalloc(sizeof(zskiplistNode) + sizeof(zskiplistLevel) * level)</code> 一次性分配。</li>
+        </ul>
+
+        <h2>跳表核心操作</h2>
+
+        <h3>插入：zslInsert</h3>
+
+        <p>跳表插入操作分为三步：查找插入位置、随机生成层高、更新指针。其中查找插入位置的过程是整个算法的精华——它使用了一个 update 数组记录每层中最后一个 <code>score &lt; 要插入的 score</code> 或 <code>score 相等但 ele 字典序小于</code> 的节点：</p>
+
+        <pre><code>/* zslInsert 核心逻辑（简化版） */
+zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
+    zskiplistNode *update[ZSKIPLIST_MAXLEVEL]; /* 每层的更新点 */
+    unsigned long rank[ZSKIPLIST_MAXLEVEL];     /* 每层的排名 */
+
+    x = zsl-&gt;header;
+    /* 从最高层往下查找，记录每层的 update 和 rank */
+    for (i = zsl-&gt;level - 1; i &gt;= 0; i--) {
+        rank[i] = i == (zsl-&gt;level - 1) ? 0 : rank[i + 1];
+        while (x-&gt;level[i].forward &amp;&amp;
+               (x-&gt;level[i].forward-&gt;score &lt; score ||
+                (x-&gt;level[i].forward-&gt;score == score &amp;&amp;
+                 sdscmp(x-&gt;level[i].forward-&gt;ele, ele) &lt; 0))) {
+            rank[i] += x-&gt;level[i].span;
+            x = x-&gt;level[i].forward;
+        }
+        update[i] = x;
+    }
+
+    /* 随机生成新节点的层高 */
+    level = zslRandomLevel();
+    if (level &gt; zsl-&gt;level) {
+        for (i = zsl-&gt;level; i &lt; level; i++) {
+            rank[i] = 0;
+            update[i] = zsl-&gt;header;
+            update[i]-&gt;level[i].span = zsl-&gt;length;
+        }
+        zsl-&gt;level = level;
+    }
+
+    /* 创建新节点并更新指针和跨度 */
+    x = zslCreateNode(level, score, ele);
+    for (i = 0; i &lt; level; i++) {
+        x-&gt;level[i].forward = update[i]-&gt;level[i].forward;
+        update[i]-&gt;level[i].forward = x;
+        x-&gt;level[i].span = update[i]-&gt;level[i].span - (rank[0] - rank[i]);
+        update[i]-&gt;level[i].span = (rank[0] - rank[i]) + 1;
+    }
+    /* ... 更新更高层的 span，设置 backward 指针 ... */
+    zsl-&gt;length++;
+    return x;
+}</code></pre>
+
+        <p>这段代码虽然看起来有点长，但逻辑非常清晰：先向下寻找，再向上回填。每层的 update 节点和 rank 记录了插入位置和排名信息，使得插入后不需要遍历就能更新所有受影响的 span。</p>
+
+        <h3>删除与排名查询</h3>
+
+        <p><code>zslDelete</code> 的逻辑与插入对称——同样先用 update 数组找到待删除节点，然后逐层更新 forward 指针和 span。<code>zslGetRank</code> 则是直接用 update 数组累加 span，O(log N) 得到排名。这些操作的时间复杂度都是 O(log N)，其中 N 是跳表中的元素数量。</p>
+
+        <h2>跳表 vs 红黑树</h2>
+
+        <p>这是一个经久不衰的技术辩论话题。让我们从 Redis 的实际需求出发，看看为什么 antirez 选择了跳表：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>跳表</th>
+                    <th>红黑树</th>
+                    <th>B+ 树</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>实现复杂度</td>
+                    <td>低（约 300 行 C 代码）</td>
+                    <td>高（平衡调整逻辑复杂）</td>
+                    <td>高（分裂/合并逻辑复杂）</td>
+                </tr>
+                <tr>
+                    <td>范围查询</td>
+                    <td>天然支持（双向链表遍历）</td>
+                    <td>需中序遍历（间接）</td>
+                    <td>天然支持（叶子节点链表）</td>
+                </tr>
+                <tr>
+                    <td>获取排名</td>
+                    <td>O(log N)（span 字段记录）</td>
+                    <td>需在节点中维护 size 字段</td>
+                    <td>O(log N)（层次记录）</td>
+                </tr>
+                <tr>
+                    <td>插入/删除</td>
+                    <td>O(log N)</td>
+                    <td>O(log N) + 旋转</td>
+                    <td>O(log N) + 分裂/合并</td>
+                </tr>
+                <tr>
+                    <td>按排名取元素</td>
+                    <td>O(log N)（span 字段）</td>
+                    <td>需在节点中维护 size 字段</td>
+                    <td>O(log N)</td>
+                </tr>
+                <tr>
+                    <td>内存效率</td>
+                    <td>平均 2 个指针/节点</td>
+                    <td>3 个指针/节点（左/右/父）</td>
+                    <td>高扇出，节点利用率高</td>
+                </tr>
+                <tr>
+                    <td>并发友好度</td>
+                    <td>高（无旋转，局部更新）</td>
+                    <td>低（需全局锁保护平衡）</td>
+                    <td>中（锁住分裂范围）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>从表中可以清楚地看出，跳表在"实现简单"和"功能全面"之间取得了最好的平衡。对于 Redis 的 ZSET 来说，核心操作是 <code>ZADD</code>、<code>ZRANGE</code>、<code>ZRANK</code>——跳表都给出了 O(log N) 的实现，而且代码可以写进一本教科书的附录，而不是整章。这正是 antirez 一贯追求的"对抗复杂度"原则的体现。</p>
+
+        <div class="highlight">
+            <strong>深入思考：</strong>跳表是概率数据结构，但这并不代表它的性能不稳定。在 1/4 概率升级、最大 64 层的参数配置下，跳表退化为链表的概率大约是 2^(-64)，比硬件比特翻转的概率还低。实践中，跳表的性能与红黑树几乎相当，有时甚至更好——因为跳表在插入时不需要像红黑树那样回溯做旋转操作。有基准测试表明，在 ZSET 的典型操作模式下，跳表比红黑树快 10-20%。
+        </div>
+
+        <h2>intset 整数集合</h2>
+
+        <p>当 Sorted Set 的元素全部是整数且数量较少时，Redis 不会使用跳表——它会使用一种更紧凑的结构：<strong>整数集合（intset）</strong>。</p>
+
+        <pre><code>/* intset.h */
+typedef struct intset {
+    uint32_t encoding;   /* 编码方式：INTSET_ENC_INT16/INT32/INT64 */
+    uint32_t length;     /* 元素数量 */
+    int8_t contents[];   /* 柔性数组，实际存储 int16_t/int32_t/int64_t */
+} intset;</code></pre>
+
+        <p>intset 的核心特性是<strong>自动升级（upgrade）</strong>：当插入一个超出当前编码范围的大整数时，intset 会将所有元素升级到更大的编码格式：</p>
+
+        <pre><code>/* intset.c — 升级过程 */
+static intset *intsetUpgradeAndAdd(intset *is, int64_t value) {
+    uint8_t curenc = intrev32ifbe(is-&gt;encoding);
+    uint8_t newenc = _intsetValueEncoding(value);
+    int length = intrev32ifbe(is-&gt;length);
+    int prepend = value &lt; 0 ? 1 : 0;  /* 负值插头，正值插尾 */
+
+    /* 重置编码为新格式 */
+    is-&gt;encoding = intrev32ifbe(newenc);
+
+    /* 从后往前逐个升级元素（避免覆盖） */
+    while (length--)
+        _intsetSet(is, length + prepend, _intsetGetEncoded(is, length, curenc));
+
+    /* 插入新值 */
+    if (prepend)
+        _intsetSet(is, 0, value);
+    else
+        _intsetSet(is, intrev32ifbe(is-&gt;length), value);
+    is-&gt;length = intrev32ifbe(intrev32ifbe(is-&gt;length) + 1);
+    return is;
+}</code></pre>
+
+        <p>升级过程的巧妙之处在于它<strong>从后往前</strong>处理元素——因为新编码的元素占用的字节数更多，如果从前往后复制，前面的元素会覆盖后面的内容。从后往前则保证每个元素都能安全地复制到新位置。</p>
+
+        <p>intset 不支持<strong>降级</strong>：即使所有元素都是 int16 范围内的，一旦升级到 int32，即使后来删除了所有 int32 范围内的元素，也不会回到 int16 编码。这是设计上的权衡——因为降级需要遍历检查所有元素，而且大集合降级的场景非常罕见。</p>
+
+        <p>查找使用<strong>二分查找</strong>（因为 intset 中的元素是有序排列的），时间复杂度 O(log N)。插入和删除需要移动元素，O(N)。</p>
+
+        <h2>zset 双结构设计</h2>
+
+        <p>Sorted Set（zset）是 Redis 中最复杂的类型之一，它在内部同时使用了 <strong>dict</strong> 和 <strong>skiplist</strong> 两种数据结构：</p>
+
+        <ul>
+            <li><strong>dict</strong>：以 member 为 key，score 为 value，提供 O(1) 的成员查找。这样 <code>ZSCORE key member</code> 命令可以瞬间返回。</li>
+            <li><strong>skiplist</strong>：以 score 为排序键，member 为辅助排序，提供 O(log N) 的范围操作。这样 <code>ZRANGE</code>、<code>ZREVRANGE</code>、<code>ZRANK</code> 等命令可以高效执行。</li>
+        </ul>
+
+        <p>这两种结构共享同一个 member 对象（SDS 字符串），通过指针引用，不会产生 double storage。插入一个元素时，zset 同时向 dict 和 skiplist 添加数据。删除时，从两个结构中同步移除。</p>
+
+        <pre><code>/* t_zset.c — zsetAdd 核心逻辑 */
+int zsetAdd(robj *zobj, double score, sds ele, int *flags, double *newscore) {
+    if (zobj-&gt;encoding == OBJ_ENCODING_SKIPLIST) {
+        zset *zs = zobj-&gt;ptr;
+        dictEntry *de;
+
+        /* 1. 先在 dict 中查找 member */
+        de = dictFind(zs-&gt;dict, ele);
+        if (de != NULL) {
+            /* 更新 score */
+            /* ... 更新 skiplist 中的 score ... */
+            /* ... 同时更新 dict 中的 score ... */
+        } else {
+            /* 新元素，同时加入 dict 和 skiplist */
+        }
+    } else if (zobj-&gt;encoding == OBJ_ENCODING_LISTPACK) {
+        /* listpack 编码（小规模 zset 的紧凑存储） */
+        /* ... */
+    }
+}</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>有一个线上 Sorted Set 存储了约 500 万个元素，业务方发现 <code>ZRANK some_member</code> 在某些时候特别慢，耗时达到几十毫秒。经过排查发现，这个 zset 的数据并非均匀分布——部分 member 的 score 极其集中（大量元素的 score 都等于 100），在跳表中形成了"等高"区域。插入高度为 1 的节点之间只能逐一串联，导致局部退化为链表。虽然整体仍能保持 O(log N)，但在等高区域查找时需要遍历大量元素。最终调整了随机层高种子和业务上的 score 分配策略，让分值更分散，问题得到缓解。这个案例告诉我们：<strong>跳表的性能依赖随机层高分布的均匀性，极端的 key 分布可能让跳表层高退化。</strong>
+        </div>
+
+        <p>七章下来我们把底层数据结构过了一遍，从 zmalloc 的内存管理，到 SDS 的字符串，到 adlist/ziplist/listpack 的各种"容器"，再到 dict 的哈希和 skiplist 的有序结构——你已经掌握了 Redis 存储层的全部原语。下一章开始，我们将进入一个新的层次：看 Redis 如何用 <code>redisObject</code> 统一管理这些类型，实现类型多态和编码转换。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

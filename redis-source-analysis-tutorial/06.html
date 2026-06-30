@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 字典与渐进式rehash</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html" class="active">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第6章：字典与渐进式 rehash</h2>
+
+        <p>大家好，我是你们的讲师。前五章我们铺垫了 Redis 的基石：内存管理让我们安心地分配和释放；SDS 提供了安全高效的字符串操作；adlist、ziplist 和 listpack 让我们可以用各种方式组织有序数据。但不论哪种底层数据结构，最终都要被一个"大管家"管理起来——这个管家就是<strong>字典（dict）</strong>。</p>
+
+        <p>在 Redis 中，字典不仅仅用于 Hash 类型——实际上，整个 Redis 的键空间就是一对巨大的字典：<code>server.db[i].dict</code> 存放所有键值对，<code>server.db[i].expires</code> 存放所有带过期时间的键。每一个 <code>SET key value</code>、每一次 <code>GET key</code>，背后都是对字典的增删改查。你可以这样理解：字典是 Redis 的心脏，而 dict.c 就是心脏的跳动逻辑。</p>
+
+        <p>Redis 的字典设计中有两个极具特色的点：一是用 MurmurHash2 算法做高效哈希，二是用"渐进式 rehash"来避免大字典扩容时阻塞服务。后一个设计尤其精彩，它是"延迟与分摊"思想在系统编程中的经典范例。</p>
+
+        <h2>dict 数据结构</h2>
+
+        <p>Redis 的字典采用的是三层结构：<code>dict → dictht → dictEntry</code>。</p>
+
+        <pre><code>/* dict.h 中的核心结构体定义 */
+typedef struct dictEntry {
+    void *key;                  /* 键（通常是 SDS） */
+    union {
+        void *val;
+        uint64_t u64;
+        int64_t s64;
+        double d;
+    } v;                        /* 值（可能是指针、整数或浮点数） */
+    struct dictEntry *next;     /* 链式哈希的 next 指针 */
+} dictEntry;
+
+typedef struct dictht {
+    dictEntry **table;          /* 哈希表数组 */
+    unsigned long size;         /* 哈希表大小（总是 2 的幂） */
+    unsigned long sizemask;     /* 掩码 = size - 1（用于快速取模） */
+    unsigned long used;         /* 已使用的桶数 */
+} dictht;
+
+typedef struct dict {
+    dictType *type;             /* 类型特定的函数（哈希函数、比较函数等） */
+    dictht ht[2];               /* 两个哈希表：ht[0] 是主表，ht[1] 用于 rehash */
+    long rehashidx;             /* rehash 进度：-1 表示未进行，否则是当前迁移的桶索引 */
+    int16_t pauserehash;        /* 暂停 rehash 的计数器 */
+} dict;</code></pre>
+
+        <p>这个设计中最引人注目的是 <code>ht[2]</code> 和 <code>rehashidx</code>。ht[0] 是当前使用的哈希表，ht[1] 只在 rehash 过程中被使用。rehashidx 标记了 rehash 的进度。</p>
+
+        <p>哈希冲突的解决方式用的是<strong>链式哈希（separate chaining）</strong>，而且插入时采用<strong>头插法</strong>——新节点直接插入到链表头部，因为在 Redis 中，最新插入的数据往往也是最近被访问概率最高的数据，放在链表头部可以更快找到。</p>
+
+        <p>哈希函数默认为 <strong>MurmurHash2</strong>，这是一个非加密哈希函数，以"速度快、分布均匀"著称。它接收一个 key 和一个 seed（不同 dict 实例可以使用不同的 seed 来避免 hash collision 攻击），输出一个无符号 32 位整数，然后通过 <code>hash & sizemask</code> 映射到桶索引。</p>
+
+        <h2>渐进式 rehash</h2>
+
+        <p>当哈希表的负载因子（used / size）过高时，哈希冲突会越来越严重，查找性能从 O(1) 退化到 O(N)（链太长了）。这时需要对哈希表进行扩容。传统的做法是：一次性分配新表，把所有 entry 重新哈希并迁移到新表，然后释放旧表。但对于 Redis 这种单线程服务来说，如果字典中有上千万个 entry，一次迁移可能耗时数百毫秒甚至数秒——这段时间 Redis 完全无法处理任何请求。</p>
+
+        <p>渐进式 rehash（progressive rehash）的核心思想是：<strong>把一次性的迁移工作，分摊到每一次增删改查操作中</strong>。</p>
+
+        <pre><code>/* dict.c 中的 dictRehash 核心循环 */
+int dictRehash(dict *d, int n) {
+    int empty_visits = n * 10; /* 最多跳过 10*n 个空桶 */
+    while (n-- &amp;&amp; d-&gt;ht[0].used != 0) {
+        dictEntry *de, *nextde;
+
+        /* 从 rehashidx 开始，找到下一个非空桶 */
+        while (d-&gt;ht[0].table[d-&gt;rehashidx] == NULL) {
+            d-&gt;rehashidx++;
+            if (--empty_visits == 0) return 1;
+        }
+
+        /* 将该桶中的整个链表迁移到 ht[1] */
+        de = d-&gt;ht[0].table[d-&gt;rehashidx];
+        while (de) {
+            uint64_t h = dictHashKey(d, de-&gt;key) &amp; d-&gt;ht[1].sizemask;
+            nextde = de-&gt;next;
+            de-&gt;next = d-&gt;ht[1].table[h];
+            d-&gt;ht[1].table[h] = de;
+            d-&gt;ht[0].used--;
+            d-&gt;ht[1].used++;
+            de = nextde;
+        }
+        d-&gt;ht[0].table[d-&gt;rehashidx] = NULL;
+        d-&gt;rehashidx++;
+    }
+
+    /* 检查是否所有桶都迁移完了 */
+    if (d-&gt;ht[0].used == 0) {
+        zfree(d-&gt;ht[0].table);
+        d-&gt;ht[0] = d-&gt;ht[1];
+        dictReset(&amp;d-&gt;ht[1], sizeof(d-&gt;ht[1]));
+        d-&gt;rehashidx = -1;
+        return 0;  /* rehash 完成 */
+    }
+    return 1;  /* 还有未迁移完的桶 */
+}</code></pre>
+
+        <p>这段代码是 dict.c 中最重要的逻辑之一。每次调用 <code>dictRehash</code> 时，最多迁移 n 个桶（通常 n=1）。当 <code>rehashidx == -1</code> 时，表示 rehash 结束；当 <code>dictIsRehashing(d)</code> 返回 true 时，表示 rehash 正在进行中。</p>
+
+        <p>在 rehash 过程中，所有增删改查操作都会同步更新 rehash 进度：</p>
+        <ul>
+            <li><strong>添加（dictAddRaw）：</strong>直接添加到 ht[1]，因为 ht[0] 最终会被替换，没必要在新表上添加旧表的 entry。</li>
+            <li><strong>查找（dictFind）：</strong>先在 ht[0] 中查找，找不到再到 ht[1] 中查找。</li>
+            <li><strong>删除（dictDelete）：</strong>同上，两个表都要检查。</li>
+            <li><strong>更新（dictReplace）：</strong>先尝试在 ht[0] 中找，找不到再到 ht[1] 中找，找到即更新。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>小贴士：</strong>在 GDB 中调试 dict 操作时，可以用 <code>p d->rehashidx</code> 查看当前是否在 rehash 中。如果值不是 -1，说明 rehash 正在进行，<code>p d->ht[0].used</code> 和 <code>p d->ht[1].used</code> 分别显示两个表中已迁移的元素数。这是诊断 rehash 对延迟影响的利器。
+        </div>
+
+        <h2>rehash 触发条件</h2>
+
+        <p>Redis 的 rehash 分为<strong>扩容（expand）</strong>和<strong>缩容（shrink）</strong>两种情况，触发条件不同：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>操作</th>
+                    <th>触发条件</th>
+                    <th>新表大小</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>扩容</td>
+                    <td>负载因子 &gt; 1（无 BGSAVE/BGREWRITEAOF 时）</td>
+                    <td>第一个 ≥ used*2 的 2 的幂</td>
+                    <td>正常使用场景</td>
+                </tr>
+                <tr>
+                    <td>扩容</td>
+                    <td>负载因子 &gt; 5（有 BGSAVE/BGREWRITEAOF 时）</td>
+                    <td>同上</td>
+                    <td>子进程运行时降低内存占用</td>
+                </tr>
+                <tr>
+                    <td>缩容</td>
+                    <td>负载因子 &lt; 0.1</td>
+                    <td>第一个 ≥ used 的 2 的幂</td>
+                    <td>大量 key 过期后自动收缩</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>注意扩展条件中是否有 BGSAVE 的差异。当有子进程在运行 RDB/AOF 重写时，Redis 会<strong>有意提高扩容门槛</strong>（负载因子从 1 升到 5），避免写时复制（COW）导致的内存暴增。这个细节在实际生产中非常重要——很多运维同学发现 <code>bgsave</code> 期间内存暴涨，就是因为 rehash 产生了大量内存页的复制。</p>
+
+        <p><code>dict_can_resize</code> 是一个全局开关，在执行 BGSAVE 或 BGREWRITEAOF 时被设置为 0，禁止 dict 自动扩容。同时 <code>dictResize</code> 也被用于缩容——当键空间大量 key 过期后，Redis 会调用 <code>dictResize</code> 来缩减哈希表到合适的大小。</p>
+
+        <h2>dict 迭代器与 SCAN 命令</h2>
+
+        <p>提到 Redis 的"勿踩"命令，<code>KEYS *</code> 必然榜上有名。它为什么危险？因为它在单线程中遍历整个键空间哈希表，期间 Redis 完全被阻塞。替代方案 <code>SCAN</code> 命令允许用户分段遍历键空间，每次返回一部分 key，其实现原理正是基于 dict 的迭代器机制。</p>
+
+        <p>dict 提供了两种迭代器：</p>
+        <ul>
+            <li><strong>安全迭代器（safe iterator）：</strong>允许在迭代过程中执行 <code>dictDelete</code> 等修改操作。它通过计数器阻止 rehash 的推进。</li>
+            <li><strong>非安全迭代器（unsafe iterator）：</strong>迭代过程中不能修改 dict。它是 SCAN 命令的基础。</li>
+        </ul>
+
+        <p>SCAN 的难点在于：<strong>如何在 rehash 过程中保证不重复、不遗漏</strong>。当 rehash 正在进行时，dict 中有两个哈希表，entry 可能散落在两个表中。SCAN 的实现使用了一种称为"反向二进制迭代"的算法，确保即使 rehash 改变了哈希表的 size，也能高效地遍历所有 entry。</p>
+
+        <pre><code>/* SCAN 命令的遍历核心思路 */
+/* 使用 cursor 来标记遍历位置 */
+unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, ...) {
+    dictht *t0, *t1;
+
+    if (dictSize(d) == 0) return 0;
+
+    /* 如果不在 rehash 中，只遍历 ht[0] */
+    if (!dictIsRehashing(d)) {
+        t0 = &amp;(d-&gt;ht[0]);
+        /* ... 从 v 位置开始遍历 t0 ... */
+    } else {
+        /* 在 rehash 中，需要遍历两个表 */
+        t0 = &amp;(d-&gt;ht[0]);
+        t1 = &amp;(d-&gt;ht[1]);
+
+        /* 如果 t0 的 size 大于 t1，先遍历 t0 再遍历 t1 */
+        if (t0-&gt;size &amp;&amp; t1-&gt;size) {
+            /* 使用反向二进制迭代，确保在 rehash 过程中
+               每个 entry 恰好被访问一次 */
+        }
+    }
+    return v; /* 返回下一次迭代的游标 */
+}</code></pre>
+
+        <h2>dict 在 Redis 中的应用</h2>
+
+        <p>dict 在 Redis 中无处不在，下面是几个最重要的应用场景：</p>
+
+        <ul>
+            <li><strong>全局键空间：</strong><code>server.db[i].dict</code> 存储了该数据库中所有的键值对。这是最大的一个 dict，生产环境中可能有上亿个 entry。</li>
+            <li><strong>过期字典：</strong><code>server.db[i].expires</code> 记录所有设置了 TTL 的键及其过期时间。它的存在使得 <code>TTL key</code> 命令是 O(1) 的——直接在独立的哈希表中查找，不用遍历整个键空间。</li>
+            <li><strong>Hash 类型的底层存储：</strong>当 Hash 中的字段数量超过 <code>hash-max-ziplist-entries</code> 或字段大小超过 <code>hash-max-ziplist-value</code> 时，Hash 类型会从 ziplist 转换为 dict 编码。</li>
+            <li><strong>Set 类型的底层存储：</strong>当 Set 中的元素不是整数，或者元素数量超过阈值时，Set 会使用 dict 编码，其中 key 是元素，value 为 NULL。</li>
+        </ul>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>API</th>
+                    <th>功能</th>
+                    <th>时间复杂度</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>dictCreate</code></td>
+                    <td>创建新字典</td>
+                    <td>O(1)</td>
+                </tr>
+                <tr>
+                    <td><code>dictAdd</code></td>
+                    <td>添加键值对</td>
+                    <td>O(1) 均摊</td>
+                </tr>
+                <tr>
+                    <td><code>dictFind</code></td>
+                    <td>按 key 查找 entry</td>
+                    <td>O(1) 均摊</td>
+                </tr>
+                <tr>
+                    <td><code>dictDelete</code></td>
+                    <td>删除 key</td>
+                    <td>O(1) 均摊</td>
+                </tr>
+                <tr>
+                    <td><code>dictReplace</code></td>
+                    <td>添加或替换 key</td>
+                    <td>O(1) 均摊</td>
+                </tr>
+                <tr>
+                    <td><code>dictResize</code></td>
+                    <td>缩容到合适大小</td>
+                    <td>O(N)</td>
+                </tr>
+                <tr>
+                    <td><code>dictExpand</code></td>
+                    <td>扩容到指定大小</td>
+                    <td>O(1) + 渐进式 rehash</td>
+                </tr>
+                <tr>
+                    <td><code>dictGetRandomKey</code></td>
+                    <td>随机返回一个 key</td>
+                    <td>O(1) 均摊</td>
+                </tr>
+                <tr>
+                    <td><code>dictScan</code></td>
+                    <td>渐进式遍历</td>
+                    <td>O(N) 每次调用</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>一个运维同事接手了一套 Redis 集群，发现每次在某个数据库上执行 <code>KEYS *</code> 都会导致 Redis 阻塞 3-5 秒，期间所有读写超时。排查后发现该库中存储了约 3000 万个 key，哈希表已经扩容到 2^23（约 800 万个桶），链长足够长使得遍历变成了一个沉重的操作。更糟的是，之前有同事习惯用 <code>KEYS *</code> 排查问题，每次执行都让业务抖动一次。解决方案很简单：用 <code>SCAN</code> 替代 <code>KEYS *</code>，每次只返回几百个 key，配合 <code>COUNT</code> 参数控制步长，将遍历操作拆散到多个时间片中。最终同样的全量遍历变成了无感的渐进式操作。进一步的优化是在业务层面引入了一个专门的"key 索引"字典来替代全库扫描。这个教训告诉我们：<strong>在大规模哈希表上，任何 O(N) 操作都不能在单线程中一次性执行。</strong>
+        </div>
+
+        <p>有序是数据库的重要需求，跳表如何在没有平衡树的情况下实现高效范围查询？在下一章中，我们将深入 <code>t_zset.c</code> 和 <code>skiplist.c</code>，探索 Redis 中跳表的设计实现，以及它为什么能完美替代红黑树。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 SDS动态字符串</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html" class="active">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第4章：SDS 动态字符串</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们弄清楚了 Redis 的内存分配机制——zmalloc 加上了统计头部来追踪每次分配，底层由 jemalloc 提供高效无锁分配。现在我们要问一个问题：Redis 中什么数据分配最频繁？答案是<strong>字符串</strong>。</p>
+
+        <p>键是字符串，大部分值也是字符串（或者包含字符串的复合结构）。在 Redis 的命令处理通路中，字符串的拼接、切分、复制操作每秒发生数十万次。如果字符串操作的效率不够高，整个系统的瓶颈就在这里。而 C 语言的标准字符串——以 <code>'\0'</code> 结尾的 char 数组——在现代高性能系统中已经被证明是一个糟糕的设计。Redis 的作者 antirez 于是自己动手造了一个轮子，叫 <strong>SDS（Simple Dynamic String）</strong>。</p>
+
+        <p>SDS 是 Redis 数据结构的起点，也是你阅读 Redis 源码中第一个会反复遇到的类型。从第 1 章的 <code>SET key value</code>，到第 6 章的字典 key，SDS 几乎无处不在。彻底理解 SDS，是你走进 Redis 源码的必修课。</p>
+
+        <h2>为什么不用 C 字符串</h2>
+
+        <p>C 语言自带的字符串有三大硬伤：</p>
+
+        <ul>
+            <li><strong>缓冲区溢出（Buffer Overflow）：</strong>执行 <code>strcat(dest, src)</code> 时，C 标准库假设 dest 有足够的空间——如果假设不成立，就悄悄覆盖了 dest 后面相邻的内存。这种 bug 极难定位，因为错误不会立即暴露，只会在某个不相关的时刻以 segfault 的形式出现。</li>
+            <li><strong>获取长度是 O(n)：</strong><code>strlen(s)</code> 需要遍历整个字符串直到遇到 <code>'\0'</code>。Redis 中大量需要获取 key 的长度——想象一下每执行一条命令都要 O(n) 扫描一次 key，QPS 上十万后这个开销就不可忽视了。</li>
+            <li><strong>二进制不安全：</strong>C 字符串用 <code>'\0'</code> 标记结束，意味着字符串内容中不能包含 <code>'\0'</code>。但 Redis 要存储的数据多种多样——图片、序列化对象、加密结果——这些都可能包含空字节。</li>
+        </ul>
+
+        <p>SDS 通过一个简单的设计同时解决了这三个问题：<strong>用额外的字段记录长度和容量，而不是依赖终止符。</strong>那么它的结构是什么样的呢？</p>
+
+        <h2>SDS 数据结构</h2>
+
+        <p>Redis 7.2 中定义了五种 SDS 头部类型，用 <code>flags</code> 字段区分：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>类型</th>
+                    <th>flags 值</th>
+                    <th>len 类型</th>
+                    <th>alloc 类型</th>
+                    <th>容量范围</th>
+                    <th>头部总大小</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>sdshdr5</td>
+                    <td>0</td>
+                    <td>（未使用 flags 低 3 位）</td>
+                    <td>（未使用）</td>
+                    <td>≤ 31 字节</td>
+                    <td>1 字节</td>
+                </tr>
+                <tr>
+                    <td>sdshdr8</td>
+                    <td>1</td>
+                    <td>uint8_t</td>
+                    <td>uint8_t</td>
+                    <td>≤ 255 字节</td>
+                    <td>3 字节</td>
+                </tr>
+                <tr>
+                    <td>sdshdr16</td>
+                    <td>2</td>
+                    <td>uint16_t</td>
+                    <td>uint16_t</td>
+                    <td>≤ 65535 字节</td>
+                    <td>5 字节</td>
+                </tr>
+                <tr>
+                    <td>sdshdr32</td>
+                    <td>3</td>
+                    <td>uint32_t</td>
+                    <td>uint32_t</td>
+                    <td>≤ 4GB</td>
+                    <td>9 字节</td>
+                </tr>
+                <tr>
+                    <td>sdshdr64</td>
+                    <td>4</td>
+                    <td>uint64_t</td>
+                    <td>uint64_t</td>
+                    <td>≥ 4GB</td>
+                    <td>17 字节</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>sdshdr8 是日常使用最多的类型，让我们看看它的结构体定义：</p>
+
+        <pre><code>/* sds.h 中的 sdshdr8 定义 */
+struct __attribute__ ((__packed__)) sdshdr8 {
+    uint8_t len;      /* 字符串当前长度（不含 \0） */
+    uint8_t alloc;    /* 实际分配容量（不含头部和 \0） */
+    unsigned char flags; /* 低 3 位表示类型，高 5 位保留 */
+    char buf[];       /* 真正的字符串数据 */
+};</code></pre>
+
+        <p>这里有几个重要的设计细节：</p>
+
+        <ul>
+            <li><strong><code>__packed__</code> 属性：</strong>告诉编译器不要做内存对齐，结构体按字段密集排列。sdshdr8 恰好占用 3 字节（len + alloc + flags），后面紧跟着 <code>buf[]</code> 数组。这个细节对内存节省至关重要——如果不对齐，光填充字节就可能浪费数十字节。乘以百万级的 key 就是 GB 级别的浪费。</li>
+            <li><strong><code>buf[]</code> 是柔性数组成员：</strong>它不占用头部空间，实际大小在运行时决定，并通过 <code>malloc(len + 头部大小 + 1)</code> 一次性分配出来。</li>
+            <li><strong>sdshdr5 的特殊性：</strong>它用 flags 的低 3 位（0-5）存储长度，没有单独的 <code>len</code> 和 <code>alloc</code> 字段。这意味着它不支持扩容——一旦创建就不可变。它主要用于存储那些永远不会改变的短字符串（比如某些配置值）。</li>
+        </ul>
+
+        <h2>SDS 核心 API</h2>
+
+        <p>SDS 的 API 设计非常用心，每一个函数都体现出"用最小的开销做最多的事"的哲学。</p>
+
+        <h3>字符串创建</h3>
+
+        <p><code>sdsnewlen</code> 是所有 <code>sdsnew</code> 系函数的核心。它的逻辑清晰明了：</p>
+
+        <pre><code>/* sds.c 中的 sdsnewlen 核心实现 */
+sds sdsnewlen(const void *init, size_t initlen) {
+    void *sh;
+    sds s;
+    char type = sdsReqType(initlen);   /* 根据长度选择合适的头部类型 */
+    if (type == SDS_TYPE_5 &amp;&amp; initlen == 0) type = SDS_TYPE_8;
+    int hdrlen = sdsHdrSize(type);     /* 计算对应头部的字节数 */
+    unsigned char *fp;                  /* 指向 flags 字段的指针 */
+
+    sh = zmalloc(hdrlen + initlen + 1); /* 一次分配：头部 + 数据 + \0 */
+    if (sh == NULL) return NULL;
+    s = (char*)sh + hdrlen;            /* s 指向数据区起始位置 */
+    fp = ((unsigned char*)s) - 1;      /* flags 在 s 的前一个字节 */
+    /* ... 根据 type 设置 len, alloc, flags ... */
+    if (initlen &amp;&amp; init)
+        memcpy(s, init, initlen);      /* 复制数据 */
+    s[initlen] = '\0';                 /* 末尾补 \0（兼容 C 函数） */
+    return s;
+}</code></pre>
+
+        <p>注意 <code>sdsnewlen</code> 末尾仍然加了一个 <code>'\0'</code>——即使 SDS 本身不依赖 <code>'\0'</code> 判断结束，这么做可以保证 SDS 字符串能直接作为参数传给标准 C 函数（比如 <code>printf</code>、<code>strcmp</code>），无需任何额外转换。这是向后兼容性的巧妙处理。</p>
+
+        <h3>扩容策略</h3>
+
+        <p><code>sdscat</code>、<code>sdscpy</code> 等修改字符串内容的函数，最终都会调用 <code>sdsMakeRoomFor</code> 来确保有足够空间。它的扩容策略非常经典：</p>
+
+        <pre><code>/* sdsMakeRoomFor 扩容逻辑伪代码 */
+if (newlen &lt; SDS_MAX_PREALLOC)    /* SDS_MAX_PREALLOC = 1024*1024 (1MB) */
+    newlen *= 2;                    /* &lt; 1MB 时翻倍增长 */
+else
+    newlen += SDS_MAX_PREALLOC;     /* &gt;= 1MB 时线性增长 1MB */
+
+/* 新容量可能会导致头部升级，比如 sdshdr8 → sdshdr16 */
+type = sdsReqType(newlen);
+if (type != sds[-1]) {             /* 需要更换头部类型 */
+    /* 重新分配内存，搬移数据，更新头部 */
+}</code></pre>
+
+        <p>这个策略在很多动态数组实现中都能看到：小规模时指数增长（减少 realloc 次数），大规模时线性增长（避免过度浪费）。对于 Redis 常见的短字符串（几十到几百字节），翻倍策略意味着大多数字符串在生命周期中只需要 1-2 次扩容。</p>
+
+        <h3>惰性空间释放</h3>
+
+        <p>当执行 <code>sdstrim</code> 或 <code>sdsclear</code> 时，SDS 并不会因为内容减少而缩小容量。它只是修改 <code>len</code> 字段，保留已有的分配空间：</p>
+
+        <pre><code>/* 截断时只修改 len，不释放底层空间 */
+void sdsclear(sds s) {
+    sdssetlen(s, 0);   /* 只改长度，不改 alloc */
+    s[0] = '\0';
+}
+
+/* sdstrim 也是类似 */
+sds sdstrim(sds s, const char *cset) {
+    /* ... 从两端删除匹配字符 ... */
+    s[len] = '\0';
+    sdssetlen(s, len);  /* 同样不改 alloc */
+    return s;
+}</code></pre>
+
+        <p>这个设计源自"未来可能还要再增长"的预期——避免立即释放又立即分配的乒乓行为。当然，如果你确定不再需要那么多空间，可以手动调用 <code>sdsRemoveFreeSpace</code> 触发真正的 realloc。</p>
+
+        <h2>SDS 性能优化：embstr 与 raw 编码</h2>
+
+        <p>不是所有的 SDS 字符串在内存中都是独立分配的。Redis 7.x 中，当字符串长度 ≤ 44 字节时，采用的是 <strong>embstr（embedded string）</strong> 编码，即 redisObject 和 SDS 头部 + 数据一次 malloc 分配在连续内存中。</p>
+
+        <p>44 这个数字是怎么来的？合理的内存分配对齐是关键。一个 <code>robj</code> 占用 16 字节（type/encoding/lru/refcount/ptr 等字段），sdshdr8 头部 3 字节，加上 1 字节的 <code>'\0'</code>，留给数据的就是 64 - 16 - 3 - 1 = 44 字节。为什么是 64？因为 jemalloc 的 size class 中有一个 64 字节的档位，一次性分配刚好对齐到这个档位，不会产生任何内存浪费。</p>
+
+        <pre><code>/* object.c 中创建字符串对象 */
+robj *createStringObject(const char *ptr, size_t len) {
+    if (len &lt;= OBJ_ENCODING_EMBSTR_SIZE_LIMIT)  /* 阈值 = 44 */
+        return createEmbeddedStringObject(ptr, len);
+    else
+        return createRawStringObject(ptr, len);   /* SDS 单独分配 */
+}</code></pre>
+
+        <p><strong>embstr 编码的优势：</strong></p>
+        <ul>
+            <li><strong>减少内存碎片：</strong>一次分配，一个连续内存块，vs 两次分配可能产生的两个不连续内存块。</li>
+            <li><strong>改善缓存局部性：</strong>访问对象时，robj 和字符串数据在相邻的内存地址，CPU cache line 一次就能加载完。</li>
+            <li><strong>减少一次指针解引用：</strong>直接通过 robj.ptr + sizeof(robj) 就能得到 SDS 头部，无需额外的间接寻址。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>有一次，一个业务团队在 Redis 中存储了一批经过压缩的图片数据（二进制格式），大小约为 200-500 字节。他们在读取数据后，使用 <code>strlen()</code> 来判断数据长度，而不是用 <code>sdslen()</code>。结果某些压缩后的数据中包含了 <code>'\0'</code> 字节，<code>strlen()</code> 在第一个 <code>'\0'</code> 处就返回了，导致后续的解压缩和图片渲染全部失败。这个问题花了整整两天才定位到——因为绝大多数压缩数据都不包含 <code>'\0'</code>，在测试环境中从未复现。根因就是 C 程序员的本能习惯：看到 char* 就用 <code>strlen()</code>。在 Redis 中，有了 SDS 就<strong>一定不要用 C 标准库的字符串函数</strong>来操作它。老老实实用 <code>sdslen()</code>，它在 Redis 源码中无处不在，因为它是 O(1) 且二进制安全的。
+        </div>
+
+        <div class="tip">
+            <strong>小贴士：</strong>在 GDB 中调试 SDS 时，可以直接用我们第 2 章配置的 <code>psds</code> 宏：<code>psds &lt;sdspointer&gt;</code>，它会打印出 hidden header 中的 len、alloc 和字符串内容。如果你发现 len 和 strlen() 的结果不一致，别慌——大概率是因为字符串中包含空字节，这恰恰是 SDS 的二进制安全特性在起作用。
+        </div>
+
+        <p>字符串是 Redis 的血液，接下来看更复杂的数据容器——链表和压缩列表。在下一章中，我们将进入 <code>adlist.c</code>、<code>ziplist.c</code> 和 <code>listpack.c</code>，探索 Redis 如何用不同的数据结构应对不同的存储需求。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

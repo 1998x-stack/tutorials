@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 内存管理：zmalloc与jemalloc</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html" class="active">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第3章：内存管理：zmalloc 与 jemalloc</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们把编译调试环境搭建好了，现在你可以用 GDB 随时断在任何函数上，用 clangd 在代码间自由穿梭。工具箱就位，是时候真正翻开源码了。</p>
+
+        <p>Redis 被称作"内存数据库"，它的全部数据都驻留在内存中。这意味着内存管理的质量直接决定了 Redis 的性能上限和稳定性——分配速度慢了，QPS 上不去；碎片多了，内存利用率暴跌；分配器在多线程下锁竞争激烈，延迟就会大幅波动。所以 Redis 选择了一个非常特殊的路线：<strong>抛弃 glibc 的 malloc，换用 jemalloc</strong>。</p>
+
+        <p>这一章我们不走弯路，直奔 <code>zmalloc.c</code> 和 <code>zmalloc.h</code> 这两个文件。它们加起来不过 300 多行，却是 Redis 整个内存系统的基石。读完这一章，你会清楚地知道 Redis 每次分配内存时发生了什么、如何精确统计内存使用量、以及为什么 jemalloc 对 Redis 如此重要。</p>
+
+        <h2>Redis 的内存管理哲学</h2>
+
+        <p>Redis 面临的内存使用场景非常特殊：大量的 key-value 分配和释放，value 的大小从几个字节到几十 MB 不等，分配频率极高（单机 QPS 十万级别），而且是在单线程的事件循环中进行。这个画像决定了它对内存分配器的需求：</p>
+
+        <ul>
+            <li><strong>低延迟：</strong>每次分配必须是微秒甚至纳秒级，不能有锁竞争。</li>
+            <li><strong>低碎片：</strong>频繁的小对象分配释放如果产生大量碎片，会导致 RSS 远大于 used_memory。</li>
+            <li><strong>可观测：</strong>必须能精确知道当前分配了多少字节，便于运维监控。</li>
+        </ul>
+
+        <p>glibc 的 ptmalloc2 分配器虽然兼容性好，但在高并发小对象场景下碎片率偏高，而且缺乏便捷的统计接口。jemalloc 则在 Facebook、Firefox、FreeBSD 等大规模项目中得到了充分验证。antirez 在 2012 年就做出了这个关键决策：让 jemalloc 成为 Redis 的默认分配器。</p>
+
+        <h2>zmalloc 源码剖析</h2>
+
+        <p><code>zmalloc.c</code> 是 Redis 对底层内存分配器的统一封装层。它的设计目标是：</p>
+        <ul>
+            <li>提供统一的 <code>zmalloc/zfree/zrealloc/zstrdup</code> API，屏蔽底层分配器差异。</li>
+            <li>通过原子操作精确统计 <code>used_memory</code>。</li>
+            <li>在分配失败时自动终止（避免 NULL 检查的繁琐）。</li>
+        </ul>
+
+        <h3>PREFIX_SIZE 与统计头</h3>
+
+        <p>这是 zmalloc 中最精巧的设计之一。为了精确统计每次分配的大小，zmalloc 在返回给调用者的指针前面藏了一个头部，记录实际分配的内存大小：</p>
+
+        <pre><code>/* zmalloc.h 中的核心定义 */
+#define PREFIX_SIZE (sizeof(size_t))
+
+/* zmalloc 核心实现 */
+void *zmalloc(size_t size) {
+    void *ptr = malloc(size + PREFIX_SIZE);
+    if (!ptr) zmalloc_oom_handler(size);
+    *((size_t*)ptr) = size;           /* 在头部写入实际大小 */
+    update_zmalloc_stat_alloc(size + PREFIX_SIZE, size);
+    return (char*)ptr + PREFIX_SIZE; /* 返回偏移后的指针 */
+}</code></pre>
+
+        <p>这里有一个关键细节：<code>update_zmalloc_stat_alloc</code> 是一个宏，它使用 <code>__sync_add_and_fetch</code> 原子操作来更新全局计数器 <code>used_memory</code>。这意味着在单线程的 Redis 主进程中，即使不会发生真正的并发竞争，Redis 依然用原子操作保证了内存统计的精确性——因为这个计数器还会被后台的 BIO 线程（异步删除、AOF fsync 等）修改。</p>
+
+        <p>同理，<code>zfree</code> 的实现是对称的：从传入的指针向前偏移 PREFIX_SIZE 得到头部，读取 <code>size</code>，然后 <code>__sync_sub_and_fetch</code> 更新计数器，最后 free 掉整个内存块。</p>
+
+        <div class="highlight">
+            <strong>代码观察：</strong>注意 <code>zmalloc_oom_handler</code> 的处理策略——它不是返回 NULL，而是调用 <code>zmalloc_default_oom()</code> 打印日志后 <code>abort()</code>。这意味着 Redis 源码中几乎不需要检查 <code>zmalloc</code> 的返回值是否为 NULL。这个约定极大地简化了错误处理逻辑，你可以把精力集中在业务代码上，而不是反复写 <code>if (!ptr) return C_ERR</code>。
+        </div>
+
+        <h3>zmalloc API 速查</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>函数</th>
+                    <th>功能</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>zmalloc(size)</code></td>
+                    <td>分配 size 字节并清零统计</td>
+                    <td>返回指针指向 PREFIX_SIZE 之后</td>
+                </tr>
+                <tr>
+                    <td><code>zcalloc(size)</code></td>
+                    <td>分配并清零</td>
+                    <td>内部使用 calloc，适合数组分配</td>
+                </tr>
+                <tr>
+                    <td><code>zrealloc(ptr, size)</code></td>
+                    <td>重新分配</td>
+                    <td>处理 NULL 指针（等价于 malloc）</td>
+                </tr>
+                <tr>
+                    <td><code>zfree(ptr)</code></td>
+                    <td>释放内存，更新统计</td>
+                    <td>处理 NULL 指针（安全）</td>
+                </tr>
+                <tr>
+                    <td><code>zstrdup(s)</code></td>
+                    <td>字符串复制</td>
+                    <td>调用 zmalloc + memcpy</td>
+                </tr>
+                <tr>
+                    <td><code>zmalloc_used_memory()</code></td>
+                    <td>返回当前 used_memory</td>
+                    <td>原子读取，O(1)</td>
+                </tr>
+                <tr>
+                    <td><code>zmalloc_get_rss()</code></td>
+                    <td>获取 RSS 物理内存</td>
+                    <td>读取 /proc/self/stat</td>
+                </tr>
+                <tr>
+                    <td><code>zmalloc_get_frag_ratio()</code></td>
+                    <td>计算碎片率</td>
+                    <td>rss / used_memory</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>jemalloc 原理浅析</h2>
+
+        <p>zmalloc 只是一个封装层，真正的分配工作由 jemalloc 完成。理解 jemalloc 的基本原理，对后续诊断内存碎片问题至关重要。我们不需要深究 jemalloc 的每一行代码，但需要理解它的核心设计思路。</p>
+
+        <p>jemalloc 的核心概念可以用四个层次来描述：</p>
+
+        <ul>
+            <li><strong>Arena：</strong>每个 CPU 核对应一个 arena（默认 4 个 arena，按核数动态调整）。每个 arena 独立管理自己的内存池，互不竞争。多线程分配时，线程被分配到不同的 arena，实现无锁分配。</li>
+            <li><strong>Bin：</strong>每个 arena 内有多个 bin，每个 bin 管理一类固定大小的内存块（称为 size class）。jemalloc 定义了数十个 size class，从 8 字节到几 MB，向上取整对齐。</li>
+            <li><strong>Slab / Run：</strong>每个 bin 对应一个或多个 run，run 是连续的内存页（默认 4KB 对齐）。run 被切分成多个相同大小的 chunk，形成一个 freelist。</li>
+            <li><strong>tcache（线程缓存）：</strong>每个线程有一个 tcache，缓存最近释放的小对象（默认缓存 128 个）。分配时优先从 tcache 取，miss 才去 arena 申请。tcache 的存在使得大多数分配可以做到完全无锁。</li>
+        </ul>
+
+        <p>这种分层设计对 Redis 最直接的好处是：Redis 在单线程事件循环中反复分配释放小对象（SDS、dictEntry、robj 等），这些对象的大小通常落在 jemalloc 的某个 size class 中。由于 Redis 主循环运行在一个固定的线程上，tcache 命中率极高，分配几乎不需要进入 arena 层级，延迟极低。</p>
+
+        <pre><code>/* 从 Redis 源码注释中可以看到 jemalloc 的配置相关代码 */
+/* config.h 中用于检测 jemalloc 是否可用 */
+#if defined(USE_JEMALLOC)
+#define zmalloc_size(p) je_malloc_usable_size(p)
+#else
+#define zmalloc_size(p) 0
+#endif</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>曾经有一个线上 Redis 实例，used_memory 显示只有 8GB，但 RSS 高达 20GB，<code>mem_fragmentation_ratio</code> 达到 2.5。我们第一反应是内存泄漏，但重启后问题复现。深入排查后发现，根因是业务方用 Redis 存储大量 80-120 字节的随机字符串——这些字符串的长度恰好跨越了 jemalloc 的 size class 边界（jemalloc 的 size class 在 64-128 字节区间有多个档位：64, 80, 96, 112, 128）。由于字符串长度分布极不均匀，每个分配都浪费了 size class 内的 padding 空间，加上频繁的淘汰和过期导致大量空洞，最终形成严重的内部碎片和外部碎片。解决方案是让业务方将字符串 padding 到统一长度，或者调整 jemalloc 的 <code>lg_dirty_mult</code> 参数控制 dirty page 的回收策略。最终碎片率降到了 1.15。
+        </div>
+
+        <h2>内存统计与监控</h2>
+
+        <p>Redis 提供了极其详尽的内存统计信息，全部集中在一个命令中：<code>INFO memory</code>。这些信息的背后，就是 zmalloc 和 jemalloc 提供的数据。</p>
+
+        <pre><code># INFO memory 关键字段示例
+used_memory:8583240832        # zmalloc_used_memory() 原子计数器
+used_memory_rss:20552089600   # 从 /proc/self/stat 读取的 RSS
+mem_fragmentation_ratio:2.39  # 碎片率 = RSS / used_memory
+mem_allocator:jemalloc-5.3.0  # 当前使用的分配器
+active_defrag_running:0       # 主动碎片整理状态
+allocator_active:12884901888  # jemalloc 已向 OS 申请的总量
+allocator_resident:19876544512 # jemalloc 驻留的内存量</code></pre>
+
+        <p>几个关键指标的解释：</p>
+        <ul>
+            <li><strong>used_memory：</strong>Redis 自己"认为"用了多少内存。这个值是 zmalloc 在每次 <code>zmalloc/zfree</code> 时通过原子操作累加/累减得到的。它不包含 jemalloc 内部的元数据开销和碎片。</li>
+            <li><strong>used_memory_rss：</strong>操作系统视角下 Redis 进程占用的物理内存。这个值从 <code>/proc/self/stat</code> 的 RSS 字段读取。</li>
+            <li><strong>mem_fragmentation_ratio：</strong>RSS / used_memory。它是衡量内存碎片程度的核心指标。通常认为 1.0-1.5 是正常范围，大于 1.5 需要关注，大于 2.0 需要立即处理。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>小贴士：</strong>注意 <code>mem_fragmentation_ratio</code> 不是严格的"碎片率"。它包含了 jemalloc 内部元数据、jemalloc 预分配的内存池、以及 shared memory 等因素。但作为日常监控指标，它仍然是最直观的参考。建议在监控系统中对此指标设置告警：ratio &gt; 1.8 告警，&gt; 2.5 紧急。
+        </div>
+
+        <p>值得注意的是，Redis 7.x 引入了 <code>active_defrag</code> 主动碎片整理功能。当碎片率超过设定阈值（默认为 1.1）时，Redis 会在后台尝试整理内存，将分散的小碎片合并。这个功能的实现非常精巧——它利用了 jemalloc 的 <code>je_malloc_usable_size</code> 接口来获取每个指针的真实分配大小，然后做"搬移-释放"操作。</p>
+
+        <p>理解了内存分配基础，我们来看 Redis 最核心的字符串中间件——SDS。在下一章中，我们将深入 <code>sds.c</code> 和 <code>sds.h</code>，看 Redis 如何用精心设计的数据结构替代 C 标准字符串，实现二进制安全、O(1) 长度查询和惰性空间释放等一系列高级特性。</p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

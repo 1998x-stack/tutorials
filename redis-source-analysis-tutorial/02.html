@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第2章 编译与调试环境搭建</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html" class="active">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第2章：编译与调试环境搭建</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们站在高处俯瞰了 Redis 的全貌，就像拿到了整座城市的地图。但要真正走进这座城市的每一条街道、每一栋建筑，你需要两样东西：一双合脚的鞋（一个可以自由调试的编译环境），和一把能打开每扇门的钥匙（GDB 和代码跳转工具）。这一章我们就来解决这两件事。</p>
+
+        <p>很多人觉得"编译环境有什么好讲的，不就是 <code>make &amp;&amp; make install</code> 吗？"如果你只是想把 Redis 跑起来，确实如此。但我们的目标不是跑起来，而是让每一行代码在 GDB 中都能单步跟踪，让每一个变量的值都一览无余，让 clangd 能瞬间带你跳转到宏定义和函数实现。这个"带调试符号的开发版本"和你线上跑的优化版本，中间的差别恰恰决定了你能在源码中走多远。</p>
+
+        <p>更重要的是，Redis 的 Makefile 本身就是一个极佳的学习材料。它展示了如何用 GNU make 管理一个跨平台的 C 项目，如何处理条件编译、依赖检查、第三方库集成等问题。读懂了 Makefile，你就能在任何意外编译失败时迅速找到问题根因——而不用对着满屏的 error 发呆。</p>
+
+        <h2>为什么需要自己编译 Redis</h2>
+
+        <p>从包管理器安装的 Redis 二进制文件是用 <code>-O2</code> 优化编译的，这意味着三个问题：</p>
+        <ul>
+            <li><strong>没有调试符号：</strong>GDB 中你看不到行号信息，无法设置源码级断点，看到的只有一堆经过内联和重排后的汇编指令。</li>
+            <li><strong>变量被优化：</strong>局部变量可能被优化掉，寄存器复用导致 <code>print var</code> 返回 <code>&lt;optimized out&gt;</code>。</li>
+            <li><strong>内联函数展开：</strong>很多关键函数如 <code>zmalloc()</code> 被内联后，你在调用栈中根本看不到它——但内存分配的细节恰恰是我们需要跟踪的。</li>
+        </ul>
+
+        <p>此外，自己编译还能自定义一些编译选项。比如你想强制使用 jemalloc 替代 glibc malloc，想开启内存追踪（<code>REDIS_MALLOC_TRACE</code>），或者想测试不同的内存分配器之间的性能差异——这些都要求你能控制编译流程。</p>
+
+        <h2>源码获取与编译</h2>
+
+        <p>首先，从 GitHub 获取 Redis 源码。建议使用 <code>7.2.x</code> 分支，这是本课程的主线版本：</p>
+
+        <pre><code>git clone https://github.com/redis/redis.git
+cd redis
+git checkout 7.2   # 切换到 7.2 分支
+git log --oneline -5  # 确认版本</code></pre>
+
+        <p>接下来是最关键的编译步骤。默认的 <code>make</code> 会使用 <code>-O2</code> 优化，这对开发调试很不友好。我们需要用调试模式编译：</p>
+
+        <pre><code># 清掉上次的编译产物（如果有的话）
+make distclean
+
+# 调试编译：关闭优化，开启调试符号，使用 jemalloc
+make REDIS_CFLAGS="-g -O0" REDIS_LDFLAGS="-g -O0" MALLOC=jemalloc
+
+# 验证编译产物
+ls -la src/redis-server src/redis-cli
+file src/redis-server | grep "not stripped"  # 确认包含调试符号</code></pre>
+
+        <p>看到 <code>not stripped</code> 的输出意味着调试符号保留完整，可以在 GDB 中愉快地玩耍了。</p>
+
+        <p>编译完成后，建议立即运行测试，验证环境一切正常：</p>
+
+        <pre><code># 运行核心测试（大约需要 3-5 分钟）
+make test
+
+# 如果只想跑某个具体模块的测试
+./runtest --single unit/type/string</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>曾有一位同事在排查 Redis 内存碎片问题时，反复查看 <code>zmalloc.c</code> 中的 <code>zmalloc_used_memory()</code> 逻辑，但 GDB 中始终看不到某些变量的值。折腾了半小时才发现，他用的 Redis 是 <code>apt install</code> 的预编译版本，根本没有调试符号。更糟的是，他试图用 <code>apt-get install redis-server-dbg</code> 安装 debug 包，但版本和源码不匹配，断点地址全部错位。最后不得不重新手动编译，才找到了内存统计逻辑中的一个计数器溢出 bug。教训很简单：<strong>看源码一定要用自己编译的调试版本。</strong>
+        </div>
+
+        <h2>Makefile 关键目标解读</h2>
+
+        <p>Redis 根目录的 Makefile 是整个构建系统的入口。它虽然只有两百多行，但使用了很多 GNU make 的高级特性。我们来逐个解析最重要的 make 目标：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>目标</th>
+                    <th>执行命令</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>make all</code></td>
+                    <td>依次编译 deps/ 和 src/</td>
+                    <td>默认目标，生成所有二进制文件</td>
+                </tr>
+                <tr>
+                    <td><code>make install</code></td>
+                    <td>cp src/redis-* /usr/local/bin/</td>
+                    <td>安装到系统路径</td>
+                </tr>
+                <tr>
+                    <td><code>make test</code></td>
+                    <td>调用 tests/test_helper.tcl</td>
+                    <td>运行 Tcl 编写的集成测试套件</td>
+                </tr>
+                <tr>
+                    <td><code>make clean</code></td>
+                    <td>rm -f src/*.o src/redis-*</td>
+                    <td>清理 src/ 编译产物</td>
+                </tr>
+                <tr>
+                    <td><code>make distclean</code></td>
+                    <td>clean + deps 清理</td>
+                    <td>完全清理，包含第三方依赖</td>
+                </tr>
+                <tr>
+                    <td><code>make valgrind</code></td>
+                    <td>启用 VALGRIND 宏</td>
+                    <td>编译内存检测版本</td>
+                </tr>
+                <tr>
+                    <td><code>make noopt</code></td>
+                    <td>REDIS_CFLAGS="-O0 -g"</td>
+                    <td>等价于无优化调试编译</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>值得留意的是 <code>make noopt</code> 这个目标。antirez 贴心地为开发者准备了这个快捷方式，它会自动设置 <code>REDIS_CFLAGS="-O0 -g"</code>，免去你每次手动输入的麻烦：</p>
+
+        <pre><code># 最简单的调试编译方式
+make noopt
+
+# 等价于
+make REDIS_CFLAGS="-O0 -g" REDIS_LDFLAGS="-O0 -g"</code></pre>
+
+        <p>Makefile 中的依赖管理也很有意思。Redis 使用 <code>%.o: %.c</code> 模式规则自动推导编译命令，通过 <code>REDIS_CFLAGS</code> 和 <code>REDIS_LDFLAGS</code> 两个变量将所有编译和链接选项暴露给外界。这种设计的好处是：你可以在不修改 Makefile 的情况下，通过环境变量覆盖任何编译参数。</p>
+
+        <h2>编译选项对比</h2>
+
+        <p>不同的编译选项组合对应不同的使用场景。下面这个表可以帮助你快速选择：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>场景</th>
+                    <th>CFLAGS</th>
+                    <th>内存分配器</th>
+                    <th>调试符号</th>
+                    <th>优化级别</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>生产部署</td>
+                    <td>（默认）</td>
+                    <td>jemalloc（默认）</td>
+                    <td>strip 后移除</td>
+                    <td>-O2</td>
+                </tr>
+                <tr>
+                    <td>源码调试</td>
+                    <td><code>-g -O0</code></td>
+                    <td>jemalloc</td>
+                    <td>完整保留</td>
+                    <td>无优化</td>
+                </tr>
+                <tr>
+                    <td>内存检测</td>
+                    <td><code>-g -O0</code> + VALGRIND</td>
+                    <td>glibc malloc</td>
+                    <td>完整保留</td>
+                    <td>无优化</td>
+                </tr>
+                <tr>
+                    <td>性能分析</td>
+                    <td><code>-g -O2</code></td>
+                    <td>jemalloc</td>
+                    <td>保留 frame pointer</td>
+                    <td>-O2</td>
+                </tr>
+                <tr>
+                    <td>二分查找 bug</td>
+                    <td><code>-g -O0 -DDEBUG</code></td>
+                    <td>任意</td>
+                    <td>完整保留</td>
+                    <td>无优化</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>小贴士：</strong>如果只用 <code>make</code> 不加任何参数，Redis 默认使用 <code>MALLOC=jemalloc</code>。如果你的系统没有安装 jemalloc 开发包，编译会失败。这时可以用 <code>MALLOC=libc</code> 回退到 glibc malloc 来编译。不过请注意，生产环境强烈推荐 jemalloc——它在减少内存碎片方面远优于 glibc malloc，我们下一章会详细讲。
+        </div>
+
+        <h2>GDB 调试 Redis</h2>
+
+        <p>调试环境配好后，我们来上手试一下 GDB。Redis 是一个典型的事件驱动服务器程序，启动后进入 <code>aeMain()</code> 事件循环，处理网络请求。我们可以在关键入口点设置断点逐步跟踪。</p>
+
+        <h3>启动 GDB 挂载 Redis 服务器</h3>
+
+        <pre><code># 方式一：直接启动并立即断在 main()
+gdb --args src/redis-server --port 6380
+(gdb) break main
+(gdb) run
+
+# 方式二：附加到正在运行的进程
+gdb -p $(pgrep redis-server)
+
+# 方式三：分析 core dump 文件
+gdb src/redis-server core.12345</code></pre>
+
+        <h3>断点设置技巧</h3>
+
+        <p>在源码阅读过程中，以下几个断点位置最常用：</p>
+
+        <pre><code># 在命令处理入口设置断点
+(gdb) break processCommand
+
+# 在键值查找函数设置断点
+(gdb) break lookupKey
+
+# 在事件循环的每次迭代中断点
+(gdb) break aeProcessEvents
+
+# 条件断点：只对特定 key 停
+(gdb) break dbAdd if strcmp((char *)key->ptr, "mykey") == 0
+
+# 观察点：监控变量的写入
+(gdb) watch server.ustat_avg_ttl</code></pre>
+
+        <h3>常用 GDB 命令速查</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>命令</th>
+                    <th>用法示例</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>break</code></td>
+                    <td><code>b processCommand</code></td>
+                    <td>设置函数断点</td>
+                </tr>
+                <tr>
+                    <td><code>next</code></td>
+                    <td><code>n</code></td>
+                    <td>单步执行（跳过函数）</td>
+                </tr>
+                <tr>
+                    <td><code>step</code></td>
+                    <td><code>s</code></td>
+                    <td>单步执行（进入函数）</td>
+                </tr>
+                <tr>
+                    <td><code>print</code></td>
+                    <td><code>p *((robj*)$rdi)</code></td>
+                    <td>打印变量或表达式</td>
+                </tr>
+                <tr>
+                    <td><code>display</code></td>
+                    <td><code>disp server.port</code></td>
+                    <td>每步自动打印表达式</td>
+                </tr>
+                <tr>
+                    <td><code>backtrace</code></td>
+                    <td><code>bt</code></td>
+                    <td>查看调用栈</td>
+                </tr>
+                <tr>
+                    <td><code>frame</code></td>
+                    <td><code>f 2</code></td>
+                    <td>切换到指定栈帧</td>
+                </tr>
+                <tr>
+                    <td><code>info locals</code></td>
+                    <td><code>i lo</code></td>
+                    <td>查看所有局部变量</td>
+                </tr>
+                <tr>
+                    <td><code>info threads</code></td>
+                    <td><code>i th</code></td>
+                    <td>查看所有线程</td>
+                </tr>
+                <tr>
+                    <td><code>finish</code></td>
+                    <td><code>fin</code></td>
+                    <td>执行到函数返回</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>配置 .gdbinit</h3>
+
+        <p>每次启动 GDB 手动敲这些命令太慢了。把常用宏和设置写入 <code>~/.gdbinit</code> 文件中，GDB 启动时会自动执行：</p>
+
+        <pre><code>set print pretty on
+set pagination off
+
+# 打印 Redis 对象
+define pro
+    print (robj *)$arg0
+    printf "type=%d, encoding=%d, refcount=%d\n", ((robj*)$arg0)->type, ((robj*)$arg0)->encoding, ((robj*)$arg0)->refcount
+end
+document pro
+    Print a Redis object with type/encoding/refcount
+end
+
+# 打印 SDS 字符串
+define psds
+    printf "len=%zu, alloc=%zu, flags=%d, buf=%s\n", ((sdshdr8*)((char*)$arg0 - sizeof(sdshdr8)))->len, ((sdshdr8*)((char*)$arg0 - sizeof(sdshdr8)))->alloc, ((sdshdr8*)((char*)$arg0 - sizeof(sdshdr8)))->flags, (char*)$arg0
+end
+document psds
+    Print an SDS string header info
+end</code></pre>
+
+        <p>有了这些宏，调试体验会提升一个档次。比如在断点处直接输入 <code>pro $rsi</code> 就能看到 Redis 对象的类型和编码，不用再手动计算结构体偏移量。</p>
+
+        <h2>VSCode + clangd 配置</h2>
+
+        <p>GDB 适合运行时调试，但日常的代码浏览和静态分析，还是 IDE 更顺手。我推荐 VSCode + clangd 的搭配，因为它支持精确的符号跳转、类型提示、错误诊断——这些对阅读 C 代码至关重要。</p>
+
+        <h3>生成 compile_commands.json</h3>
+
+        <p>clangd 需要 <code>compile_commands.json</code> 才能知道每个源文件的编译参数。最简单的生成方式是用 <code>bear</code> 工具包裹 make 命令：</p>
+
+        <pre><code># 安装 bear（以 Ubuntu 为例）
+sudo apt install bear
+
+# 在 Redis 源码目录执行
+make distclean
+bear -- make REDIS_CFLAGS="-g -O0" MALLOC=jemalloc
+
+# 验证生成结果
+ls -la compile_commands.json
+jq '. | length' compile_commands.json  # 应该包含 60+ 个编译单元</code></pre>
+
+        <div class="tip">
+            <strong>小贴士：</strong><code>bear</code> 的工作原理是 LD_PRELOAD 拦截了 gcc 的 exec 调用，将每个编译单元的命令行参数记录到 JSON 文件中。如果你不想安装 bear，也可以使用 CMake 的 <code>CMAKE_EXPORT_COMPILE_COMMANDS</code> 选项，但 Redis 用的是原生的 Makefile，所以 bear 是最方便的选择。
+        </div>
+
+        <h3>VSCode 配置</h3>
+
+        <p>在 VSCode 中需要做两件事：安装 clangd 插件，禁用默认的 C/C++ IntelliSense。在 <code>.vscode/settings.json</code> 中添加：</p>
+
+        <pre><code>{
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "clangd.arguments": [
+        "--background-index",
+        "--clang-tidy",
+        "--header-insertion=never"
+    ]
+}</code></pre>
+
+        <p>重启 VSCode 后，打开 <code>src/server.c</code>，试试 <code>Ctrl+点击</code> <code>lookupKey</code> 函数——clangd 会立即带你跳转到 <code>db.c</code> 中该函数的定义。再试试把鼠标悬停在 <code>robj</code> 类型上，会弹出详细的结构体定义。这种体验在未配置 clangd 的项目中是完全不可想象的。</p>
+
+        <p>clangd 还有一个隐藏功能——<strong>代码补全时显示函数签名和参数类型</strong>。当你输入 <code>zmalloc(</code> 时，它会提示参数类型为 <code>size_t size</code>，并且返回类型是 <code>void *</code>。这对于记住那些参数较多的 API（比如 <code>sdscatfmt</code>、<code>dictAddRaw</code>）非常有帮助。</p>
+
+        <div class="highlight">
+            <strong>提示：</strong>如果你发现 clangd 跳转到的是头文件中的声明而不是 .c 文件中的定义，多半是因为 compile_commands.json 没有正确生成。请确保：1) 先执行 <code>make distclean</code> 再 <code>bear -- make</code>；2) bear 捕获到的编译单元数与 src/ 目录下的 .c 文件数基本一致。如果还是不行，可以手动在 VSCode 中执行 "clangd: Restart language server"。
+        </div>
+
+        <p>环境搭好之后，我们正式进入源码阅读的第一站——内存管理。在下一章中，我们将深入 <code>zmalloc.c</code> 和 <code>zmalloc.h</code>，看看 Redis 如何管理内存、如何与 jemalloc 协作、以及如何精确监控每一点内存的使用。</p>
+
+        <div class="footer-nav">
+            <a href="01.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="03.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

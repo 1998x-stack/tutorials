@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第5章 链表、压缩列表与listpack</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html" class="active">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第5章：链表、压缩列表与 listpack</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们深入研究了 SDS——Redis 的字符串基石。字符串虽然强大，但它们终究是"原子"——只能存储一个值。当我们需要存储一个元素的列表、一个键的一系列字段时，就需要容器型的数据结构了。</p>
+
+        <p>Redis 的容器数据结构走过了一条非常有意思的演进路线。早期版本中，List 类型使用双向链表（adlist）存储，Hash 和 Sorted Set 使用压缩列表（ziplist）做紧凑存储。但随着时间推移，ziplist 的"连锁更新"问题逐渐暴露，antirez 在 Redis 5.0 中引入了一个新的替代方案——listpack。再到后来，quicklist 把链表和压缩列表结合起来，形成了一种混合数据结构。这一章我们要读的 <code>adlist.c</code>、<code>ziplist.c</code> 和 <code>listpack.c</code>，加起来超过 3000 行，但核心思想都非常清晰：用不同的内存布局和访问模式，在不同场景下做最优的选择。</p>
+
+        <h2>adlist 双向链表</h2>
+
+        <p>adlist（A generic doubly linked list）是 Redis 中最"标准"的链表实现。它的结构体定义简洁明了：</p>
+
+        <pre><code>/* adlist.h — 链表的三个核心结构 */
+typedef struct listNode {
+    struct listNode *prev;
+    struct listNode *next;
+    void *value;
+} listNode;
+
+typedef struct listIter {
+    listNode *next;
+    int direction;
+} listIter;
+
+typedef struct list {
+    listNode *head;
+    listNode *tail;
+    void *(*dup)(void *ptr);      /* 复制节点值 */
+    void (*free)(void *ptr);      /* 释放节点值 */
+    int (*match)(void *ptr, void *key); /* 匹配比较 */
+    unsigned long len;
+} list;</code></pre>
+
+        <p>这个设计有几个值得注意的地方：</p>
+
+        <ul>
+            <li><strong>多态通过函数指针实现：</strong><code>dup</code>、<code>free</code>、<code>match</code> 是三个函数指针，它们让 <code>list</code> 可以存储任意类型的值。创建 list 时你可以传入自定义的 dup/free/match 函数，如果传 NULL 则走默认行为（浅复制、不释放、指针比较）。</li>
+            <li><strong>无环双向：</strong>区别于某些教材中的"循环链表"，Redis 的链表是普通的双向链表（head->prev = NULL, tail->next = NULL）。这简化了边界情况的处理。</li>
+            <li><strong>独立迭代器：</strong><code>listIter</code> 是单独的结构体，支持从头部或尾部开始迭代（由 <code>direction</code> 字段控制，取值 <code>AL_START_HEAD</code> 或 <code>AL_START_TAIL</code>）。迭代过程中修改链表是安全的。</li>
+        </ul>
+
+        <p>adlist 的 API 非常直观：<code>listAddNodeHead</code>、<code>listAddNodeTail</code>、<code>listInsertNode</code>、<code>listDelNode</code>、<code>listSearchKey</code>、<code>listIndex</code> 等。这些操作的时间复杂度如预期：头部/尾部插入删除 O(1)，按索引查找 O(N)。</p>
+
+        <p>但 adlist 有一个明显的缺陷：<strong>每个节点都有两个指针的开销（16 字节在 64 位系统上）</strong>，而且节点在内存中分散分配，遍历时 cache miss 严重。对于少量元素的小列表来说，这个开销可以接受；但当列表中有成千上万个元素时，内存和 CPU 缓存的效率就很成问题。</p>
+
+        <h2>ziplist 压缩列表</h2>
+
+        <p>为了解决 adlist 的内存开销问题，Redis 设计了 ziplist——一个连续内存上的紧凑列表结构。它的核心理念很简单：<strong>把所有元素按顺序排列在一块连续内存中，用变长编码来存储每个元素的长度</strong>。</p>
+
+        <h3>ziplist 内存布局</h3>
+
+        <pre><code>/* ziplist.c 中的文档描述了 ziplist 的布局 */
+&lt;zlbytes&gt; &lt;zltail&gt; &lt;zllen&gt; &lt;entry&gt; &lt;entry&gt; ... &lt;entry&gt; &lt;zlend&gt;
+
+/* 每个 entry 的编码格式 */
+&lt;prevlen&gt; &lt;encoding&gt; &lt;entry-data&gt;</code></pre>
+
+        <ul>
+            <li><strong>zlbytes（4 字节）：</strong>整个 ziplist 占用的字节数。</li>
+            <li><strong>zltail（4 字节）：</strong>最后一个 entry 的偏移量（方便从尾部操作）。</li>
+            <li><strong>zllen（2 字节）：</strong>entry 的数量。如果超过 65535，需要遍历才能得到真实数量。</li>
+            <li><strong>zlend（1 字节）：</strong>结束标志，固定值 0xFF。</li>
+            <li><strong>prevlen：</strong>前一个 entry 的长度，用于从后向前遍历。如果前一个 entry 长度 &lt; 254 字节，用 1 字节存储；否则用 5 字节（第一个字节是 0xFE 标记，后 4 字节是真实长度）。</li>
+            <li><strong>encoding：</strong>当前 entry 的编码类型和长度。可以是字符串编码（指定长度）或整数编码（int4/int8/int16/int24/int32/int64）。</li>
+        </ul>
+
+        <p>ziplist 的最大优势是<strong>内存利用率极高</strong>——没有额外的指针开销，元素连续存放，对 CPU cache 非常友好。它的读取在大多数情况下也是高效的（通过 <code>zltail</code> 直接定位到尾节点，通过 <code>prevlen</code> 反向遍历）。</p>
+
+        <h2>连锁更新问题</h2>
+
+        <p>ziplist 有一个著名的问题——<strong>连锁更新（cascading update）</strong>。当一个 entry 被插入或删除时，它后面的所有 entry 的 <code>prevlen</code> 字段可能需要调整大小（从 1 字节变成 5 字节，或者反过来），进而引发后续 entry 的连锁调整。</p>
+
+        <p>具体来说，假设当前 ziplist 中所有 entry 的长度都在 250-253 字节之间，它们的 prevlen 都是 1 字节。现在我们在头部插入了一个 254 字节的 entry，那么它后面的第一个 entry 的 prevlen 就必须从 1 字节扩展到 5 字节。这一扩展导致第一个 entry 的总长度增加了 4 字节（从 250 变成 254），于是触发第二个 entry 的 prevlen 扩展，依此类推——就像多米诺骨牌一样传播下去。最坏的情况下，每次插入都触发一次 O(N^2) 级别的内存重分配。</p>
+
+        <div class="highlight">
+            <strong>实战观察：</strong>虽然连锁更新听起来很可怕，但在实际生产中它造成的性能问题非常罕见。原因有三：1) 触发条件苛刻，需要所有 entry 大小都落在 250-254 字节这个极其狭窄的区间内；2) ziplist 通常只用于存储少量元素（hash-max-ziplist-entries 默认 512，list-max-ziplist-size 默认 -2 即 8KB），元素数量有限；3) 每次调整只是 memmove 操作，对现代 CPU 来说并不算慢。但不可否认，这个设计缺陷确实是 ziplist 的"阿喀琉斯之踵"，也是 antirez 在 Redis 5.0 中引入 listpack 的直接原因。
+        </div>
+
+        <h2>listpack 替代方案</h2>
+
+        <p>listpack 是 antirez 在 Redis 5.0 中引入的新型紧凑列表结构，它的设计目标非常明确：<strong>彻底解决 ziplist 的连锁更新问题</strong>。</p>
+
+        <p>listpack 和 ziplist 的核心区别在于：listpack 的每个 entry 不再依赖前一个 entry 的长度信息。每个 entry 仅包含自身信息的编码，不包含 <code>prevlen</code> 字段。</p>
+
+        <pre><code>/* listpack entry 的通用编码格式 */
+&lt;encoding-type&gt; &lt;element-data&gt; &lt;element-tot-len&gt;</code></pre>
+
+        <p>每个 entry 在末尾包含了自身总长度（<code>element-tot-len</code>），这使得从后向前遍历时，可以"跳过"当前 entry 来找到前一个 entry 的起始位置。因为每个 entry 的长度信息是自包含的，修改一个 entry 不会影响其他 entry 的编码，连锁更新就此消失。</p>
+
+        <p>listpack 在 Redis 7.x 中已经逐渐取代 ziplist，成为 Stream、Hash（当元素较小时）等类型的底层编码。未来版本的 Redis 计划彻底移除 ziplist，全面切换到 listpack。</p>
+
+        <h2>quicklist 混合结构</h2>
+
+        <p>quicklist 是 Redis 3.2 引入的，用于替代 adlist + ziplist 作为 List 类型的底层实现。它的设计思路是典型的"分治"——将一个大列表切分成多个 ziplist（或 listpack）片段，每个片段作为一个 quicklistNode，节点之间用双向指针连接。</p>
+
+        <pre><code>/* quicklist.h 中的核心结构 */
+typedef struct quicklist {
+    quicklistNode *head;
+    quicklistNode *tail;
+    unsigned long count;        /* 所有节点中的元素总数 */
+    unsigned long len;          /* quicklistNode 数量 */
+    int fill : QL_FILL_BITS;   /* 每个 ziplist 的最大大小控制 */
+    unsigned int compress : QL_COMP_BITS; /* 压缩深度 */
+    /* ... */
+} quicklist;</code></pre>
+
+        <p><code>fill</code> 参数控制每个 ziplist 的大小。正值表示每个 ziplist 最多包含多少个 entry，负值（如 -1 到 -5）表示按 4KB 到 64KB 的字节数限制。生产环境中默认的 <code>list-max-ziplist-size -2</code> 意味着每个 ziplist 最大 8KB。</p>
+
+        <p><code>compress</code> 参数控制压缩深度。由于列表的操作通常集中在两端（LPUSH/LPOP/RPUSH/RPOP），quicklist 可以将中间的节点用 LZF 算法压缩存储，节省内存。默认 <code>compress</code> 为 0（不压缩）。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th>ziplist</th>
+                    <th>listpack</th>
+                    <th>quicklist</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>内存布局</td>
+                    <td>连续内存</td>
+                    <td>连续内存</td>
+                    <td>多个 ziplist + 双向链表</td>
+                </tr>
+                <tr>
+                    <td>遍历方式</td>
+                    <td>双向（通过 prevlen）</td>
+                    <td>双向（自描述长度）</td>
+                    <td>双向（节点内 ziplist 遍历）</td>
+                </tr>
+                <tr>
+                    <td>插入/删除</td>
+                    <td>可能 O(N) 重分配</td>
+                    <td>O(N) 重分配（无连锁）</td>
+                    <td>O(1) 定位节点 + O(n) 节点内</td>
+                </tr>
+                <tr>
+                    <td>连锁更新</td>
+                    <td>有</td>
+                    <td>无</td>
+                    <td>节点内有（ziplist 模式）</td>
+                </tr>
+                <tr>
+                    <td>内存效率</td>
+                    <td>极高</td>
+                    <td>极高</td>
+                    <td>高+可压缩中间节点</td>
+                </tr>
+                <tr>
+                    <td>场景</td>
+                    <td>小规模 Hash/ZSet</td>
+                    <td>Listpack 编码的 Hash/Stream</td>
+                    <td>List 类型默认编码</td>
+                </tr>
+                <tr>
+                    <td>引入版本</td>
+                    <td>1.0</td>
+                    <td>5.0</td>
+                    <td>3.2</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>有一家公司的 Redis 集群每隔一段时间就会 CPU 飙升到 100%，持续几十秒后恢复正常。排查后发现，业务方用 <code>LRANGE mylist 0 -1</code> 读取一个包含几十万个元素的列表，而这个 List 的 quicklist 中每个 ziplist 被设置得过大（fill 参数被调到了 10000）。单个 ziplist 中的元素太多，导致 <code>lrange</code> 在解压和遍历时消耗了大量 CPU。更糟的是，这个列表的中间节点还开启了 LZF 压缩，<code>lrange</code> 遍历时需要逐一解压。最终解决方案是调小 <code>list-max-ziplist-size</code>，让每个 ziplist 包含更少的元素，分摊解压开销。教训是：<strong>quicklist 的 fill 参数不是一个可以随意调大的值——在大列表场景下，"拆细"往往比"合并"更有利于读写性能。</strong>
+        </div>
+
+        <p>底层的数据容器各显神通，但 Redis 需要一个统一的高层映射结构——字典。在下一章中，我们将翻开 <code>dict.c</code>，看 Redis 如何设计一个高效的哈希表，以及"渐进式 rehash"这个精妙机制是如何实现的。</p>
+
+        <div class="footer-nav">
+            <a href="04.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="06.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

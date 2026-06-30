@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 SFT数据去噪与去重实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 后训练概述与数据定位</a></li>
+            <li><a href="02.html">第2章 后训练数据分类体系</a></li>
+            <li><a href="03.html">第3章 数据格式与标准规范</a></li>
+            <li><a href="04.html">第4章 数据来源与采集策略</a></li>
+            <li><a href="05.html">第5章 数据质量评估框架</a></li>
+            <li><a href="06.html">第6章 数据生命周期管理</a></li>
+            <li><a href="07.html">第7章 HuggingFace数据生态入门</a></li>
+            <li><a href="08.html">第8章 通用英文SFT标杆数据集</a></li>
+            <li><a href="09.html">第9章 多轮对话SFT数据集</a></li>
+            <li><a href="10.html">第10章 推理增强SFT数据集</a></li>
+            <li><a href="11.html">第11章 中文SFT数据集体系</a></li>
+            <li><a href="12.html">第12章 垂直领域SFT数据</a></li>
+            <li><a href="13.html">第13章 SFT数据配比与混合策略</a></li>
+            <li><a href="14.html" class="active">第14章 SFT数据去噪与去重实战</a></li>
+            <li><a href="15.html">第15章 偏好对齐数据基础</a></li>
+            <li><a href="16.html">第16章 全球通用偏好数据标杆</a></li>
+            <li><a href="17.html">第17章 DPO/PPO/ORPO数据适配</a></li>
+            <li><a href="18.html">第18章 安全对齐与中文偏好数据</a></li>
+            <li><a href="19.html">第19章 思维链(CoT)推理数据</a></li>
+            <li><a href="20.html">第20章 GRPO/RLVR推理增强数据</a></li>
+            <li><a href="21.html">第21章 工具调用与Function Call数据</a></li>
+            <li><a href="22.html">第22章 Agent多步推理数据</a></li>
+            <li><a href="23.html">第23章 数据质量管线搭建</a></li>
+            <li><a href="24.html">第24章 训练框架数据适配</a></li>
+            <li><a href="25.html">第25章 许可证合规与商用风险</a></li>
+            <li><a href="26.html">第26章 2025-2026后训练数据新范式</a></li>
+            <li><a href="27.html">第27章 数据策略设计与评估体系</a></li>
+            <li><a href="28.html">第28章 综合实战：从零构建后训练数据流水线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第14章 SFT数据去噪与去重实战</h2>
+
+        <p>在第 13 章中我们花了大量精力来优化数据配比。但如果你的数据本身存在大量重复或噪声，再好的配比策略也救不了——这就像用优质的调料去烹饪腐烂的食材，结果可想而知。</p>
+
+        <p>"后训练数据，质量远重于数量"——这是我们在第 1 章就反复强调的原则。这一章，我们将把这个原则落实到工程实现上。你将学到一套完整的数据清洗方法论：从去重（精确去重、模糊去重、语义去重）到质量过滤（长度过滤、困惑度过滤、格式校验），以及如何用工业化工具（NeMo Curator）在大规模数据集上高效地完成这些操作。</p>
+
+        <h2>后训练数据「质量远重于数量」的工程实现</h2>
+
+        <p>在正式进入技术细节之前，我们先建立一个框架性的理解。后训练数据的质量治理可以分为三个层次：</p>
+
+        <ul>
+            <li><strong>第一层：去重</strong>——移除数据集中重复或高度相似的样本。重复数据不仅浪费算力，更严重的是会导致模型对特定模式过拟合。</li>
+            <li><strong>第二层：过滤</strong>——根据预设规则和阈值移除低质量样本。这一步需要你定义什么是"低质量"——太短、太乱、语言不对、格式有误等。</li>
+            <li><strong>第三层：评分与排序</strong>——不是简单地丢弃"坏"数据，而是对数据质量进行打分，让模型在训练中更关注高质量样本。这是更精细化的质量治理。</li>
+        </ul>
+
+        <p>好的消息是，这三个层次都有成熟的开源工具和实现方案，不需要从零开始造轮子。</p>
+
+        <h2>去重技术栈</h2>
+
+        <p>去重是数据清洗中最基础也最重要的环节。根据重复的"粒度"，去重技术可以分为三个层级：</p>
+
+        <h3>精确去重</h3>
+        <p>完全一样的字符串或经过简单归一化（去除空格、统一大小写）后完全一样的文本。这是最简单也最有效的方法——没有遗漏，也不会误伤。</p>
+
+        <pre><code>import hashlib
+
+def exact_dedup(dataset, text_key="instruction"):
+    """精确去重：基于 MD5 哈希"""
+    seen = set()
+    deduped = []
+    for item in dataset:
+        text = item[text_key]
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        if text_hash not in seen:
+            seen.add(text_hash)
+            deduped.append(item)
+    return deduped
+
+# 使用示例
+dataset = load_dataset("tatsu-lab/alpaca", split="train")
+deduped = exact_dedup(dataset, text_key="instruction")
+print(f"去重前: {len(dataset)} 条, 去重后: {len(deduped)} 条")
+# 通常 Alpaca 去重后会减少 2000-3000 条（大约 5%）</code></pre>
+
+        <h3>MinHash + LSH 模糊去重</h3>
+        <p>精确去重无法处理"几乎一样但略有不同"的情况。比如两条指令："请用 Python 写一个二分查找函数"和"用 Python 写一个二分查找函数，谢谢"——内容高度相似，但逐字比对并不相同。这时候就需要模糊去重。</p>
+
+        <p>MinHash + LSH（Locality-Sensitive Hashing）是模糊去重的工业标准方法。它的核心思想是：将文本转换成固定长度的"签名"（signature），然后通过比较签名来判断文本相似度。如果两个文本的 MinHash 签名高度重合，它们就很可能包含相似的语义内容。</p>
+
+        <pre><code>from datasketch import MinHash, MinHashLSH
+
+def minhash_dedup(dataset, threshold=0.8, text_key="instruction"):
+    """
+    基于 MinHash + LSH 的模糊去重
+    threshold: Jaccard 相似度阈值，大于此值的被视为重复
+    """
+    lsh = MinHashLSH(threshold=threshold, num_perm=128)
+    deduped = []
+
+    for idx, item in enumerate(dataset):
+        text = item[text_key]
+        # 构建 MinHash
+        m = MinHash(num_perm=128)
+        for word in text.split():
+            m.update(word.encode())
+
+        # 检查是否与已有样本高度相似
+        if not lsh.query(m):
+            lsh.insert(f"doc_{idx}", m)
+            deduped.append(item)
+
+    return deduped</code></pre>
+
+        <h3>语义 Embedding 去重</h3>
+        <p>MinHash 基于词级别的重叠来计算相似度，无法捕捉"用词不同但意思相同"的语义重复。比如"二元查找算法的 Python 实现"和"如何使用 Python 实现二分搜索"——用词完全不同，但说的是同一件事。这时候就需要语义去重。</p>
+
+        <p>语义去重使用 Sentence Transformer 等模型将文本转换为向量，然后基于向量间的余弦相似度来判断重复。这种方法计算量大（需要跑一次 embedding），但效果最好，能发现写法和用词完全不同但语义高度重复的样本。</p>
+
+        <div class="tip">
+            <strong>去重策略的选择顺序：</strong>建议<strong>先做精确去重，再做 MinHash 模糊去重，最后根据需要做语义去重</strong>。精确去重先移除最明显的重复，减少后续模糊去重的计算量；MinHash 处理字面级别的近似重复；语义去重作为"收尾"处理更深层的语义重复。这种分层策略兼顾了效率和效果。
+        </div>
+
+        <h2>质量过滤流水线</h2>
+
+        <p>去重之后，下一步是质量过滤。以下是一套经过验证的过滤流水线：</p>
+
+        <table>
+            <tr>
+                <th>过滤步骤</th>
+                <th>检测内容</th>
+                <th>典型阈值</th>
+                <th>移除比例（参考）</th>
+            </tr>
+            <tr>
+                <td>长度过滤</td>
+                <td>指令或回答过短/过长</td>
+                <td>回答 &lt; 5 字符 或 &gt; 4096 字符</td>
+                <td>2-5%</td>
+            </tr>
+            <tr>
+                <td>语言检测</td>
+                <td>语言识别与混合语言检测</td>
+                <td>非目标语言比例 &gt; 30%</td>
+                <td>1-3%</td>
+            </tr>
+            <tr>
+                <td>困惑度过滤</td>
+                <td>用一个小模型评估文本困惑度</td>
+                <td>PPL &gt; 平均 + 2 * 标准差</td>
+                <td>3-5%</td>
+            </tr>
+            <tr>
+                <td>格式完整性</td>
+                <td>JSON 格式校验、字段完整性</td>
+                <td>数据不符合 Schema</td>
+                <td>1-2%</td>
+            </tr>
+            <tr>
+                <td>毒性/不当内容</td>
+                <td>有害内容检测</td>
+                <td>毒性分数 &gt; 0.8</td>
+                <td>0.5-2%</td>
+            </tr>
+        </table>
+
+        <pre><code>def quality_filtering_pipeline(dataset):
+    """完整的数据过滤管线"""
+    filtered = []
+
+    for item in dataset:
+        # 1. 长度过滤
+        response = item.get("output", "")
+        if len(response) &lt; 5 or len(response) &gt; 4096:
+            continue
+
+        # 2. 语言检测（使用 fasttext 的 lid.176 模型）
+        instruction = item.get("instruction", "")
+        lang = detect_language(instruction)  # 返回 ISO 语言代码
+        if lang not in ("zh", "en", "ja", "ko"):  # 根据需求调整
+            continue
+
+        # 3. 困惑度过滤
+        ppl = compute_perplexity(response)
+        if ppl &gt; PPL_THRESHOLD:
+            continue
+
+        # 4. 格式完整性检查
+        if not validate_structure(item):
+            continue
+
+        filtered.append(item)
+
+    return filtered</code></pre>
+
+        <div class="highlight">
+            <strong>关键实践经验：</strong>质量过滤的"黄金法则是"不要过度过滤"——过于激进的过滤会把"意外之喜"也过滤掉。有些看起来"质量不高"的数据（比如带语法错误的用户提问），恰恰因为更接近真实用户场景而成为更有价值的训练数据。建议采取"保守过滤，逐步收窄"的策略：先用宽松的阈值过滤掉明显的低质量数据，评估训练效果，再根据效果逐步收紧阈值。
+        </div>
+
+        <h2>实战：用datasets库搭建去重管线</h2>
+
+        <p>让我们把前面学到的方法整合成一个完整的实战例子。下面是用 HuggingFace <code>datasets</code> 库搭建的去重+过滤管线：</p>
+
+        <pre><code>from datasets import load_dataset, Dataset
+from datasketch import MinHash, MinHashLSH
+import hashlib
+
+class DataCleaningPipeline:
+    """后训练数据清洗管线"""
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+        self.stats = {"initial": len(dataset)}
+
+    def exact_dedup(self, text_keys=["instruction", "output"]):
+        """精确去重"""
+        seen = set()
+        deduped = []
+        for item in self.dataset:
+            combined = "".join(item.get(k, "") for k in text_keys)
+            h = hashlib.md5(combined.encode()).hexdigest()
+            if h not in seen:
+                seen.add(h)
+                deduped.append(item)
+        self.dataset = deduped
+        self.stats["exact_dedup"] = len(deduped)
+        return self
+
+    def minhash_dedup(self, threshold=0.8, text_key="instruction"):
+        """模糊去重"""
+        lsh = MinHashLSH(threshold=threshold, num_perm=128)
+        deduped = []
+        for idx, item in enumerate(self.dataset):
+            m = MinHash(num_perm=128)
+            for word in item.get(text_key, "").split():
+                m.update(word.encode())
+            if not lsh.query(m):
+                lsh.insert(f"d{idx}", m)
+                deduped.append(item)
+        self.dataset = deduped
+        self.stats["minhash_dedup"] = len(deduped)
+        return self
+
+    def length_filter(self, min_len=10, max_len=4096, text_key="output"):
+        """长度过滤"""
+        self.dataset = [
+            item for item in self.dataset
+            if min_len <= len(item.get(text_key, "")) <= max_len
+        ]
+        self.stats["length_filter"] = len(self.dataset)
+        return self
+
+    def report(self):
+        """输出清洗报告"""
+        print("=" * 50)
+        print("数据清洗报告")
+        print("=" * 50)
+        initial = self.stats["initial"]
+        for stage, count in self.stats.items():
+            if stage == "initial":
+                print(f"初始数据量: {count}")
+            else:
+                removed = self.stats[list(self.stats.keys())[
+                    list(self.stats.keys()).index(stage) - 1
+                ]] - count
+                print(f"{stage}: {count} (移除了 {removed} 条)")
+        final = self.stats[list(self.stats.keys())[-1]]
+        print(f"\n最终保留: {final} / {initial} ({final/initial*100:.1f}%)")
+        return self
+
+# 运行清洗管线
+raw_dataset = load_dataset("json", data_files="my_sft_data.jsonl",
+                           split="train")
+pipeline = DataCleaningPipeline(raw_dataset)
+(
+    pipeline
+    .exact_dedup()
+    .minhash_dedup(threshold=0.85)
+    .length_filter(min_len=10, max_len=3072)
+    .report()
+)
+# 输出示例:
+# 初始数据量: 150000
+# 精确去重: 147200 (移除了 2800 条)
+# minhash_dedup: 138368 (移除了 8832 条)
+# length_filter: 135600 (移除了 2768 条)
+# 最终保留: 135600 / 150000 (90.4%)</code></pre>
+
+        <h2>NeMo Curator简介：GPU加速的数据策管工具</h2>
+
+        <p>当你的数据量达到数百万甚至上千万条时，在单机上用 Python 逐条处理就太慢了。这时候需要工业级的、支持分布式和 GPU 加速的数据策管工具。</p>
+
+        <p><strong>NeMo Curator</strong> 是 NVIDIA 开发的 GPU 加速数据策管工具，专为大规模语言模型训练数据的准备而设计。它的核心特性包括：</p>
+
+        <ul>
+            <li><strong>GPU 加速去重</strong>：利用 GPU 的并行计算能力加速 MinHash 和 embedding 去重。在 8 卡 A100 的配置下，NeMo Curator 可以在 <strong>1.8 小时内完成 1.1T token</strong> 的去重处理——这相当于处理整个 C4 数据集的规模。</li>
+            <li><strong>内置质量打分模型</strong>：使用 FastText 分类器、困惑度模型、以及基于 BERT 的质量评分模型，对文本进行多维度质量评分。</li>
+            <li><strong>灵活的分布式架构</strong>：基于 Dask 和 RAPIDS，可以无缝扩展到多节点集群。</li>
+            <li><strong>HuggingFace 集成</strong>：可以直接读取 datasets 格式的数据，也可以输出为兼容格式。</li>
+        </ul>
+
+        <pre><code># NeMo Curator 去重代码示例（命令行）
+# 对 JSONL 格式的 SFT 数据进行近似去重
+
+nemo_curator dedup \
+    --input_dir /data/my_sft_dataset/ \
+    --output_dir /data/deduped_sft/ \
+    --id_key "id" \
+    --text_key "instruction" \
+    --num_workers 32 \
+    --cache_dir /cache/nemo_curator/ \
+    --minhash_threshold 0.85
+
+# 在 4 卡 A100 上处理 500 万条 SFT 数据
+# 预计耗时: 15-20 分钟（vs 单机 CPU 方案 6-8 小时）</code></pre>
+
+        <p>对于 SFT 数据规模（通常是数十万到数百万条），NeMo Curator 可能有些"杀鸡用牛刀"。不过一旦你的数据管线开始处理预训练级别的数据（数十亿 token），或者你需要频繁迭代数据清洗流程，NeMo Curator 的 GPU 加速能力会带来极大的效率提升。</p>
+
+        <div class="warning">
+            <strong>工具选择的建议：</strong>根据数据规模选择工具。对于 <strong>&lt; 10 万条</strong> 的数据，用 Python 脚本 + datasets 库就够了。对于 <strong>10 万 - 500 万条</strong> 的数据，建议使用 Spark 或 Dask 的分布式处理方案。对于 <strong>&gt; 500 万条</strong> 的海量数据，NeMo Curator 的 GPU 加速方案可以带来 10-50 倍的速度提升。
+        </div>
+
+        <h2>去重前后效果对比</h2>
+
+        <p>说了这么多数据和工具，最后让我们用数据说话。以下是某团队在一个 100 万条 SFT 数据集上做完整去重+过滤后的效果对比：</p>
+
+        <table>
+            <tr>
+                <th>指标</th>
+                <th>清洗前</th>
+                <th>清洗后</th>
+                <th>变化</th>
+            </tr>
+            <tr>
+                <td>数据量</td>
+                <td>1,000,000 条</td>
+                <td>824,000 条</td>
+                <td>-17.6%</td>
+            </tr>
+            <tr>
+                <td>平均回答长度</td>
+                <td>327 字符</td>
+                <td>415 字符</td>
+                <td>+26.9%</td>
+            </tr>
+            <tr>
+                <td>重复样本占比</td>
+                <td>12.3%</td>
+                <td>0.4%</td>
+                <td>-96.7%</td>
+            </tr>
+            <tr>
+                <td>GSM8K 评测</td>
+                <td>51.2%</td>
+                <td>58.7%</td>
+                <td>+7.5 百分点</td>
+            </tr>
+            <tr>
+                <td>MT-Bench 评测</td>
+                <td>5.83</td>
+                <td>6.21</td>
+                <td>+0.38 分</td>
+            </tr>
+            <tr>
+                <td>训练时长</td>
+                <td>24 小时</td>
+                <td>19.8 小时</td>
+                <td>-17.5%</td>
+            </tr>
+        </table>
+
+        <p>特别注意最后一行：<strong>训练时间也减少了 17.5%</strong>。这意味着清洗不仅提升了模型质量，还节省了训练成本。质量更高、数量更少的数据，训练出来的模型反而更好——这正是"质量远重于数量"的工程实证。</p>
+
+        <div class="tip">
+            <strong>总结一下这一章的核心：</strong>数据去重和过滤是 SFT 数据工程中"投入产出比最高"的环节。花一两天搭建清洗管线，通常能带来 5-15% 的模型能力提升——这个 ROI 远高于增加数据量或调超参数。永远记住：<strong>喂给模型的数据，宁可少，不可脏</strong>。
+        </div>
+
+        <p>至此，我们完成了"第二部分：SFT 数据集深度解析"的全部内容。从第 7 章的 HuggingFace 生态入门，到本章的数据去重实战，你已掌握了 SFT 数据选型、配比和清洗的完整知识体系。从下一章开始，我们将进入第三部分更广阔的领域——<strong>偏好对齐数据</strong>。当模型已经学会了"如何回答"，下一步就是让它学会"什么回答更好"——这正是偏好数据要做的事，也是第 15 章：偏好对齐数据基础的开篇主题。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -63,7 +63,7 @@ A collection of 45 free, comprehensive technical tutorials in Chinese — from f
 | 📡 | 电波传播与天线 · 从入门到精通 | 28 | [antenna-propagation-tutorial](https://1998x-stack.github.io/antenna-propagation-tutorial/) |
 | 📡 | 传感网技术 · 从入门到精通 | 28 | [sensor-network-tutorial](https://1998x-stack.github.io/sensor-network-tutorial/) |
 
-### 经济 / 金融 (10 courses)
+### 经济 / 金融 (11 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -77,6 +77,7 @@ A collection of 45 free, comprehensive technical tutorials in Chinese — from f
 | 🪙 | 比特币与加密货币 | 28 | [cryptocurrency-tutorial](https://1998x-stack.github.io/cryptocurrency-tutorial/) |
 | 📝 | 申论体系 · 从入门到精通 | 28 | [shenlun-tutorial](https://1998x-stack.github.io/shenlun-tutorial/) |
 | 🛡️ | 保险学 · 从入门到精通 | 28 | [insurance-tutorial](https://1998x-stack.github.io/insurance-tutorial/) |
+| 📈 | 证券投资分析 · 从入门到精通 | 28 | [securities-investment-analysis-tutorial](https://1998x-stack.github.io/securities-investment-analysis-tutorial/) |
 
 ### 机器人 / 控制 (1 course)
 

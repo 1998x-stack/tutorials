@@ -63,7 +63,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `antenna-propagation-tutorial/` | 电波传播与天线 | 28 | `https://1998x-stack.github.io/antenna-propagation-tutorial/` |
 | `sensor-network-tutorial/` | 传感网技术 | 28 | `https://1998x-stack.github.io/sensor-network-tutorial/` |
 
-### 经济 / 金融 (10)
+### 经济 / 金融 (11)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `investment-tutorial/` | 投资学 | 28 | `https://1998x-stack.github.io/investment-tutorial/` |
@@ -76,6 +76,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `cryptocurrency-tutorial/` | 加密货币 | 28 | `https://1998x-stack.github.io/cryptocurrency-tutorial/` |
 | `shenlun-tutorial/` | 申论体系 | 28 | `https://1998x-stack.github.io/shenlun-tutorial/` |
 | `insurance-tutorial/` | 保险学 | 28 | `https://1998x-stack.github.io/insurance-tutorial/` |
+| `securities-investment-analysis-tutorial/` | 证券投资分析 | 28 | `https://1998x-stack.github.io/securities-investment-analysis-tutorial/` |
 
 ### 机器人 / 控制 (1)
 | Directory | Topic | Chapters | URL |

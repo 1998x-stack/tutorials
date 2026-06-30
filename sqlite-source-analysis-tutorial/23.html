@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第23章 CLI shell 源码</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html" class="active">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第23章 CLI shell 源码</h1>
+
+        <p>大家好，我是你们的讲师。前二十多章我们一直在剖析 SQLite 核心库的源码——从词法分析到 VDBE 虚拟机，从 B-Tree 存储引擎到查询规划器。但有一个重要的"门面"我们一直没聊——那就是每个 SQLite 开发者每天都会用的 <code>sqlite3</code> 命令行工具。</p>
+
+        <p>你也许觉得它就是个"输入 SQL，输出结果"的简单 REPL。但如果你打开 <code>src/shell.c.in</code> 看一下——哇，这份源码超过 4 万行。为什么一个命令行 shell 需要 4 万行代码？因为 SQLite 的 shell 绝不是一个简单的 REPL——它还是 <strong>调试工具、诊断工具、格式化工具和扩展框架</strong>。今天我们就走进它的源码世界。</p>
+
+        <h2>shell.c.in 的架构</h2>
+
+        <p>严格来说，CLI shell 的源码并不是一个直接的 <code>.c</code> 文件，而是一个 <code>.c.in</code> 模板文件。这意味着它在编译前要经过预处理——SQLite 的构建系统通过 <code>tool/mkshellc.tcl</code> 脚本，把 <code>shell.c.in</code> 中的一些宏占位符替换为实际的代码片段，生成最终的 <code>shell.c</code>。</p>
+
+        <p>为什么需要这种模板机制？主要是为了处理 <strong>条件编译</strong>。SQLite 支持大量的编译时选项，shell 的行为需要根据核心库的编译配置自动调整。例如，如果核心库编译时去掉了 FTS5 支持（<code>SQLITE_OMIT_FTS5</code>），shell 中就不能出现 <code>.fts5</code> 相关命令。模板机制通过 <code>@HAVE_FTS5@</code> 之类的占位符来解决这个问题。</p>
+
+        <p><code>shell.c.in</code> 的整体结构大致分为以下几个大段：</p>
+
+        <table>
+            <thead>
+                <tr><th>代码段</th><th>行数（约）</th><th>职责</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>头文件引入 & 宏定义</td><td>~500 行</td><td>平台适配、HAVE_* 宏、数据结构定义</td></tr>
+                <tr><td>linenoise 行编辑库</td><td>~2000 行</td><td>嵌入式行编辑库，实现历史记录和行编辑</td></tr>
+                <tr><td>ShellState 结构体</td><td>~300 行</td><td>全局 shell 状态，保存所有配置和回调</td></tr>
+                <tr><td>点命令处理表</td><td>~400 行</td><td>所有 "." 命令的分发表</td></tr>
+                <tr><td>输出格式化函数</td><td>~3000 行</td><td>QRF 格式化引擎、mode 实现</td></tr>
+                <tr><td>点命令实现函数</td><td>~8000 行</td><td>每个点命令的具体逻辑</td></tr>
+                <tr><td>主循环 process_input</td><td>~500 行</td><td>读取-解析-执行的主循环</td></tr>
+                <tr><td>main 函数 & 参数解析</td><td>~600 行</td><td>命令行参数处理，初始化流程</td></tr>
+            </tbody>
+        </table>
+
+        <p>这种"单文件 + 模板"的设计，与 SQLite 核心库的 amalgamation 哲学一脉相承——<strong>部署越简单越好</strong>。</p>
+
+        <h2>主循环 process_input</h2>
+
+        <p>shell 的核心是 <code>process_input()</code> 函数，它实现了经典的"读取-解析-执行"循环。我们来看看它的简化流程：</p>
+
+        <pre><code>static int process_input(ShellState *p, const char *zSql){
+    // 1. 跳过前导空白和注释
+    while( sqlite3_isspace(*zSql) ) zSql++;
+
+    // 2. 检查是否是点命令
+    if( zSql[0]=='.' ){
+        // 分离命令名和参数
+        zCmd = &zSql[1];
+        // 查找点命令表
+        for(i=0; i&lt;ArraySize(aDotCommands); i++){
+            if( strcmp(zCmd, aDotCommands[i].zName)==0 ){
+                // 执行点命令回调
+                rc = aDotCommands[i].xCallback(p, nArg, azArg);
+                break;
+            }
+        }
+    } else {
+        // 3. 普通 SQL——调用 sqlite3_prepare + sqlite3_step
+        rc = sqlite3_prepare_v2(p-&gt;db, zSql, -1, &amp;pStmt, &amp;zTail);
+        while( rc==SQLITE_OK ){
+            rc = sqlite3_step(pStmt);
+            if( rc==SQLITE_ROW ){
+                // 4. 输出行数据（通过当前 mode 的回调）
+                display_output(p, pStmt);
+            }
+        }
+        sqlite3_finalize(pStmt);
+        zSql = zTail; // 继续处理同一行的下一条 SQL
+    }
+}</code></pre>
+
+        <p>注意到这个函数的关键设计：<strong>它同时处理点命令和 SQL</strong>。判断依据仅仅是第一个字符是不是 <code>.</code>。如果是点命令，就去查找 <code>aDotCommands</code> 数组；如果是普通字符，就当作 SQL 传给 SQLite 核心库执行。</p>
+
+        <p>还有一个重要的设计是 <strong>多语句支持</strong>——用户可以在同一行输入多条 SQL 语句，用分号隔开。核心库的 <code>sqlite3_prepare_v2()</code> 的第四个参数 <code>zTail</code> 会指向第一条语句之后的内容，循环继续处理下一条。</p>
+
+        <div class="tip">
+            💡 有趣的是，<code>process_input()</code> 并不是一次读完整个输入——它按需读行。如果当前语句不完整（例如省略了分号就回车），shell 会输出 <code>...&gt;</code> 提示符等待继续输入。这个"连续行读取"的逻辑通过 <code>continue_input()</code> 辅助函数实现，它会检查括号是否匹配。
+        </div>
+
+        <h2>点命令解析</h2>
+
+        <p>点命令是 SQLite shell 最强大的特性之一。超过 100 个点命令被定义在一个名为 <code>aDotCommands[]</code> 的数组中，这个数组是点命令的分发表：</p>
+
+        <pre><code>typedef struct Command {
+    const char *zName;      // 命令名
+    const char *zHelp;      // 帮助文本
+    int (*xCallback)(ShellState*, int, char**); // 回调函数
+} Command;
+
+static Command aDotCommands[] = {
+    { "backup",     "BACKUP TABLE",        backup_callback       },
+    { "bail",       "ON|OFF",              bail_callback         },
+    { "database",   "LIST DATABASES",      database_callback     },
+    { "dump",       "DUMP DATABASE",       dump_callback         },
+    { "echo",       "ON|OFF",              echo_callback         },
+    { "exit",       "EXIT SQLITE",         exit_callback         },
+    { "headers",    "ON|OFF",              headers_callback      },
+    { "help",       "SHOW HELP",           help_callback         },
+    { "import",     "IMPORT DATA",         import_callback       },
+    { "indexes",    "SHOW INDEXES",        indexes_callback      },
+    { "mode",       "MODE SET",            mode_callback         },
+    { "schema",     "SHOW SCHEMA",         schema_callback       },
+    { "tables",     "SHOW TABLES",         tables_callback       },
+    { "timer",      "ON|OFF",              timer_callback        },
+    // ... 还有 80+ 个
+};</code></pre>
+
+        <p>这种设计非常直白——一个名字 + 一个回调函数。跟 VDBE 的 opcode 表是同样的思路。我最常用的几个点命令的实现值得我们快速看一下：</p>
+
+        <ul>
+            <li><strong><code>.tables</code></strong> — 本质上执行 <code>SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name</code>，然后用默认格式输出结果。</li>
+            <li><strong><code>.schema</code></strong> — 查询 <code>sqlite_schema.sql</code> 字段，即每个对象的 CREATE 语句。</li>
+            <li><strong><code>.dump</code></strong> — 最复杂的点命令之一。它遍历所有表，为每张表生成完整的 INSERT 语句序列，并且智能处理自引用依赖（通过 PRAGMA foreign_keys 暂时禁用外键检查）。</li>
+            <li><strong><code>.import</code></strong> — 读取 CSV 或其它分隔符文件，使用核心库的 <code>sqlite3_import()</code> 函数实现批量导入。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>值得注意的工程决策：</strong>点命令不是通过 SQL 解析器解析的——它们是 shell 自己解析的。这意味着点命令不需要分号结尾，也不遵循 SQL 语法规则。但这也意味着点命令 <strong>不能</strong> 通过 SQL 连接驱动（如 libpq 风格的 API）发送，只能在交互式 shell 中使用。这个设计是有意为之——点命令是面向"人"的，不是面向"程序"的。
+        </div>
+
+        <h2>3.53.0 QRF 格式化库</h2>
+
+        <p>在 2026 年发布的 SQLite 3.53.0 中，shell 引入了一个重要的新组件——<strong>QRF（Query Result Formatter）</strong>格式化库。它的核心目标是统一和美化查询结果的输出格式。</p>
+
+        <p>以大家最熟悉的 <code>.mode box</code> 为例，它输出的表格自带 Unicode 框线字符：</p>
+
+        <pre><code>┌──────┬──────────┐
+│  id  │  name    │
+├──────┼──────────┤
+│  1   │  Alice   │
+│  2   │  Bob     │
+│  3   │  Charlie │
+└──────┴──────────┘</code></pre>
+
+        <p>这个效果是靠 QRF 库实现的。它的核心数据结构是一个名为 <code>QRFormatter</code> 的结构体：</p>
+
+        <pre><code>typedef struct QRFormatter {
+    int nCol;           // 列数
+    int *anWidth;       // 每列的最大显示宽度
+    char **azTitle;     // 列标题
+    char ***azData;     // 行数据（nRow x nCol）
+    int nRow;           // 当前行数
+    int nRowAlloc;      // 分配的行数容量
+    void (*xRender)(struct QRFormatter*);  // 渲染回调
+} QRFormatter;</code></pre>
+
+        <p>QRF 的工作流程分为三个阶段：</p>
+
+        <ol>
+            <li><strong>收集阶段</strong> — <code>qrf_add_row()</code> 将每一行的数据加入 <code>azData</code> 数组，同时更新 <code>anWidth</code>（每列的最大显示宽度）。</li>
+            <li><strong>计算阶段</strong> — 根据每列宽度、分隔符宽度、边框字符宽度，计算出整个表格的总宽度。</li>
+            <li><strong>渲染阶段</strong> — 调用 <code>xRender</code> 回调，根据当前的 mode（box、column、csv、json 等）生成最终的输出字符串。</li>
+        </ol>
+
+        <p><code>.mode box</code> 使用的是 Unicode 制表符（U+2500 ~ U+257F），这些字符在 <code>shell.c.in</code> 中以 UTF-8 编码直接硬编码。QRF 还支持 <code>.mode box2</code>（圆角框线）、<code>.mode table</code>（ASCII 框线）等多种风格。</p>
+
+        <div class="tip">
+            💡 QRF 库的实现体现了 SQLite 团队的一贯作风——先把基础功能做对，再考虑性能优化。3.53.0 刚引入 QRF 时，所有行数据都先缓存到内存中再统一渲染。对于千万行级别的查询结果，这显然有内存压力。因此 3.54.0 中引入了"流式渲染"优化——当结果超过一定行数时，QRF 切换到逐行输出模式，不再缓存全部数据。这种"渐进式优化"的思路值得我们学习。
+        </div>
+
+        <h2>输出格式控制</h2>
+
+        <p>shell 的输出格式控制是一个经典的"策略模式"案例。核心是 <code>mode_callback()</code> 函数，它处理 <code>.mode</code> 点命令：</p>
+
+        <pre><code>static int mode_callback(ShellState *p, int nArg, char **azArg){
+    const char *zMode = azArg[0];
+    if( strcmp(zMode, "csv")==0 ){
+        p-&gt;mode = MODE_Csv;
+        p-&gt;colSep = ",";
+        p-&gt;rowSep = "\r\n";
+    } else if( strcmp(zMode, "column")==0 ){
+        p-&gt;mode = MODE_Column;
+        p-&gt;colSep = "  ";
+        p-&gt;rowSep = "\n";
+    } else if( strcmp(zMode, "box")==0 ){
+        p-&gt;mode = MODE_Box;
+        p-&gt;cMode = CMODE_Unicode;
+        // 启用 QRF 格式化
+        p-&gt;xOutputCallback = qrf_output_callback;
+    } else if( strcmp(zMode, "json")==0 ){
+        p-&gt;mode = MODE_Json;
+        p-&gt;xOutputCallback = json_output_callback;
+    }
+    // ... 还有 markdown、html、insert、quote、tabs 等
+}</code></pre>
+
+        <p>每个 mode 对应一个 <code>ShellState.mode</code> 枚举值和一个 <code>xOutputCallback</code> 函数指针。当 VDBE 返回一行数据时，<code>display_output()</code> 函数会调用当前的回调来格式化输出。这种"回调函数指针"的设计让添加新的输出格式变得非常容易——加一个枚举值、写一个回调函数、在 <code>mode_callback</code> 中注册即可。</p>
+
+        <p><code>.separator</code> 和 <code>.headers</code> 的实现就更简单了——它们只是修改 <code>ShellState</code> 结构体中的几个字段，输出回调函数在渲染时读取这些字段决定行为。</p>
+
+        <h2>历史与编辑</h2>
+
+        <p>SQLite shell 的行编辑功能是靠自己实现的一个迷你库——<strong>linenoise</strong>。没错，SQLite 没有依赖 GNU Readline，而是直接内置了一个精简的行编辑库。这是 SQLite 的一贯风格——"能不依赖外部库就不依赖"。</p>
+
+        <p>linenoise 是 Salvatore Sanfilippo（Redis 的作者）开发的一个轻量级行编辑库，全部代码只有几百行。SQLite 将其嵌入到 <code>shell.c.in</code> 中，并做了少量修改以适配自己的构建系统。</p>
+
+        <pre><code>// linenoise 的核心结构
+typedef struct linenoiseHistoryEntry {
+    char *line;          // 历史记录行内容
+    char *timestamp;     // 时间戳（可选）
+} linenoiseHistoryEntry;
+
+static linenoiseHistoryEntry *history;  // 历史记录数组
+static int history_len;                 // 当前记录数
+static int history_max_len = 100;       // 最大记录数（默认100）</code></pre>
+
+        <p>linenoise 的工作原理非常有趣：</p>
+
+        <ul>
+            <li>它使用 <code>tcgetattr()</code>/<code>tcsetattr()</code> 将终端设置为"原始模式"（raw mode），这样每个按键都不会经过终端的行缓冲，而是直接传给程序。</li>
+            <li>收到按键后，linenoise 判断是普通字符（直接插入）还是控制序列（如方向键、Backspace、Ctrl+C 等），然后更新内部的 <code>linenoiseState</code> 缓冲区。</li>
+            <li>方向键上/下触发历史记录遍历，左/右触发光标移动。</li>
+            <li>输入完成后，新的行被追加到 <code>history</code> 数组，同时写入 <code>.sqlite_history</code> 文件。</li>
+        </ul>
+
+        <p>在 SQLite 3.52.0 之后，shell 还增加了对 <code>.history</code> 点命令的支持——它可以显示、搜索和管理历史记录。它的实现就是直接读取 <code>.sqlite_history</code> 文件并将其内容格式化为表格。</p>
+
+        <div class="warning">
+            ⚠️ 如果你在 shell 中按 Ctrl+C，你会注意到 SQLite 不会直接退出，而是中断当前查询。这个行为是在 <code>signal_handler()</code> 中实现的——它设置一个标志位 <code>p-&gt;interrupt</code>，核心库在 <code>sqlite3_step()</code> 的每次循环中检查这个标志，实现优雅中断。这比粗暴地终止进程要安全得多——正在进行的事务可以正确回滚。
+        </div>
+
+        <h2>实战：自定义 .mycommand 扩展点命令</h2>
+
+        <p>理解源码最好的方式就是动手改一改。我们来实战练习——在 shell 中添加一个自定义点命令 <code>.mycommand</code>。</p>
+
+        <p>首先，在 <code>aDotCommands[]</code> 数组中添加一行：</p>
+
+        <pre><code>// 在 aDotCommands 数组中添加：
+{ "mycommand", "MY CUSTOM COMMAND", mycommand_callback },</code></pre>
+
+        <p>然后，实现回调函数。这里演示一个"列出当前数据库所有表和行数统计"的命令：</p>
+
+        <pre><code>static int mycommand_callback(ShellState *p, int nArg, char **azArg){
+    sqlite3_stmt *pStmt;
+    const char *zSql = "SELECT name AS '表名', "
+                       "   (SELECT COUNT(*) FROM \"main\".\"??\") AS '行数' "
+                       "FROM sqlite_schema WHERE type='table'";
+    // 注意：这里为了可读性简化了 SQL，实际需要动态构建
+    int rc = sqlite3_prepare_v2(p-&gt;db,
+        "SELECT name FROM sqlite_schema WHERE type='table'", -1, &amp;pStmt, 0);
+    if( rc!=SQLITE_OK ) return SQLITE_ERROR;
+    // 输出设置为 box 模式风格
+    p-&gt;mode = MODE_Box;
+    p-&gt;cMode = CMODE_Unicode;
+    // 逐表查询行数并输出
+    while( sqlite3_step(pStmt)==SQLITE_ROW ){
+        const char *zTab = (const char*)sqlite3_column_text(pStmt, 0);
+        // 动态构建 COUNT(*) 查询
+        char zCount[256];
+        sqlite3_snprintf(256, zCount,
+            "SELECT COUNT(*) FROM \"%w\"", zTab);
+        // ... 执行并输出
+    }
+    sqlite3_finalize(pStmt);
+    return 0;
+}</code></pre>
+
+        <p>编译时，你需要先运行 <code>tool/mkshellc.tcl</code> 生成 <code>shell.c</code>，然后使用修改后的 <code>shell.c.in</code>。或者更直接——直接修改生成的 <code>shell.c</code> 然后编译：</p>
+
+        <pre><code>gcc -o sqlite3-custom shell.c sqlite3.c -lpthread -ldl -lm</code></pre>
+
+        <p>这就是 SQLite shell 可扩展性的体现——所有核心数据结构和回调接口都是公开的，开发人员可以在不修改 SQLite 核心库的情况下，定制完全属于自己的命令行工具。</p>
+
+        <div class="tip">
+            💡 SQLite 官方其实并不鼓励用户直接修改 <code>shell.c.in</code>，因为合并时会增加冲突。更好的做法是在 <code>shell.c.in</code> 的末尾追加自定义命令——模板脚本在合并时会把 <code>#include "shell_extra.c"</code> 这类模式也一并处理。你只需要创建自己的 <code>shell_extra.c</code>，然后在模板中加一行 include 即可。
+        </div>
+
+        <p>CLI shell 是我们与 SQLite 核心库交互最常用的入口。理解了它的源码，你就掌握了"如何把 SQLite 核心库的 API 组织成一个面向用户的交互工具"的完整思路。下一章，我们要深入另一个非常重要的领域——<strong>SQLite 的测试框架</strong>。SQLite 以 100% 分支覆盖率和极低的 bug 率著称，它的测试是怎么写的？TH3 套件又是什么？我们第 24 章见。</p>
+
+        <div class="footer-nav">
+            <a href="22.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="24.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

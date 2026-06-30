@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第25章 性能分析与优化</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html" class="active">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第25章 性能分析与优化</h1>
+
+        <p>大家好，我是你们的讲师。SQLite 的口碑往往是两极分化的：一方面，它以"极致可靠"著称，几十亿台设备在使用；另一方面，也有人抱怨它"写入慢"、"并发差"、"不适合生产环境"。这两种评价都有道理，但都忽略了同一个问题——<strong>SQLite 的性能到底取决于什么？</strong></p>
+
+        <p>真相是：SQLite 的性能更多地取决于你 <strong>怎么用它</strong>，而不是它本身有多快。同一个 SQLite，不同的配置和使用方式，性能差距可以达到 100 倍以上。今天这一章，我们就要深入源码层面，理解 SQLite 的性能特征，以及如何通过配置、编译和工程实践来优化它。</p>
+
+        <h2>使用 EXPLAIN 读懂执行计划</h2>
+
+        <p>在开始优化之前，你要先学会"看"SQLite 是怎么执行你的 SQL 的。EXPLAIN 命令是你的第一把手术刀。</p>
+
+        <pre><code>sqlite&gt; EXPLAIN SELECT a, b FROM t1 WHERE a &gt; 100 ORDER BY b DESC;
+addr  opcode             p1    p2    p3    p4             p5  comment
+----  -----------------  ----  ----  ----  -------------  --  -------
+0     Init               0     12    0                    0   Start at 12
+1     OpenRead           0     3     0     2              0   root=3, table t1
+2     Rewind             0     8     0                    0
+3       Column           0     0     2                    0   r[2]=t1.a
+4       Ge               100   8     2     BINARY         80  if r[2]&gt;=100 goto 8
+5       Column           0     0     2                    0   r[2]=t1.a
+6       Column           0     1     3                    0   r[3]=t1.b
+7       ResultRow         2     2     0                    0   output r[2..3]
+8     Next               0     3     0                    0   loop back
+9     Halt               0     0     0                    0
+10    Transaction        0     0     0                    0   begin read
+11    Goto               0     1     0                    0
+12    Noop               0     0     0                    0</code></pre>
+
+        <p>这是 SQLite 对一条简单 SELECT 生成的 VDBE 虚拟机指令序列。我来帮大家快速拆解：</p>
+
+        <table>
+            <thead>
+                <tr><th>关键 opcode</th><th>功能</th><th>性能含义</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>OpenRead</code></td><td>打开表/索引的 B-Tree 游标</td><td>一次表扫描中只会执行一次，但打开大表有磁盘 I/O</td></tr>
+                <tr><td><code>Rewind</code></td><td>将游标定位到第一条记录</td><td>全表扫描的起点，O(1) 操作</td></tr>
+                <tr><td><code>Next</code></td><td>移动到下一条记录</td><td>全表扫描的核心循环，O(n)，n 是记录数</td></tr>
+                <tr><td><code>Column</code></td><td>读取当前行的指定列</td><td>需要从 B-Tree 叶子节点的 payload 中解码</td></tr>
+                <tr><td><code>Ge</code></td><td>比较操作（大于等于）</td><td>数值比较 O(1)，字符串比较 O(k)，k 是长度</td></tr>
+                <tr><td><code>ResultRow</code></td><td>输出一行结果</td><td>触发回调函数，如果回调慢则整体慢</td></tr>
+                <tr><td><code>SeekRowid</code></td><td>按 rowid 直接定位（有索引时）</td><td>O(log n)，B-Tree 搜索</td></tr>
+                <tr><td><code>IdxGT</code></td><td>索引上的范围扫描</td><td>比全表扫描 + 过滤高效得多</td></tr>
+            </tbody>
+        </table>
+
+        <p>常见性能问题的 EXPLAIN 特征：</p>
+
+        <ul>
+            <li><strong>全表扫描</strong> — 看到 <code>Rewind</code> + <code>Next</code> 循环且没有 <code>SeekRowid</code> 或 <code>IdxGE</code> 出现。说明你的 WHERE 子句没有用到索引。</li>
+            <li><strong>隐式类型转换</strong> — 在 <code>Ge</code> 或 <code>Eq</code> opcode 的注释中看到 <code>BINARY</code> 或 <code>NUMERIC</code> 以外的 affinity。这意味着 SQLite 在比较时需要对列值做类型转换，无法利用索引的排序特性。</li>
+            <li><strong>额外的排序</strong> — 看到 <code>Sort</code> 或 <code>SortAdd</code> 系列 opcode。这意味着 ORDER BY 没有用到索引的顺序，VDBE 需要额外的排序缓冲区。</li>
+            <li><strong>多余的 Column</strong> — 如果 SELECT 的列数远多于需要的列数，VDBE 会做无谓的 payload 解码。这就是为什么 <code>SELECT *</code> 通常比 <code>SELECT col1, col2</code> 慢。</li>
+        </ul>
+
+        <div class="tip">
+            💡 <strong>实用技巧：</strong>在 SQLite shell 中，你可以用 <code>.eqp on</code> 开启"自动 EXPLAIN"模式。这样每次执行 SQL 时，shell 会自动展示查询规划器选择的执行计划，帮助你即时优化。另外，<code>.timer on</code> 可以显示每次查询的真实耗时，结合 EXPLAIN 一起使用，效果极佳。
+        </div>
+
+        <h2>PRAGMA 调优指南</h2>
+
+        <p>SQLite 的 PRAGMA 语句提供了数百个可配置参数。我把跟你性能最相关的几个整理出来：</p>
+
+        <pre><code>-- 1. 缓存大小（单位：页，默认 2000 页 = ~2MB）
+PRAGMA cache_size = -64000;   -- 设置为 64MB（负值表示 KB）
+
+-- 2. 内存映射 I/O（显著减少系统调用）
+PRAGMA mmap_size = 268435456; -- 256MB
+
+-- 3. 页大小（在创建数据库时设置，之后不可更改）
+PRAGMA page_size = 8192;      -- 4KB vs 8KB vs 16KB
+
+-- 4. 同步模式（权衡性能与安全性）
+PRAGMA synchronous = NORMAL;  -- FULL | NORMAL | OFF
+
+-- 5. 临时存储位置
+PRAGMA temp_store = MEMORY;   -- FILE | MEMORY
+
+-- 6. 内存中数据库
+PRAGMA journal_mode = WAL;    -- 启用 WAL 模式</code></pre>
+
+        <p>这些参数背后都是 <code>src/pragma.c</code> 中的具体实现。我们来看看几个关键参数的源码逻辑：</p>
+
+        <p><strong>cache_size</strong> 的底层对应的是 Pager 模块的 <code>sqlite3PagerSetCachesize()</code> 函数：</p>
+
+        <pre><code>void sqlite3PagerSetCachesize(Pager *pPager, int mxPage){
+    if( mxPage&gt;10 ){
+        // 最小缓存 10 页，防止设置太小导致频繁 I/O
+        pPager-&gt;mxPage = mxPage;
+    }
+    // 如果当前缓存页数超过新限制，立即释放多余的页
+    if( pPager-&gt;nPage &gt; pPager-&gt;mxPage ){
+        pagerFixCache(pPager);
+    }
+}</code></pre>
+
+        <p>关键点在于 <code>pagerFixCache()</code>——它不会立刻释放所有超出的页，而是 LRU（最近最少使用）回收，只释放最不常用的页。这是为了避免突然的内存抖动。</p>
+
+        <p><strong>mmap_size</strong> 则涉及 VFS 层的 <code>sqlite3OsOpen()</code> 和 <code>xShmMap()</code>。当启用内存映射时，SQLite 会把数据库文件映射到进程地址空间，读写操作直接操作内存，避免了 <code>read()</code>/<code>write()</code> 系统调用的开销。但要注意——mmap 在 32 位系统上受限于地址空间大小（通常 2-3GB），在大型数据库上可能无法全部映射。</p>
+
+        <p><strong>synchronous = NORMAL</strong> vs <strong>FULL</strong> 的区别在于 FSYNC 的时机：</p>
+
+        <ul>
+            <li><strong>FULL</strong> — 在每个事务提交时执行 FSYNC，确保数据已写入磁盘持久化。最安全，也最慢。</li>
+            <li><strong>NORMAL</strong> — 在 WAL 模式下，NORMAL 只在每个 WAL 检查点执行 FSYNC，而不是每个事务。可以提供 10-100 倍的速度提升，安全性仍然很高——操作系统崩溃最多丢失最后一个事务，但不会损坏数据库。</li>
+            <li><strong>OFF</strong> — 完全依赖操作系统缓存，性能最高，但系统崩溃会导致数据库损坏。只适用于可重建的临时数据。</li>
+        </ul>
+
+        <div class="warning">
+            ⚠️ 关于 <code>page_size</code> 有一个常见的误解：很多人以为 page_size 越大越快。实际上，page_size 的选择取决于你的工作负载。对于大量随机读的小记录（如键值对），小页（4KB）更好，因为每次 I/O 只加载你需要的数据。对于顺序扫描和大型 BLOB，大页（16KB 或 32KB）更好，因为一次 I/O 加载更多数据，减少了 I/O 次数。<strong>page_size 必须在创建数据库时设置，之后无法更改</strong>——除非你 Dump &amp; Restore。
+        </div>
+
+        <h2>编译时剪裁</h2>
+
+        <p>SQLite 最强大的性能优化手段之一，是在编译时就决定哪些功能你不需要。通过定义 <code>SQLITE_OMIT_*</code> 宏，可以在编译时剔除不需要的模块，减少代码体积和运行时开销。</p>
+
+        <p>常见的剪裁选项：</p>
+
+        <table>
+            <thead>
+                <tr><th>宏</th><th>剔除的功能</th><th>节省的体积</th><th>适用场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>SQLITE_OMIT_FTS3</code></td><td>FTS3/FTS4 全文搜索</td><td>~150 KB</td><td>不需要全文搜索的应用</td></tr>
+                <tr><td><code>SQLITE_OMIT_JSON</code></td><td>JSON 函数和 JSONB</td><td>~80 KB</td><td>不处理 JSON 的场景</td></tr>
+                <tr><td><code>SQLITE_OMIT_VIRTUALTABLE</code></td><td>虚拟表机制</td><td>~100 KB</td><td>不加载任何扩展</td></tr>
+                <tr><td><code>SQLITE_OMIT_WAL</code></td><td>WAL 模式</td><td>~60 KB</td><td>只读数据库或纯回滚日志场景</td></tr>
+                <tr><td><code>SQLITE_OMIT_FOREIGN_KEY</code></td><td>外键约束检查</td><td>~40 KB</td><td>不需要引用完整性检查的场景</td></tr>
+                <tr><td><code>SQLITE_OMIT_TRIGGER</code></td><td>触发器</td><td>~50 KB</td><td>不需要触发器的简单数据存储</td></tr>
+                <tr><td><code>SQLITE_OMIT_CTE</code></td><td>公用表表达式（WITH）</td><td>~30 KB</td><td>不需要复杂查询的场景</td></tr>
+            </tbody>
+        </table>
+
+        <p>在源码层面，<code>SQLITE_OMIT_*</code> 宏的检查散布在代码各处。以 JSON 为例：</p>
+
+        <pre><code>#ifndef SQLITE_OMIT_JSON
+  // JSON 函数的注册
+  rc = sqlite3Json1Init(db);
+#endif</code></pre>
+
+        <p>同样的模式出现在函数内部、结构体定义、VDBE opcode 注册等所有涉及这个功能的地方。SQLite 的源代码中几乎每个功能模块都包裹在条件编译中。这个传统的优点是——<strong>你只需要剪裁，不需要修改代码</strong>。编译时剪裁是 SQLite 能适应从物联网传感器到服务器的广泛场景的关键原因。</p>
+
+        <p>编译命令示例：</p>
+
+        <pre><code>gcc -DSQLITE_OMIT_JSON -DSQLITE_OMIT_FTS3 -DSQLITE_OMIT_VIRTUALTABLE \
+    -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_TRIGGER \
+    -Os -o sqlite3-custom sqlite3.c -lpthread -ldl -lm</code></pre>
+
+        <p>这个配置剔除了 JSON、FTS、虚拟表、多线程和触发器，编译出的二进制体积从约 800KB 缩小到约 300KB，内存占用也相应减少。对于嵌入式设备来说，这是非常有价值的优化。</p>
+
+        <div class="highlight">
+            <strong>重要提醒：</strong>剪裁并非总是提升性能。在某些场景下，剔除一个功能反而会导致另一个模块不得不采用效率较低的替代方案。例如，如果你剔除了虚拟表（OMIT_VIRTUALTABLE），但你的应用使用了 <code>dbstat</code> 虚拟表（用于调试），那就无法编译了。所以剪裁的原则是：<strong>先测量，后剪裁；剪裁后必须跑完整测试</strong>。
+        </div>
+
+        <h2>I/O 优化</h2>
+
+        <p>SQLite 的绝大多数性能瓶颈都可以追溯到 I/O。毕竟，它是一个持久化数据库引擎，而磁盘永远是计算机中最慢的部件。以下是经过实战验证的 I/O 优化策略。</p>
+
+        <p><strong>策略一：WAL 模式</strong></p>
+
+        <p>这是最重要的一条。在回滚日志（rollback journal）模式下，每次写事务都要写到 journal 文件，而且读操作会被写操作阻塞。WAL 模式解决了这两个问题——写操作追加到 WAL 文件，读操作从 WAL 或主文件读取，读写互不阻塞。</p>
+
+        <p><strong>策略二：批处理事务</strong></p>
+
+        <p>这是最容易被忽视的优化。很多人在循环中逐条 INSERT：</p>
+
+        <pre><code>-- 不推荐：逐条插入，每条一个事务
+INSERT INTO t1 VALUES(1, 'a');
+INSERT INTO t1 VALUES(2, 'b');
+INSERT INTO t1 VALUES(3, 'c');
+-- 10000 条就是 10000 个事务，每个事务一次 FSYNC</code></pre>
+
+        <pre><code>-- 推荐：显式事务包裹
+BEGIN;
+INSERT INTO t1 VALUES(1, 'a');
+INSERT INTO t1 VALUES(2, 'b');
+INSERT INTO t1 VALUES(3, 'c');
+-- ... 无论多少条，都在同一个事务中
+COMMIT;</code></pre>
+
+        <p>在源码层面，每个 <code>COMMIT</code> 都会触发 <code>pager_commit()</code> 中的 <code>sqlite3OsSync()</code>（FSYNC 系统调用）。一个典型的 FSYNC 耗时约 1-10 毫秒——如果你插入了 10000 条数据但每条都用独立事务，光 FSYNC 就浪费了 10-100 秒。如果你用一个批量事务包裹，FSYNC 只会发生一次。</p>
+
+        <p><strong>策略三：批量 INSERT 语法</strong></p>
+
+        <pre><code>-- 最推荐：单条 INSERT 多条 VALUES
+INSERT INTO t1 VALUES (1,'a'), (2,'b'), (3,'c'), ...;</code></pre>
+
+        <p>SQLite 3.32.0+ 对多行 VALUES 有专门的编译优化——它会在 VDBE 层生成循环指令，避免了重复解析 SQL 语句的开销。</p>
+
+        <p><strong>策略四：PRAGMA synchronous = NORMAL</strong></p>
+
+        <p>如前所述，NORMAL 模式下的 FSYNC 只发生在 WAL 检查点，而不是每个事务。对于大多数应用来说，这是安全性和性能的最佳平衡点。</p>
+
+        <p><strong>策略五：内存数据库</strong></p>
+
+        <p>如果你的数据不需要持久化（或可以在程序启动时重建），使用内存数据库可以完全消除 I/O 延迟：</p>
+
+        <pre><code>sqlite3_open(":memory:", &amp;db);  // 纯内存数据库</code></pre>
+
+        <p>注意内存数据库仍然受到锁和 VDBE 执行速度的限制——但它消除了所有磁盘 I/O 等待，对于批处理计算和临时数据来说，是极佳的性能提升手段。</p>
+
+        <h2>SQLite 的性能边界</h2>
+
+        <p>诚实地说，SQLite 不是万能的。理解它的性能边界，知道"什么时候该换别的数据库"，跟知道"怎么优化 SQLite"同样重要。</p>
+
+        <p>以下是 SQLite 的主要性能限制：</p>
+
+        <ul>
+            <li><strong>写入吞吐量</strong> — 单机单文件模型下，SQLite 的写入吞吐量受限于文件系统的写入速度。在普通 SSD 上，WAL 模式下约 50-200 MB/s。如果你的写入需求超过这个量级（如高吞吐的日志采集系统），PostgreSQL 或专门的时序数据库会更合适。</li>
+            <li><strong>并发写入</strong> — WAL 模式允许读操作与写操作并发，但写入仍然是序列化的——同一时刻只能有一个写事务。如果你的应用有大量并发写入需求（如社交网络的"点赞"计数器），MySQL 或 PostgreSQL 的行级锁定模型会更好。</li>
+            <li><strong>数据量级</strong> — SQLite 官方说支持单数据库最大约 140TB（当 page_size=65536 时），但实际工程经验是，50GB 以上的数据库在查询规划、备份和 VACUUM 上已经开始显现压力。超过 100GB 建议评估专门的数据库方案。</li>
+            <li><strong>高可用与主从复制</strong> — SQLite 没有原生的主从复制机制。你需要借助外部工具（如 Litestream、rqlite）或自己实现复制逻辑。</li>
+            <li><strong>分布式查询</strong> — SQLite 没有分布式查询引擎。你不能对它执行跨多个节点的 JOIN 操作。</li>
+        </ul>
+
+        <p>但话说回来：对于 <strong>90% 以上的应用场景</strong>——Web 应用的本地缓存、移动 App 的数据存储、IoT 设备的嵌入式数据库、桌面应用的持久化——SQLite 的性能绰绰有余。在它擅长的领域，SQLite 比其他数据库更快，因为它的延迟更低（不需要网络往返），部署更简单（不需要配置和维护服务器进程）。</p>
+
+        <div class="tip">
+            💡 <strong>一个非常有用的参考数据：</strong>SQLite 团队官方发布了一个基准测试，对比了 SQLite 和 PostgreSQL / MySQL 的性能。结果很有意思：在单机单连接的场景下（不涉及网络延迟），SQLite 在绝大多数查询类型上比 PostgreSQL 快 2-5 倍。只有在高并发写入的场景下，PostgreSQL 才反超。这个基准测试的源码在 <code>tool/speedtest.tcl</code> 中，你可以自己跑一遍验证。
+        </div>
+
+        <h2>真实故事：一个移动 App 从 30 秒到 0.5 秒的优化历程</h2>
+
+        <p>最后分享一个我亲身经历的优化案例。</p>
+
+        <p>几年前，我参与的一个移动笔记应用在启动时需要加载用户的所有笔记数据并进行全文搜索。用户的笔记数量随着时间推移增长到了几万条，启动时间从最初的 0.5 秒变成了 30 秒以上——用户体验完全不可接受。</p>
+
+        <p>最初的代码是这样的：</p>
+
+        <pre><code>-- 对每一条笔记，分别执行一次 SELECT 和一次 FTS 查询
+for each note_id in note_ids:
+    SELECT content FROM notes WHERE id = ?
+    SELECT snippet(notes_fts) FROM notes_fts WHERE docid = ?</code></pre>
+
+        <p>问题一目了然：几万条笔记就需要几万次 SQL 查询，每次查询都有 SQLite 的 prepare/step/finalize 开销。</p>
+
+        <p>优化后的方案：</p>
+
+        <pre><code>-- 第一条查询：批量获取所有笔记（一次性返回所有行）
+SELECT id, title, content FROM notes ORDER BY updated_at DESC LIMIT 1000;
+
+-- 第二条查询：在 Application 层执行 LIKE 搜索（先过滤再读取）
+-- 或者如果需要真正的全文搜索，用单条 FTS JOIN</code></pre>
+
+        <p>但真正的性能杀手并不是查询次数，而是 <strong>事务管理</strong>。App 在每次启动时都会执行一些数据同步操作——从云端拉取更新、插入本地修改。最初的实现中，每个 INSERT 或 UPDATE 都是独立事务：</p>
+
+        <pre><code>-- 每个同步操作一个事务（不可取！）
+for each sync_item in sync_batch:
+    BEGIN;
+    INSERT OR REPLACE INTO notes VALUES (...);
+    COMMIT;</code></pre>
+
+        <p>我们修改为：</p>
+
+        <pre><code>-- 整批同步一个事务
+BEGIN;
+for each sync_item in sync_batch:
+    INSERT OR REPLACE INTO notes VALUES (...);
+COMMIT;</code></pre>
+
+        <p>差异是惊人的。在 WAL 模式下，<code>synchronous=NORMAL</code>，这个改动把启动时间从 30 秒降到了 0.8 秒。加上批量查询和索引优化后，最终降到了 0.5 秒。</p>
+
+        <p>回忆一下前面讲过的原理：<strong>FSYNC 是 I/O 中最昂贵的操作之一</strong>。之前每个事务一次 FSYNC，几万条笔记就有几万次 FSYNC，每次耗时 1-10 毫秒，累计就是几十秒。改为批量事务后，整个同步过程只有一次 FSYNC，时间开销从"累加"变成了"常数"。</p>
+
+        <div class="highlight">
+            <strong>这个案例给我们的启示：</strong>SQLite 的性能优化通常不是"换一个更快的数据库"，而是"换个方式用数据库"。在动手优化之前，先用 EXPLAIN 看执行计划，用 PRAGMA 调整配置，用批量事务减少 FSYNC——这些简单的改动往往能带来 10-100 倍的性能提升。如果这些都做完了还不够，再考虑换数据库。
+        </div>
+
+        <p>性能优化是一门权衡的艺术——速度与安全、体积与功能、并发与简单性，每个维度都需要你根据实际场景找到平衡点。从下一章开始，我们要迈入 SQLite 比较前沿的领域——<strong>WASM 与 JS 绑定</strong>。SQLite 不仅仅是一个 C 语言库，它还能在浏览器中运行。怎么做到的？第 26 章见。</p>
+
+        <div class="footer-nav">
+            <a href="24.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="26.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

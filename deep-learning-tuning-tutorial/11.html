@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 学习率调度：从固定到自适应</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 调参之道：从炼丹到科学</a></li>
+            <li><a href="02.html">第2章 梯度下降的数学直觉</a></li>
+            <li><a href="03.html">第3章 优化器选择：Adam vs SGD的底层逻辑</a></li>
+            <li><a href="04.html">第4章 学习率：调参的第一优先级</a></li>
+            <li><a href="05.html">第5章 批大小：梯度估计的精度博弈</a></li>
+            <li><a href="06.html">第6章 初始化：训练的起跑线</a></li>
+            <li><a href="07.html">第7章 归一化层：训练稳定性的基石</a></li>
+            <li><a href="08.html">第8章 激活函数：非线性之源</a></li>
+            <li><a href="09.html">第9章 权重衰减与正则化的数学</a></li>
+            <li><a href="10.html">第10章 Dropout：隐式集成学习的数学</a></li>
+            <li><a href="11.html" class="active">第11章 学习率调度：从固定到自适应</a></li>
+            <li><a href="12.html">第12章 损失函数的设计哲学</a></li>
+            <li><a href="13.html">第13章 数据增强与泛化的信息论视角</a></li>
+            <li><a href="14.html">第14章 评估与验证的科学方法</a></li>
+            <li><a href="15.html">第15章 训练曲线全解读</a></li>
+            <li><a href="16.html">第16章 NaN与梯度爆炸的根因分析</a></li>
+            <li><a href="17.html">第17章 小数据过拟合测试：调试的银弹</a></li>
+            <li><a href="18.html">第18章 调参优先级与方法论</a></li>
+            <li><a href="19.html">第19章 CNN训练的核心法则</a></li>
+            <li><a href="20.html">第20章 NLP模型微调的原理</a></li>
+            <li><a href="21.html">第21章 推荐系统的特征与采样</a></li>
+            <li><a href="22.html">第22章 类别不平衡与长尾分布</a></li>
+            <li><a href="23.html">第23章 LoRA微调的数学本质</a></li>
+            <li><a href="24.html">第24章 SFT数据工程的科学方法</a></li>
+            <li><a href="25.html">第25章 RLHF对齐训练的底层逻辑</a></li>
+            <li><a href="26.html">第26章 Scaling Law与μP参数化</a></li>
+            <li><a href="27.html">第27章 自动化调参与前沿趋势</a></li>
+            <li><a href="28.html">第28章 综合实战：从零调优一个模型</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>学习率调度——决定"怎么走"比"走多大步"更重要</h2>
+
+        <p>大家好，我是你们的讲师。今天我们来讲一个被很多人低估、但实际上和初始学习率一样重要的主题——<strong>学习率调度（Learning Rate Scheduling）</strong>。</p>
+
+        <p>让我分享一个真实的经历。某次我训练一个文本分类模型，选定了初始学习率=3e-4（经过LR Range Test验证过的合理值），AdamW优化器，跑了一个完整的训练周期。训练loss下降很顺畅，但验证loss在某个点之后就纹丝不动了。我试了不同的初始学习率、不同的batch size、不同的weight decay，效果都差不多——总是卡在同样的验证loss水平上。</p>
+
+        <p>后来一个同事看了一眼问我："你用了学习率调度吗？"我说没，用的固定学习率。"那试试cosine decay。"我改了一行代码——加了一个CosineAnnealingLR调度器。结果验证loss又往下掉了将近20%，而且模型收敛之后更加稳定。</p>
+
+        <p>同一组参数，唯一的变化就是加了一个学习率调度。不是模型架构的问题，不是初始学习率的问题——而是<strong>训练过程中学习率如何变化</strong>的问题。从那以后，我做的每一个实验都默认加上学习率调度。</p>
+
+        <h3>为什么需要衰减学习率</h3>
+
+        <p>要理解为什么固定学习率不够好，先想一下梯度下降的几何过程。训练初期，参数距离最优解很远，损失函数的曲面很"陡峭"——梯度大、方向明确。此时我们希望大步向前，快速接近最优区域。但训练后期，参数已经接近最优解，损失函数的曲面变得"平坦"——梯度小、方向模糊。此时如果还保持大步长，参数就会在最优解附近来回震荡，永远无法精确收敛。</p>
+
+        <p>固定学习率的做法相当于：不管你在训练初期还是后期，步长都一样大。结果就是——前期步长可能太小（收敛慢），后期步长又太大（震荡不收敛）。</p>
+
+        <p><strong>学习率调度的核心思想</strong>就是根据训练进度动态调整步长：前期大步探索，后期小步精调。不同的调度策略本质上是不同的"步长变化曲线"——决定了训练过程中何时加速、何时减速、何时重启。</p>
+
+        <h3>主流调度策略的数学原理</h3>
+
+        <p><strong>Step Decay（阶梯衰减）</strong>是最经典的做法。在预设的epoch/step将LR乘以衰减系数（通常0.1）。例如每30个epoch将LR降低10倍。优点是简单、可解释——每次衰减后可以观察模型反应，判断是否还有继续训练的价值。缺点是衰减时机需要人工预设，选得不好会错过最佳衰减点。</p>
+
+        <pre><code># Step Decay —— 每30个epoch将LR×0.1
+scheduler = torch.optim.lr_scheduler.StepLR(
+    optimizer, step_size=30, gamma=0.1
+)
+
+# MultiStep Decay —— 在多个自定义节点衰减
+scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    optimizer, milestones=[60, 120, 160], gamma=0.1
+)
+# DeepSeek在训练到80%和90% tokens时各衰减一次</code></pre>
+
+        <p><strong>Cosine Decay（余弦退火）</strong>是目前最流行的策略。学习率按半个余弦曲线从初始值平滑下降到接近0：</p>
+
+        <pre><code># Cosine Decay —— 从初始LR平滑衰减到接近0
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, T_max=total_steps, eta_min=1e-6
+)
+# T_max是总步数，eta_min是最小LR</code></pre>
+
+        <p>Cosine Decay的优势在于平滑——它能自然地完成从"大步探索"到"小步精调"的过渡，没有Step Decay那种突然跳变的阶梯。在训练早期，cosine曲线下降较慢（保持大LR的时间较长），让模型有充分的时间跳出局部陷阱；在训练后期，cosine曲线迅速拉低（快速进入小LR精调），防止震荡。</p>
+
+        <p><strong>Warmup + Cosine</strong>是这个时代的事实标准模板。Warmup处理训练初期的"冷启动"问题——训练开始时参数随机、梯度统计不稳定，直接上大学习率会导致初始更新过大甚至发散。Warmup从小学习率开始，逐步增长到目标学习率，然后再接Cosine Decay平滑下降：</p>
+
+        <div class="tip">
+            <strong>万能模板：</strong>如果你不确定用什么学习率调度策略，直接用 AdamW + Linear Warmup + Cosine Decay。这个组合几乎适用于所有场景——CV分类、NLP预训练、LLM微调。它不是每个场景的最优解，但它是所有场景的最优"默认选择"。
+        </div>
+
+        <h3>Cyclical LR的探索-利用权衡</h3>
+
+        <p>前面讲的Step Decay和Cosine Decay都有一个共同特点：学习率是单调下降的。但Cyclical LR（循环学习率）打破了这个模式——学习率在上下界之间周期性变化，训练过程中反复上升和下降。</p>
+
+        <p>这背后的直觉很有意思：<strong>探索-利用权衡</strong>。LR上升阶段是"探索"——大步跳出当前局部最小值，去搜索其他可能更好的区域；LR下降阶段是"利用"——小步在当前区域精细收敛。一个周期结束后，模型可能已经找到了一个更好的局部最小值，然后LR跳回高处，再开始新一轮探索。</p>
+
+        <p>更精妙的是，<strong>Cyclical LR + Cyclical Momentum</strong>的反向周期联动：LR增大时momentum减小（鼓励探索），LR减小时momentum增大（加速收敛）。两者的配合使得模型在探索时更加"轻盈"，在利用时更加"果断"。</p>
+
+        <p>Cyclical LR还有一个隐藏优势：<strong>自动模型集成</strong>。每次LR周期结束时，模型收敛到一个局部最小值。把这些不同周期收敛的checkpoint保存下来，做推理平均——你就得到了多个模型的集成效果，而训练成本只是单次训练。</p>
+
+        <div class="highlight">
+            <strong>为什么Cyclical LR没有成为主流？</strong>对大部分实际任务而言，单调衰减的调度策略（Cosine + Warmup）已经足够好。Cyclical LR的优势在"难优化"的任务上更明显——比如loss landscape特别崎岖、有很多尖锐局部最小值的场景。如果你在一个任务上用了Cosine Decay怎么调都调不好，可以试试Cyclical LR。但作为日常选择，Cosine + Warmup是性价比最高的方案。
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>调度策略</th>
+                    <th>核心机制</th>
+                    <th>优点</th>
+                    <th>缺点</th>
+                    <th>推荐场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Step Decay</td>
+                    <td>预设epoch将LR×γ</td>
+                    <td>简单可解释，每步可观察</td>
+                    <td>衰减时机需人工预设</td>
+                    <td>CV分类从头训练</td>
+                </tr>
+                <tr>
+                    <td>Cosine Decay</td>
+                    <td>半余弦曲线从LR_max到LR_min</td>
+                    <td>平滑过渡，自动精调</td>
+                    <td>全程快速下降，可能训练不足</td>
+                    <td>NLP预训练、LLM</td>
+                </tr>
+                <tr>
+                    <td>Warmup + Cosine</td>
+                    <td>线性增长→余弦下降</td>
+                    <td>万能模板，稳定+平滑</td>
+                    <td>多一个warmup步数超参</td>
+                    <td>通用默认选择</td>
+                </tr>
+                <tr>
+                    <td>Cyclical LR</td>
+                    <td>LR在上下界间周期性变化</td>
+                    <td>跳出局部最优，可做集成</td>
+                    <td>需要调参base/max LR</td>
+                    <td>难优化任务、模型集成</td>
+                </tr>
+                <tr>
+                    <td>ReduceLROnPlateau</td>
+                    <td>验证指标瓶颈时自动衰减</td>
+                    <td>自适应、无需预设epoch</td>
+                    <td>需要patience参数，可能过晚</td>
+                    <td>验证集驱动的调参</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Warmup步数设置原则</h3>
+
+        <p>Warmup虽然在训练初期增加了一个"预热"阶段，但它的效果非常显著——尤其对Transformer和深层网络。设置Warmup步数需要平衡几个因素：</p>
+
+        <p><strong>模型越复杂，Warmup越长。</strong>BERT原始论文使用总步数的1/10作为warmup步数。LLM预训练常见2000步固定warmup（无论总步数多少）。这是因为复杂的模型在训练初期梯度更不稳定，需要更长的预热期来建立稳定的梯度统计。</p>
+
+        <p><strong>数据量越大，Warmup越短。</strong>大数据集上每个epoch的梯度估计更准确（因为每个batch的随机性被数据多样性"平均"了），所以warmup可以缩短。小数据集上梯度方差大，warmup可以适当延长。</p>
+
+        <p><strong>Warmup期间BN统计量的建立。</strong>这是不太为人知但很重要的点。BN在训练过程中维护running mean和running var。在warmup的初期（LR很小），参数更新很慢，BN的统计量有充足的时间稳定建立。如果跳过warmup直接使用大LR，参数更新剧烈，BN的统计量会很混乱——这反过来又加剧了训练的不稳定性。</p>
+
+        <pre><code># WarmupCosineScheduler —— PyTorch实现
+class WarmupCosineScheduler:
+    """Linear warmup followed by cosine decay"""
+    def __init__(self, optimizer, warmup_steps, total_steps, min_lr=0):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.min_lr = min_lr
+        self.base_lr = optimizer.param_groups[0]['lr']
+        self.current_step = 0
+
+    def step(self):
+        self.current_step += 1
+        step = self.current_step
+
+        if step &lt; self.warmup_steps:
+            # 线性warmup: 从0增长到base_lr
+            lr = self.base_lr * step / self.warmup_steps
+        else:
+            # Cosine decay: 从base_lr衰减到min_lr
+            progress = (step - self.warmup_steps) / \
+                       (self.total_steps - self.warmup_steps)
+            progress = min(progress, 1.0)  # 防止超过总步数
+            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * \
+                 (1 + math.cos(math.pi * progress))
+
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+
+    def get_lr(self):
+        return self.optimizer.param_groups[0]['lr']
+
+# 使用方式
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
+scheduler = WarmupCosineScheduler(
+    optimizer,
+    warmup_steps=1000,      # 总步数的1/10（假设total=10000）
+    total_steps=10000,
+    min_lr=1e-6
+)
+
+for epoch in range(num_epochs):
+    for batch in dataloader:
+        loss = train_step(batch)
+        loss.backward()
+        optimizer.step()
+        scheduler.step()    # 每一步更新一次LR
+        optimizer.zero_grad()</code></pre>
+
+        <div class="warning">
+            <strong>常见陷阱：</strong>调度策略不能补偿初始学习率选错。如果初始学习率偏离最优值超过一个数量级，任何调度策略都无法挽回。第一步永远是找到合理的初始学习率范围（LR Range Test），然后再叠加调度策略。调度策略是"优化"学习率的用法，不是"拯救"错误学习率的方法。
+        </div>
+
+        <p>总结一下，学习率调度是决定"怎么走"的关键机制——从Step Decay的阶梯式下降到Cosine Decay的平滑衰减，再到Cyclical LR的周期性探索。Warmup + Cosine Decay是当今最通用的万能模板。Warmup步数取决于模型复杂度和数据规模，复杂模型/小数据 → 更长warmup，简单模型/大数据 → 更短warmup。调度策略是对初始学习率的优化和补充，而不是替代。</p>
+
+        <p>下一章我们进入<strong>损失函数的设计哲学</strong>。学习率调度决定了"怎么走"，而损失函数决定了"往哪里走"——模型的优化目标是什么、关心什么、怎么判断"做得好不好"。这是调参中最接近问题本质的一步。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

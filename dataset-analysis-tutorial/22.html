@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 GNN与RL专项数据集</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI数据集全景图</a></li>
+            <li><a href="02.html">第2章 datasets库快速上手</a></li>
+            <li><a href="03.html">第3章 数据集元信息与特征系统</a></li>
+            <li><a href="04.html">第4章 Arrow：高性能数据后端</a></li>
+            <li><a href="05.html">第5章 数据类型与格式转换</a></li>
+            <li><a href="06.html">第6章 数据集的下载与缓存机制</a></li>
+            <li><a href="07.html">第7章 Split切分与采样策略</a></li>
+            <li><a href="08.html">第8章 map() 数据处理核心</a></li>
+            <li><a href="09.html">第9章 filter() 与数据筛选</a></li>
+            <li><a href="10.html">第10章 文本数据预处理实战</a></li>
+            <li><a href="11.html">第11章 图像与音频数据预处理</a></li>
+            <li><a href="12.html">第12章 流式处理与大数据策略</a></li>
+            <li><a href="13.html">第13章 数据分片与分布式训练</a></li>
+            <li><a href="14.html">第14章 数据版本管理与可复现性</a></li>
+            <li><a href="15.html">第15章 数据管线性能优化</a></li>
+            <li><a href="16.html">第16章 常见踩坑与故障排查</a></li>
+            <li><a href="17.html">第17章 数据质量评估与清洗</a></li>
+            <li><a href="18.html">第18章 数据集合规与许可证</a></li>
+            <li><a href="19.html">第19章 NLP经典数据集</a></li>
+            <li><a href="20.html">第20章 计算机视觉经典数据集</a></li>
+            <li><a href="21.html">第21章 语音与多模态数据集</a></li>
+            <li><a href="22.html" class="active">第22章 GNN与RL专项数据集</a></li>
+            <li><a href="23.html">第23章 数据EDA与可视化工具</a></li>
+            <li><a href="24.html">第24章 自定义数据集构建</a></li>
+            <li><a href="25.html">第25章 数据管线自动化</a></li>
+            <li><a href="26.html">第26章 2026最新特性与趋势</a></li>
+            <li><a href="27.html">第27章 前沿基准数据集巡览</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第22章：GNN与RL专项数据集</h2>
+
+        <p>到目前为止，我们遇到的所有数据集都有一个共同假设：<strong>样本之间是独立的</strong>。NLP中每句话是独立的，CV中每张图是独立的，音频中每段录音是独立的。但这一章的两个领域从根本上打破了这个假设——图神经网络（GNN）处理的是<strong>相互连接的实体</strong>，强化学习（RL）处理的是<strong>连续决策的序列</strong>。</p>
+
+        <p>这种"非独立同分布"的特性给数据工程带来了全新的挑战。图数据中一个节点的标签取决于它的邻居，RL数据中一个状态的价值取决于前一个动作。你不能像处理图像那样随机打乱样本然后送进模型——图结构必须保留，时序关系不能破坏。本章将深入介绍GNN领域的 Planetoid 和 OGB 系列数据集，以及离线RL领域的 D4RL 数据集，并分享相关的数据工程最佳实践。</p>
+
+        <div class="highlight">
+            <strong>核心区别：</strong>图数据集的"样本"不是一个独立的数据点，而是一整个图（或多个子图）。RL数据集的"样本"不是独立事件，而是时序相关的状态转移元组 (s, a, r, s')。这种结构差异意味着你之前学的很多数据处理方法（比如随机shuffle、独立map）需要重新审视。
+        </div>
+
+        <h2>图数据集基础概念</h2>
+
+        <p>在深入具体数据集之前，先确认几个图数据领域的核心概念。如果你已经熟悉，可以跳过这一节——但建议还是扫一眼，因为HF Hub上加载的图数据格式和PyG（PyTorch Geometric）或DGL的格式可能不同。</p>
+
+        <p>一张图的基本构成是<strong>节点（Node/Vertex）</strong>和<strong>边（Edge）</strong>：</p>
+
+        <ul>
+            <li><strong>节点特征（Node Features）</strong>：每个节点关联的特征向量，比如论文引用网络中每篇论文的Bag-of-Words向量</li>
+            <li><strong>边特征（Edge Features）</strong>：每条边关联的属性，比如社交网络中两条"好友关系"的亲密度权重</li>
+            <li><strong>邻接矩阵（Adjacency Matrix）</strong>：描述节点之间连接关系的矩阵，稀疏存储是大图的关键</li>
+            <li><strong>有向图 vs 无向图</strong>：引用网络是有向的（论文A引用B ≠ B引用A），社交网络通常是无向的</li>
+            <li><strong>动态图 vs 静态图</strong>：交通网络随时间变化（动态），分子结构固定不变（静态）</li>
+        </ul>
+
+        <p>在HF datasets中，图数据通常以"特征矩阵 + 边列表"的形式存储，而不是直接存邻接矩阵（因为太大）：</p>
+
+        <pre><code>from datasets import load_dataset
+
+# 典型的图数据集结构
+cora = load_dataset("planetoid", "cora")
+print(cora)
+# DatasetDict with 'train', 'validation', 'test' splits
+
+# 每个split包含以下字段
+print(cora["train"].column_names)
+# 取决于具体实现，通常有：
+# ['x', 'y', 'edge_index', 'train_mask', 'val_mask', 'test_mask']
+
+# x: 节点特征矩阵 (N_nodes x F_features)
+# y: 节点标签 (N_nodes,)
+# edge_index: 边列表 (2 x N_edges)，第一行是源节点，第二行是目标节点</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>一位研究员在PyG中训练GNN模型，用HF datasets加载Cora数据后，直接取了一条样本 <code>sample = cora["train"][0]</code> 然后尝试 <code>model(sample)</code>。报错信息显示 <code>'dict' object has no attribute 'x'</code>。debug了三天才发现：HF datasets返回的是Python字典，而PyG的 <code>Data</code> 对象需要从字典构建——<code>data = Data(**sample)</code>。但更隐蔽的问题是，HF加载的edge_index是Python list，还需要转成torch.LongTensor。这个"格式不匹配"的坑几乎每个从HF过渡到GNN框架的人都会踩一遍。
+        </div>
+
+        <h2>Planetoid系列 — 引文网络的经典基准</h2>
+
+        <p><strong>Planetoid</strong> 是图神经网络领域最经典的基准数据集家族，包含三个引文网络：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>数据集</th>
+                    <th>节点数</th>
+                    <th>边数</th>
+                    <th>类别数</th>
+                    <th>特征维度</th>
+                    <th>领域</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Cora</td>
+                    <td>2,708</td>
+                    <td>5,429</td>
+                    <td>7</td>
+                    <td>1,433</td>
+                    <td>机器学习论文</td>
+                </tr>
+                <tr>
+                    <td>CiteSeer</td>
+                    <td>3,327</td>
+                    <td>4,732</td>
+                    <td>6</td>
+                    <td>3,703</td>
+                    <td>计算机科学论文</td>
+                </tr>
+                <tr>
+                    <td>PubMed</td>
+                    <td>19,717</td>
+                    <td>44,338</td>
+                    <td>3</td>
+                    <td>500</td>
+                    <td>生物医学论文</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这三个数据集的任务都是<strong>节点分类（Node Classification）</strong>——根据论文的内容特征（Bag-of-Words）和引用关系预测论文的研究领域。它们的共同特点是：图本身很小，可以完整载入单个GPU内存，非常适合GNN算法的快速试验。</p>
+
+        <pre><code># 加载Cora数据集
+cora = load_dataset("planetoid", "cora")
+
+# 查看标准train/val/test划分
+train_mask = cora["train"]["train_mask"]  # boolean mask
+val_mask = cora["train"]["val_mask"]
+test_mask = cora["train"]["test_mask"]
+
+print(f"训练节点: {sum(train_mask)}")
+print(f"验证节点: {sum(val_mask)}")
+print(f"测试节点: {sum(test_mask)}")
+
+# 将HF数据转换为PyG格式
+import torch
+from torch_geometric.data import Data
+
+def hf_to_pyg(hf_dataset):
+    """将HF Dataset的Cora子集转换为PyG Data对象"""
+    x = torch.tensor(hf_dataset["x"], dtype=torch.float)
+    y = torch.tensor(hf_dataset["y"], dtype=torch.long)
+    edge_index = torch.tensor(hf_dataset["edge_index"], dtype=torch.long)
+
+    data = Data(x=x, y=y, edge_index=edge_index)
+    data.train_mask = torch.tensor(hf_dataset["train_mask"], dtype=torch.bool)
+    data.val_mask = torch.tensor(hf_dataset["val_mask"], dtype=torch.bool)
+    data.test_mask = torch.tensor(hf_dataset["test_mask"], dtype=torch.bool)
+    return data
+
+pyg_data = hf_to_pyg(cora["train"])
+print(pyg_data)
+# Data(x=[2708, 1433], edge_index=[2, 10556], y=[2708],
+#      train_mask=[2708], val_mask=[2708], test_mask=[2708])</code></pre>
+
+        <div class="tip">
+            <strong>Planetoid使用提示：</strong>这三个数据集的官方划分非常"小"——Cora只有140个训练节点（占5%）。这是有意为之的——GNN的半监督学习特性要求模型利用图结构从未标注节点中获取信息。不要在Cora上做大数据量的"作弊"训练，得出的结论无法推广到真实场景。另外，Planetoid的数据集已经在学术论文中被使用了上万次——任何在Cora上的新方法都要做统计显著性检验，因为随机种子的波动可能比方法本身的提升还大。
+        </div>
+
+        <h2>OGB大规模图基准</h2>
+
+        <p>Planetoid系列虽然经典，但规模太小了。当你在Cora上跑出99%的准确率时，并不意味着你的方法能处理拥有上亿节点的工业级图数据。为此，斯坦福大学推出了 <strong>OGB</strong>（Open Graph Benchmark）系列——覆盖学术、电商、生物信息学等领域的大规模图数据集。</p>
+
+        <h3>OGB的三级任务体系</h3>
+
+        <p>OGB将图学习任务划分为三个层次，每个层次有对应的数据集：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>任务层次</th>
+                    <th>代表数据集</th>
+                    <th>规模</th>
+                    <th>典型应用</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>节点预测</td>
+                    <td>ogbn-arxiv, ogbn-products, ogbn-proteins</td>
+                    <td>17万-240万节点</td>
+                    <td>论文分类、商品推荐、蛋白质功能预测</td>
+                </tr>
+                <tr>
+                    <td>链接预测</td>
+                    <td>ogbl-ppa, ogbl-collab, ogbl-wikikg2</td>
+                    <td>5.8万-250万节点</td>
+                    <td>蛋白质关联预测、合作预测、知识图谱补全</td>
+                </tr>
+                <tr>
+                    <td>图预测</td>
+                    <td>ogbg-molhiv, ogbg-molpcba, ogbg-ppa</td>
+                    <td>4.1万-44万张图</td>
+                    <td>分子性质预测、药物发现</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <pre><code># 加载OGB节点分类数据集（arxiv子集）
+ogb_arxiv = load_dataset("ogb", "ogbn-arxiv", split="train")
+print(ogb_arxiv)
+# 节点特征：128维（Skip-gram嵌入）
+# 节点数：169,343
+# 边数：1,166,243
+
+# OGB提供了标准化的eval指标和Leaderboard
+# 节点预测：Accuracy
+# 链接预测：Hit@K / MRR
+# 图预测：ROC-AUC / AP</code></pre>
+
+        <h3>大规模图数据的加载策略</h3>
+
+        <p>OGB的图规模远超Planetoid。ogbn-products有240万节点、6100万条边——不可能全部加载到单个GPU内存中。这时候需要<strong>子图采样（Subgraph Sampling）</strong>技术：</p>
+
+        <pre><code># 使用PyG的NeighborLoader做邻域采样
+from torch_geometric.loader import NeighborLoader
+
+# 假设已有PyG Data对象 ogb_data
+# 每次只采样一个小批次
+loader = NeighborLoader(
+    ogb_data,
+    num_neighbors=[15, 10, 5],  # 3层，每层采样邻居数
+    batch_size=1024,
+    shuffle=True,
+)
+
+for batch in loader:
+    # batch是一个子图，包含采样到的节点和边
+    print(f"批次节点数: {batch.x.shape[0]}")
+    print(f"批次边数: {batch.edge_index.shape[1]}")
+    # 在这个子图上执行forward/backward
+    break</code></pre>
+
+        <div class="highlight">
+            <strong>OGB vs Planetoid：</strong>在Planetoid上，你可以把整张图都放进显存。在OGB上，你必须有采样策略。很多在Cora上work得很好的方法，在ogbn-arxiv上根本无法跑——不是因为模型逻辑错了，而是因为<strong>内存管理策略没跟上</strong>。做GNN研究时，建议至少用ogbn-arxiv验证方法的可扩展性，别只停留在Planetoid上。
+        </div>
+
+        <h2>离线强化学习数据集D4RL</h2>
+
+        <p>如果说图数据打破的是"样本独立"假设，那么RL数据打破的是"样本静态"假设。RL中的每个样本由 (state, action, reward, next_state) 四元组构成，并且这些样本来自一个决策序列——你不能像做监督学习那样随机打乱后训练。</p>
+
+        <p><strong>D4RL</strong>（Datasets for Deep Data-Driven Reinforcement Learning）是离线强化学习领域最广泛使用的数据集集合。它包含了机器人控制、自动驾驶、游戏等多个场景下的轨迹数据。</p>
+
+        <pre><code># 加载D4RL的MuJoCo跑步机器人数据集
+d4rl = load_dataset("d4rl", "halfcheetah-medium-v2", split="train")
+print(d4rl[0].keys())
+# dict_keys(['observations', 'actions', 'rewards', 'next_observations',
+#            'terminals', 'timeouts'])
+
+# 每个字段的类型和维度
+obs = d4rl[0]["observations"]       # 17维连续向量
+action = d4rl[0]["actions"]         # 6维连续向量（关节力矩）
+reward = d4rl[0]["rewards"]         # 标量
+next_obs = d4rl[0]["next_observations"]  # 17维
+
+print(f"obs shape: {obs.shape}, action shape: {action.shape}")
+# obs shape: (17,), action shape: (6,)</code></pre>
+
+        <h3>D4RL的数据集类型</h3>
+
+        <p>D4RL为每个环境提供了多个<strong>数据质量等级</strong>的数据集——这是离线RL独有的设计：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>数据质量等级</th>
+                    <th>数据集标识</th>
+                    <th>数据来源</th>
+                    <th>训练难度</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>随机</td>
+                    <td><code>"halfcheetah-random-v2"</code></td>
+                    <td>完全随机策略采集</td>
+                    <td>高（数据质量差）</td>
+                </tr>
+                <tr>
+                    <td>混合</td>
+                    <td><code>"halfcheetah-medium-v2"</code></td>
+                    <td>部分训练好的策略 + 随机混合</td>
+                    <td>中等</td>
+                </tr>
+                <tr>
+                    <td>专家</td>
+                    <td><code>"halfcheetah-expert-v2"</code></td>
+                    <td>已训练好的专家策略</td>
+                    <td>低（容易模仿）</td>
+                </tr>
+                <tr>
+                    <td>中继专家</td>
+                    <td><code>"halfcheetah-medium-expert-v2"</code></td>
+                    <td>混合+专家的组合</td>
+                    <td>难（分布外动作多）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>RL数据的特殊陷阱：</strong>离线RL数据的一个独特问题是<strong>分布偏移（distribution shift）</strong>——你用来训练的策略（behavior policy）和你要学习的目标策略（target policy）不同。用"expert"数据集训练可能学到一个只会模仿的模型，一旦遇到训练数据中没有的状态就会崩溃。这也是为什么数据集的<strong>覆盖度</strong>比"质量"更重要——一个包含多种行为的medium数据集往往比只包含完美轨迹的expert数据集更有价值。
+        </div>
+
+        <h3>RL数据格式与处理</h3>
+
+        <p>离线RL数据的标准格式是轨迹（trajectory）——一系列连续的状态转移。但在实际训练中，你通常需要把轨迹切分成独立的状态转移样本：</p>
+
+        <pre><code>import numpy as np
+from datasets import Dataset
+
+def trajectory_to_transitions(dataset):
+    """将轨迹形式的数据转为独立的状态转移样本"""
+    transitions = []
+    for episode in dataset:
+        obs = episode["observations"]
+        actions = episode["actions"]
+        rewards = episode["rewards"]
+        # D4RL中next_observations可能包含最后一个timestep的占位
+        next_obs = episode["next_observations"]
+        terminals = episode["terminals"]
+
+        for t in range(len(rewards)):
+            transitions.append({
+                "obs": obs[t],
+                "action": actions[t],
+                "reward": rewards[t],
+                "next_obs": next_obs[t],
+                "done": terminals[t],
+            })
+
+    return Dataset.from_list(transitions)
+
+# 转换为独立样本
+flat_d4rl = trajectory_to_transitions(d4rl)
+print(f"原始轨迹数: {len(d4rl)}")
+print(f"转换后样本数: {len(flat_d4rl)}")</code></pre>
+
+        <div class="tip">
+            <strong>RL数据重放缓冲（Replay Buffer）的最佳实践：</strong>在离线RL中，通常不需要再使用在线RL中的环形缓冲（circular buffer）——因为所有数据都是预先收集好的。但要注意：1）<strong>不要打乱轨迹间的顺序</strong>，但可以在轨迹内部随机采样；2）使用重放缓冲时，<strong>优先采样近期轨迹还是均匀采样</strong>是一个重要的超参数；3）如果数据来自多个质量等级，<strong>分层采样</strong>（stratified sampling）可以避免训练偏向某一等级。
+        </div>
+
+        <h2>GNN/RL数据工程最佳实践</h2>
+
+        <p>结合GNN和RL这两种非标准数据的工程经验，有三个通用的最佳实践值得特别注意。</p>
+
+        <h3>图数据批处理策略（Batching）</h3>
+
+        <p>图数据的batch不像图像那样可以简单stack。PyG和DGL采用的方法是<strong>将多个小图合并成一个大图</strong>（disjoint batch）——每个子图有自己的节点和边，通过增加额外维度来区分不同的子图：</p>
+
+        <pre><code># PyG的batch原理示意
+# 两个小图：图A有3个节点，图B有2个节点
+# 合并后：5个节点，边索引自动偏移
+import torch_geometric.data
+
+# DataLoader会自动处理batch
+loader = torch_geometric.loader.DataLoader(
+    graph_dataset, batch_size=32, shuffle=True
+)
+
+for batch in loader:
+    print(batch)  # DataBatch对象，包含batch属性
+    # batch.batch 指示每个节点属于哪个原图
+    print(batch.batch)  # tensor([0,0,0,1,1,...])</code></pre>
+
+        <h3>子图采样（Graph Sampling）</h3>
+
+        <p>对于OGB级别的大图，你必须使用采样技术：</p>
+
+        <ul>
+            <li><strong>GraphSAINT</strong>：基于随机游走的子图采样器，每次采样一个连通子图再训练</li>
+            <li><strong>ClusterGCN</strong>：先用图聚类算法（如METIS）将图分成多个簇，每个batch训练一个簇</li>
+            <li><strong>Neighbor Sampling</strong>：逐层采样邻居节点，是GraphSAGE提出的经典方法</li>
+        </ul>
+
+        <p>这些方法的核心思想都一样：<strong>别训练整张图，训练子图</strong>。虽然每个batch只看到图的局部，但通过多个epoch覆盖全图，模型依然能学到全局结构。</p>
+
+        <h3>RL重放缓冲与数据增强</h3>
+
+        <p>离线RL的数据增强与CV/NLP截然不同——你不能随意扰动state或action，因为RL对<strong>数值精度极其敏感</strong>。两个常用的无害增强是：</p>
+
+        <ul>
+            <li><strong>奖励缩放（Reward Scaling）</strong>：将奖励标准化到 [-1, 1] 范围，加速收敛</li>
+            <li><strong>状态归一化（State Normalization）</strong>：对每个维度做Z-score归一化，消除量纲差异</li>
+        </ul>
+
+        <pre><code># 状态归一化的标准做法
+import numpy as np
+
+def normalize_states(dataset):
+    """计算整个数据集的均值和标准差，应用到所有样本"""
+    states = np.stack([s["obs"] for s in dataset])
+    mean = states.mean(axis=0)
+    std = states.std(axis=0) + 1e-8  # 避免除零
+
+    def _normalize(example):
+        example["obs"] = (example["obs"] - mean) / std
+        example["next_obs"] = (example["next_obs"] - mean) / std
+        return example
+
+    return dataset.map(_normalize)</code></pre>
+
+        <div class="highlight">
+            <strong>GNN+RL数据工程的关键提醒：</strong>这两个领域的数据是最"娇气"的。GNN中图结构的微小变化（比如少了一个边）可能导致节点嵌入的完全改变。RL中状态数值的几个百分点的差异可能导致策略行为的彻底不同。与CV和NLP不同，这里<strong>不能依赖数据的"鲁棒性"来容忍管线中的bug</strong>。每一个数据处理步骤的正确性都必须明确验证。
+        </div>
+
+        <p>至此，第19-22章的"领域数据集精讲"系列全部完成。从NLP到CV、从语音多模态到GNN和RL，你已系统性地了解了各大AI领域的主流数据集和加载策略。第23章将换一个角度——不再关注"有什么数据集"，而是关注"怎么分析和理解数据"。数据EDA与可视化工具将帮助你用眼睛"看"懂数据，而不是只靠代码"猜"数据。</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

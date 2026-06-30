@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第24章 自定义数据集构建</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI数据集全景图</a></li>
+            <li><a href="02.html">第2章 datasets库快速上手</a></li>
+            <li><a href="03.html">第3章 数据集元信息与特征系统</a></li>
+            <li><a href="04.html">第4章 Arrow：高性能数据后端</a></li>
+            <li><a href="05.html">第5章 数据类型与格式转换</a></li>
+            <li><a href="06.html">第6章 数据集的下载与缓存机制</a></li>
+            <li><a href="07.html">第7章 Split切分与采样策略</a></li>
+            <li><a href="08.html">第8章 map() 数据处理核心</a></li>
+            <li><a href="09.html">第9章 filter() 与数据筛选</a></li>
+            <li><a href="10.html">第10章 文本数据预处理实战</a></li>
+            <li><a href="11.html">第11章 图像与音频数据预处理</a></li>
+            <li><a href="12.html">第12章 流式处理与大数据策略</a></li>
+            <li><a href="13.html">第13章 数据分片与分布式训练</a></li>
+            <li><a href="14.html">第14章 数据版本管理与可复现性</a></li>
+            <li><a href="15.html">第15章 数据管线性能优化</a></li>
+            <li><a href="16.html">第16章 常见踩坑与故障排查</a></li>
+            <li><a href="17.html">第17章 数据质量评估与清洗</a></li>
+            <li><a href="18.html">第18章 数据集合规与许可证</a></li>
+            <li><a href="19.html">第19章 NLP经典数据集</a></li>
+            <li><a href="20.html">第20章 计算机视觉经典数据集</a></li>
+            <li><a href="21.html">第21章 语音与多模态数据集</a></li>
+            <li><a href="22.html">第22章 GNN与RL专项数据集</a></li>
+            <li><a href="23.html">第23章 数据EDA与可视化工具</a></li>
+            <li><a href="24.html" class="active">第24章 自定义数据集构建</a></li>
+            <li><a href="25.html">第25章 数据管线自动化</a></li>
+            <li><a href="26.html">第26章 2026最新特性与趋势</a></li>
+            <li><a href="27.html">第27章 前沿基准数据集巡览</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第24章：自定义数据集构建</h2>
+
+        <p>到此前的23章为止，我们一直在讨论如何使用现有的数据集——加载、检查、清洗、可视化。但在真实的AI工程中，你面对的数据很少是"开箱即用"的公开数据集。更多时候，你需要从零构建自己的数据集：从业务数据库导出、从标注平台下载、从原始的日志文件解析、或者从AP.I.接口逐条抓取。本章就是专门讲这件事的——如何用 Hugging Face datasets 库，把各种来源的原始数据转换成标准化的、可训练的 Dataset 对象。</p>
+
+        <p>自定义数据集构建的核心目标有三个：<strong>规范</strong>（统一格式和类型）、<strong>高效</strong>（内存和IO性能）、<strong>可发布</strong>（方便团队共享和版本管理）。datasets 库为这三个目标提供了完整的工具链。</p>
+
+        <div class="highlight">
+            <strong>核心认知：</strong>构建数据集不是"把数据塞进一个对象"。Feature 类型的声明、分片策略、缓存格式、序列化方式——每个决策都会影响下游训练的效率和正确性。
+        </div>
+
+        <p>讲一个我踩过的坑。去年帮一个团队调试模型训练崩溃的问题，现象很奇怪：训练刚开始就报错，说 CrossEntropyLoss 的输入类型不匹配。检查了模型forward没问题、损失函数调用没问题、数据加载也正常。最后打印了DataLoader出来的第一个batch一看——label列的值是 <code>"0"</code>、<code>"1"</code>、<code>"2"</code>——字符串，不是整数！</p>
+
+        <p>根源出在数据构建阶段。他们用 <code>from_generator()</code> 加载数据时，没有显式指定 Features 参数，datasets 库的自动推断把每一列都当成了 string。label列虽然看起来是数字，但底层类型是 <code>Value('string')</code>。训练框架的 CrossEntropyLoss 接受不了字符串标签，直接崩了。如果他们在构建数据集时多花30秒写一行 <code>Features(...)</code> 声明，这个bug根本不会出现。这也引出了本章最重要的一个原则：<strong>永远不要依赖自动类型推断，始终显式声明每个字段的 Feature 类型</strong>。</p>
+
+        <div class="warning">
+            <strong>血泪教训：</strong>自动推断的"方便"是短期红利，显式声明的"繁琐"是长期保障。在数据工程中，显式优于隐式。
+        </div>
+
+        <h2>从零构建数据集的三种方式</h2>
+
+        <p>datasets 库提供了三种主要的数据集构建方法，适用于不同的数据规模和来源。选择哪一种，取决于你的数据在构建时刻的形态：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>方法</th>
+                    <th>适用场景</th>
+                    <th>数据量</th>
+                    <th>内存特点</th>
+                    <th>示例</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>Dataset.from_dict()</code></td>
+                    <td>Pandas/内存数据</td>
+                    <td>小到中等</td>
+                    <td>全量加载到内存</td>
+                    <td><code>Dataset.from_dict({"text": [...], "label": [...]})</code></td>
+                </tr>
+                <tr>
+                    <td><code>Dataset.from_generator()</code></td>
+                    <td>DB/API/文件流</td>
+                    <td>大到超大</td>
+                    <td>逐条生成，低内存</td>
+                    <td><code>Dataset.from_generator(gen_fn, features=Features(...))</code></td>
+                </tr>
+                <tr>
+                    <td><code>Dataset.from_parquet()</code></td>
+                    <td>已有Parquet文件</td>
+                    <td>中等到大</td>
+                    <td>内存映射，零拷贝</td>
+                    <td><code>Dataset.from_parquet("data.parquet")</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>三种方式不是互斥的，实际项目中经常组合使用：从数据库导出为Parquet，然后用 <code>from_parquet()</code> 加载，再叠加 <code>map()</code> 做预处理。下面逐一深入。</p>
+
+        <h3>Dataset.from_dict() — 小数据量的便捷方式</h3>
+
+        <p>当你已经有了一组Python列表或Pandas DataFrame时，<code>from_dict()</code> 是最简单的方式。它接受一个字典，key是列名，value是值的列表：</p>
+
+        <pre><code>from datasets import Dataset
+
+data = {
+    "text": ["这家酒店服务很好", "房间太小了不推荐", "性价比不错"],
+    "label": [1, 0, 1]  # 1=正面, 0=负面
+}
+dataset = Dataset.from_dict(data)
+print(dataset)
+print(dataset[0])</code></pre>
+
+        <p>这种方式的好处是极其简单，适合快速原型和测试。但注意：数据会被全量加载到内存并序列化为 Arrow 格式。对于百万级别以上的数据，建议用下面两种方式。</p>
+
+        <h2>from_generator() 实战</h2>
+
+        <p><code>from_generator()</code> 是构建大规模数据集的首选。它接受一个生成器函数，每次 yield 一条样本。datasets 库会在后台把生成器产出的数据分批写入 Arrow 文件，内存占用始终可控。</p>
+
+        <h3>生成器函数设计</h3>
+
+        <p>生成器函数必须是一个无参函数（或者用可调用对象），内部通过 <code>yield</code> 逐条产出字典：</p>
+
+        <pre><code>from datasets import Dataset, Features, Value
+
+
+def data_generator():
+    for i in range(1_000_000):
+        # 模拟从数据库读取
+        yield {
+            "id": i,
+            "text": f"这是第{i}条样本的文本内容",
+            "label": i % 3  # 三分类
+        }
+
+
+features = Features({
+    "id": Value("int64"),
+    "text": Value("string"),
+    "label": Value("int8"),
+})
+
+dataset = Dataset.from_generator(
+    data_generator,
+    features=features,
+    cache_dir="./cache"
+)
+print(dataset)
+print(f"内存占用: {dataset.dataset_size / 1024**3:.2f} GB")</code></pre>
+
+        <div class="highlight">
+            <strong>关键点：</strong>generator 每次 yield 的字典的 key 必须和 Features 中声明的字段名完全一致。value 的类型必须匹配 Feature 声明——string 字段不能 yield int，int8 字段不能 yield 超过范围的值。datasets 在写入时会对类型做校验，不匹配会抛出异常。
+        </div>
+
+        <h3>与数据库/API集成</h3>
+
+        <p>生成器中可以进行任何IO操作——查询数据库、调用 API、读取远程文件。这是 <code>from_generator()</code> 真正的威力所在。你可以在不产生任何临时文件的情况下，把整个数据集"流"进 Dataset：</p>
+
+        <pre><code>import sqlite3
+
+
+def db_generator(db_path: str, batch_size: int = 1000):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, content, sentiment FROM reviews")
+    while True:
+        rows = cursor.fetchmany(batch_size)
+        if not rows:
+            break
+        for row in rows:
+            yield {"id": row[0], "text": row[1], "label": row[2]}
+    conn.close()
+
+
+dataset = Dataset.from_generator(
+    lambda: db_generator("reviews.db"),
+    features=Features({
+        "id": Value("int64"),
+        "text": Value("string"),
+        "label": Value("int8"),
+    })
+)</code></pre>
+
+        <div class="tip">
+            <strong>性能提示：</strong>生成器中可以使用 <code>fetchmany()</code> 批量读取来减少IO次数，但每次 yield 仍然只 yield 一条样本。这是因为 datasets 的 Arrow 写入器内部已经做了批处理优化，你不需要在生成器里自己拼batch。保持每次 yield 一条样本是最清晰、最安全的方式。
+        </div>
+
+        <h2>格式转换全流程</h2>
+
+        <p>在实际项目中，你的原始数据通常不是"刚好适合构建Dataset"的形态。你需要经过一个格式转换流程。下面是最常见的几种转换路径。</p>
+
+        <h3>CSV → Arrow → Dataset</h3>
+
+        <p>CSV是最常见的数据交换格式，但存在众所周知的性能问题：没有类型信息（所有列都是字符串）、解析慢、文件体积大。用Pandas读取后再转Dataset是一条标准路径：</p>
+
+        <pre><code>import pandas as pd
+from datasets import Dataset
+
+df = pd.read_csv("reviews.csv")
+# 在Pandas中完成类型转换
+df["label"] = df["label"].astype(int)
+df["price"] = df["price"].astype(float)
+dataset = Dataset.from_pandas(df)
+print(dataset.features)  # 确认类型正确</code></pre>
+
+        <h3>JSONL → Dataset</h3>
+
+        <p>JSONL（每行一个JSON对象）在深度学习中非常流行。你可以用生成器方式加载，避免把整个文件读入内存：</p>
+
+        <pre><code>import json
+
+
+def jsonl_generator(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            yield json.loads(line.strip())
+
+
+dataset = Dataset.from_generator(
+    lambda: jsonl_generator("data.jsonl"),
+    features=Features({
+        "text": Value("string"),
+        "label": Value("int8"),
+    })
+)</code></pre>
+
+        <h3>Pandas → Parquet → Dataset</h3>
+
+        <p>对于需要长期存储和跨项目复用的数据，Parquet是最佳目标格式。它比CSV小10倍、读写快50倍，并且保留了完整的类型信息：</p>
+
+        <pre><code>df = pd.read_csv("large_data.csv")
+# 类型转换
+df["label"] = df["label"].astype("int8")
+df["price"] = df["price"].astype("float32")
+# 存储为Parquet
+df.to_parquet("clean_data.parquet", index=False)
+# 加载为Dataset
+dataset = Dataset.from_parquet("clean_data.parquet")</code></pre>
+
+        <div class="warning">
+            <strong>注意：</strong>Parquet文件中的列名不能包含空格和特殊字符（如 <code>/</code>、<code>.</code>），否则在转换成Dataset时可能会报错。建议在Pandas阶段就用 <code>df.columns = [c.strip().replace(" ", "_") for c in df.columns]</code> 做规范化。
+        </div>
+
+        <h2>push_to_hub：发布你的数据集</h2>
+
+        <p>数据集构建好之后，下一步通常是发布到团队或社区，让模型训练可以引用。<strong>Hugging Face Hub</strong> 是目前最主流的数据集托管平台，datasets 库提供了 <code>push_to_hub()</code> 方法一键上传。</p>
+
+        <h3>完整的上传流程</h3>
+
+        <pre><code>from datasets import Dataset, Features, Value
+from huggingface_hub import login
+
+# 1. 登录HF Hub（需要token）
+login(token="hf_your_token_here")
+
+# 2. 构建数据集
+dataset = Dataset.from_dict({
+    "text": ["样本1", "样本2", "样本3"],
+    "label": [0, 1, 0]
+})
+
+# 3. 上传到Hub
+dataset.push_to_hub("your-username/my-dataset", private=False)
+
+print("✅ 数据集已发布到 https://huggingface.co/datasets/your-username/my-dataset")</code></pre>
+
+        <p>上传完成后，任何人（如果是 public）都可以通过 <code>load_dataset("your-username/my-dataset")</code> 直接加载你的数据集。</p>
+
+        <h3>Dataset Card：数据集的门面</h3>
+
+        <p>光传数据不够——你需要写一份<strong>Dataset Card</strong>，告诉使用者你的数据集是什么、怎么来的、有什么限制。Dataset Card 是一个 README.md 文件，放在数据集仓库的根目录，通常包含以下内容：</p>
+
+        <ul>
+            <li><strong>数据集描述</strong>：任务目标、数据来源、构建方法</li>
+            <li><strong>数据字段</strong>：每个字段的名称、类型、含义</li>
+            <li><strong>数据统计</strong>：样本量、标签分布、split信息</li>
+            <li><strong>数据预处理</strong>：是否有清洗、过滤、脱敏</li>
+            <li><strong>许可证信息</strong>：明确标注使用许可</li>
+            <li><strong>引用格式</strong>：BibTeX 格式，方便论文引用</li>
+        </ul>
+
+        <p>在 datasets v5.0.0 中，<code>push_to_hub()</code> 已经支持通过 <code>dataset_card</code> 参数传入Dataset Card的markdown内容，自动化程度更高。</p>
+
+        <h3>版本管理与并发安全</h3>
+
+        <p>数据集上传到Hub后，每次新的 <code>push_to_hub()</code> 调用都会创建一个新版本。你可以在加载时指定版本：</p>
+
+        <pre><code>dataset_v1 = load_dataset("your-username/my-dataset", revision="v1.0.0")
+dataset_v2 = load_dataset("your-username/my-dataset", revision="v2.0.0")</code></pre>
+
+        <div class="tip">
+            <strong>并发安全说明：</strong>在 datasets v5.0.0 中，<code>push_to_hub()</code> 新增了 <code>max_shard_size</code> 参数来控制分片大小，以及 <code>num_proc</code> 参数支持多进程上传。如果你的数据集超过50GB，建议设置 <code>max_shard_size="500MB"</code> 让数据集自动分片，避免单文件过大上传失败。对于团队协作场景，请确保不要同时 push 同一个数据集，否则后 push 的人会覆盖前一个人的版本。
+        </div>
+
+        <h2>实战：构建一个中文NER数据集</h2>
+
+        <p>为了把本章的知识串联起来，我们做一个完整的实战演练——从一个标注平台导出的原始数据，到发布到HF Hub的结构化NER数据集。</p>
+
+        <p>假设数据来自标注平台（如Label Studio），导出格式为JSONL，每条包含原文文本和实体标注列表：</p>
+
+        <pre><code>// 标注平台导出格式
+{"id": 1, "text": "张三在北京大学学习计算机科学", "entities": [{"start": 0, "end": 2, "type": "PER"}, {"start": 3, "end": 8, "type": "ORG"}]}
+{"id": 2, "text": "李四昨天去了上海", "entities": [{"start": 6, "end": 8, "type": "LOC"}]}
+// ...</code></pre>
+
+        <p>第一步：清洗原始数据，转换为BIO格式（Begin-Inside-Outside，序列标注的标准编码方式）：</p>
+
+        <pre><code>import json
+
+def convert_to_bio(text, entities, label2id):
+    """将文本和实体列表转换为BIO标签序列"""
+    tags = ["O"] * len(text)
+    for ent in entities:
+        start, end, etype = ent["start"], ent["end"], ent["type"]
+        tags[start] = f"B-{etype}"
+        for i in range(start + 1, end):
+            tags[i] = f"I-{etype}"
+    return tags</code></pre>
+
+        <p>第二步：构建 Features 并生成 Dataset：</p>
+
+        <pre><code>from datasets import Dataset, Features, Value, Sequence, ClassLabel
+
+# 定义标签集合（BIO格式）
+labels = ["O", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC"]
+
+features = Features({
+    "id": Value("int64"),
+    "text": Value("string"),
+    "tokens": Sequence(Value("string")),
+    "ner_tags": Sequence(ClassLabel(names=labels)),
+})
+
+
+def generator():
+    with open("label_studio_export.jsonl", "r") as f:
+        for line in f:
+            item = json.loads(line.strip())
+            text = item["text"]
+            entities = item["entities"]
+            tags = convert_to_bio(text, entities, labels)
+            tokens = list(text)  # 字级别token
+            yield {
+                "id": item["id"],
+                "text": text,
+                "tokens": tokens,
+                "ner_tags": tags,
+            }
+
+
+dataset = Dataset.from_generator(generator, features=features)
+print(dataset[0])
+# {'id': 1, 'text': '张三在北京大学学习计算机科学',
+#  'tokens': ['张', '三', '在', '北', '京', '大', '学', ...],
+#  'ner_tags': [1, 2, 0, 3, 4, 4, 4, ...]}</code></pre>
+
+        <p>第三步：切分训练/验证/测试集，并上传Hub：</p>
+
+        <pre><code>dataset = dataset.train_test_split(test_size=0.1, seed=42)
+dataset["valid"] = dataset.pop("test")
+
+dataset.push_to_hub(
+    "your-team/chinese-ner-reviews",
+    private=True,
+    max_shard_size="500MB"
+)
+
+print("✅ NER数据集构建完成并上传")
+print(f"训练集: {len(dataset['train'])} 条")
+print(f"验证集: {len(dataset['valid'])} 条")</code></pre>
+
+        <div class="highlight">
+            <strong>最佳实践：</strong>NER数据集的Feature声明中使用 <code>ClassLabel(names=labels)</code> 而不是 <code>Value("int8")</code> 有一个额外的好处——HF Hub会自动在Dataset Card中生成标签映射表，其他使用者无需查阅额外文档就能知道第5类标签对应什么含义。
+        </div>
+
+        <p>整个流程走下来，从标注平台导出的原始JSONL到上传Hub的结构化NER数据集，只需要不到100行代码。核心工程决策点其实只有一个——<strong>Features 的类型声明</strong>。这一点做对了，后续的加载、训练、版本管理都会顺滑无比。</p>
+
+        <div class="tip">
+            <strong>补充建议：</strong>如果你要构建的数据集规模超过10万条，强烈推荐在 <code>from_generator()</code> 之前先用 <code>map()</code> 做一轮数据校验。例如检查每个生成的样本是否包含所有指定字段、字符串长度是否合理、标签是否在合法范围内。这比上传后再发现问题要省事得多。
+        </div>
+
+        <p>下一章我们进入数据工程的高级话题——<strong>数据管线自动化</strong>。当你面对的不是一个数据集，而是几十个数据集要统一处理时，手动重复调用的方式就不够用了。你需要一个可复用、可配置、可测试的数据处理管线。而本章学习的 Features 声明和格式转换技巧，正是构建管线的基础模块。</p>
+
+        <div class="footer-nav">
+            <a href="23.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="25.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

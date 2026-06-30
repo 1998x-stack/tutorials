@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 x86保护模式精要</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html" class="active">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。在前面几章中，我们频繁地提到了"保护模式"、"GDT"、"IDT"、"分页"、"特权级"这些术语。如果你对它们只有模糊的概念，这一章将帮你把它们彻底弄清楚。</p>
+
+        <p>保护模式是Intel 80286引入、在80386上成熟的重要体系结构特性。Linux 0.11充分利用了386保护模式的全部能力——<strong>段保护、分页、多级特权级、硬件任务切换</strong>。可以说，不懂保护模式，读Linux内核源码就如同没有地图的旅行。</p>
+
+        <p>这一章不分析具体的代码，而是系统地讲解x86保护模式的<strong>核心概念和数据结构</strong>。这些知识是后续章节（中断、系统调用、进程调度、内存管理）的基石。建议你在阅读时打开Bochs调试器，对照实际硬件状态来理解——本章最后一节会告诉你怎么做。</p>
+
+        <h2>引言——保护模式是理解内核的基石</h2>
+
+        <p>保护模式（Protected Mode）之"保护"，核心体现在三个方面：</p>
+
+        <ul>
+            <li><strong>内存保护</strong>：进程不能随意访问其他进程的内存空间——这是通过分段和分页机制共同实现的。</li>
+            <li><strong>特权级保护</strong>：操作系统内核运行在最高特权级（Ring 0），用户程序运行在最低特权级（Ring 3）。用户程序不能执行特权指令、不能直接访问内核数据。</li>
+            <li><strong>多任务支持</strong>：硬件提供了TSS（任务状态段）和任务切换指令，支持操作系统实现多进程并发。</li>
+        </ul>
+
+        <p>在实模式下，这些保护全部不存在——任何程序都可以访问任何内存地址、执行任何指令。从实模式到保护模式的切换，本质上就是计算机系统从"无序"到"有序"的跃迁。理解了这个跃迁，你就能理解操作系统的本质。</p>
+
+        <h2>实模式 vs 保护模式</h2>
+
+        <p>让我们用一张对比表来建立直观的认识。这张表涵盖了两种模式的核心差异：</p>
+
+        <table>
+            <thead>
+                <tr><th>特性</th><th>实模式</th><th>保护模式</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>寄存器宽度</td><td>16位 (AX, BX, CX, DX, ...)</td><td>32位 (EAX, EBX, ECX, EDX, ...)</td></tr>
+                <tr><td>寻址空间</td><td>1MB (0x00000 ~ 0xFFFFF)</td><td>4GB (0x00000000 ~ 0xFFFFFFFF)</td></tr>
+                <tr><td>地址计算</td><td>段基址 × 16 + 偏移量</td><td>段描述符中的基址 + 偏移量 (通过GDT/LDT)</td></tr>
+                <tr><td>段大小</td><td>固定 64KB</td><td>可变，最大 4GB（由段描述符的Limit和G位决定）</td></tr>
+                <tr><td>内存保护</td><td>无（任何代码可访问任意地址）</td><td>有（段限长检查、页级保护、特权级检查）</td></tr>
+                <tr><td>多任务支持</td><td>无</td><td>支持（通过TSS和硬件任务切换指令）</td></tr>
+                <tr><td>分页</td><td>无</td><td>可选的二级页表机制</td></tr>
+                <tr><td>特权级</td><td>无（所有代码运行在最高特权）</td><td>4级 (Ring 0 ~ Ring 3)</td></tr>
+                <tr><td>操作系统典型用法</td><td>BIOS、引导加载器</td><td>现代操作系统内核</td></tr>
+            </tbody>
+        </table>
+
+        <p>从这张表可以清楚地看到，保护模式相对于实模式的升级是全方位的。但要注意一点——虽然保护模式能力更强，但它并不能完全替代实模式。因为在引导阶段，保护模式的运行环境还没有建立（GDT没有加载、中断门没有设置），所以引导代码必须先以实模式启动，完成基本的环境准备后再切换到保护模式。</p>
+
+        <div class="tip">
+            <strong>为什么不能跳过实模式？</strong> 上电后CPU的默认状态就是实模式——这是x86设计的初衷：保证与8086的向后兼容性。CPU需要"从实模式开始，通过软件主动切换到保护模式"这个流程，是x86体系结构历史包袱的直接体现。
+        </div>
+
+        <h2>段描述符与GDT/LDT</h2>
+
+        <p>保护模式最核心的概念之一是<strong>段描述符</strong>。在实模式下，"段"只是一个16位的数值（段寄存器里的值乘以16就是段基址）。在保护模式下，段寄存器里存放的是一个<strong>段选择子</strong>——它像一把钥匙，指向GDT（全局描述符表）或LDT（局部描述符表）中的一个<strong>段描述符</strong>，由描述符来定义该段的基址、限长、访问权限等属性。</p>
+
+        <p>段描述符是一个8字节（64位）的数据结构。它的结构如下：</p>
+
+        <pre><code>段描述符 (8字节 = 64位):
+
+  位63        56  55  54  53  52  51  48  47        40  39  38  37  36  35        32
+  +------------+---+---+---+---+---+---+------------+---+---+---+---+---+------------+
+  | 基址[31:24] | G | D | 0 | A |  段限长[19:16]  | P | DPL | S |  TYPE  | 基址[23:16]|
+  +------------+---+---+---+---+---+---+------------+---+---+---+---+---+------------+
+                                                                                      |
+  位31                                16  15                                      0  |
+  +------------------------------------+--------------------------------------------+
+  |        基址[15:0]                  |           段限长[15:0]                      |
+  +------------------------------------+--------------------------------------------+
+
+  关键字段:
+  - 基址 (Base): 32位, 段的起始物理地址
+  - 段限长 (Limit): 20位, 段的长度 (取决于G位单位是字节还是4KB)
+  - G (Granularity): 0=限长单位1字节, 1=限长单位4KB
+  - D (Default operation size): 0=16位段, 1=32位段
+  - P (Present): 1=段在内存中
+  - DPL (Descriptor Privilege Level): 2位, 段的特权级 (0~3)
+  - S (Descriptor type): 0=系统段, 1=代码/数据段
+  - TYPE: 3位, 段的类型 (代码/数据/可读/可写/一致/扩展方向等)</code></pre>
+
+        <p>GDT和LDT本身就是一个段描述符的数组。GDT是全局唯一的——系统中所有进程共享同一个GDT（在Linux 0.11中，GDT中存放了内核代码段、内核数据段、以及最多64个任务的TSS和LDT描述符）。每个进程可以有自己的LDT——在早期的Linux中，LDT被用来实现进程的私有段，但后来很快被基于分页的地址空间隔离取代。</p>
+
+        <p>段选择子（Segment Selector）是一个16位的值，存放在CS、DS、ES、FS、GS、SS等段寄存器中：</p>
+
+        <pre><code>段选择子 (16位):
+
+  位15         3  2  1  0
+  +-------------+--+----+
+  |    INDEX    |TI| RPL|
+  +-------------+--+----+
+
+  - INDEX (13位): 在GDT/LDT中的描述符索引 (从0开始)
+  - TI (Table Indicator): 0=使用GDT, 1=使用LDT
+  - RPL (Requested Privilege Level): 请求特权级 (0~3)
+
+  示例: 段选择子 0x0F = 0000 0000 0000 1 111
+    INDEX = 1 (GDT的第1项)
+    TI = 1 (使用LDT) —— 实际上在0.11中这是用户数据段
+    等等——让我重新算: 0x0F = 0000 0000 0000 1111
+    INDEX = 1 (右移3位: 0x0F >> 3 = 1)
+    TI = 1 (位2)
+    RPL = 3 (位0-1) —— 用户态
+
+  在0.11中常用的段选择子:
+    0x08 = 0000 0000 0000 1000    内核代码段 (GDT索引1, TI=0, RPL=0)
+    0x10 = 0000 0000 0001 0000    内核数据段 (GDT索引2, TI=0, RPL=0)
+    0x0F = 0000 0000 0000 1111    用户代码段 (GDT索引1, TI=1, RPL=3)
+    0x17 = 0000 0000 0001 0111    用户数据段 (GDT索引2, TI=1, RPL=3)</code></pre>
+
+        <div class="highlight">
+            <strong>GDT与LDT的"分权"设计</strong>：Intel的设计意图是GDT存放系统全局的段（内核代码/数据），LDT存放进程私有的段。这样当任务切换时，只需要切换LDTR寄存器指向新的LDT，而GDT可以保持不变。但在Linux 0.11中，LDT的用途比较有限——实际上每个任务的TSS和LDT描述符都存放在GDT中。LDT本身只包含了该任务的代码段和数据段描述符。这种"简化使用"体现了Linus的实用主义风格——充分利用硬件能力，但不被硬件的每一个花哨功能所束缚。
+        </div>
+
+        <h2>特权级保护</h2>
+
+        <p>x86保护模式支持4个特权级（Ring 0 ~ Ring 3），通常操作系统只使用Ring 0（内核态）和Ring 3（用户态）。Ring 1和Ring 2在经典操作系统中很少使用——不过在虚拟化场景中（比如早期的VMware）它们被用作客户操作系统的运行级别。</p>
+
+        <p>特权级保护通过三个不同的权限标识来管控：</p>
+
+        <ul>
+            <li><strong>CPL</strong>（Current Privilege Level）：当前特权级，存放在CS寄存器的位0-1中。CPU正在执行的代码的特权级。</li>
+            <li><strong>DPL</strong>（Descriptor Privilege Level）：描述符特权级，存放在段描述符的DPL字段中。访问该段所需的最低特权级。</li>
+            <li><strong>RPL</strong>（Requested Privilege Level）：请求特权级，存放在段选择子的位0-1中。请求者声明的特权级——操作系统可以用RPL来防止用户程序"借用"高特权段。</li>
+        </ul>
+
+        <p>访问检查规则：<strong>只有当CPL ≤ DPL 并且 RPL ≤ DPL 时，访问才被允许</strong>（数值越小，特权级越高）。也就是说，只有特权级足够高（数值小）的代码，才能访问特权级要求高（DPL数值小）的段。</p>
+
+        <p>特权级切换是通过<strong>门描述符</strong>（Gate Descriptor）实现的。门有四种类型：调用门（Call Gate）、中断门（Interrupt Gate）、陷阱门（Trap Gate）和任务门（Task Gate）。Linux 0.11主要使用中断门和陷阱门来实现系统调用和中断响应。</p>
+
+        <pre><code>中断门/陷阱门 (8字节):
+
+  位31            16  15            0
+  +----------------+----------------+
+  |    偏移量[15:0]  |  段选择子[15:0]  |
+  +----------------+----------------+
+  | 偏移量[31:16]   |P|DPL|0|1|1|0|0|0|
+  +----------------+----------------+
+
+  - 段选择子: 指向GDT/LDT中的代码段描述符
+  - 偏移量: 中断/异常处理函数的入口地址
+  - P: 存在位
+  - DPL: 触发该门所需的最低特权级
+  - 类型: 0xE=中断门, 0xF=陷阱门
+
+  当CPU通过门进行特权级切换时:
+  1. 检查CPL ≤ 门的DPL (可以访问这个门)
+  2. 检查门的段选择子的CPL ≤ 目标段的DPL (门的RPL在硬件上被忽略)
+  3. 如果CPL ≠ 目标段的DPL, 发生栈切换
+     - 从TSS中获取对应特权级的SS和ESP
+     - 将返回地址(SS:ESP、CS:EIP、EFLAGS)压入新栈
+  4. 跳转到门中指定的EIP地址执行</code></pre>
+
+        <p>这种门机制是操作系统的"安全闸门"——用户态程序（Ring 3）不能直接调用内核函数，但可以通过触发一个DPL=3的门（比如INT 0x80系统调用门）间接进入内核态（Ring 0）。内核在门中验证用户的请求是否合法，然后代表用户执行操作，最后通过IRET指令返回用户态。</p>
+
+        <h2>分页机制</h2>
+
+        <p>分段和分页是x86保护模式提供的两种内存管理机制。分段是必须的（保护模式下的地址翻译总是基于段的），分页是可选的但强烈推荐的。Linux 0.11只使用了一个简单的分段模型（内核代码/数据段覆盖整个4GB地址空间），依赖分页来实现进程地址空间的隔离。</p>
+
+        <p>在Linux 0.11中，虚拟地址到物理地址的翻译流程如下：</p>
+
+        <pre><code>虚拟地址翻译流程:
+
+  虚拟地址 (由指令给出)
+        |
+        |  分段单元 (Segment Unit)
+        v
+  +--GDT/LDT中的段描述符--+
+  | 从段描述符中获取基址   |
+  | 基址 + 偏移 = 线性地址 |
+  +----------------------+
+        |
+        |  分页单元 (Paging Unit)
+        v
+  +--页目录 + 页表--------+
+  | CR3 → 页目录→页表→物理页|
+  +----------------------+
+        |
+        v
+  物理地址
+
+  Linux 0.11的简化设置:
+  段基址 = 0x00000000, 段限长 = 4GB
+  因此 虚拟地址 = 线性地址 (段翻译退化为无操作)
+  最终的地址转换完全由分页负责</code></pre>
+
+        <p>Linux 0.11的两级分页结构：</p>
+
+        <pre><code>两级分页: 线性地址 → 物理地址
+
+  线性地址 (32位):
+  +-----------+-----------+--------------+
+  | 页目录索引 | 页表索引   |  页内偏移     |
+  | (10位)    | (10位)    | (12位)       |
+  +-----------+-----------+--------------+
+       |           |            |
+       v           v            v
+   +--------+  +--------+  +--------+
+   |CR3寄存器|  | 页目录  |  | 页表    |
+   |页目录基址|→|项中给出 |→|项中给出 |→ 物理内存页面
+   |(物理地址)|  |页表基址 |  |页基址   |    (4KB对齐)
+   +--------+  +--------+  +--------+
+
+  关键控制寄存器:
+  - CR0: PG位(位31)=1 启用分页
+  - CR3: 页目录的物理基址 (必须4KB对齐)
+  - CR2: 缺页错误线性地址 (发生缺页时自动记录)
+
+  页目录项 (4字节, 每个页目录1024项 → 4KB):
+  +-------+----+----+----+----+----+----+----+
+  | 页表基址[31:12] | AVL| 0 | D | A | 0 | U | R | P |
+  |                 |    |   |   |   |   / S | W |   |
+  +-------+----+----+----+----+----+---+----+----+
+  P=存在, RW=读写, US=用户/超级用户
+  A=访问位, D=脏位
+
+  页表项 (4字节, 每个页表1024项 → 4KB):
+  +-------+----+----+----+----+----+----+----+
+  | 页基址[31:12]  | AVL| 0 | D | A | 0 | U | R | P |
+  |                  |    |   |   |   |   / S | W |   |
+  +-------+----+----+----+----+----+---+----+----+
+
+  Linux 0.11的页表映射 (head.S中设置):
+  页目录[0] → pg0页表 → 映射虚拟0x00000000~0x003FFFFF → 物理0x00000000~0x003FFFFF
+  页目录[1] → pg1页表 → 映射虚拟0x00400000~0x007FFFFF → 物理0x00400000~0x007FFFFF</code></pre>
+
+        <p>这里最关键的是<strong>TLB</strong>（Translation Lookaside Buffer，页表缓存）。CPU在翻译虚拟地址时，需要先查页目录、再查页表——这需要两次内存访问。如果每次都这样，性能会下降一半。TLB是CPU内部的一个小型硬件缓存，它缓存了最近使用的虚拟地址到物理地址的映射关系。当CPU要翻译一个虚拟地址时，先查TLB——如果命中（TLB hit），不需要访问内存中的页表；如果不命中（TLB miss），才去查页表，并将结果加入TLB。</p>
+
+        <p>修改页表后，必须<strong>刷新TLB</strong>——否则CPU可能使用过时的缓存映射，导致访问到错误的物理地址。刷新TLB的方法是重新加载CR3寄存器（即使赋相同的值）。这就是为什么在进程切换时，Linux 0.11的<code>switch_mm()</code>会重新加载CR3——因为每个进程有独立的页表。</p>
+
+        <h2>任务切换</h2>
+
+        <p>x86提供了一套硬件任务切换机制，核心是<strong>TSS</strong>（Task State Segment，任务状态段）。TSS是一个特殊的数据结构，用于保存任务（进程）的完整执行上下文。</p>
+
+        <pre><code>TSS (任务状态段) 结构:
+
+  偏移    字段
+  =====  ============
+  0x00   上一个任务的TSS选择子 (用于任务嵌套)
+  0x04   ESP0          (Ring 0栈指针)
+  0x08   SS0           (Ring 0栈段)
+  0x0C   ESP1          (Ring 1栈指针)
+  0x10   SS1           (Ring 1栈段)
+  0x14   ESP2          (Ring 2栈指针)
+  0x18   SS2           (Ring 2栈段)
+  0x1C   CR3           (页目录基址)
+  0x20   EIP
+  0x24   EFLAGS
+  0x28   EAX
+  0x2C   ECX
+  0x30   EDX
+  0x34   EBX
+  0x38   ESP           (堆栈指针)
+  0x3C   EBP
+  0x40   ESI
+  0x44   EDI
+  0x48   ES
+  0x4C   CS
+  0x50   SS
+  0x54   DS
+  0x58   FS
+  0x5C   GS
+  0x60   LDT段选择子
+  0x64   T标志 (调试陷阱标志)
+
+  Linux 0.11中task_struct中的TSS:
+  struct task_struct {
+      long state;           // 进程状态
+      long counter;         // 运行时间片
+      long priority;        // 优先级
+      long signal;          // 信号位图
+      struct sigaction sigaction[32]; // 信号处理动作
+      long blocked;         // 信号屏蔽码
+      // ... 其他字段 ...
+      struct tss_struct tss; // 硬件TSS (内嵌在PCB中!)
+  };</code></pre>
+
+        <p>在Linux 0.11中，每个任务的TSS直接包含在<code>task_struct</code>中，而不是单独分配。当一个任务被调度执行时，CPU通过<code>ljmp</code>指令或<code>call</code>/<code>jmp</code>到TSS描述符来触发硬件任务切换。硬件会自动：</p>
+
+        <pre><code>硬件任务切换过程 (以ljmp到TSS描述符为例):
+
+  1. 检查当前CPL是否有权切换到目标TSS
+  2. 将当前CPU寄存器的值保存到当前任务的TSS中
+     (通过TR寄存器指向的TSS)
+  3. 从目标任务的TSS中加载所有寄存器
+     - 通用寄存器: EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
+     - 段寄存器: ES, CS, SS, DS, FS, GS
+     - 控制寄存器: CR3 (页表切换!)
+     - EFLAGS, EIP
+  4. 设置TR寄存器指向目标TSS
+  5. 从目标TSS的CS:EIP开始执行
+
+  Linux 0.11使用"硬件任务切换"——每次调用schedule()时:
+  if (当前任务 ≠ 下一个任务)
+  {
+      // 发信号给前一个任务
+      // ...
+      // 执行硬件任务切换
+      __asm__("ljmp %0": :"m" (next->tss));
+      // 这个ljmp触发CPU自动保存/加载寄存器
+  }</code></pre>
+
+        <div class="tip">
+            <strong>硬件切换 vs 软件切换</strong>：Linux 0.11使用的是硬件任务切换（通过<code>ljmp</code>到TSS）。有趣的是，从Linux 2.2开始，Linux改用软件任务切换——即在<code>switch_to</code>宏中手动保存和加载寄存器，不再依赖x86的硬件TSS切换指令。原因有二：第一，硬件任务切换在跨CPU架构时不可移植；第二，软件切换可以更精细地控制只保存必要的寄存器，性能更高。但Linux 0.11中的硬件任务切换更简单、更易于理解——这是它作为教学版本的优势。
+        </div>
+
+        <p>特别需要注意的是：TSS中的<code>ESP0</code>和<code>SS0</code>字段——它们记录了该任务在Ring 0的栈指针。当用户态（Ring 3）程序通过中断或系统调用进入内核态（Ring 0）时，CPU自动从当前任务的TSS中读取<code>ESP0</code>和<code>SS0</code>，切换到内核栈。这是执行特权级切换时栈切换的基础——每个用户态进程都有一个对应的内核栈。</p>
+
+        <h2>在Bochs中验证</h2>
+
+        <p>理论知识讲完了，但真正理解它们的最佳方式是——在Bochs调试器中查看真实硬件的状态。Bochs内置了一个强大的调试器，可以查看GDT、IDT、页表、寄存器的当前值。</p>
+
+        <p>在Linux 0.11运行到shell提示符后，按<strong>Ctrl+C</strong>中断Bochs的模拟，进入调试模式：</p>
+
+        <pre><code>&lt;bochs:1&gt; info gdt          ← 显示GDT的内容
+Global Descriptor Table (base=0x00005cb8, limit=2047):
+GDT[0x00]= 0x00000000:0x00000000  ← 空描述符(必须为0)
+GDT[0x01]= 代码段: base=0x00000000, limit=0x7FFFFF, DPL=0
+GDT[0x02]= 数据段: base=0x00000000, limit=0x7FFFFF, DPL=0
+GDT[0x03]= 代码段: base=0x00000000, limit=0x7FFFFF, DPL=3  ← 用户代码段
+GDT[0x04]= 数据段: base=0x00000000, limit=0x7FFFFF, DPL=3  ← 用户数据段
+GDT[0x05]= TSS0:  base=0x0000XXXX, limit=0x00068, DPL=3   ← 任务0的TSS
+GDT[0x06]= LDT0:  base=0x0000XXXX, limit=0x0001F, DPL=3   ← 任务0的LDT
+GDT[0x07]= TSS1:  base=0x0000XXXX, limit=0x00068, DPL=3   ← 任务1的TSS
+GDT[0x08]= LDT1:  base=0x0000XXXX, limit=0x0001F, DPL=3   ← 任务1的LDT
+...
+
+&lt;bochs:2&gt; info idt          ← 显示IDT的内容
+Interrupt Descriptor Table (base=0x00005438, limit=2047):
+IDT[0x00]= 中断门: selector=0x0008, offset=0xXXXX, DPL=0  ← 除以零异常
+IDT[0x01]= 中断门: selector=0x0008, offset=0xXXXX, DPL=0  ← 调试异常
+IDT[0x02]= 中断门: selector=0x0008, offset=0xXXXX, DPL=0  ← NMI
+IDT[0x03]= 陷阱门: selector=0x0008, offset=0xXXXX, DPL=3  ← 断点(用户态可用!)
+...
+IDT[0x20]= 中断门: selector=0x0008, offset=0xXXXX, DPL=0  ← 时钟中断
+IDT[0x21]= 中断门: selector=0x0008, offset=0xXXXX, DPL=0  ← 键盘中断
+...
+IDT[0x80]= 陷阱门: selector=0x0008, offset=0xXXXX, DPL=3  ← 系统调用(用户态可用!)
+
+&lt;bochs:3&gt; info tab         ← 显示页表翻译表
+CR3=0x00000000
+页目录[0] = 0x00002007 (页表基址=0x00002000)
+  页表[0x000] → 物理页 0x00000  (P=1, RW=1, US=1)
+  页表[0x001] → 物理页 0x01000  (P=1, RW=1, US=1)
+  ...
+页目录[1] = 0x00003007 (页表基址=0x00003000)
+  页表[0x000] → 物理页 0x40000  (P=1, RW=1, US=1)
+  ...
+
+&lt;bochs:4&gt; creg           ← 显示控制寄存器
+CR0=0x8000001B: PG=1, PE=1, ...
+CR2=0x00000000
+CR3=0x00000000  ← 页目录基址
+
+&lt;bochs:5&gt; sreg           ← 显示段寄存器
+CS=0x000F: base=0x00000000, limit=0x7FFFFF, DPL=3  ← 用户态代码段
+SS=0x0017: base=0x00000000, limit=0x7FFFFF, DPL=3  ← 用户态数据段
+DS=0x0017: ...
+ES=0x0017: ...
+
+&lt;bochs:6&gt; reg            ← 显示通用寄存器
+EAX=0x00000000
+EBX=0x00000000
+ECX=0x0000002E
+EDX=0x00000236
+ESP=0x0000XXXX
+EIP=0x0000XXXX
+EFLAGS=0x00000202
+
+&lt;bochs:7&gt; s             ← 单步执行一条指令
+&lt;bochs:8&gt; n             ← 单步执行(跳过函数调用)
+&lt;bochs:9&gt; b 0x7C00     ← 在0x7C00处设置断点(bootsect入口)
+&lt;bochs:10&gt; b 0x90200    ← 在0x90200处设置断点(setup入口)
+&lt;bochs:11&gt; c             ← 继续执行
+&lt;bochs:12&gt; pmem 0x00000 16  ← 显示物理内存从0x00000开始的16字节
+&lt;bochs:12&gt; vmem 0x00000 16  ← 显示虚拟内存从0x00000开始的16字节</code></pre>
+
+        <div class="warning">
+            <strong>Bochs调试器</strong>：这个内置调试器是Bochs最大的亮点。QEMU虽然快，但查看GDT、页表等底层状态时远不如Bochs方便。我强烈建议你在读代码时，随时在Bochs中设断点、查看状态。比如在分析<code>head.S</code>设置分页的代码时，你可以在跳转到main()之前停下来，查看<code>info tab</code>确认页表是否正确建立——这比反复读代码确认有效得多。
+        </div>
+
+        <p>好了，这一章我们系统学习了x86保护模式的核心机制。这些知识可能看起来有些抽象，但它们是理解后续所有内核代码的必备基础。下一章开始，我们将进入进程管理部分——中断和异常处理。有了保护模式的知识，你会发现中断处理不再是一个"黑盒子"。</p>
+
+        <p><strong>下一章预告：中断与异常</strong> —— IDT的每个表项如何设置，CPU如何响应中断，可屏蔽中断与异常的区别，以及Linux 0.11的中断处理框架。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

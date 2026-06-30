@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 内核初始化</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html" class="active">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们走完了汇编阶段的全部旅程——bootsect.S、setup.S、head.S共同完成了从实模式到保护模式再到分页的跨越，最终跳转到了C语言世界。现在，CPU在<code>init/main.c</code>的<code>main()</code>函数中执行，内核的"安营扎寨"工作正式开始了。</p>
+
+        <p>如果你从头读完了引导代码，你可能会有一个感觉：汇编阶段虽然复杂，但目标很明确——"做保护模式和分页，然后跳转"。而从main()函数开始，事情变得比汇编更"杂"——内存初始化、中断设置、调度器、终端、定时器、文件系统……主函数像一位指挥家，一个接一个地唤醒各个子系统的"乐手"。</p>
+
+        <p>这一章，我们沿着main()函数的调用序列，看看每个子系统初始化的核心逻辑。</p>
+
+        <h2>引言——进入main.c，内核开始"安营扎寨"</h2>
+
+        <p>在分析代码之前，我们要先理解一个关键问题：<strong>当main()开始执行时，硬件环境处于什么状态？</strong></p>
+
+        <ul>
+            <li><strong>CPU模式</strong>：32位保护模式 + 分页已启用</li>
+            <li><strong>内存布局</strong>：system模块在0x00000 ~ 0x8FFFF，内核的代码和数据已经就位</li>
+            <li><strong>栈指针</strong>：指向一个合理的栈空间（在head.S中设置）</li>
+            <li><strong>中断</strong>：IDT已经设置但内容为空（所有中断处理函数还未注册），<strong>中断仍关闭</strong></li>
+            <li><strong>A20门</strong>：已开启</li>
+            <li><strong>页表</strong>：恒等映射（虚拟地址 == 物理地址），覆盖低端8MB</li>
+        </ul>
+
+        <p>也就是说，硬件层已经准备好了，但操作系统层还是一片空白。main()需要为每个子系统分配资源、注册服务、建立数据结构，最后打开中断，进入用户态。这就像一个城市建设的总规划师——道路已经修好（硬件基础），现在要安装红绿灯、铺设水管、建立警察局和学校。</p>
+
+        <h2>main.c初始化全景</h2>
+
+        <p>让我们直接看main()函数的调用序列。我会在调用序列旁边标注每个函数的职责：</p>
+
+        <pre><code>void main(void)
+{
+    // 以下所有初始化都在中断关闭(CLI)的状态下进行
+
+    // ------- 核心子系统初始化 -------
+    mem_init();          // 内存初始化: 标记内核占用, 初始化mem_map
+    trap_init();         // 中断向量初始化: 填充IDT表项
+    blk_dev_init();      // 块设备初始化: 清空请求队列(request[32])
+    chr_dev_init();      // 字符设备初始化: (空操作)
+    tty_init();          // 终端初始化: 串口+控制台+键盘
+    time_init();         // 时间初始化: 设置8253 PIT定时器
+    sched_init();        // 调度器初始化: 任务0的TSS+LDT
+
+    // ------- 数据和I/O初始化 -------
+    buffer_init();       // 缓冲区初始化: 建立缓冲头和数据区
+    hd_init();           // 硬盘初始化: 注册中断处理
+    floppy_init();       // 软盘初始化: 注册中断处理
+
+    // ------- 开启中断, 进入用户态 -------
+    sti();               // 开中断! (set interrupt flag)
+    move_to_user_mode(); // 从内核态"模拟"进入用户态(任务0)
+
+    // ------- 第一个真正的进程 -------
+    init();              // fork出init进程(任务1)
+}
+
+// init() 内部:
+void init(void)
+{
+    int pid = fork();    // 创建进程1(init)
+    if (pid)             // 父进程(任务0)
+        while(1) wait(NULL); // 等待子进程
+    else                 // 子进程(init)
+    {
+        open("/dev/tty0", O_RDWR);  // 打开终端
+        execve("/bin/sh", ...);     // 执行shell
+    }
+}</code></pre>
+
+        <p>这个序列非常清晰地反映了一件事情：<strong>初始化顺序至关重要</strong>。例如，<code>time_init()</code>必须在<code>sched_init()</code>之前——因为调度器依赖<code>jiffies</code>（系统滴答）来切换进程，而<code>jiffies</code>的增量来自8253定时器中断，这个中断必须在<code>trap_init()</code>设置了IDT之后、调度器启动之前配好。</p>
+
+        <p>每个初始化函数的依赖关系和核心产出可以总结如下：</p>
+
+        <table>
+            <thead>
+                <tr><th>函数</th><th>依赖</th><th>核心产出</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>mem_init()</td><td>无（最先调用）</td><td>mem_map数组，标记已占用/空闲物理页</td></tr>
+                <tr><td>trap_init()</td><td>IDT已加载（head.S完成）</td><td>填充IDT的256个表项，注册异常处理函数</td></tr>
+                <tr><td>blk_dev_init()</td><td>无</td><td>清空块设备请求队列request[32]</td></tr>
+                <tr><td>chr_dev_init()</td><td>无</td><td>（空操作，仅占位）</td></tr>
+                <tr><td>tty_init()</td><td>trap_init()（需要中断）</td><td>串口/控制台/键盘初始化，注册中断处理</td></tr>
+                <tr><td>time_init()</td><td>trap_init()（需要时钟中断）</td><td>配置8253 PIT定时器，设置100Hz时钟中断</td></tr>
+                <tr><td>sched_init()</td><td>time_init()（需要jiffies）</td><td>任务0的TSS/LDT，调度器数据结构</td></tr>
+                <tr><td>buffer_init()</td><td>mem_init()（需要内存）</td><td>缓冲头和数据区（磁盘I/O缓存）</td></tr>
+                <tr><td>hd_init()</td><td>buffer_init() + blk_dev_init()</td><td>硬盘中断处理注册</td></tr>
+                <tr><td>floppy_init()</td><td>同上</td><td>软盘中断处理注册</td></tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>编程启示</strong>：main()函数的代码质量非常高——它只有大约200行（包括init()），但结构极其清晰。每一个初始化函数的名字都精确描述了它的作用，调用顺序就是依赖关系的体现。这是"自我文档化代码"的典范——你不需要额外的文档，只看函数名和它们的调用顺序，就能理解整个初始化流程。
+        </div>
+
+        <h2>内存初始化mem_init()</h2>
+
+        <p>mem_init()是main()调用的第一个函数。它要做的事情非常直白：告诉内核"哪些物理内存已经被我占了，剩下的你可以自由分配"。</p>
+
+        <pre><code>// mm/memory.c 中的 mem_init()
+// 定义在 mm/memory.c 中
+
+void mem_init(long start_mem, long end_mem)
+{
+    int i;
+
+    // HIGH_MEMORY = 实际物理内存大小(字节)
+    // 在0.11中, HIGH_MEMORY通常为 16MB 或 4MB 或 2MB
+
+    // 将mem_map数组全部置0
+    // mem_map数组是内存页面的"位图" —— 0表示空闲
+    for (i = 0; i < PAGING_PAGES; i++)
+        mem_map[i] = 0;
+
+    // PAGING_PAGES = HIGH_MEMORY / 4096
+    // 对于16MB内存: 16 * 1024 * 1024 / 4096 = 4096个页
+
+    // 标记内核占用的内存页
+    // start_mem 到 end_mem 是内核代码+数据已占用的物理地址范围
+    i = (start_mem - LOW_MEM) >> 12;   // 起始页号
+    while (i < (end_mem - LOW_MEM) >> 12)
+        mem_map[i++] = 255;             // 255 = 已占用(不可分配)
+}
+
+// low memory = 1MB (0x00000 ~ 0xFFFFF), 这部分不通过mem_map管理
+// 实际可用的内存从 1MB 以上的地址开始</code></pre>
+
+        <p>这个函数非常直观。mem_map是一个数组，每个元素代表一个4KB物理页面的状态：0表示空闲，255表示已占用或被保留。内核在引导阶段已经占用了从<code>start_mem</code>到<code>end_mem</code>的物理页面——这部分通过main()的参数传入（实际上是head.S提前计算好的）。</p>
+
+        <p>注意一个细节：<code>LOW_MEM</code> = 1MB。在Linux 0.11的设计中，物理地址0x00000 ~ 0xFFFFF（低端1MB）被保留给引导代码、BIOS数据、DMA缓冲区等特殊用途，不纳入页分配器管理。实际的可分配物理内存从1MB以上开始。</p>
+
+        <p>这个过程的结果就是：比如你的虚拟机有16MB内存，<code>mem_map[256] ~ mem_map[4095]</code>（对应1MB ~ 16MB的页面）被初始化为0（空闲），然后从<code>start_mem</code>到<code>end_mem</code>对应的页面被标记为255（已占用），剩下的页面就是内核可以分配给进程的自由内存。</p>
+
+        <h2>各子系统初始化</h2>
+
+        <p>接下来main()会依次调用多个初始化函数。每个函数只做非常具体的一两件事——这是良好模块化设计的体现。让我们逐个看：</p>
+
+        <p><strong>trap_init()</strong> —— 设置IDT</p>
+
+        <pre><code>// kernel/traps.c
+
+void trap_init(void)
+{
+    int i;
+    // 设置保留的中断向量号
+    // set_trap_gate() 将中断/异常的处理函数地址填入IDT表项
+
+    set_trap_gate(0, ÷_error);      // 除以零错误
+    set_trap_gate(1, &debug);
+    set_trap_gate(2, &nmi);
+    set_trap_gate(3, &int3);         // 断点指令
+    set_trap_gate(4, &overflow);
+    set_trap_gate(5, &bounds);
+    set_trap_gate(6, &invalid_op);
+    set_trap_gate(7, &device_not_available);
+    set_trap_gate(8, &double_fault);
+    set_trap_gate(9, &coprocessor_segment_overrun);
+    set_trap_gate(10, &invalid_TSS);
+    set_trap_gate(11, &segment_not_present);
+    set_trap_gate(12, &stack_segment);
+    set_trap_gate(13, &general_protection);
+    set_trap_gate(14, &page_fault);   // 缺页异常
+    set_trap_gate(15, &reserved);
+    set_trap_gate(16, &coprocessor_error);
+
+    // 系统调用门 —— 允许用户态程序通过INT 0x80进入内核
+    set_system_gate(0x80, &system_call);
+}</code></pre>
+
+        <p>注意<code>set_trap_gate</code>和<code>set_system_gate</code>的区别：前者设置的是<strong>陷阱门</strong>（Trap Gate），后者设置的是<strong>系统门</strong>（System Gate）。两者的关键区别在于特权级——陷阱门的DPL=0（仅内核态可触发），系统门的DPL=3（用户态也可以触发）。这就是为什么INT 0x80系统调用能从用户态调用——它的门描述符的DPL=3。</p>
+
+        <p><strong>tty_init()</strong> —— 终端初始化</p>
+
+        <p>这个函数在<code>kernel/chr_drv/tty_io.c</code>中实现。它做的事情看起来简单，背后却非常复杂：初始化串口（RS232）、初始化控制台、初始化键盘。每个初始化都会注册对应的中断处理函数，设置缓冲区（读队列和写队列），以及建立终端参数结构。</p>
+
+        <p><strong>time_init()</strong> —— 时间系统初始化</p>
+
+        <p>这个函数配置了8253可编程间隔定时器（PIT）。8253是IBM PC上的标准定时器芯片，它通过IRQ 0产生周期性时钟中断。time_init()设置8253的计数初值，使其以约100Hz（每10ms一次）的频率产生中断。</p>
+
+        <p><strong>sched_init()</strong> —— 调度器初始化</p>
+
+        <pre><code>// kernel/sched.c
+
+void sched_init(void)
+{
+    int i;
+    // 初始化任务0的TSS和LDT
+    // 注意: 任务0就是当前正在执行的"内核进程"
+    // 在Linux 0.11中, 任务0是"空闲任务"(idle)
+
+    // 设置TSS0和LDT0
+    set_tss(0);        // 将任务0的TSS填入GDT[(TSS0_INDEX)]
+    set_ldt(0);        // 将任务0的LDT填入GDT[(LDT0_INDEX)]
+
+    // 清除所有任务槽(slot), 设置任务0为运行态
+    for (i = 0; i < NR_TASKS; i++)
+        task[i] = NULL;         // 所有任务槽初始为空
+    task[0] = &task0;           // 任务0指向init_task结构
+
+    // 设置8253定时器的中断处理
+    // 定时器中断(IRQ 0)对应INT 0x20
+    set_intr_gate(0x20, &timer_interrupt);
+
+    // 设置系统调用门
+    set_system_gate(0x80, &system_call);
+}</code></pre>
+
+        <p>这里有个微妙之处：任务0（task 0）在sched_init()中初始化，但它此时并不是一个真正的用户态进程——它其实就是<strong>当前正在运行的内核</strong>。main()函数、init()函数、以及内核的所有初始化代码，实际上都是在"任务0"的上下文中执行的。当后续执行<code>move_to_user_mode()</code>时，任务0才被"伪装"成用户态进程。</p>
+
+        <h2>move_to_user_mode()——内核态的"伪装"</h2>
+
+        <p>这个函数是Linux 0.11中最精巧的小函数之一。它的目标是：<strong>在当前代码执行流中，模拟一次从用户态到内核态的中断返回——从而让CPU认为当前进程是从用户态进来的。</strong></p>
+
+        <pre><code>// include/asm/system.h
+
+#define move_to_user_mode() \
+    __asm__("movl %%esp,%%eax\n\t"     \
+            "pushl $0x17\n\t"          \   // SS = 0x17 (用户数据段选择子)
+            "pushl %%eax\n\t"          \   // ESP = 当前栈指针
+            "pushfl\n\t"               \   // EFLAGS
+            "pushl $0x0f\n\t"          \   // CS = 0x0F (用户代码段选择子)
+            "pushl $1f\n\t"            \   // EIP = 下一条指令的地址
+            "iret\n"                   \   // iret — 中断返回!
+            "1:"
+            : : )
+
+// 这段代码的原理:
+// iret指令从栈中弹出 EIP → CS → EFLAGS → ESP → SS
+// 从而完成从Ring 0到Ring 3的模式切换
+//
+// 伪造的栈帧:
+//   +----------------+
+//   | SS = 0x17      |  ← 用户数据段(特权级3)
+//   +----------------+
+//   | ESP            |  ← 当前栈顶(内核栈)
+//   +----------------+
+//   | EFLAGS         |  ← 当前标志寄存器
+//   +----------------+
+//   | CS = 0x0F      |  ← 用户代码段(特权级3)
+//   +----------------+
+//   | EIP = 标号1:   |  ← 返回地址(连续执行)
+//   +----------------+
+//
+// iret 执行时, CPU检测到返回目标的特权级(3)不同于当前(0),
+// 于是将栈切换到用户栈, 并将特权级降低到Ring 3.</code></pre>
+
+        <div class="highlight">
+            <strong>为什么需要"模拟"而不是"创建"？</strong> 在Linux 0.11中，任务0实际上就是内核本身。它并不是通过fork()创建的——fork()需要一个已有的进程模板。Linus的做法是：直接让内核执行流"变成"一个用户态进程。这种方法简单直接——不需要为任务0单独创建进程控制块，也不需要经过fork的复杂流程。但它的代价是：任务0比较特殊，不能执行一般的用户程序（它没有自己的用户态代码段），所以任务0的唯一职责就是调用<code>init()</code>，然后等待子进程结束。
+        </div>
+
+        <h2>init()——第一个真正的进程</h2>
+
+        <p>当move_to_user_mode()完成后，CPU实际上仍然在执行main()函数末尾的<code>init()</code>调用——只不过此时CPU已经处于用户态（Ring 3）了。init()中才是真正的"用户态进程"的开始：</p>
+
+        <pre><code>// init/main.c
+
+void init(void)
+{
+    int pid;
+
+    // 第一次调用fork() —— 这是内核中的第一个系统调用
+    // fork() 会创建一个新进程(任务1), 完全复制任务0的地址空间
+    pid = fork();
+    if (pid)    // pid != 0 —— 当前是父进程(任务0)
+    {
+        // 任务0的唯一工作: 等待子进程结束
+        // wait()会让任务0进入睡眠状态
+        while(1)
+            wait(NULL);
+    }
+    else        // pid == 0 —— 当前是子进程(任务1)
+    {
+        // 任务1(init进程)的工作:
+        // 1. 打开标准输入/输出/错误设备
+        open("/dev/tty0", O_RDWR);  // fd = 0 (stdin)
+        open("/dev/tty0", O_RDWR);  // fd = 1 (stdout)
+        open("/dev/tty0", O_RDWR);  // fd = 2 (stderr)
+
+        // 2. 执行shell
+        // execve() 将当前进程的内存映像替换为/bin/sh
+        execve("/bin/sh", argv, envp);
+
+        // 如果execve返回, 说明失败了
+        _exit(0);
+    }
+}</code></pre>
+
+        <p>这就是你在Bochs屏幕上看到<code>/ #</code>提示符的全过程。fork()创建了一个子进程（init进程），init进程打开终端设备，然后执行<code>/bin/sh</code>。shell程序运行后，打印提示符，等待用户输入。</p>
+
+        <p>注意：<code>fork()</code>是第一次真正从用户态通过INT 0x80进入内核的系统调用。在此之前的<code>move_to_user_mode()</code>虽然让CPU进入了用户态，但并没有使用任何系统调用。所以，fork()是内核系统调用机制的"第一次实战检验"——如果syscall门或相关处理函数设置有误，fork()就会失败，系统将无法启动。</p>
+
+        <h2>踩坑故事——初始化顺序的血泪教训</h2>
+
+        <p>main()函数中初始化函数的顺序看似平淡无奇，但Linus在早期版本中在这个顺序上吃过苦头。</p>
+
+        <p>最经典的一个问题是：<strong>time_init()必须在sched_init()之前调用</strong>。为什么？因为sched_init()中设置了定时器中断的处理函数（<code>set_intr_gate(0x20, &timer_interrupt)</code>），而定时器中断处理函数每次被调用时会递增全局变量<code>jiffies</code>。如果time_init()没有提前配置好8253定时器芯片，定时器中断就不会产生，jiffies就不会增长——结果就是调度器的<code>schedule()</code>函数永远不会被调用，因为schedule()只在<code>do_timer()</code>中触发，而<code>do_timer()</code>又是定时器中断处理函数调用的。</p>
+
+        <p>在Linux 0.11的开发过程中，有一次Linus把<code>time_init()</code>放在了<code>sched_init()</code>之后。结果内核启动后，init进程fork出来之后，父进程（任务0）调用<code>wait()</code>进入睡眠，但<code>schedule()</code>从未被调用——因为jiffies从未增长——所以系统完全卡死。Linus花了好几个小时才找到这个Bug。</p>
+
+        <div class="warning">
+            <strong>教训总结</strong>：内核初始化中的依赖关系往往不是显式的。time_init()和sched_init()之间并没有明显的函数调用关系——它们的依赖是<strong>通过硬件中断机制间接形成的</strong>。这就是为什么阅读内核代码时，不能只看函数调用图，还要理解硬件交互的隐式依赖。每个初始化函数做了什么事情、设置了什么硬件状态、影响了哪些全局变量——这些都需要综合理解。
+        </div>
+
+        <p>类似的隐式依赖还有很多：<code>trap_init()</code>必须在任何可能触发中断的代码之前（否则中断来了找不到处理函数，系统直接崩溃）；<code>buffer_init()</code>必须在<code>hd_init()</code>之前（因为硬盘驱动需要缓冲区）；<code>chr_dev_init()</code>虽然是空函数（只是登记了设备号），但它必须出现在tty_init()之前，因为tty依赖字符设备框架的初始化。</p>
+
+        <p>这些依赖关系构成了内核初始化的"关键路径"。现代Linux内核的初始化顺序比0.11复杂了数百倍，但核心逻辑是一样的——只不过现代内核使用了一种更系统化的方式（如<code>initcall</code>机制）来声明和排序初始化函数，而不是像0.11这样在main()中硬编码调用顺序。</p>
+
+        <p>好了，main()函数的工作到此结束。从初始化子系统开始，到开启中断、进入用户态、执行shell——内核现在已经在全速运转了。在进入用户代码之前，还有最后一个重要的体系结构基础需要理解：<strong>x86保护模式下的各种机制——GDT、LDT、分页、特权级、任务切换</strong>。</p>
+
+        <p>下一章，我们将系统性地学习x86保护模式的方方面面。这些知识是理解后续所有章节——进程调度、内存管理、中断处理、系统调用——的共同基础。</p>
+
+        <p><strong>下一章预告：x86保护模式精要</strong> —— 深入理解段描述符、GDT/LDT、特权级保护、分页机制和任务切换。看懂这些，内核代码对你来说就不再是"天书"。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

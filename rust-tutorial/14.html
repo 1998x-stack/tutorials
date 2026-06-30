@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 闭包与迭代器</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦀 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Rust简介与安装</a></li>
+            <li><a href="02.html">第2章 变量与数据类型</a></li>
+            <li><a href="03.html">第3章 函数与控制流</a></li>
+            <li><a href="04.html">第4章 所有权初探</a></li>
+            <li><a href="05.html">第5章 切片与字符串</a></li>
+            <li><a href="06.html">第6章 结构体</a></li>
+            <li><a href="07.html">第7章 枚举与模式匹配</a></li>
+            <li><a href="08.html">第8章 项目管理与模块</a></li>
+            <li><a href="09.html">第9章 集合类型</a></li>
+            <li><a href="10.html">第10章 错误处理</a></li>
+            <li><a href="11.html">第11章 泛型</a></li>
+            <li><a href="12.html">第12章 Trait</a></li>
+            <li><a href="13.html">第13章 生命周期</a></li>
+            <li><a href="14.html" class="active">第14章 闭包与迭代器</a></li>
+            <li><a href="15.html">第15章 测试体系</a></li>
+            <li><a href="16.html">第16章 Cargo生态进阶</a></li>
+            <li><a href="17.html">第17章 常见实用Trait</a></li>
+            <li><a href="18.html">第18章 日志与调试</a></li>
+            <li><a href="19.html">第19章 智能指针</a></li>
+            <li><a href="20.html">第20章 并发编程</a></li>
+            <li><a href="21.html">第21章 异步编程</a></li>
+            <li><a href="22.html">第22章 Unsafe Rust</a></li>
+            <li><a href="23.html">第23章 常用库选型</a></li>
+            <li><a href="24.html">第24章 性能分析</a></li>
+            <li><a href="25.html">第25章 宏编程入门</a></li>
+            <li><a href="26.html">第26章 实战：CLI工具</a></li>
+            <li><a href="27.html">第27章 实战：Web API</a></li>
+            <li><a href="28.html">第28章 2027 Edition展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>开篇：一段200行变20行的神奇经历</h2>
+
+        <p>有一次我需要从一个日志文件中提取所有错误行，计算每种错误类型出现的次数，然后按频率排序。刚学Rust的时候，我会这样写：先创建一个空的<code>Vec</code>，逐行读取，用<code>if</code>判断是否包含"ERROR"，手动解析出错误类型，插入<code>HashMap</code>，再转成<code>Vec</code>排序，最后打印——大概200行。</p>
+
+        <p>后来学会了闭包和迭代器，同样的逻辑变成了这样：</p>
+
+        <pre><code>use std::{fs, collections::HashMap};
+
+fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    let content = fs::read_to_string("app.log")?;
+    let mut counts: HashMap&lt;String, u32&gt; = HashMap::new();
+
+    content
+        .lines()
+        .filter(|line| line.contains("ERROR"))
+        .filter_map(|line| line.split_whitespace().nth(2))
+        .for_each(|err_type| {
+            *counts.entry(err_type.to_string()).or_insert(0) += 1;
+        });
+
+    let mut sorted: Vec&lt;_&gt; = counts.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&amp;a.1));
+
+    for (err, count) in &amp;sorted {
+        println!("{err}: {count}");
+    }
+    Ok(())
+}</code></pre>
+
+        <p>不到30行，每个步骤的意图清晰可读。这就是闭包和迭代器的魅力——让你的代码从"描述怎么做"变成"描述要什么"。</p>
+
+        <h2>闭包语法</h2>
+
+        <p><strong>闭包</strong>（Closure）是可以捕获其环境的匿名函数。与普通函数不同，闭包可以从定义它的作用域中"捕获"变量。</p>
+
+        <h3>基本语法</h3>
+
+        <pre><code>// 完整形式：|参数列表| -> 返回类型 { 表达式 }
+let add = |a: i32, b: i32| -&gt; i32 { a + b };
+
+// 类型推断（大多数情况下可省略）
+let add = |a, b| a + b;
+
+// 不带参数的闭包
+let hello = || println!("hello");
+
+// 调用闭包
+println!("{}", add(2, 3));</code></pre>
+
+        <p>闭包还有一个关键特征：<strong>类型推断</strong>。编译器会根据第一次调用时传入的参数类型来推断闭包的参数类型。如果你在同一个闭包上尝试传不同类型，编译器会报错。</p>
+
+        <h3>捕获环境变量</h3>
+
+        <pre><code>let name = String::from("Alice");
+
+// 闭包捕获了 name
+let greet = || println!("你好，{name}");
+
+greet();  // 输出：你好，Alice
+// greet() 之后 name 仍然可用（闭包只用了不可变引用）
+println!("{name}");</code></pre>
+
+        <p>闭包捕获变量的方式取决于闭包体如何使用变量：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>捕获方式</th>
+                    <th>trait</th>
+                    <th>行为</th>
+                    <th>闭包外变量状态</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>不可变引用</td>
+                    <td><code>Fn</code></td>
+                    <td>只读取变量</td>
+                    <td>闭包外仍然可用</td>
+                </tr>
+                <tr>
+                    <td>可变引用</td>
+                    <td><code>FnMut</code></td>
+                    <td>修改变量</td>
+                    <td>闭包外可用</td>
+                </tr>
+                <tr>
+                    <td>获取所有权</td>
+                    <td><code>FnOnce</code></td>
+                    <td>消耗变量（移动所有权）</td>
+                    <td>闭包外不可用</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <pre><code>let mut count = 0;
+
+// Fn：不可变捕获
+let print_count = || println!("{count}");
+
+// FnMut：可变捕获
+let increment = || count += 1;
+
+// FnOnce：所有权捕获（使用 move 关键字）
+let name = String::from("Bob");
+let consume = move || {
+    println!("{name}");  // name 的所有权被移入闭包
+};  // 这里 name 不再可用
+// println!("{name}");  // 编译错误！</code></pre>
+
+        <h2>Fn/FnMut/FnOnce：三种捕获方式</h2>
+
+        <p>Rust中闭包实现了三个trait之一（或几个）：</p>
+        <ul>
+            <li><strong><code>FnOnce</code></strong>：所有闭包都实现了<code>FnOnce</code>，因为它可以被调用至少一次。如果闭包移动了捕获变量的所有权（使用<code>move</code>或隐式所有权捕获），它就只能被调用一次。</li>
+            <li><strong><code>FnMut</code></strong>：不移动捕获变量，但可能修改它们。闭包可以被多次调用。</li>
+            <li><strong><code>Fn</code></strong>：不移动也不修改捕获变量（只读）。闭包可以被多次调用，甚至可以同时共享。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>move关键字什么时候用？</strong>当你需要把闭包传给另一个线程或存储到需要在当前作用域之外存活的地方时——比如<code>thread::spawn(|| ...)</code>，必须使用<code>move</code>强制所有权转移到闭包中。否则，闭包捕获的是引用，引用的数据可能在闭包执行前就被释放了。
+        </div>
+
+        <p>函数参数可以通过泛型约束指定闭包的捕获方式：</p>
+
+        <pre><code>fn call_once&lt;F&gt;(f: F) where F: FnOnce() {
+    f();
+}
+
+fn call_mut&lt;F&gt;(mut f: F) where F: FnMut() {
+    f();
+    f();
+}
+
+fn call_fn&lt;F&gt;(f: F) where F: Fn() {
+    f();
+    f();
+    f();  // Fn 闭包可以安全地调用多次
+}</code></pre>
+
+        <h2>Iterator trait</h2>
+
+        <p>迭代器是Rust函数式编程的另一大支柱。<code>Iterator</code> trait非常简洁：</p>
+
+        <pre><code>pub trait Iterator {
+    type Item;
+    fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt;;
+}</code></pre>
+
+        <p>只要实现<code>next</code>方法，你就拥有了一整套迭代器适配器（map、filter、fold等等）。</p>
+
+        <h3>基础消费者</h3>
+
+        <pre><code>let v = vec![1, 2, 3, 4, 5];
+
+// collect：将迭代器收集到集合中
+let doubled: Vec&lt;i32&gt; = v.iter().map(|x| x * 2).collect();
+
+// sum：求和
+let sum: i32 = v.iter().sum();
+
+// count：计数
+let count = v.iter().count();
+
+// fold：折叠
+let product = v.iter().fold(1, |acc, x| acc * x);</code></pre>
+
+        <h2>迭代器适配器</h2>
+
+        <p>迭代器适配器（Adapter）是返回新迭代器的方法，它们<strong>惰性求值</strong>——只有被消费者（如<code>collect</code>、<code>sum</code>、<code>for</code>循环）消耗时才会真正执行。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>适配器</th>
+                    <th>作用</th>
+                    <th>示例</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>map</code></td>
+                    <td>对每个元素应用变换</td>
+                    <td><code>iter.map(|x| x + 1)</code></td>
+                </tr>
+                <tr>
+                    <td><code>filter</code></td>
+                    <td>保留满足条件的元素</td>
+                    <td><code>iter.filter(|x| x &gt; 0)</code></td>
+                </tr>
+                <tr>
+                    <td><code>filter_map</code></td>
+                    <td>过滤 + 变换二合一</td>
+                    <td><code>iter.filter_map(|x| x.parse().ok())</code></td>
+                </tr>
+                <tr>
+                    <td><code>flat_map</code></td>
+                    <td>每个元素展开为迭代器然后拼接</td>
+                    <td><code>iter.flat_map(|x| x.split(','))</code></td>
+                </tr>
+                <tr>
+                    <td><code>take(n)</code></td>
+                    <td>取前n个元素</td>
+                    <td><code>iter.take(5)</code></td>
+                </tr>
+                <tr>
+                    <td><code>skip(n)</code></td>
+                    <td>跳过前n个元素</td>
+                    <td><code>iter.skip(5)</code></td>
+                </tr>
+                <tr>
+                    <td><code>enumerate</code></td>
+                    <td>附带索引（返回(usize, T)）</td>
+                    <td><code>iter.enumerate()</code></td>
+                </tr>
+                <tr>
+                    <td><code>zip</code></td>
+                    <td>将两个迭代器配对</td>
+                    <td><code>a.iter().zip(b.iter())</code></td>
+                </tr>
+                <tr>
+                    <td><code>chain</code></td>
+                    <td>连接两个迭代器</td>
+                    <td><code>a.iter().chain(b.iter())</code></td>
+                </tr>
+                <tr>
+                    <td><code>cloned</code></td>
+                    <td>克隆每个元素</td>
+                    <td><code>iter.cloned()</code></td>
+                </tr>
+                <tr>
+                    <td><code>copied</code></td>
+                    <td>复制每个元素（需Copy）</td>
+                    <td><code>iter.copied()</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>惰性求值的陷阱</strong>：迭代器适配器是惰性的——如果你写了<code>iter.map(|x| expensive(x))</code>但没有加<code>.collect()</code>或<code>for</code>循环，expensive操作<strong>永远不会执行</strong>。编译器甚至会给出<code>warning: unused Map that must be used</code>警告。所以请记住：适配器只是"描述"，消费者才真正"执行"。
+        </div>
+
+        <h3>链式调用的力量</h3>
+
+        <p>真正体现Rust迭代器优雅的地方在于<strong>链式调用</strong>：</p>
+
+        <pre><code>let data = vec![
+    "1", "2", "abc", "3", "def", "4",
+];
+
+let result: Vec&lt;i32&gt; = data
+    .iter()
+    .filter_map(|s| s.parse::&lt;i32&gt;().ok())  // 跳过无法解析的
+    .map(|n| n * 2)                          // 每个乘以2
+    .filter(|n| n &gt; 5)                       // 只保留大于5的
+    .collect();                              // 收集为Vec
+
+println!("{result:?}");  // [6, 8]</code></pre>
+
+        <p>等效的命令式代码需要临时变量、循环、if语句——而迭代器链式风格把每个步骤清晰分离。</p>
+
+        <div class="tip">
+            <strong>性能提示</strong>：你可能会担心链式调用产生大量中间分配。Rust的迭代器适配器是<strong>零成本抽象</strong>——每个适配器只是一个结构体，不分配堆内存。编译器会尽可能将整个链式调用内联展开为高效的循环代码。事实上，很多情况下迭代器代码的性能<strong>超过了</strong>手写的手工循环代码，因为编译器更容易对无分支的链式调用做优化。
+        </div>
+
+        <h2>自定义迭代器</h2>
+
+        <p>你可以在自己的类型上实现<code>Iterator</code> trait：</p>
+
+        <pre><code>struct Fibonacci {
+    current: u64,
+    next: u64,
+}
+
+impl Fibonacci {
+    fn new() -&gt; Self {
+        Fibonacci { current: 0, next: 1 }
+    }
+}
+
+impl Iterator for Fibonacci {
+    type Item = u64;
+
+    fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt; {
+        let current = self.current;
+        self.current = self.next;
+        self.next = current + self.next;
+        Some(current)  // 永远不停止（无限迭代器）
+    }
+}
+
+fn main() {
+    let fib: Vec&lt;u64&gt; = Fibonacci::new()
+        .take(20)     // 取前20个
+        .collect();
+
+    println!("前20个斐波那契数: {fib:?}");
+}</code></pre>
+
+        <p>一旦实现了<code>Iterator</code>，你的类型就自动获得了<code>map</code>、<code>filter</code>、<code>fold</code>等几十种适配器方法——这是trait的"组合威力"的最好证明。</p>
+
+        <p>你还可以实现<code>IntoIterator</code>让你的自定义集合可以被<code>for</code>循环遍历：</p>
+
+        <pre><code>struct MyCollection&lt;T&gt;(Vec&lt;T&gt;);
+
+impl&lt;T&gt; IntoIterator for MyCollection&lt;T&gt; {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter&lt;T&gt;;
+
+    fn into_iter(self) -&gt; Self::IntoIter {
+        self.0.into_iter()
+    }
+}</code></pre>
+
+        <div class="highlight">
+            <strong>三种迭代范式</strong>：<code>.iter()</code>产生<code>&amp;T</code>（不可变引用），<code>.iter_mut()</code>产生<code>&amp;mut T</code>（可变引用），<code>.into_iter()</code>产生<code>T</code>（获取所有权）。选择哪种取决于你是否需要在迭代后继续使用原集合。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>闭包和迭代器是Rust函数式编程的双引擎。闭包让你可以灵活地捕获环境并传递给高阶函数；迭代器提供了一套声明式的数据处理管道，既简洁又高效。我们学习了闭包的三种捕获方式（Fn/FnMut/FnOnce）、迭代器的核心适配器和消费者、以及如何实现自定义迭代器。</p>
+
+        <p>掌握闭包和迭代器意味着你已经从"会写Rust"进阶到了"会用好Rust"。下节课我们将进入Rust开发中非常重要的一环——<strong>测试体系</strong>。如何用<code>cargo test</code>为你的Rust代码编写单元测试、集成测试和文档测试？第15章见！</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

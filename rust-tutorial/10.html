@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 错误处理</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦀 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Rust简介与安装</a></li>
+            <li><a href="02.html">第2章 变量与数据类型</a></li>
+            <li><a href="03.html">第3章 函数与控制流</a></li>
+            <li><a href="04.html">第4章 所有权初探</a></li>
+            <li><a href="05.html">第5章 切片与字符串</a></li>
+            <li><a href="06.html">第6章 结构体</a></li>
+            <li><a href="07.html">第7章 枚举与模式匹配</a></li>
+            <li><a href="08.html">第8章 项目管理与模块</a></li>
+            <li><a href="09.html">第9章 集合类型</a></li>
+            <li><a href="10.html" class="active">第10章 错误处理</a></li>
+            <li><a href="11.html">第11章 泛型</a></li>
+            <li><a href="12.html">第12章 Trait</a></li>
+            <li><a href="13.html">第13章 生命周期</a></li>
+            <li><a href="14.html">第14章 闭包与迭代器</a></li>
+            <li><a href="15.html">第15章 测试体系</a></li>
+            <li><a href="16.html">第16章 Cargo生态进阶</a></li>
+            <li><a href="17.html">第17章 常见实用Trait</a></li>
+            <li><a href="18.html">第18章 日志与调试</a></li>
+            <li><a href="19.html">第19章 智能指针</a></li>
+            <li><a href="20.html">第20章 并发编程</a></li>
+            <li><a href="21.html">第21章 异步编程</a></li>
+            <li><a href="22.html">第22章 Unsafe Rust</a></li>
+            <li><a href="23.html">第23章 常用库选型</a></li>
+            <li><a href="24.html">第24章 性能分析</a></li>
+            <li><a href="25.html">第25章 宏编程入门</a></li>
+            <li><a href="26.html">第26章 实战：CLI工具</a></li>
+            <li><a href="27.html">第27章 实战：Web API</a></li>
+            <li><a href="28.html">第28章 2027 Edition展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>开篇：那个用了unwrap的生产事故</h2>
+
+        <p>我还清楚地记得那个周三下午。我们部署了一个新版本的API网关，上线15分钟后，PagerDuty开始疯狂报警——整个服务的错误率从0.1%飙升到了35%。追溯日志发现，罪魁祸首就是一行代码：<code>.unwrap()</code>。</p>
+
+        <p>一个第三方API偶尔返回空的响应体。我们内部代码在解析响应时潇洒地写了个<code>response.body.parse::&lt;Config&gt;().unwrap()</code>——结果空响应触发了<code>panic!</code>，worker线程崩溃，连接池迅速耗尽，连锁反应几乎瘫痪了整个服务。</p>
+
+        <p>从那天起，我的团队立了一个规矩：<strong>除了测试代码和原型验证，任何<code>unwrap</code>都必须经过代码评审并给出明确的理由</strong>。</p>
+
+        <p>这就是Rust错误处理的精髓——它不让你"忘记"处理错误，而是用类型系统逼你做选择。这一章我们就来系统学习Rust的错误处理机制。</p>
+
+        <h2>panic! 与不可恢复错误</h2>
+
+        <p>当程序遇到无法继续执行的状况时，可以调用<code>panic!</code>宏。它会打印错误消息、<strong>展开栈</strong>（unwinding）、清理资源，然后退出。</p>
+
+        <pre><code>fn divide(a: i32, b: i32) -&gt; i32 {
+    if b == 0 {
+        panic!("除数不能为0！传入的值: {b}");
+    }
+    a / b
+}
+
+fn main() {
+    println!("{}", divide(10, 0));
+}</code></pre>
+
+        <p>运行上述代码会输出：</p>
+
+        <pre><code>thread 'main' panicked at src/main.rs:3:9:
+除数不能为0！传入的值: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</code></pre>
+
+        <h3>什么时候应该panic？</h3>
+
+        <p>在Rust中，<code>panic!</code>意味着"无法恢复的错误"。适合使用<code>panic!</code>的场景：</p>
+        <ul>
+            <li><strong>代码逻辑错误</strong>：索引越界、除以0、非法状态——这些属于"编程bug"，应该修复代码而非处理错误</li>
+            <li><strong>原型阶段</strong>：快速验证想法，用<code>unwrap</code>或<code>expect</code>临时处理</li>
+            <li><strong>测试代码</strong>：测试中<code>unwrap</code>失败就是测试失败，合理</li>
+            <li><strong>配置错误</strong>：程序启动时配置加载失败，没必要继续运行</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>栈展开 vs 中止</strong>：默认情况下Rust使用栈展开（unwinding），会逐层释放栈上的资源然后退出。如果你的目标平台对二进制大小敏感（比如嵌入式），可以在<code>Cargo.toml</code>中设置<code>panic = "abort"</code>来直接终止进程，但这会跳过Drop代码的执行。
+        </div>
+
+        <h2>Result&lt;T, E&gt;：可恢复错误</h2>
+
+        <p>大部分错误是<strong>可恢复</strong>的。文件不存在？可以创建。网络超时？可以重试。解析失败？跳过这一行继续。Rust使用<code>Result&lt;T, E&gt;</code>枚举来表示可能失败的操作：</p>
+
+        <pre><code>enum Result&lt;T, E&gt; {
+    Ok(T),
+    Err(E),
+}</code></pre>
+
+        <h3>Result的基本使用</h3>
+
+        <pre><code>use std::fs::File;
+
+fn main() {
+    let result = File::open("config.txt");
+
+    let file = match result {
+        Ok(f) =&gt; f,
+        Err(e) =&gt; {
+            eprintln!("打开文件失败: {e}");
+            return;
+        }
+    };
+}</code></pre>
+
+        <h3>便捷方法</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>方法</th>
+                    <th>Ok时的行为</th>
+                    <th>Err时的行为</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>unwrap()</code></td>
+                    <td>返回内部值</td>
+                    <td><code>panic!</code></td>
+                </tr>
+                <tr>
+                    <td><code>expect(msg)</code></td>
+                    <td>返回内部值</td>
+                    <td><code>panic!</code>并附带自定义消息</td>
+                </tr>
+                <tr>
+                    <td><code>unwrap_or(default)</code></td>
+                    <td>返回内部值</td>
+                    <td>返回默认值</td>
+                </tr>
+                <tr>
+                    <td><code>unwrap_or_else(fn)</code></td>
+                    <td>返回内部值</td>
+                    <td>调用闭包生成默认值</td>
+                </tr>
+                <tr>
+                    <td><code>is_ok()</code></td>
+                    <td><code>true</code></td>
+                    <td><code>false</code></td>
+                </tr>
+                <tr>
+                    <td><code>is_err()</code></td>
+                    <td><code>false</code></td>
+                    <td><code>true</code></td>
+                </tr>
+                <tr>
+                    <td><code>ok()</code></td>
+                    <td><code>Some(T)</code></td>
+                    <td><code>None</code></td>
+                </tr>
+                <tr>
+                    <td><code>err()</code></td>
+                    <td><code>None</code></td>
+                    <td><code>Some(E)</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>unwrap的诱惑</strong>：<code>unwrap()</code>打字快、省事——这是它最大的诱惑，也是它最大的危险。一个简单的原则：生产代码中，如果你觉得"这里绝对不会出错"但用了<code>unwrap</code>，请在旁边注释说明理由。更好的做法是用<code>expect("理由")</code>。
+        </div>
+
+        <h2>?运算符：错误传播的优雅写法</h2>
+
+        <p>写<code>match</code>处理每个<code>Result</code>虽然安全，但代码会变得非常冗长。Rust提供了<code>?</code>运算符来简化错误传播：</p>
+
+        <pre><code>use std::fs::File;
+use std::io::{self, Read};
+
+fn read_username() -&gt; Result&lt;String, io::Error&gt; {
+    let mut file = File::open("username.txt")?;  // 出错时提前返回 Err
+    let mut username = String::new();
+    file.read_to_string(&amp;mut username)?;
+    Ok(username.trim().to_string())
+}</code></pre>
+
+        <p><code>?</code>运算符的作用：如果<code>Result</code>是<code>Ok</code>，提取其中的值给左值；如果是<code>Err</code>，将错误<strong>转换后返回</strong>给调用者。</p>
+
+        <p>错误自动转换依赖<code>From&lt;E&gt;</code> trait。上面例子中<code>File::open</code>返回<code>io::Error</code>，而函数返回值也是<code>io::Error</code>，所以直接匹配。但不同类型呢？</p>
+
+        <pre><code>use std::num::ParseIntError;
+
+fn parse_number(s: &amp;str) -&gt; Result&lt;i32, ParseIntError&gt; {
+    s.parse()?  // 自动将 ParseIntError 向上传播
+}</code></pre>
+
+        <div class="highlight">
+            <strong>?在main中的使用</strong>：从Rust 2021 Edition开始，<code>main</code>函数可以返回<code>Result</code>：<code>fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt;</code>。这样你就能在<code>main</code>中使用<code>?</code>了。程序出错时，会以非零退出码结束并打印错误信息。
+        </div>
+
+        <h2>自定义错误类型</h2>
+
+        <p>随着项目变大，你会发现需要自己的错误类型。Rust中自定义错误的最佳实践是定义一个<strong>枚举</strong>，为每种错误原因创建一个变体：</p>
+
+        <pre><code>use std::fmt;
+
+#[derive(Debug)]
+pub enum MyError {
+    NotFound(String),
+    PermissionDenied,
+    NetworkTimeout { service: String, retries: u32 },
+    IoError(std::io::Error),  // 包装其他错误
+}
+
+impl fmt::Display for MyError {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        match self {
+            MyError::NotFound(id) =&gt; write!(f, "资源未找到: {id}"),
+            MyError::PermissionDenied =&gt; write!(f, "权限不足"),
+            MyError::NetworkTimeout { service, retries } =&gt; {
+                write!(f, "服务 {service} 超时（已重试{retries}次）")
+            }
+            MyError::IoError(e) =&gt; write!(f, "IO错误: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for MyError {}  // 可选方法覆盖</code></pre>
+
+        <p>手动实现<code>Display</code>和<code>Error</code>很繁琐——在实际项目中，大家几乎都用<strong>thiserror</strong> crate来简化：</p>
+
+        <pre><code>// Cargo.toml: thiserror = "2.0"
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum MyError {
+    #[error("资源未找到: {0}")]
+    NotFound(String),
+
+    #[error("权限不足")]
+    PermissionDenied,
+
+    #[error("服务 {service} 超时（已重试{retries}次）")]
+    NetworkTimeout { service: String, retries: u32 },
+
+    #[error(transparent)]
+    IoError(#[from] std::io::Error),
+}</code></pre>
+
+        <p><code>#[from]</code>属性会自动生成<code>From&lt;io::Error&gt; for MyError</code>的实现，这样在<code>?</code>运算符中就能自动转换。</p>
+
+        <h2>anyhow与eyre：应用层错误处理</h2>
+
+        <p>在<strong>应用代码</strong>（而非库代码）中，你往往不关心具体的错误类型，只关心"出错了，告诉用户或者记录日志"。这时候<strong>anyhow</strong> crate就派上用场了：</p>
+
+        <pre><code>// Cargo.toml: anyhow = "1.0"
+use anyhow::{Context, Result};
+
+fn read_config() -&gt; Result&lt;Config&gt; {
+    let content = std::fs::read_to_string("config.toml")
+        .with_context(|| "无法读取配置文件")?;
+    let config: Config = toml::from_str(&amp;content)
+        .with_context(|| "配置文件格式不正确")?;
+    Ok(config)
+}
+
+fn main() -&gt; Result&lt;()&gt; {
+    let config = read_config()?;
+    println!("{config:?}");
+    Ok(())
+}</code></pre>
+
+        <p><code>anyhow::Result&lt;T&gt;</code>是<code>Result&lt;T, anyhow::Error&gt;</code>的别名，它像一个"兜底"的错误类型——可以自动转换任何实现了<code>std::error::Error</code>的错误类型。而<code>Context</code> trait的<code>with_context</code>方法让你可以为错误添加上下文信息。</p>
+
+        <div class="tip">
+            <strong>库 vs 应用</strong>：一个重要的设计原则——<strong>库代码应该定义自己的细粒度错误类型</strong>（配合thiserror），让调用者知道具体出了什么问题；<strong>应用代码使用anyhow</strong>，只关心错误的传播和展示。这类似于Go语言中"库返回具体类型，main/main-like代码使用error"的哲学。
+        </div>
+
+        <p><code>eyre</code>是anyhow的替代者，提供了更灵活的<strong>错误报告</strong>定制能力，但在简单场景下两者功能几乎等价。对于大多数项目，直接从anyhow入手即可。</p>
+
+        <h2>本章小结</h2>
+
+        <p>Rust的错误处理体系可以用一句话概括：<strong>用类型把错误显式化，不让任何失败无声无息地溜走</strong>。<code>panic!</code>处理不可恢复的错误，<code>Result</code>处理可恢复的错误，<code>?</code>简化传播路径，thiserror和anyhow让生产代码更加优雅。</p>
+
+        <p>从下一章开始，我们将进入Rust"零成本抽象"的核心主题之一——<strong>泛型</strong>。理解泛型是理解Rust标准库和生态的钥匙。准备好迎接<code>&lt;T&gt;</code>的世界了吗？第11章见。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第26章 学习型路径规划</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是路径规划</a></li>
+            <li><a href="02.html">第2章 状态空间与构型空间</a></li>
+            <li><a href="03.html">第3章 图论基础</a></li>
+            <li><a href="04.html">第4章 栅格地图与代价地图</a></li>
+            <li><a href="05.html">第5章 启发式搜索入门</a></li>
+            <li><a href="06.html">第6章 Dijkstra算法</a></li>
+            <li><a href="07.html">第7章 A*算法</a></li>
+            <li><a href="08.html">第8章 A*改进与变体</a></li>
+            <li><a href="09.html">第9章 D* Lite增量搜索</a></li>
+            <li><a href="10.html">第10章 JPS跳点搜索</a></li>
+            <li><a href="11.html">第11章 RRT快速随机树</a></li>
+            <li><a href="12.html">第12章 RRT*渐进最优</a></li>
+            <li><a href="13.html">第13章 PRM概率路线图</a></li>
+            <li><a href="14.html">第14章 采样方法大对比</a></li>
+            <li><a href="15.html">第15章 路径平滑与后处理</a></li>
+            <li><a href="16.html">第16章 动态窗口法DWA</a></li>
+            <li><a href="17.html">第17章 人工势场法</a></li>
+            <li><a href="18.html">第18章 运动学约束与曲线</a></li>
+            <li><a href="19.html">第19章 动态环境重规划</a></li>
+            <li><a href="20.html">第20章 多目标路径规划</a></li>
+            <li><a href="21.html">第21章 多机器人协调</a></li>
+            <li><a href="22.html">第22章 优化模型方法</a></li>
+            <li><a href="23.html">第23章 可视化与调试</a></li>
+            <li><a href="24.html">第24章 算法性能基准测试</a></li>
+            <li><a href="25.html">第25章 仿真到实车部署</a></li>
+            <li><a href="26.html" class="active">第26章 学习型路径规划</a></li>
+            <li><a href="27.html">第27章 前沿趋势与未来</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <p>大家好，欢迎来到第26章。如果你一路跟着课程走到这里，你应该已经掌握了 A*、RRT、DWA 等经典算法的原理和实现。但你可能已经注意到一个共同的问题：这些算法的"智能"是被人为设计出来的——你需要手工调参、设计启发式函数、决定采样策略。那么，有没有一种方法，让算法自己学会如何规划路径？这就是本章的主题：学习型路径规划。</p>
+
+        <p>先抛一个真实的故事。2020年，Waymo 的工程师团队在 Mountain View 做了一次有趣的对照实验：他们把一条复杂路口的决策逻辑从手写规则改成了一个端到端的 RL 策略。结果呢？RL 策略在训练场景上表现惊艳——右转成功率从 94% 提升到了 99.3%。但当他们把这套策略部署到凤凰城的同类型路口时，成功率直接掉到了 71%。这个数字让团队意识到：学习型方法的泛化能力远没有论文里看起来那么美好。</p>
+
+        <h2>传统方法的天花板</h2>
+
+        <p>在讨论学习型方法之前，我们先诚实地审视一下经典方法为什么还不够好。这不是要否定经典方法——它们仍然是工业界的基石——而是要理解什么场景下我们需要引入学习。</p>
+
+        <p>第一个瓶颈是 <strong>手工设计的启发式（hand-crafted heuristics）</strong>。A* 的启发式函数需要你对场景有很好的先验理解——在开阔场景中 Euclidean distance 好使，在迷宫场景中 Manhattan distance 更准，但如果你面对的是混合场景呢？你只能选一个折中方案，或者花大量精力设计自适应启发式。实操中，很多工程师最终选择了 overshoot（过度估计），结果搜索效率还不如 Dijkstra。</p>
+
+        <p>第二个问题是 <strong>参数调优的诅咒</strong>。一个 RRT* 的运行效果高度依赖于采样半径、步长、目标偏置概率等超参数。在仿真环境下调好的参数，换一个地图可能就不工作了。更麻烦的是，这些参数之间还有耦合关系——调了步长可能需要重新调碰撞检测阈值。我在做仓储机器人项目时，光是调 RRT 的 goal bias 参数就花了两周时间，最后发现不同区域的最优参数差别很大。这种"一个地图一套参数"的窘境，是推动学习型方法发展的核心动力。</p>
+
+        <p>第三个问题是 <strong>泛化困难</strong>。经典方法对每个场景都"从头开始"规划——它不积累经验。你在迷宫 A 中找到路径后，不会对迷宫 B 的搜索有任何帮助。每次规划都是一次全新的计算。人不是这样找路的：你走过一个小区之后，下次去类似的小区会本能地知道哪些路口可能是死胡同，哪些通道更可能通向出口。这种"经验迁移"的能力，是经典方法所缺乏的。</p>
+
+        <div class="highlight">
+            <strong>关键认识：</strong>经典方法的"天花板"不是它们不够好，而是它们"不会学习"。当你面对高频重复的规划任务、环境有规律可循、或者手工调参成本过高时，学习型方法就可能带来质的飞跃。
+        </div>
+
+        <h2>模仿学习</h2>
+
+        <p>学习型路径规划最简单的方式是<strong>模仿学习（Imitation Learning）</strong>，也叫行为克隆（Behavior Cloning, BC）。核心思想非常直接：让一个专家（经典算法或人类操作员）先跑一遍规划，把它的决策记录下来，然后训练一个神经网络去模仿这些决策。</p>
+
+        <p>具体流程是：</p>
+        <ol>
+            <li><strong>数据采集</strong>——用 A* 或人类操作员在大量地图上运行规划，记录每个状态下的最优动作（或概率分布）。一个典型的仓储数据集中可能包含数十万条 (state, action) 对。</li>
+            <li><strong>训练</strong>——用监督学习训练一个策略网络 π(s) → a，目标是最大化与专家动作的一致性。损失函数通常是交叉熵（离散动作）或 MSE（连续动作）。</li>
+            <li><strong>部署</strong>——用训练好的策略网络做在线规划，输入当前状态，输出动作。</li>
+        </ol>
+
+        <p>2017年，PRM-RL 这篇工作展示了一个经典 pipeline：用 PRM 在高维构型空间中构建路线图，然后用 RL 学习如何在路线图中导航。这本质上是模仿学习的一个变体。另一个成功案例是 2019 年 Uber ATG 的模仿学习工作，他们用 10 万小时的人类驾驶数据训练了一个端到端规划器，在模拟中表现出了流畅的城市驾驶行为。</p>
+
+        <p>但模仿学习有它的根本局限：<strong>分布偏移（distribution shift）</strong>问题。训练数据来自专家轨迹，但部署时策略可能进入训练分布之外的区域——这时它就像从没做过这类题的学生，只能乱猜。更糟的是，一次小偏差可能导致后续状态越来越偏离训练分布，最终酿成大错。这种"并发症效应"（compounding error）是模仿学习在实际部署中最头疼的问题。DAgger（Dataset Aggregation）算法尝试通过交互式地收集新数据来缓解这个问题，但代价是训练期间需要持续访问专家。</p>
+
+        <h2>强化学习路径规划</h2>
+
+        <p>如果说模仿学习是让学生抄答案，那<strong>强化学习（Reinforcement Learning, RL）</strong>就是让学生自己刷题——它通过试错来学，不需要专家示范。</p>
+
+        <p>将路径规划建模为一个 <strong>马尔可夫决策过程（MDP）</strong>：</p>
+
+        <ul>
+            <li><strong>状态 State</strong>：机器人的当前位姿 + 传感器观测（激光雷达、相机） + 目标位置。有时还包括速度信息和局部代价地图。</li>
+            <li><strong>动作 Action</strong>：连续控制（线速度、角速度）或离散控制（前、左、右、停）。对于差速驱动底盘，常用 (v, ω) 对。</li>
+            <li><strong>奖励 Reward</strong>：这是设计最讲究的部分。典型奖励函数包含三个分量：
+                <ul>
+                    <li>到达目标：+100 或更大（稀疏奖励）</li>
+                    <li>碰撞障碍物：-100 或 episode 终止</li>
+                    <li>每步代价：-0.1 到 -0.01（鼓励高效到达）</li>
+                </ul>
+            </li>
+            <li><strong>转移 Transition</strong>：由机器人运动学模型和环境动力学共同决定。在仿真中就是 step() 函数。</li>
+        </ul>
+
+        <p>训练时最常用的算法是 <strong>PPO（Proximal Policy Optimization）</strong>，它在稳定性和样本效率之间取得了很好的平衡。下面是一个用 Stable-Baselines3 训练路径规划策略的极简示例：</p>
+
+        <pre><code>import gym
+import numpy as np
+from stable_baselines3 import PPO
+
+# 假设你已经定义了一个自定义 gym 环境
+# 该环境封装了机器人模型、传感器和障碍物
+class PathPlanningEnv(gym.Env):
+    def __init__(self, map_size=10):
+        super().__init__()
+        self.action_space = gym.spaces.Box(
+            low=np.array([-0.5, -0.3]),  # [v_min, omega_min]
+            high=np.array([1.0, 0.3]),   # [v_max, omega_max]
+            dtype=np.float32
+        )
+        # 观测：激光雷达扫描 + 当前位姿 + 目标方向
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(36 + 3 + 1,), dtype=np.float32
+        )
+        self.target = np.array([8.0, 8.0])
+
+    def step(self, action):
+        # 应用动作到机器人运动学
+        self.robot.apply_control(action)
+        obs = self._get_obs()
+        # 检查碰撞
+        if self.robot.check_collision():
+            reward = -100.0
+            done = True
+        elif np.linalg.norm(self.robot.pos - self.target) < 0.3:
+            reward = 100.0
+            done = True
+        else:
+            dist_old = np.linalg.norm(self.robot.pos_prev - self.target)
+            dist_new = np.linalg.norm(self.robot.pos - self.target)
+            reward = (dist_old - dist_new) * 5 - 0.05
+            done = False
+        return obs, reward, done, {}
+
+    def reset(self):
+        self.robot.reset()
+        return self._get_obs()
+
+# 创建环境并训练
+env = PathPlanningEnv()
+model = PPO("MlpPolicy", env, verbose=1,
+            learning_rate=3e-4, n_steps=2048,
+            batch_size=64, n_epochs=10)
+model.learn(total_timesteps=1_000_000)
+
+# 保存策略
+model.save("path_planner_ppo")
+
+# 部署测试
+obs = env.reset()
+for _ in range(200):
+    action, _ = model.predict(obs, deterministic=True)
+    obs, reward, done, _ = env.step(action)
+    if done:
+        break</code></pre>
+
+        <p>这段代码虽然简短，但它涵盖了 RL 路径规划的核心要素。实际工程中，环境会复杂得多——你需要处理部分可观测性、动态障碍物、多传感器融合。此外，reward shaping 也是一门学问：reward 设计得太稀疏，学习会非常缓慢；设计得太稠密，策略可能学会"钻空子"行为。我见过一个团队不小心把接近奖励设得太高，机器人在障碍物前疯狂往复振荡来累积奖励——它学会了"绕圈刷分"而不是"到达目标"。</p>
+
+        <h2>混合架构</h2>
+
+        <p>学术界和工业界在过去几年的共识越来越清晰：<strong>纯学习型方法和纯经典方法各有短板，混合架构才是当前的最优解</strong>。</p>
+
+        <p>最流行的混合模式是：<strong>A*（或 RRT*）做全局规划 + RL 做局部控制</strong>。这个设计的直觉很简单：全局规划器负责在高层次上找到一条无碰撞的粗略路径（这需要最优性和完备性，经典方法擅长），而 RL 策略负责在局部层面跟随这条路径并避开动态障碍物（这需要快速反应和适应性，学习型方法擅长）。</p>
+
+        <p>为什么这种架构比纯 RL 更好？四个原因：</p>
+
+        <ul>
+            <li><strong>搜索空间压缩</strong>——全局路径为 RL 提供了"大致方向"，RL 只需要在这个管道内做局部调整，而不需要从头探索整个状态空间。这大幅降低了学习难度。</li>
+            <li><strong>安全兜底</strong>——即使 RL 策略在某个场景下表现异常（分布外状态），全局路径仍然提供了一个"可恢复的基线"。</li>
+            <li><strong>可解释性</strong>——当系统行为异常时，你可以问"是全局规划选错了路径还是局部控制执行失误？"这种归因能力在纯端到端系统中是没有的。</li>
+            <li><strong>数据效率</strong>——RL 只需要学习"如何微调"而不是"如何在完全陌生的环境中找路"，训练样本量可以减少 1-2 个数量级。</li>
+        </ul>
+
+        <table>
+            <tr>
+                <th>维度</th>
+                <th>经典方法</th>
+                <th>纯深度RL</th>
+                <th>混合架构</th>
+            </tr>
+            <tr>
+                <td>安全性</td>
+                <td>高（可形式化验证）</td>
+                <td>低（无保障）</td>
+                <td>中高（全局规划兜底）</td>
+            </tr>
+            <tr>
+                <td>适应性</td>
+                <td>低（需重新调参）</td>
+                <td>高（可适应新场景）</td>
+                <td>中（全局需手动更新）</td>
+            </tr>
+            <tr>
+                <td>计算代价</td>
+                <td>中等</td>
+                <td>推理低，训练极高</td>
+                <td>全局规划+推理</td>
+            </tr>
+            <tr>
+                <td>泛化能力</td>
+                <td>差（每场景重新规划）</td>
+                <td>环境内好，跨环境差</td>
+                <td>较好</td>
+            </tr>
+            <tr>
+                <td>可解释性</td>
+                <td>高</td>
+                <td>极低（黑箱）</td>
+                <td>中高</td>
+            </tr>
+            <tr>
+                <td>部署难度</td>
+                <td>低</td>
+                <td>高（sim-to-real）</td>
+                <td>中</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <strong>实战建议：</strong>如果你要在真实机器人上引入 RL，不要从端到端规划器开始。先从"经典全局规划 + RL 局部控制器"的混合架构入手——这个方案风险最低，效果最可预期，审阅代码的同事也不会太紧张。
+        </div>
+
+        <h2>为什么纯DRL还没大规模部署</h2>
+
+        <p>2016年 AlphaGo 击败李世石后，深度强化学习（DRL）被寄予厚望。2018 年前后，"End-to-End DRL for navigation"曾经是机器人顶会的标配标题。但到了 2025-2026 年，你会发现一个有趣的现象：<strong>纯 DRL 路径规划在实验室以外的大规模部署几乎没有</strong>。为什么？</p>
+
+        <p><strong>1. Sim-to-Real 鸿沟</strong>——这是最核心的障碍。在仿真中训练的策略，迁移到真实世界时几乎一定会退化。光照变化、传感器噪声、地面摩擦系数差异、执行器延迟——这些在仿真中要么被简化，要么被完全忽略。Domain Randomization 可以缓解，但不能根除。2023 年的一项研究发现，一个在仿真中达到 98% 成功率的导航策略，在真实环境中只有 34%，而这个差距从 2019 年以来几乎没有缩小。</p>
+
+        <p><strong>2. 安全性保障缺失</strong>——RL 策略没有安全屏障。经典算法可以证明"如果存在路径，一定会找到"（完备性），或者"找到的路径一定是最优的"（最优性）。RL 策略只是一个经过训练的黑箱函数，没有任何形式化的行为保证。这在自动驾驶和医疗机器人领域是致命的。</p>
+
+        <p><strong>3. 可解释性黑洞</strong>——当一辆自动驾驶汽车突然停在路中间时，你可以检查 A* 的搜索日志：是因为障碍物扩展被阻塞了？还是启发式函数太高估了代价？但如果是 RL 策略做出的决策，你只能摊手——"神经网络说停。"在监管合规角度上，这是不可接受的。</p>
+
+        <p><strong>4. 基准测试碎片化</strong>——每个实验室用自己的仿真器、自己的地图集、自己的评价指标。同一个算法在 A 团队的测试中表现惊艳，在 B 团队的测试中却一败涂地。这种碎片化使得学界和工业界很难建立对"什么方法真正有效"的共识。相比之下，经典算法在标准图集上的对比要清晰得多。</p>
+
+        <div class="warning">
+            <strong>过来人忠告：</strong>不要被论文里的 DRL 曲线骗了——它们在训练环境里表现惊艳，换个地图可能完全失效。如果你看到一篇 paper 说"我们的 RL planner beats A*"，请一定先看看它的训练环境和测试环境是否同分布、它的评估指标是否合理（比如是否考虑了规划成功率以外的安全指标）。这行里的"cherry-pick"比你想象的更普遍。
+        </div>
+
+        <p>但这不意味着 RL 在路径规划中没有价值。它最有前景的方向是作为一个"辅助模块"：帮助调整启发式函数的权重、在探索阶段指导采样方向、在冗余自由度上做优化。换句话说，RL 应该嵌入到经典算法的框架中，而不是试图替代它们。</p>
+
+        <p>下一章我们将从更宏观的视角审视路径规划领域的未来趋势——基础模型（foundation model）、V2X协同、量子计算的可能性，以及安全认证的挑战。这些话题可能会改变你对"路径规划是什么"的根本认知。</p>
+
+        <div class="footer-nav">
+            <a href="25.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="27.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

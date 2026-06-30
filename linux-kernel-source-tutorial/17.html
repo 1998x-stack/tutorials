@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 MINIX文件系统(下)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html" class="active">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们学习了MINIX文件系统的磁盘布局和底层数据结构——超级块、inode、位图。这些是文件系统的"静态"部分。本章我们将进入"动态"部分：文件系统是如何<strong>运转</strong>起来的。从你在shell里输入一个路径名开始，到最终读取到文件内容，中间经历了怎样的一条代码链路？这就是我们本章要回答的问题。</p>
+
+        <h2>引言——从文件名到文件数据</h2>
+
+        <p>当你执行 <code>cat /usr/bin/sh</code> 时，发生了什么事情？看起来只是一个命令读取了一个文件，但内核需要完成以下一连串的工作：</p>
+
+        <ol>
+            <li><strong>解析路径</strong>：将字符串 <code>/usr/bin/sh</code> 拆解为组件：<code>/</code> → <code>usr</code> → <code>bin</code> → <code>sh</code>。</li>
+            <li><strong>逐级查找</strong>：从根inode出发，读取根目录的内容，找到 <code>usr</code> 的inode号；读取 <code>usr</code> 目录的内容，找到 <code>bin</code> 的inode号；读取 <code>bin</code> 目录的内容，找到 <code>sh</code> 的inode号。</li>
+            <li><strong>打开文件</strong>：将文件路径映射到一个<strong>文件描述符</strong>——一个整数，后续操作都通过这个整数来引用文件。</li>
+            <li><strong>读取数据</strong>：根据<code>sh</code>的inode中的 <code>i_zone[]</code> 数组，找到文件数据所在的磁盘块，通过缓冲区读取到内存，再复制到用户空间。</li>
+        </ol>
+
+        <p>整个过程就是一条<strong>三层映射链</strong>：<strong>文件名 → inode → 磁盘块</strong>。本章将沿着这条链，从目录项结构开始，一步步走到最终的I/O完成。</p>
+
+        <h2>目录项结构</h2>
+
+        <p>在MINIX文件系统中，<strong>目录</strong>本质上是一个特殊类型的文件——它的"文件内容"是一组连续的<strong>目录项</strong>（directory entry）。每个目录项将一个<strong>文件名</strong>映射到一个<strong>inode号</strong>。</p>
+
+        <pre><code>struct dir_entry {
+    unsigned short inode;  /* inode号（2字节），0表示空闲目录项 */
+    char name[14];         /* 文件名（14字节），以'\0'结尾 */
+};</code></pre>
+
+        <p>每个目录项固定占用16字节。这意味着一个磁盘块（1,024字节）恰好可以存放64个目录项。在MINIX V1中，文件名最长14个字符——这是早期UNIX文件系统的惯例（System V的14字节文件名限制的继承）。</p>
+
+        <p>根目录（inode号为1）的<code>i_size</code>决定了这个目录下有多少个目录项。例如，如果根目录的<code>i_size = 1024</code>，则它有 <code>1024 / 16 = 64</code> 个目录项，恰好占满一个磁盘块。</p>
+
+        <div class="tip">
+            <strong>目录项的两种特殊条目</strong>：每个目录下都有两个特殊的目录项——<code>.</code>（当前目录）和<code>..</code>（父目录）。前者指向自身inode，后者指向父目录的inode。根目录的<code>..</code>特殊之处在于它指向自身（因为根目录没有父目录）。这两个特殊条目极大地简化了<code>namei()</code>中处理<code>.</code>和<code>..</code>的逻辑。
+        </div>
+
+        <h2>namei()——路径解析的核心函数</h2>
+
+        <p><code>namei()</code>是文件系统中最重要的函数之一。它接受一个路径名字符串，返回对应的inode指针。路径解析的整体逻辑如下：</p>
+
+        <pre><code>// fs/namei.c — 简化后的namei()逻辑
+
+        struct inode * namei(const char * pathname)
+        {
+            struct inode * inode;
+
+            // 1. 确定起始inode
+            if (pathname[0] == '/')
+                inode = iget(dev, ROOT_INO); // 绝对路径 → 从根开始
+            else
+                inode = current-&gt;pwd;         // 相对路径 → 从当前目录开始
+
+            // 2. 逐组件解析
+            while (1) {
+                // 跳过开头的'/'
+                while (*pathname == '/') pathname++;
+                if (!*pathname) break; // 已到末尾
+
+                // 3. 提取路径组件（如 "usr"）
+                char * component = get_next_component(&amp;pathname);
+
+                // 4. 在当前目录中查找该组件
+                int inr = find_entry(inode, component);
+                if (!inr) { /* ENOENT: 文件不存在，返回错误 */ }
+
+                // 5. 获取子inode
+                inode = iget(dev, inr);
+
+                // 6. 如果还有下一级，当前inode必须是目录
+                if (is_last_component) break;
+                if (!S_ISDIR(inode-&gt;i_mode))
+                    return error(ENOTDIR);
+            }
+
+            return inode;
+        }</code></pre>
+
+        <p>让我们用具体的例子来追踪路径 <code>/usr/bin/sh</code> 的解析过程：</p>
+
+        <pre><code>步骤0: 输入 pathname = "/usr/bin/sh"
+        以 '/' 开头 → 从根目录 inode(1) 开始
+
+        步骤1: 提取组件 "usr"
+        → 读取根目录的数据块（inode(1) 的 i_zone[0]）
+        → 在根目录的目录项中搜索 "usr"
+        → 发现 inode = 128
+        → 读取 inode(128)（发现是目录，继续）
+
+        步骤2: 提取组件 "bin"
+        → 读取 inode(128) 的数据块
+        → 在 /usr 的目录项中搜索 "bin"
+        → 发现 inode = 256
+        → 读取 inode(256)（发现是目录，继续）
+
+        步骤3: 提取组件 "sh"
+        → 读取 inode(256) 的数据块
+        → 在 /usr/bin 的目录项中搜索 "sh"
+        → 发现 inode = 384
+        → 读取 inode(384)（发现是文件，是最后组件）
+
+        步骤4: 返回 inode(384)
+
+        整个流程使用了 3 次目录读取 + 4 次 inode 读取，
+        每次读取都通过 bread() 走缓冲区缓存。
+        如果文件被频繁访问，这些读取全部命中缓存。</code></pre>
+
+        <p>这个例子揭示了文件系统性能的关键：路径解析过程中，<strong>目录项数据被记录在目录文件的数据块中，而这些数据块是通过缓冲区的<code>bread()</code>读取的</strong>。目录的<code>i_zone[]</code>指向包含目录项的数据块，内核逐块扫描查找匹配的文件名。这虽然没有现代文件系统的目录索引（如ext4的Htree或B树）那样高效，但对于目录项数量不多的场景（每个块扫描64个目录项），性能是可以接受的。</p>
+
+        <h2>file_table[] 与文件描述符</h2>
+
+        <p>路径解析完成后，我们得到了文件对应的inode。但inode只是一个"索引"，要从中读写数据，还需要建立进程和文件之间的关联——这就是<strong>文件描述符</strong>和<strong>打开文件表</strong>的职责。</p>
+
+        <p>Linux 0.11中维护了三级映射关系：</p>
+
+        <pre><code>进程控制块(PCB)          文件表(file_table[])         inode表(inode_table[])
+        ┌─────────────┐        ┌──────────────┐        ┌──────────────────┐
+        │ filp[0] ──────────→  │ f_mode       │        │ i_mode           │
+        │ filp[1] ──────────→  │ f_pos        │        │ i_uid            │
+        │ filp[2] ──────────→  │ f_flags      │        │ i_size           │
+        │ ...           │        │ f_inode ─────────→  │ i_zone[0..8]     │
+        │ filp[19]     │        │ f_count     │        │ i_nlinks         │
+        └─────────────┘        └──────────────┘        └──────────────────┘
+        fd(整数索引)          file_struct          inode(元数据+数据索引)</code></pre>
+
+        <p>每个进程可以在 <code>filp[]</code> 数组中最多打开20个文件（<code>NR_OPEN=20</code>），而系统全局的 <code>file_table[]</code> 最多可以容纳64个打开的文件句柄（<code>NR_FILE=64</code>）。<code>filp[]</code> 中的每个元素是一个指向 <code>file_table[]</code> 的指针——为什么需要两层？因为这样可以让多个文件描述符指向同一个打开的文件（比如 <code>dup()</code> 和 <code>fork()</code> 后的父子进程共享）。</p>
+
+        <p><code>file_struct</code> 中的 <code>f_pos</code> 字段记录了当前读写位置——这就是为什么每个打开的文件句柄可以独立追踪读写位置。当你调用 <code>read(fd, buf, 10)</code> 读取10个字节后，下次再调用 <code>read(fd, buf, 10)</code> 时，文件指针已经自动推进了10个字节。</p>
+
+        <table>
+            <thead>
+                <tr><th>层级</th><th>数据结构</th><th>容量</th><th>作用</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>进程级</td><td>task_struct.filp[20]</td><td>20个fd</td><td>进程私有的文件描述符数组</td></tr>
+                <tr><td>系统级</td><td>file_table[64]</td><td>64个打开文件</td><td>全局打开文件表，记录偏移和引用计数</td></tr>
+                <tr><td>全局</td><td>inode_table[32]</td><td>32个内存inode</td><td>inode缓存，所有文件系统共用</td></tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>f_count引用计数</strong>：这是避免"使用中释放"的关键机制。当多个进程共享同一个文件句柄时（例如<code>fork()</code>后），每次<code>close()</code>只是将<code>f_count</code>减1，只有减到0时才真正释放file_table项。这就是Linux中"引用计数"设计模式的最早应用之一。
+        </div>
+
+        <h2>文件读写完整路径</h2>
+
+        <p>假设你已经打开了 <code>/usr/bin/sh</code> 并得到了文件描述符3。现在执行 <code>read(3, buf, 1024)</code>，这个系统调用会经历怎样的链条？</p>
+
+        <pre><code>用户态调用:
+    n = read(3, buf, 1024);  // 用户态
+
+         │
+         ▼
+    系统调用入口 (kernel/system_call.s)
+         │
+         ▼
+    sys_read() (fs/read_write.c)
+        │ fd → 获取当前进程的 filp[fd]
+        │ filp[fd] → 获取 file_table[f_inode]
+         │
+         ▼
+    file_read() (fs/file_dev.c)
+        │ 根据 f_pos 计算要读取的块号
+        │ 例如 f_pos=2048 → 块号 = 2048 / 1024 = 2 (从第0块开始偏移2)
+         │
+         ▼
+    minix_file_read() (fs/minix/file.c, 注意: 0.11中直接实现)
+        │ 调用 bread() 读取数据块
+        │ 使用 inode.i_zone[] 将文件逻辑块号 → 磁盘物理块号
+         │
+         ▼
+    bread() 返回 buffer_head (fs/buffer.c)
+        │ 数据在 bh-&gt;b_data 中
+         │
+         ▼
+    copy_to_user()  (mm/memory.c)
+        │ 将 bh-&gt;b_data 中的数据复制到用户空间的 buf
+        │ 注意：这涉及内核态→用户态的数据拷贝
+         │
+         ▼
+    brelse() — 释放缓冲区
+    更新 f_pos += 实际读取的字节数
+    返回读取的字节数给用户态</code></pre>
+
+        <p>这条调用链中，<code>file_read()</code> 函数内部有一个重要的逻辑——将<strong>文件逻辑块号</strong>映射为<strong>磁盘物理块号</strong>。这个映射就是通过上一章讲的 <code>i_zone[]</code> 数组来完成的：</p>
+
+        <ul>
+            <li>如果逻辑块号 <code>block &lt; 7</code>，直接取 <code>i_zone[block]</code>（直接块）；</li>
+            <li>如果 <code>7 &lt;= block &lt; 7+256</code>，通过 <code>i_zone[7]</code> 的一级间接块来查找；</li>
+            <li>如果 <code>7+256 &lt;= block</code>，通过 <code>i_zone[8]</code> 的二级间接块来查找。</li>
+        </ul>
+
+        <p>注意，<code>copy_to_user()</code> 这一步不是可选的——内核不能直接把内核空间的<code>b_data</code>地址返回给用户态程序。因为内核地址空间和用户地址空间是隔离的（通过页表），用户态程序不能直接访问内核的内存。所以必须进行一次数据拷贝。这就是为什么 <code>read()</code> 系统调用在读取小文件时开销主要来自"数据拷贝"而非"磁盘I/O"——因为缓存命中时没有真正的磁盘访问，但数据拷贝无论如何都要进行。</p>
+
+        <h2>sys_open()/sys_close()——打开与关闭</h2>
+
+        <h3>sys_open()</h3>
+
+        <p>当我们调用 <code>open("/usr/bin/sh", O_RDONLY)</code> 时，内核执行以下步骤：</p>
+
+        <pre><code>int sys_open(const char * filename, int flags, int mode)
+{
+    struct file * f;
+    int fd, i;
+
+    // 1. 在当前进程的 filp[] 中找一个空闲位置
+    fd = find_empty_filp(current);
+
+    // 2. 在系统 file_table[] 中找一个空闲项
+    f = get_empty_file();
+
+    // 3. 建立关联
+    current-&gt;filp[fd] = f;
+
+    // 4. 解析路径名 → 获取inode
+    f-&gt;f_inode = open_namei(filename, flags, mode);
+
+    // 5. 根据flags做处理
+    if (flags &amp; O_TRUNC) {
+        // 截断文件：将文件大小设为0，释放所有数据块
+        truncate_inode(f-&gt;f_inode);
+    }
+
+    // 6. 初始化文件结构
+    f-&gt;f_mode = flags;     // 读写模式
+    f-&gt;f_pos = 0;          // 读写位置从0开始
+    f-&gt;f_count = 1;        // 引用计数
+
+    return fd;              // 返回文件描述符整数
+}</code></pre>
+
+        <p><code>flags</code> 参数支持以下模式：<code>O_RDONLY</code>（0，只读）、<code>O_WRONLY</code>（1，只写）、<code>O_RDWR</code>（2，读写）、<code>O_CREAT</code>（不存在时创建）、<code>O_TRUNC</code>（截断）、<code>O_EXCL</code>（与<code>O_CREAT</code>配合使用，文件已存在时报错）。这些标志位的组合构成了UNIX文件操作的基础API。</p>
+
+        <h3>sys_close()</h3>
+
+        <pre><code>int sys_close(unsigned int fd)
+{
+    struct file * filp;
+
+    // 检查fd是否有效（0 ≤ fd < NR_OPEN）
+    if (fd >= NR_OPEN)
+        return -EINVAL;
+
+    filp = current-&gt;filp[fd];
+    if (!filp)
+        return -EINVAL;  // 这个fd没有被打开
+
+    // 将进程的fd槽位置空
+    current-&gt;filp[fd] = NULL;
+
+    // 减少文件结构的引用计数
+    // 如果减到0，真正释放全局file_table项
+    if (--filp-&gt;f_count == 0) {
+        // 释放对应的inode（完成写回等）
+        iput(filp-&gt;f_inode);
+        // file_table项被回收
+    }
+
+    return 0;
+}</code></pre>
+
+        <p>注意 <code>close()</code> 的引用计数管理是非常精妙的设计——一个文件句柄可以被多个进程共享（例如 <code>fork()</code> 后父子进程共享了所有打开的文件句柄），只有最后一个使用者关闭它时，内核才真正释放资源。</p>
+
+        <h2>踩坑故事——文件描述符泄漏</h2>
+
+        <p>2008年，我维护的一个网络服务器程序在线上运行了大约两周后，突然开始疯狂输出错误日志，全是 <code>"Too many open files"</code>（EMFILE错误）。更糟糕的是，<code>syslogd</code> 本身也打不开日志文件了，因为它也需要打开文件描述符来写入日志。结果就是：服务器虽然进程还在，但<strong>完全无法写入任何日志</strong>，相当于"失明"了。</p>
+
+        <p>问题出在一段看似人畜无害的代码中：</p>
+
+        <pre><code>// 有bug的代码示例
+        for (int i = 0; i &lt; 10000; i++) {
+            int fd = open("/proc/uptime", O_RDONLY);
+            // 读一点数据...
+            char buf[64];
+            read(fd, buf, 10);
+            // 处理数据...
+            // 哦——忘了 close(fd)！！！
+        }</code></pre>
+
+        <p>这个循环在一个请求的处理路径中被调用，每次处理请求时打开 <code>/proc/uptime</code> 读取系统运行时间。每次打开都会分配一个文件描述符，但程序员忘记调用 <code>close()</code>。每个请求泄漏一个fd，当并发请求足够多时，进程的 <code>filp[]</code> 表中的20个槽位（Linux 0.11限制；现代Linux默认1024，但可以调整）被全部占满。</p>
+
+        <p>随后所有 <code>open()</code> 调用都返回 <code>-1</code> 并设置 <code>errno = EMFILE</code>（"The per-process limit on the number of open file descriptors has been reached"）。不仅仅是你的业务逻辑打不开文件——<code>syslog</code> 也打不开，新的网络连接也 <code>accept()</code> 不出来，因为 <code>accept()</code> 返回的socket本质上也是一个文件描述符！</p>
+
+        <div class="warning">
+            <strong>教训</strong>：在系统编程中，每一个 <code>open()</code> 都必须配对 <code>close()</code>。这个原则和 <code>malloc()</code>/<code>free()</code> 同样重要。现代C/C++的最佳实践是使用RAII（Resource Acquisition Is Initialization）模式——在对象的析构函数中自动释放资源。在Linux内核源码中，你可以看到每一对 <code>open()</code>/<code>close()</code>、<code>getblk()</code>/<code>brelse()</code> 的严格对称——这是Linus从一开始就坚持的编码风格。
+        </div>
+
+        <p>文件描述符泄漏在Linux 0.11中更加致命，因为每个进程最多只能打开20个文件，全局也只有64个文件句柄。一旦泄漏，系统可能会在几分钟内就耗尽可用资源。今天的Linux虽然默认限制更高（可以通过 <code>ulimit -n</code> 查看和调整），但问题的本质是一模一样的。</p>
+
+        <p>下一章我们将进入另一个精彩的主题——<strong>管道与exec</strong>。管道让数据可以在不同进程之间流动，而exec让一个进程可以"变身"成另一个程序。这两个机制结合起来，就构成了Unix/Linux最强大的编程范式：组合小程序完成复杂任务。</p>
+
+        <p><strong>下一章预告：管道与exec</strong> —— pipe() 的实现原理、环行缓冲区、阻塞与唤醒、execve() 完整流程、shell管道链的剖析。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 MINIX文件系统(上)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html" class="active">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们深入分析了缓冲区管理——它是内核I/O子系统的基石。但缓冲区只解决了"如何高效地读写磁盘块"的问题，还有一个更上层的问题需要解决：<strong>如何组织磁盘上的数据，让用户可以通过"文件名"和"目录"来访问，而不是直接操作块号？</strong>答案就在文件系统中。</p>
+
+        <p>本章和下一章将专门研究<strong>MINIX文件系统</strong>——Linux 0.11使用的原生文件系统。它由Andrew Tanenbaum设计，是MINIX操作系统的一部分，也是Linus最早移植到Linux上的文件系统。</p>
+
+        <h2>引言——为什么是MINIX文件系统？</h2>
+
+        <p>你可能在想：MINIX文件系统？这太古老了吧？为什么不讲ext4或Btrfs？</p>
+
+        <p>答案是：<strong>MINIX文件系统是现代文件系统的"最小公倍数"</strong>。它包含了一个文件系统应该具备的所有核心要素：超级块、inode、位图、目录项、间接块索引——但它剔除了现代文件系统中大量的复杂性（如日志、B树、扩展属性、ACL等）。如果你能彻底理解MINIX文件系统，阅读ext2/ext3（以及任何UNIX风格文件系统）的源码将易如反掌。</p>
+
+        <div class="tip">
+            <strong>历史小知识</strong>：Linux 0.11使用MINIX文件系统，纯粹是因为Linus当时正在用MINIX，所以直接复用了它的磁盘布局。直到1992年，Theodore Ts'o（我们在第1章提过他）才开发了专门为Linux设计的ext文件系统。今天，我们可以在一个Linux系统上同时挂载MINIX、ext2、ext4、XFS等多种文件系统——这就是<strong>虚拟文件系统（VFS）</strong>的力量。不过VFS是后续版本才引入的，0.11还没有VFS层，文件系统是直接硬编码的。
+        </div>
+
+        <h2>MINIX磁盘布局</h2>
+
+        <p>一个被格式化为MINIX文件系统的磁盘分区，在逻辑上被划分为6个连续的区域。理解这个布局是理解文件系统的第一步。</p>
+
+        <pre><code>MINIX文件系统磁盘布局（整个磁盘分区）：
+
+        偏移量(块号)   区域             大小          作用
+        ┌──────────┐
+        │ 引导块    │   第0块(1KB)     存储引导扇区代码
+        ├──────────┤                 （在文件系统格式化时保留，
+        │          │                  通常为全0，不从文件系统访问）
+        ├──────────┤
+        │ 超级块    │   第1块(1KB)     存储文件系统全局元数据：
+        │          │                  总inode数、总块数、位图块数等
+        ├──────────┤
+        │ inode位图 │   可变大小       每1位表示1个inode的占用/空闲
+        │          │   按块对齐        1块(1024字节)可管理8192个inode
+        ├──────────┤
+        │ 块位图    │   可变大小       每1位表示1个数据块的占用/空闲
+        │          │   按块对齐        1块可管理8192个数据块
+        ├──────────┤
+        │ inode区   │   可变大小       连续存放所有inode结构体
+        │          │   每个inode 32字节  每个文件/目录对应一个inode
+        ├──────────┤
+        │ 数据区    │   剩余所有块       存放文件的数据内容
+        │          │                    和目录的目录项数据
+        └──────────┘</code></pre>
+
+        <p>这种布局的优雅之处在于它的<strong>静态分割</strong>：格式化时，inode的总数量就是固定的，数据块的总数量也是固定的。这使得位图管理变得非常简单——你永远不会遇到"inode用完了但数据块还剩很多"或者反过来"数据块用完了但inode还剩很多"的奇怪情况（好吧，其实可能的——这就是为什么ext4引入了动态inode分配）。</p>
+
+        <h2>超级块(super_block)</h2>
+
+        <p>超级块是文件系统的"身份证"和"账本"，它记录了整个文件系统的全局信息。MINIX文件系统在磁盘上有一个<strong>磁盘超级块</strong>（存储在分区第1块），启动时被读入内存形成<strong>内存超级块</strong>。</p>
+
+        <p>磁盘超级块的定义如下：</p>
+
+        <pre><code>struct d_super_block {
+    unsigned short s_ninodes;     /* inode总数 */
+    unsigned short s_nzones;      /* 总块数（zones） */
+    unsigned short s_imap_blocks; /* inode位图占用的块数 */
+    unsigned short s_zmap_blocks; /* 块位图占用的块数 */
+    unsigned short s_firstdatazone; /* 第一个数据块的块号 */
+    unsigned short s_log_zone_size; /* 日志块大小（MINIX中为0） */
+    unsigned long s_max_size;     /* 最大文件长度 */
+    unsigned short s_magic;       /* 魔数（标识文件系统类型） */
+};</code></pre>
+
+        <p>关键字段解读：</p>
+
+        <ul>
+            <li><strong>s_magic</strong>：魔数，MINIX文件系统为<code>0x137F</code>（MINIX V1）或<code>0x138F</code>（MINIX V1的变体）。如果超级块读出来魔数不对，内核会拒绝挂载——这是一个快速校验。</li>
+            <li><strong>s_ninodes</strong>：inode的总数量。假设<code>s_ninodes = 1024</code>，则inode位图需要 <code>1024/8 = 128</code> 字节，按块对齐就是1个块（1024字节）。</li>
+            <li><strong>s_firstdatazone</strong>：第一个数据块的块号。这是从分区起始算起的绝对块号，通过它计算数据区的起始位置。</li>
+            <li><strong>s_max_size</strong>：单个文件的最大大小。在MINIX V1中，由于只有7个直接块+1个间接块+1个双重间接块，最大文件大小大约是 <code>7*1KB + 256*1KB + 256*256*1KB ≈ 64MB</code>。</li>
+        </ul>
+
+        <p>内存超级块（<code>struct super_block</code>）除了磁盘超级块的字段外，还额外维护了一些运行时状态——例如指向超级块对应<code>buffer_head</code>的指针、脏标志等。<code>read_super()</code>函数负责读取磁盘超级块并填充内存超级块。</p>
+
+        <div class="highlight">
+            <strong>超级块与缓冲区：关键依赖</strong>。注意，超级块本身也是存储在磁盘块上的！<code>read_super()</code>本质上就是调用<code>bread(dev, 1)</code>——读取设备上第1块（引导块是第0块，超级块是第1块），然后将读取到的数据强制类型转换为<code>struct d_super_block *</code>。这就是上一章中缓冲区管理对文件系统的支撑作用。
+        </div>
+
+        <h2>inode结构——文件的"身份证"</h2>
+
+        <p>在MINIX文件系统中，每个文件或目录都有一个唯一的<strong>inode</strong>（索引节点）与之对应。inode存储了文件的<strong>元数据</strong>——通俗地说就是"关于数据的数据"。</p>
+
+        <pre><code>struct d_inode {
+    unsigned short i_mode;   /* 文件类型和权限（rwxrwxrwx） */
+    unsigned short i_uid;    /* 文件所有者的用户ID */
+    unsigned long i_size;    /* 文件大小（字节数） */
+    unsigned long i_mtime;   /* 最后修改时间 */
+    unsigned char i_gid;     /* 文件所有者的组ID */
+    unsigned char i_nlinks;  /* 硬链接数（有多少个文件名指向这个inode） */
+    unsigned short i_zone[9]; /* 数据块索引数组（核心！） */
+};</code></pre>
+
+        <p>每个inode占用32字节（固定大小），所以一个块（1024字节）恰好可以存放32个inode。inode号从1开始计数（0表示无效），inode1通常是根目录。</p>
+
+        <p>让我们聚焦最重要的字段——<code>i_zone[9]</code>。这个数组定义了文件数据在磁盘上的存放位置。</p>
+
+        <table>
+            <thead>
+                <tr><th>数组索引</th><th>名称</th><th>寻址方式</th><th>可寻址的数据块</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>i_zone[0]</td><td>直接块0</td><td>直接指向数据块</td><td>1个块（1KB）</td></tr>
+                <tr><td>i_zone[1]</td><td>直接块1</td><td>同上</td><td>1个块</td></tr>
+                <tr><td>i_zone[2]</td><td>直接块2</td><td>同上</td><td>1个块</td></tr>
+                <tr><td>i_zone[3]</td><td>直接块3</td><td>同上</td><td>1个块</td></tr>
+                <tr><td>i_zone[4]</td><td>直接块4</td><td>同上</td><td>1个块</td></tr>
+                <tr><td>i_zone[5]</td><td>直接块5</td><td>同上</td><td>1个块</td></tr>
+                <tr><td>i_zone[6]</td><td>直接块6</td><td>同上</td><td>1个块</td></tr>
+                <tr><td>i_zone[7]</td><td>一级间接块</td><td>指向一个块，该块存储256个块号</td><td>256个块（256KB）</td></tr>
+                <tr><td>i_zone[8]</td><td>二级间接块</td><td>指向一个块，该块存储256个间接块号，每个间接块再存储256个块号</td><td>65,536个块（64MB）</td></tr>
+            </tbody>
+        </table>
+
+        <p>这种多级索引的设计极为精妙。对于小文件（7KB以内），只需要使用直接块，<strong>一次磁盘I/O就能读取所有索引信息</strong>。随着文件变大，逐步启用一级间接块、二级间接块.这样既保证了小文件的访问效率，又支持了大文件的扩展。</p>
+
+        <p>在Linux 0.11中，<code>i_zone</code>的每个元素是<code>unsigned short</code>（16位），所以最大块号是65,535。再加上块大小为1KB，每个MINIX分区的最大容量就是64MB——这在1991年是非常合理的。</p>
+
+        <h2>位图管理——分配与释放</h2>
+
+        <p>位图是文件系统中用来追踪"哪些资源已经被占用"的关键机制。MINIX文件系统有两张位图：<strong>inode位图</strong>（追踪inode的使用情况）和<strong>块位图</strong>（追踪数据块的使用情况）。</p>
+
+        <h3>new_inode()——分配一个空闲inode</h3>
+
+        <pre><code>int new_inode(int dev)
+{
+    struct super_block * sb = get_super(dev);
+    struct buffer_head * bh;
+    int i, j;
+
+    // 遍历inode位图中的每一位
+    for (i = 0; i &lt; sb-&gt;s_imap_blocks; i++) {
+        bh = bread(dev, 2 + i); // 第2块开始是inode位图
+        j = 0;
+        // 在一个块中寻找第一个值为0的位
+        while (j < 8192 && (bh-&gt;b_data[j >> 3] & (1 << (j & 7))))
+            j++;
+        if (j < 8192) {
+            // 找到了空闲位！标记为已使用
+            bh-&gt;b_data[j >> 3] |= (1 << (j & 7));
+            bh-&gt;b_dirt = 1;     // 标记脏，后续写回磁盘
+            brelse(bh);
+            // 返回inode号（位图中的位置+1, 因为inode从1开始编号）
+            return i * 8192 + j + 1;
+        }
+        brelse(bh);
+    }
+    return 0;  // 没有空闲inode了
+}</code></pre>
+
+        <h3>free_inode()——释放一个inode</h3>
+
+        <pre><code>void free_inode(int dev, int inr)
+{
+    struct super_block * sb = get_super(dev);
+    struct buffer_head * bh;
+
+    // 计算inode在位图中的位置
+    inr--;  // inode号从1开始，转回0基索引
+    // 在位图块中的偏移：inr/8192决定是哪个位图块
+    bh = bread(dev, 2 + inr / 8192);
+    // 将对应的位清零
+    bh-&gt;b_data[(inr % 8192) >> 3] &amp;= ~(1 << ((inr % 8192) & 7));
+    bh-&gt;b_dirt = 1;  // 标记脏
+    brelse(bh);
+}</code></pre>
+
+        <p><code>new_block()</code>和<code>free_block()</code>的操作逻辑完全对称，区别在于它们操作的是块位图，而块位图的起始块号是 <code>2 + s_imap_blocks</code>。</p>
+
+        <p>这里有一个重要细节：位图被修改后，<code>b_dirt</code>被置为1。还记得上一章讲的延迟写策略吗？这就意味着位图的写入不是立即发生的——它在缓冲区中等待，直到被<code>sync()</code>或缓冲区回收时刷入磁盘。这提供了一个天然的"批量写入"效果：创建多个文件时，位图块只被写入一次，而不是每个文件创建都写一次。</p>
+
+        <h2>挂载(mount)流程</h2>
+
+        <p>当系统启动时，根文件系统需要通过<code>mount</code>流程加载。在Linux 0.11中，内核在初始化阶段调用 <code>mount_root()</code> 来完成根文件系统的挂载。让我们追踪它的完整流程。</p>
+
+        <pre><code>void mount_root(void)
+{
+    int i, dev;
+    struct super_block * p;
+    struct inode * ip;
+
+    // 1. 获取根设备号（由启动参数指定，通常为软盘或硬盘分区）
+    dev = ROOT_DEV;
+
+    // 2. 读取超级块
+    // read_super() 内部调用 bread(dev, 1) 读取第1块
+    // 然后校验 s_magic 是否为 0x137F
+    p = read_super(dev);
+
+    // 3. 获取根目录的inode（inode号固定为1）
+    // iget() 从inode区读取第1个inode
+    ip = iget(dev, ROOT_INO);  // ROOT_INO = 1
+
+    // 4. 将根目录的inode设为当前进程的当前目录和工作目录
+    current-&gt;pwd = ip;
+    current-&gt;root = ip;
+
+    // 5. 初始化缓冲区（确保根文件系统相关的缓冲区准备好）
+    // ... 初始化完成
+}</code></pre>
+
+        <p>这个过程看起来简单，但背后做了几个关键的事情：</p>
+
+        <ul>
+            <li><strong>read_super()</strong>不仅读取了磁盘超级块，还在内存中创建了一个<code>struct super_block</code>结构，并将它缓存在<code>super_block[]</code>数组中（Linux 0.11最多支持8个同时挂载的文件系统）。</li>
+            <li><strong>iget(dev, 1)</strong>从磁盘上读取inode区中的第一个inode（根目录的inode），并将其装入内存的inode表（<code>inode_table[]</code>）。这个inode的<code>i_mode</code>必须是一个<strong>目录</strong>类型（S_IFDIR），否则挂载会失败。</li>
+            <li>根挂载完成后，所有路径解析将从根目录inode开始。也就是说，你输入<code>/usr/bin/sh</code>时，内核会从根inode出发，一步步向下查找。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>注意</strong>：Linux 0.11还没有VFS层，所以它只能支持<strong>一种</strong>文件系统——MINIX。所有文件系统操作函数（<code>minix_readdir()</code>、<code>minix_file_read()</code>等）都是直接调用的，没有函数指针表。现代内核中的VFS通过<code>file_operations</code>和<code>inode_operations</code>这样的操作结构体来实现多文件系统支持——这是架构上的一个重大改进。
+        </div>
+
+        <h2>踩坑故事——超级块损坏的灾难</h2>
+
+        <p>在我早年做系统管理员的时候，遇到过一起经典的"掉电事故"。一台运行Linux的服务器在半夜突然断电，第二天管理员启动机器，发现根文件系统<strong>完全无法挂载了</strong>。</p>
+
+        <p>现象是这样的：引导加载程序正常启动，内核被加载到内存，但在<code>mount_root()</code>阶段打印了一条神秘的消息：<code>"VFS: Unable to mount root fs"</code>。进入紧急shell后，用<code>dd</code>命令直接读取磁盘超级块，发现<code>s_magic</code>字段变成了<code>0x0000</code>而非正常的<code>0x137F</code>——超级块<strong>被清零了</strong>。</p>
+
+        <p>原因复盘：断电发生时，系统正在执行<code>sync()</code>写回脏缓冲区。超级块正好是脏的（可能因为刚刚安装了一个新软件，更新了文件的访问时间等信息，导致超级块中的某些计数发生了变化），但<code>sync()</code>还没来得及把它刷入磁盘，电源就断了。磁盘上的超级块还是旧的？不——情况比这更糟。因为延迟写的策略，磁盘超级块可能在<strong>更早</strong>的某个时刻被部分写入了错误的数据，或者因为磁头在写入过程中停在了一个错误的位置。</p>
+
+        <p>这就是文件系统日志（journaling）诞生的背景。现代文件系统如ext3/ext4、XFS都包含了日志功能：在真正修改磁盘上的元数据之前，先将操作记录到日志区域。如果系统崩溃，重启后通过<strong>回放日志</strong>（replay journal）可以让文件系统恢复到一致状态。从ext2到ext3，最大的变化就是增加了日志支持。</p>
+
+        <p>至于那次事故的结局——<code>fsck</code>（文件系统一致性检查）工具救了我们。它扫描了整个磁盘分区，通过检测inode位图和实际inode使用情况的一致性、块位图和实际数据块使用情况的一致性，<strong>重建了一个超级块</strong>。虽然丢失了部分文件，但至少系统恢复了启动。那次之后，我养成了两个好习惯：一是给关键服务器配备UPS不间断电源，二是定期备份超级块（<code>dd if=/dev/sda2 of=/superblock.backup bs=1024 count=1</code>）。</p>
+
+        <p>下一章中，我们将继续MINIX文件系统的下半部分——从<strong>路径解析</strong>开始，看看内核如何把一个像<code>/usr/bin/sh</code>这样的字符串，一步步翻译成实实在在的文件数据。</p>
+
+        <p><strong>下一章预告：MINIX文件系统(下)</strong> —— 目录项结构、namei()路径解析、文件描述符表、读写完整路径、open/close实现。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

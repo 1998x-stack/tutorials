@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 管道与exec</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html" class="active">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。前两章我们完整地走通了MINIX文件系统的实现——从磁盘布局到路径解析，从inode到文件描述符。但操作系统中的I/O不仅包括<strong>持久的文件存储</strong>，还包括<strong>进程间数据流动</strong>的机制。本章要讲的两个主题——<strong>管道</strong>和<strong>exec</strong>——正好构成了Unix哲学中"组合能力"的核心。</p>
+
+        <p>管道让不同进程的输出和输入可以连接起来，就像搭积木一样。exec让一个程序可以被另一个程序"取代"——加载新的可执行文件到当前进程并开始执行。两者结合起来，就实现了shell中最基本也是最强大的功能：<code>ls -l | grep "key" | wc -l</code>。</p>
+
+        <h2>引言——Unix哲学的粘合剂</h2>
+
+        <p>Unix的设计哲学有一条核心原则：<strong>"Write programs that do one thing and do it well. Write programs to work together."</strong>（编写做一件事并且做好的程序。编写能协作的程序。）</p>
+
+        <p>但这意味着什么？如果每个程序都独立运行，它们怎么"协作"？答案就是<strong>管道</strong>。管道提供了一种单向的数据流通道——一个进程的<code>stdout</code>连接到另一个进程的<code>stdin</code>，数据从一端流入，从另一端流出。这种机制让<code>ls</code>（只负责列出文件名）的输出可以流入<code>grep</code>（只负责文本过滤），再流入<code>wc</code>（只负责计数）。</p>
+
+        <p>而exec则是"变身"的魔法。一个进程可以通过 <code>execve()</code> 系统调用，将自己正在运行的程序替换成一个全新的程序。进程的PID不变，但代码、数据、堆栈全部被替换——就好像这个进程"投胎转世"了一样。</p>
+
+        <p>把管道和exec结合起来，你就理解了shell的本质：Shell就是一个"进程编排器"——它用 <code>fork()</code> 创建新进程，用 <code>exec()</code> 加载要执行的程序，用 <code>pipe()</code> 连接它们的I/O。Linux 0.11中这些机制的实现虽然简单，但已经奠定了Unix操作系统的全部基础。</p>
+
+        <h2>管道实现原理</h2>
+
+        <p>管道（pipe）是Unix中最古老的进程间通信（IPC）机制。在Linux 0.11中，它的实现非常简单而优雅。</p>
+
+        <p>当用户调用 <code>pipe(int fd[2])</code> 时，内核执行以下操作：</p>
+
+        <pre><code>// kernel/pipe.c — sys_pipe() 简化逻辑
+
+        int sys_pipe(unsigned long * fildes)
+        {
+            struct inode * inode;
+            struct file * f[2];
+            int fd[2];
+
+            // 1. 从file_table[]中分配两个空闲文件结构
+            // （一个用于读端，一个用于写端）
+            f[0] = get_empty_file();
+            f[1] = get_empty_file();
+
+            // 2. 分配一个inode（用于管道）
+            // 管道inode是特殊的—它没有磁盘上的数据块
+            // i_zone[] 数组被借用为其他用途
+            inode = get_pipe_inode();
+
+            // 3. 分配一个物理页（4KB）作为环形缓冲区
+            inode-&gt;i_size = get_free_page();  // 分配一页物理内存
+
+            // 4. 设置文件操作
+            f[0]-&gt;f_inode = inode;   // 读端
+            f[0]-&gt;f_mode = 1;        // 读模式
+            f[1]-&gt;f_inode = inode;   // 写端
+            f[1]-&gt;f_mode = 2;        // 写模式
+
+            // 5. 分配两个文件描述符
+            fd[0] = find_empty_filp(current, f[0]);
+            fd[1] = find_empty_filp(current, f[1]);
+
+            // 6. 将fd数组写回用户空间
+            put_fs_long(fd[0], &amp;fildes[0]);
+            put_fs_long(fd[1], &amp;fildes[1]);
+
+            return 0;
+        }</code></pre>
+
+        <p>管道inode与普通文件inode有两个关键区别：</p>
+
+        <ul>
+            <li>它的 <code>i_size</code> 字段被复用为<strong>指向页面地址的指针</strong>（而不是文件大小），因为管道的数据缓冲区是从主内存池中分配的一个物理页（4096字节）。</li>
+            <li>它的 type 字段是 <code>S_IFIFO</code>（管道类型），而不是 <code>S_IFREG</code>（普通文件）或 <code>S_IFDIR</code>（目录）。</li>
+        </ul>
+
+        <p>所以，管道本质上是一个<strong>内存中的环形缓冲区</strong>，由一对文件描述符引用。两个文件描述符指向同一个inode，但一个被配置为只读（读端），另一个被配置为只写（写端）。</p>
+
+        <h2>pipe.c源码分析——read_pipe()与write_pipe()</h2>
+
+        <p>管道的核心逻辑在 <code>read_pipe()</code> 和 <code>write_pipe()</code> 这两个函数中。</p>
+
+        <h3>read_pipe()——从管道中读取数据</h3>
+
+        <pre><code>int read_pipe(struct inode * inode, char * buf, int count)
+        {
+            int chars, size, read = 0;
+            struct page * page;
+
+            // 1. 获取管道缓冲区页面
+            page = (struct page *) inode-&gt;i_size;
+
+            // 2. 循环读取，直到读完请求的字节数或管道关闭
+            while (count > 0) {
+                // 2a. 检查管道中是否有数据
+                while (!(size = PIPE_SIZE(*inode))) {
+                    // 管道空 + 写端已关闭 → 返回0（EOF）
+                    if (inode-&gt;i_count == 1)
+                        return read;
+                    // 否则 → 睡眠等待写者写入数据
+                    sleep_on(&amp;inode-&gt;i_wait);
+                }
+
+                // 2b. 计算本次可读取的字节数
+                chars = PAGE_SIZE - PIPE_TAIL(*inode);
+                if (chars > count) chars = count;
+                if (chars > size)  chars = size;
+
+                // 2c. 从环形缓冲区复制数据到用户空间
+                copy_to_user(buf,
+                    page + PIPE_TAIL(*inode), chars);
+
+                // 2d. 更新读指针
+                PIPE_TAIL(*inode) += chars;
+                if (PIPE_TAIL(*inode) == PAGE_SIZE)
+                    PIPE_TAIL(*inode) = 0;
+
+                // 2e. 更新计数器
+                read += chars;
+                buf += chars;
+                count -= chars;
+
+                // 2f. 唤醒等待写入空间的写者
+                wake_up(&amp;inode-&gt;i_wait);
+            }
+
+            return read;
+        }</code></pre>
+
+        <h3>write_pipe()——向管道中写入数据</h3>
+
+        <pre><code>int write_pipe(struct inode * inode, char * buf, int count)
+        {
+            int chars, size, written = 0;
+            struct page * page;
+
+            page = (struct page *) inode-&gt;i_size;
+
+            while (count > 0) {
+                // 1. 检查管道中是否有空余空间
+                while (!(size = (PAGE_SIZE - 1) - PIPE_SIZE(*inode))) {
+                    // 管道满 + 读端已关闭 → 写者收不到SIGPIPE也要坚持...
+                    if (inode-&gt;i_count == 1)
+                        return written;
+                    // 管道满 → 睡眠等待读者读取数据腾出空间
+                    sleep_on(&amp;inode-&gt;i_wait);
+                }
+
+                // 2. 计算本次可写入的字节数
+                chars = PAGE_SIZE - PIPE_HEAD(*inode);
+                if (chars > count) chars = count;
+                if (chars > size)  chars = size;
+
+                // 3. 从用户空间复制数据到环形缓冲区
+                copy_from_user(page + PIPE_HEAD(*inode), buf, chars);
+
+                // 4. 更新写指针
+                PIPE_HEAD(*inode) += chars;
+                if (PIPE_HEAD(*inode) == PAGE_SIZE)
+                    PIPE_HEAD(*inode) = 0;
+
+                written += chars;
+                buf += chars;
+                count -= chars;
+
+                // 5. 唤醒等待数据的读者
+                wake_up(&amp;inode-&gt;i_wait);
+            }
+
+            return written;
+        }</code></pre>
+
+        <p>这两个函数的核心机制可以总结为：<strong>读者等数据，写者等空间</strong>。它们通过 <code>sleep_on()</code> 和 <code>wake_up()</code> 在管道这个"队列"上同步。环形缓冲区维护了两个指针：<code>head</code>（写指针）和 <code>tail</code>（读指针），当 head == tail 时管道为空，当 (head+1) == tail mod PAGE_SIZE 时管道为满。</p>
+
+        <table>
+            <thead>
+                <tr><th>场景</th><th>读者行为</th><th>写者行为</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>管道空</td><td>睡眠等待（sleep_on）</td><td>继续写入，然后唤醒读者</td></tr>
+                <tr><td>管道满</td><td>读取数据，然后唤醒写者</td><td>睡眠等待（sleep_on）</td></tr>
+                <tr><td>写端已关闭</td><td>读完剩余数据后返回0（EOF）</td><td>—</td></tr>
+                <tr><td>读端已关闭</td><td>—</td><td>收到SIGPIPE信号（或返回-EPIPE）</td></tr>
+            </tbody>
+        </table>
+
+        <h2>管道的原子性</h2>
+
+        <p>管道在多写者场景中有一个重要的设计约束——<strong>写入原子性</strong>。POSIX标准规定，当写入的数据量小于 <code>PIPE_BUF</code> 时，写入操作必须是原子的——即不会与其他写者的写入交错。</p>
+
+        <p>在Linux 0.11中，<code>PIPE_BUF</code> 的大小就是 <code>PAGE_SIZE</code>（4096字节）。这意味着如果两个进程同时向同一个管道写入不超过4096字节的数据，内核保证它们的写入不会相互交错。如果写入超过4096字节，则不能保证原子性——可能多个写者的数据在环形缓冲区中交错存放。</p>
+
+        <div class="tip">
+            <strong>为什么PIPE_BUF很重要？</strong>考虑一个场景：两个进程都向管道写入一行消息 "Hello World\n"，每条消息12字节。如果写入不是原子的，读者可能读到 "Hello He" 这样被截断的片段。由于PIPE_BUF保证，12 &lt; 4096，所以这两条消息在读者端一定是一条一条完整出现的。很多Unix工具依赖这个保证来做简单的消息传递。
+        </div>
+
+        <h2>execve()完整流程</h2>
+
+        <p>管道提供了进程间数据流动的通道，但要让多个程序协作，还需要另一个关键机制——<strong>exec</strong>。我们来看 <code>execve()</code> 在Linux 0.11中的完整流程。</p>
+
+        <p>Linux 0.11的可执行文件是<strong>MINIX a.out 格式</strong>，一种早期的Unix可执行文件格式。它的头部结构如下：</p>
+
+        <pre><code>// include/a.out.h — a.out 可执行文件头部
+
+        struct exec {
+            unsigned long a_magic;   /* 魔数 (0x64130101 = OMAGIC) */
+            unsigned long a_text;    /* 代码段(text)长度，字节 */
+            unsigned long a_data;    /* 数据段(data)长度，字节 */
+            unsigned long a_bss;     /* BSS段长度，字节 */
+            unsigned long a_syms;    /* 符号表长度，字节 */
+            unsigned long a_entry;   /* 程序入口点地址 */
+            unsigned long a_trsize;  /* text重定位表长度 */
+            unsigned long a_drsize;  /* data重定位表长度 */
+        };</code></pre>
+
+        <p><code>sys_execve()</code> 的完整执行流程：</p>
+
+        <pre><code>// fs/exec.c — sys_execve() 核心流程
+
+        步骤1：打开可执行文件
+        → open_namei(filename) 解析路径
+        → 获取文件的 inode
+        → 检查权限（可执行位）
+
+        步骤2：读取文件头部
+        → bread() 读取文件第0块
+        → 将数据强制转换为 struct exec *
+
+        步骤3：验证魔数
+        → if (a_magic != OMAGIC &amp;&amp; a_magic != ZMAGIC)
+              return -ENOEXEC;
+        → OMAGIC (0x64130101): 纯二进制，无需加载时重定位
+        → ZMAGIC (0x64130102): 按页对齐，可直接加载
+
+        步骤4：释放旧的内存空间
+        → free_page_tables() 释放当前进程的所有页表
+        → 进程的线性地址空间被清空
+
+        步骤5：为新程序分配内存
+        → 根据 a_text + a_data + a_bss 计算需要的总内存
+        → 从主内存分配物理页，建立页表映射
+
+        步骤6：加载代码和数据段
+        → 从可执行文件中读取 text 段到 0x00000000 起始处
+        → 从可执行文件中读取 data 段紧随其后
+        → 将 bss 段清零（未初始化数据区）
+
+        步骤7：设置栈
+        → 分配一页物理内存作为栈
+        → 栈顶设置在 0xFFFFF000（线性地址的顶端）
+        → 将命令行参数 (argv) 和环境变量 (envp) 复制到栈上
+        → 在栈顶设置好参数数组的指针
+
+        步骤8：修改进程控制块
+        → 更新 current-&gt;executable（记录可执行文件inode）
+        → 更新 current-&gt;signal（清空信号处理函数，全部重置为默认）
+
+        步骤9：返回用户态
+        → 修改栈上的返回地址为新程序的入口点
+        → 执行 "iret" 指令返回到用户态
+        → CPU 开始执行新程序的入口代码（_start）
+        → C运行时最终调用 main(argc, argv)</code></pre>
+
+        <p>这个流程中最关键的步骤是<strong>步骤4</strong>——释放旧内存。注意：exec执行成功时，旧程序的所有代码和数据都会被销毁。如果 exec 失败（比如文件不存在或没有执行权限），旧程序的内存不受影响，会继续执行下去。这就是为什么在shell中执行一个不存在的命令时，你会得到 <code>"command not found"</code> 而不是整个shell崩溃。</p>
+
+        <div class="highlight">
+            <strong>argc/argv是如何传递的？</strong>在设置栈时，内核将参数和环境变量按一定布局压入用户栈：首先是参数个数 argc，然后是各参数的指针数组 argv[]，接着是环境变量指针数组 envp[]，最后是实际的参数字符串和环境变量字符串。entry point（_start）从栈上取出这些值，然后调用 main(argc, argv)。这就是为什么我们说"main函数是程序员的入口，但不是真正的程序入口"——真正的入口在C运行时库的_start函数中。
+        </div>
+
+        <h2>shell管道链——以 "ls | grep foo | wc -l" 为例</h2>
+
+        <p>现在我们把所有知识整合起来，看看shell是如何执行一条典型的管道命令的。</p>
+
+        <pre><code>Shell内部逻辑解析 "ls | grep foo | wc -l"：
+
+        ┌──────┐   管道1   ┌────────┐   管道2   ┌───────┐
+        │  ls  │────────→│ grep foo │────────→│ wc -l │
+        └──────┘         └────────┘         └───────┘
+        fd: 1(stdout)     fd: 0(stdin)       fd: 0(stdin)
+                          fd: 1(stdout)      fd: 1(stdout)
+
+        Shell的实际操作时序:
+
+        1. 创建管道1: pipe(pipe1_fd)   → 得到 fd[3]=读端, fd[4]=写端
+        2. 创建管道2: pipe(pipe2_fd)   → 得到 fd[5]=读端, fd[6]=写端
+
+        3. fork() 进程1 (ls):
+           子进程1:
+             close(1)          → 关闭标准输出
+             dup2(4, 1)        → 将管道1写端复制到 stdout
+             close(3),close(4),close(5),close(6)  → 关闭无用的fd
+             exec("ls")        → ls 的输出写入管道1
+
+        4. fork() 进程2 (grep foo):
+           子进程2:
+             close(0)          → 关闭标准输入
+             dup2(3, 0)        → 将管道1读端复制到 stdin
+             close(1)          → 关闭标准输出
+             dup2(6, 1)        → 将管道2写端复制到 stdout
+             close(3),close(4),close(5),close(6)  → 关闭无用的fd
+             exec("grep", "foo")  → grep从管道1读，输出到管道2
+
+        5. fork() 进程3 (wc -l):
+           子进程3:
+             close(0)          → 关闭标准输入
+             dup2(5, 0)        → 将管道2读端复制到 stdin
+             close(3),close(4),close(5),close(6)  → 关闭无用的fd
+             exec("wc", "-l")  → wc从管道2读
+
+        6. 父进程(shell):
+           close(3),close(4),close(5),close(6)  → 关闭所有管道fd
+           wait() 等待所有子进程结束
+           → 子进程全部结束后，shell打印提示符，等待下一条命令</code></pre>
+
+        <p>这个例子的精妙之处在于：<code>dup2()</code> 系统调用让文件描述符可以"重定向"——我们不需要修改 <code>ls</code> 的代码来让它输出到管道，只需要在 <code>fork()</code> 后、<code>exec()</code> 前，把它的 <code>stdout</code>（文件描述符1）通过 <code>dup2()</code> 指向管道的写端即可。这就是"组合"的威力——每个程序只做自己的事，shell 负责编排它们之间的数据流。</p>
+
+        <h2>踩坑故事——管道死锁</h2>
+
+        <p>管道死锁是初学者在使用多进程编程时最常遇到的bug之一。让我讲一个典型的案例。</p>
+
+        <p>有一次，一个同事写了一个"双向管道"通信的程序：一个父进程和一个子进程通过两个管道双向交换数据。一个管道 A→B，一个管道 B→A。大致的逻辑是这样的：</p>
+
+        <pre><code>父进程:
+            write(pipe_A_to_B, "hello", 5);  // 发送给子进程
+            read(pipe_B_to_A, buf, 5);       // 等待子进程回复
+
+        子进程:
+            read(pipe_A_to_B, buf, 5);       // 等待父进程发送
+            write(pipe_B_to_A, "world", 5);  // 回复父进程</code></pre>
+
+        <p>看起来很简单对吗？但程序运行起来后，<strong>两个进程都永远阻塞了</strong>。为什么？</p>
+
+        <p>罪魁祸首是——<strong>管道写端在不需要的进程中未关闭</strong>。管道有一个重要的特性：在写端的所有文件描述符都关闭之前，读端读取数据时如果管道为空，会阻塞等待（而不是返回EOF）。在上述程序中：</p>
+
+        <p>父子进程都拥有两个管道的全部四个文件描述符。子进程中的 <code>pipe_A_to_B</code> 写端没有关闭，父进程中的 <code>pipe_A_to_B</code> 写端也没有关闭。当父进程写入"hello"后尝试从 <code>pipe_B_to_A</code> 读取时——子进程确实在"world"方向上写入了回复，但你可能已经想到了：问题在于字节数的不匹配，或者如果数据更大、管道满了，就会产生经典的"互相等待"死锁。</p>
+
+        <p>更隐蔽的死锁形式是：<strong>父子进程都变成了写者+读者。</strong>如果管道缓冲区满了（4096字节），写者阻塞等待读者读取；但读者也在等待写者先写入数据才能读取——结果双方都阻塞，形成死锁。</p>
+
+        <div class="warning">
+            <strong>管道的黄金法则</strong>：在<code>fork()</code>之后，每个进程应该立即<code>close()</code>掉自己不需要的管道端。这是避免管道死锁的最重要的编程规范。具体来说：(1) 读端进程关闭自己的写端；(2) 写端进程关闭自己的读端；(3) 父进程关闭所有管道端（因为子进程会继承它们）。这条法则不仅适用于Linux 0.11，也适用于任何Unix/Linux系统。忽略它的后果就是——你的程序在管道的wait队列上永久睡眠。
+        </div>
+
+        <p>解决方式很简单：在子进程中不需要的管道端一定要 close 掉。比如子进程如果只需要从管道读数据，就应该关掉自己的写端。如果只需要写数据，就应该关掉自己的读端。保证每个管道只有"一个读者+一个写者"在活动，死锁的风险就降到了最低。</p>
+
+        <p>至此，我们完成了文件系统和I/O部分的核心内容。缓冲区管理、MINIX文件系统（上下）、管道与exec——这四个章节构成了Part 3的完整图景。下一章开始，我们将进入<strong>设备驱动</strong>的世界，看看内核是如何管理键盘、硬盘、软盘、串口等各种硬件的。</p>
+
+        <p><strong>下一章预告：块设备驱动(上)</strong> —— 从设备号到请求队列，从ll_rw_block()到块设备驱动的工作机制。</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

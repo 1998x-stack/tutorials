@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 信号机制</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html" class="active">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们学习了进程的完整生命周期——从fork到exit。但在进程的"一生"中，它还需要与其他进程进行<strong>异步通信</strong>。比如你在终端按下了Ctrl+C，你希望前台进程立即退出。这个"通知"怎么送过去？</p>
+
+        <p>答案是<strong>信号（Signal）</strong>——UNIX世界中最古老、最基础的异步通信机制。信号本质上是一个<strong>软件中断</strong>：发送信号就是在目标进程的<code>signal</code>位图中设置一个bit；目标进程在从内核态返回用户态时检查这个位图，发现有信号就处理。</p>
+
+        <p>Linux 0.11支持22种信号。虽然数量不及现代Linux的60多种，但信号处理的核心机制已经完全成型。</p>
+
+        <h2>引言——信号是UNIX的软件中断</h2>
+
+        <p>信号的设计思想与硬件中断非常相似：</p>
+
+        <table>
+            <thead>
+                <tr><th>硬件中断</th><th>信号（软件中断）</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>CPU收到INTR引脚的电平变化</td><td>进程收到内核或其他进程发送的信号</td></tr>
+                <tr><td>CPU在当前指令完成后响应</td><td>进程在从内核态返回用户态时检查</td></tr>
+                <tr><td>通过IDT找到中断处理函数</td><td>通过signal结构找到处理函数</td></tr>
+                <tr><td>中断门/陷阱门决定是否关中断</td><td>阻塞位图决定是否屏蔽信号</td></tr>
+                <tr><td>iret返回现场</td><td>sigreturn返回现场</td></tr>
+            </tbody>
+        </table>
+
+        <p>这种相似性不是巧合——UNIX的设计者Ken Thompson在设计信号机制时，受硬件中断的启发很大。信号就是"软件层面的中断"。</p>
+
+        <p>但信号有一个重要的特殊性：<strong>信号处理函数在用户态执行</strong>。这意味着当内核检测到进程有信号要处理时，它不能简单地在内核态调用处理函数——它需要构造一个"虚假的用户态返回帧"，让进程返回到用户态时执行的是信号处理函数，而不是原来的代码。</p>
+
+        <h2>信号数据结构</h2>
+
+        <p>与信号相关的数据结构在task_struct中：</p>
+
+        <pre><code>/* include/linux/sched.h — 进程的signal相关字段 */
+
+struct task_struct {
+    /* ... 其他字段 ... */
+    unsigned long signal;       /* 收到的信号位图（32位，每位对应一种信号） */
+    unsigned long blocked;      /* 屏蔽的信号位图（阻塞mask） */
+    struct sigaction sigaction[32]; /* 信号处理函数表 */
+    int exit_code;              /* 进程退出码（exit/signal共用） */
+    /* ... 其他字段 ... */
+};
+
+/* include/linux/signal.h — sigaction结构 */
+struct sigaction {
+    void (*sa_handler)(int);    /* 信号处理函数地址 */
+    sigset_t sa_mask;           /* 执行处理函数时额外屏蔽的信号 */
+    int sa_flags;               /* 标志位 */
+    void (*sa_restorer)(void);  /* 恢复函数地址（内核内部使用） */
+};</code></pre>
+
+        <p>信号位图<code>signal</code>是一个32位的无符号整数。bit 0对应SIGHUP（挂起），bit 1对应SIGINT（中断/Ctrl+C），以此类推。这种位图设计非常高效——设置信号就是设置一个bit，检查信号就是读一个整数。</p>
+
+        <p><code>blocked</code>也是位图，用来屏蔽某些信号。如果信号X在blocked中被置位，那么即使进程收到了信号X，它也不会被递送，直到blocked中X的位被清除。</p>
+
+        <p><code>sigaction[32]</code>数组定义了每种信号的处理方式，每个元素可以有三种取值：</p>
+        <ul>
+            <li><strong>SIG_DFL（0）</strong>：默认处理（通常是终止进程或忽略）</li>
+            <li><strong>SIG_IGN（1）</strong>：忽略该信号</li>
+            <li><strong>其他地址</strong>：用户自定义的信号处理函数</li>
+        </ul>
+
+        <h2>信号发送</h2>
+
+        <p>信号通过<code>sys_kill()</code>系统调用发送。kill这个名字很"暴力"，但它的实际含义是"发送信号"——可以是SIGKILL（杀死进程），也可以是SIGUSR1（用户自定义信号）。</p>
+
+        <pre><code>/* kernel/exit.c — sys_kill 系统调用 */
+
+int sys_kill(int pid, int sig)
+{
+    struct task_struct **p;
+    int err = -ESRCH;
+
+    if (sig &lt; 0 || sig &gt; 32)  /* 信号号必须在1-32范围内 */
+        return -EINVAL;
+
+    if (pid &gt; 0) {
+        /* 向指定PID发送 */
+        for (p = &amp;LAST_TASK; p &gt; &amp;FIRST_TASK; --p)
+            if (*p &amp;&amp; (*p)-&gt;pid == pid) {
+                send_sig(sig, *p, 1);
+                return 0;
+            }
+    } else if (pid == 0) {
+        /* 向同组的所有进程发送 */
+        for (p = &amp;LAST_TASK; p &gt; &amp;FIRST_TASK; --p)
+            if (*p &amp;&amp; (*p)-&gt;pgrp == current-&gt;pgrp)
+                send_sig(sig, *p, 1);
+    }
+    /* ... 其他pid值（-1向全体发送，pid&lt;-1向进程组发送）... */
+    return err;
+}
+
+/* 实际的信号发送函数 */
+int send_sig(int sig, struct task_struct *p, int priv)
+{
+    /* 权限检查 */
+    if (!priv &amp;&amp; (current-&gt;uid != p-&gt;uid &amp;&amp; current-&gt;uid != 0))
+        return -EPERM;
+
+    if (!sig)  /* 信号0只是检查权限，不发送 */
+        return 0;
+
+    /* 在目标进程的signal位图中设置对应位 */
+    p-&gt;signal |= (1 &lt;&lt; (sig - 1));
+
+    /* 如果目标进程处于可中断睡眠状态，唤醒它 */
+    if (p-&gt;state == TASK_INTERRUPTIBLE)
+        p-&gt;state = TASK_RUNNING;
+
+    return 0;
+}</code></pre>
+
+        <p>这段代码的核心逻辑非常简洁：</p>
+        <ol>
+            <li><strong>设置位图</strong>：<code>p-&gt;signal |= (1 &lt;&lt; (sig - 1))</code>——在目标进程的signal位图中设置对应的bit</li>
+            <li><strong>唤醒进程</strong>：如果目标进程处于TASK_INTERRUPTIBLE状态，将其改为TASK_RUNNING，这样schedule()会考虑调度它</li>
+        </ol>
+
+        <p>注意send_sig()并不实际"执行"信号处理——它只是设置了位图。真正的信号处理要等到目标进程下次从内核态返回用户态时才进行。</p>
+
+        <div class="highlight">
+            <strong>信号零的特例</strong>：信号0在POSIX中有一个特殊用途——用于检测进程是否存在而不实际发送信号。如果你调用kill(pid, 0)，内核只做权限检查，不发送任何信号。如果进程存在且你有权发送，返回0；否则返回-ESRCH。这是很多监控程序检测进程是否存活的常用手段。
+        </div>
+
+        <h2>信号递送</h2>
+
+        <p>信号递送发生在<strong>进程从内核态返回用户态的时刻</strong>。这个时机非常关键：当进程因为中断、异常或系统调用进入内核态，完成处理准备返回用户态时，内核会检查是否有信号要递送。</p>
+
+        <p>在Linux 0.11中，这个检查发生在<code>ret_from_sys_call</code>和<code>signal_return</code>中。核心函数是<code>do_signal()</code>：</p>
+
+        <pre><code>! kernel/system_call.s — 从系统调用返回时检查信号
+
+ret_from_sys_call:
+    movl _current, %eax      ! 当前进程
+    cmpl $0, _signal(%eax)   ! 检查signal位图
+    je  no_signal            ! 没有信号，直接返回
+    call _do_signal          ! 有信号，调用do_signal处理
+no_signal:
+    RESTORE_ALL              ! 恢复寄存器
+    iret                     ! 返回用户态</code></pre>
+
+        <p><code>do_signal()</code>函数在<code>kernel/signal.c</code>中：</p>
+
+        <pre><code>/* kernel/signal.c — 信号处理核心 */
+
+void do_signal(long *eip, long *esp, long *eflags)
+{
+    long sa_handler;
+    unsigned long signr;
+
+    /* 1. 遍历信号位图，找到第一个未阻塞的信号 */
+    /* 从31到0扫描（高位优先，但实际无所谓顺序） */
+    for (signr = 1; signr &lt; 32; signr++) {
+        if (!(current-&gt;signal &amp; (1 &lt;&lt; (signr - 1))))
+            continue;          /* 这个信号没有收到 */
+        if (current-&gt;blocked &amp; (1 &lt;&lt; (signr - 1)))
+            continue;          /* 这个信号被阻塞了 */
+
+        /* 找到了一个要处理的信号 */
+        current-&gt;signal &amp;= ~(1 &lt;&lt; (signr - 1));  /* 清除位图中对应的位 */
+
+        /* 2. 获取该信号的处理方式 */
+        sa_handler = (long) current-&gt;sigaction[signr].sa_handler;
+
+        if (sa_handler == 1)   /* SIG_IGN */
+            continue;           /* 忽略，继续检查下一个 */
+
+        if (sa_handler == 0) { /* SIG_DFL */
+            /* 默认处理 */
+            switch (signr) {
+            case SIGKILL:
+            case SIGINT:
+            case SIGSEGV:
+            case SIGTERM:
+                do_exit(signr + 128);  /* 终止进程 */
+                /* 不返回 */
+            case SIGCHLD:
+                do_exit(0);     /* 在0.11中SIGCHLD默认导致退出 */
+                /* ... 实际上0.11的SIGCHLD实现不完全 ... */
+            case SIGSTOP:
+                current-&gt;state = TASK_STOPPED;
+                schedule();
+            }
+        } else {
+            /* 3. 自定义处理——设置用户态信号处理帧 */
+            setup_sigframe(eip, esp, eflags, signr, sa_handler);
+            return;  /* 处理完一个信号就返回（避免栈帧重叠） */
+        }
+    }
+}</code></pre>
+
+        <h2>信号处理机制</h2>
+
+        <p>最难理解的部分是<strong>自定义信号处理</strong>。当信号的处理方式不是SIG_IGN也不是SIG_DFL时，内核需要在用户态执行处理函数。但内核不能直接调用用户态的函数——它只能通过"制造一个返回用户态的假象"来让处理函数执行。</p>
+
+        <p>具体做法是：</p>
+
+        <pre><code>/* kernel/signal.c — 设置信号处理栈帧 */
+
+void setup_sigframe(long *eip, long *esp, long *eflags,
+                    unsigned long signr, long sa_handler)
+{
+    struct sigframe *frame;
+
+    /* 1. 在用户栈上分配一个 sigframe 结构 */
+    /*    这个结构包含了信号处理函数执行完后返回恢复现场所需的信息 */
+    frame = (struct sigframe *) (*esp - sizeof(struct sigframe));
+
+    /* 2. 保存当前用户态执行上下文到 sigframe 中 */
+    /*    这样信号处理函数执行完后可以恢复 */
+    frame-&gt;ret_eip = *eip;     /* 原来用户代码的下一条指令 */
+    frame-&gt;ret_esp = *esp;     /* 原来的用户栈指针 */
+    frame-&gt;ret_eflags = *eflags;  /* 原来的EFLAGS */
+    frame-&gt;signum = signr;      /* 信号编号 */
+
+    /* 3. 设置用户栈中的返回地址为 sigreturn 的包装函数 */
+    frame-&gt;ret_addr = &amp;__sigreturn;
+
+    /* 4. 修改栈指针和指令指针 */
+    *esp = (unsigned long) frame;   /* 用户栈指针指向sigframe */
+    *eip = sa_handler;              /* 信号处理函数地址——返回用户态时执行这里 */
+
+    /* 5. 现在的栈布局：
+     *    用户栈顶 ← esp
+     *       sigframe结构
+     *          ret_addr = __sigreturn  ← 信号处理函数返回时跳到这里
+     *          ret_eip, ret_esp, ret_eflags
+     *       ...
+     *    返回用户态后从 sa_handler 开始执行
+     */
+}</code></pre>
+
+        <p>这个过程可以用一张图来表示：</p>
+
+        <pre><code>信号处理前后的用户栈变化：
+
+  处理前用户栈：                  处理后用户栈：
+  ┌──────────────┐               ┌──────────────┐
+  │  用户数据     │               │  用户数据     │
+  ├──────────────┤               ├──────────────┤
+  │              │               │ ret_eip      │ ← 原EIP
+  │              │               │ ret_esp      │ ← 原ESP
+  │              │               │ ret_eflags   │ ← 原EFLAGS
+  │              │               │ signum       │ ← 信号编号
+  │              │               │ __sigreturn  │ ← 信号函数返回地址
+  │              │               ├──────────────┤
+  │              │               │ 有效栈空间    │ ← ESP
+  └──────────────┘               └──────────────┘
+
+  当信号处理函数执行到return时：
+    1. 跳转到 __sigreturn（它包装了 int 0x80 + NR_sigreturn）
+    2. 内核中的 sys_sigreturn() 恢复 ret_eip, ret_esp, ret_eflags
+    3. 用户程序从原来被中断的位置继续执行</code></pre>
+
+        <p>这个过程优雅地实现了"临时中断用户程序 -> 执行信号处理函数 -> 恢复用户程序继续执行"的完整流程，而且完全不需要用户态代码感知信号处理的存在。</p>
+
+        <div class="tip">
+            <strong>信号处理的特点</strong>：信号处理函数在用户态执行，优先级低于内核态操作但高于普通的用户代码。因为它相当于"插队"在用户程序的正常执行流中。如果信号处理函数调用了不可重入的函数（如malloc），可能会破坏堆，导致难以调试的Bug——这是信号处理中一个永恒的话题。
+        </div>
+
+        <h2>常见信号</h2>
+
+        <p>下面是Linux 0.11中支持的22种信号中最常用的部分：</p>
+
+        <table>
+            <thead>
+                <tr><th>编号</th><th>名称</th><th>默认动作</th><th>典型触发场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>1</td><td>SIGHUP</td><td>终止</td><td>终端挂起或控制进程死亡</td></tr>
+                <tr><td>2</td><td>SIGINT</td><td>终止</td><td>Ctrl+C 键盘中断</td></tr>
+                <tr><td>3</td><td>SIGQUIT</td><td>终止+转储</td><td>Ctrl+\ 退出信号</td></tr>
+                <tr><td>9</td><td>SIGKILL</td><td>终止</td><td>强制杀死进程（不可忽略/阻塞）</td></tr>
+                <tr><td>11</td><td>SIGSEGV</td><td>终止+转储</td><td>段错误——访问非法内存地址</td></tr>
+                <tr><td>13</td><td>SIGPIPE</td><td>终止</td><td>向已关闭的管道写入数据</td></tr>
+                <tr><td>14</td><td>SIGALRM</td><td>终止</td><td>alarm()定时器超时</td></tr>
+                <tr><td>15</td><td>SIGTERM</td><td>终止</td><td>kill命令默认发送的信号</td></tr>
+                <tr><td>17</td><td>SIGCHLD</td><td>忽略</td><td>子进程退出时发送给父进程</td></tr>
+                <tr><td>18</td><td>SIGCONT</td><td>继续</td><td>恢复被SIGSTOP暂停的进程</td></tr>
+                <tr><td>19</td><td>SIGSTOP</td><td>暂停</td><td>暂停进程（不可忽略/阻塞）</td></tr>
+            </tbody>
+        </table>
+
+        <p>注意SIGKILL(9)和SIGSTOP(19)这两个"终极"信号——它们不能被阻塞、不能被忽略、也不能被自定义处理。这是操作系统保留的"最后手段"，确保管理员总能杀死失控的进程。</p>
+
+        <h2>踩坑故事——sigaction与signal的兼容性区别</h2>
+
+        <p>这是一个让无数UNIX程序员头疼过的兼容性问题。故事从两个看似等价的API开始：</p>
+
+        <pre><code>/* 方式一：signal() 函数 */
+signal(SIGINT, my_handler);
+
+/* 方式二：sigaction() 函数 */
+struct sigaction sa;
+sa.sa_handler = my_handler;
+sigemptyset(&amp;sa.sa_mask);
+sa.sa_flags = 0;
+sigaction(SIGINT, &amp;sa, NULL);</code></pre>
+
+        <p>看起来两个API做的事情是一样的——设置SIGINT的处理函数为my_handler。但<strong>在不同的UNIX系统上，signal()的行为是不一致的</strong>。</p>
+
+        <p>问题的根源在于UNIX早期的<code>signal()</code>系统调用在不同实现中有两种语义：</p>
+
+        <ul>
+            <li><strong>System V语义</strong>：信号处理函数执行完后，该信号的处理方式<strong>自动重置为SIG_DFL</strong>。这意味着如果你的信号处理函数执行期间又收到了同样的信号，系统将按默认方式处理（通常是终止进程）。</li>
+            <li><strong>BSD语义</strong>：信号处理函数执行期间，该信号被自动阻塞（加入blocked位图），处理完后再恢复。函数不会重置为SIG_DFL。</li>
+        </ul>
+
+        <p>Linux 0.11实现了BSD风格的signal()——处理函数执行期间自动阻塞信号，不会重置。但其他UNIX系统（特别是System V变体）实现了不同的行为。</p>
+
+        <pre><code>/* 一个典型的可移植性问题 */
+void handler(int sig) {
+    write(1, "Got signal!\n", 12);
+    /* 为什么这个函数可能会"递归"？ */
+}
+
+int main() {
+    signal(SIGINT, handler);
+
+    /* 如果在handler执行期间又收到了SIGINT会怎么样？
+     *
+     * System V: handler被重置为SIG_DFL，第二次会直接终止进程
+     * BSD:      handler继续有效，信号被自动阻塞，不会递归
+     * Linux 0.11: 同BSD
+     *
+     * 这个行为差异坑了无数人！
+     */
+}</code></pre>
+
+        <p>这就是POSIX标准后来定义了<code>sigaction()</code>的原因——它明确规定了信号处理的所有行为细节，包括阻塞、重置、flags等，不留给实现任何"自由发挥"的空间。所以如果你在写可移植代码，永远使用<code>sigaction()</code>而不是<code>signal()</code>。</p>
+
+        <div class="warning">
+            <strong>给现代程序员的话</strong>：即使在Linux 0.11上，我也建议使用sigaction而不是signal。不要因为signal()接口更简单就偷懒——这个"偷懒"可能让你在移植到其他UNIX系统（如AIX、HP-UX、Solaris）时遇到诡异的问题。LINUX手册（man 7 signal）中明确建议：<em>"The behavior of signal() varies across UNIX versions, and has also varied historically across different versions of Linux. Avoid its use: use sigaction(2) instead."</em>
+        </div>
+
+        <p>信号机制为你打开了一扇通往异步通信世界的大门。但信号只是一个"通知"——它告诉进程"有事情发生了"。真正的数据交换还在前面的章节等着我们。下一章，我们将进入操作系统最核心也最复杂的内存管理模块——<strong>内存管理（上）</strong>，深入学习物理内存的分配与回收机制。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

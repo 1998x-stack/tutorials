@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 进程生命周期</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html" class="active">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们学习了进程调度——CPU如何在多个进程之间切换。但有一个问题我们还没回答：<strong>进程是怎么来的？又是怎么没的？</strong></p>
+
+        <p>进程的生命周期由四个核心系统调用掌管：<code>fork()</code>、<code>execve()</code>、<code>exit()</code>、<code>wait()</code>。如果把进程比作一个"人"，那么fork就是"出生"（产生一个新实体），exec就是"整容"（更换外貌但继续是这个人），exit就是"死亡"（停止存在），wait就是"送葬"（清理遗物）。</p>
+
+        <p>在Linux 0.11中，这些机制的代码量加起来不到500行——但它们构成了所有多任务操作系统的基石。</p>
+
+        <p>下面这张表快速对比这四大系统调用的定位：</p>
+
+        <table>
+            <thead>
+                <tr><th>系统调用</th><th>调用号</th><th>角色</th><th>返回值</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>fork()</td><td>2</td><td>创建新进程（"出生"）</td><td>父进程返回子进程PID，子进程返回0</td></tr>
+                <tr><td>execve()</td><td>11</td><td>替换当前进程的代码和数据（"整容"）</td><td>成功不返回，失败返回-1</td></tr>
+                <tr><td>exit()</td><td>1</td><td>终止当前进程（"死亡"）</td><td>不返回</td></tr>
+                <tr><td>waitpid()</td><td>7</td><td>等待子进程退出并回收资源（"送葬"）</td><td>返回子进程PID或出错返回-1</td></tr>
+            </tbody>
+        </table>
+
+        <h2>引言——fork、exec、exit、wait</h2>
+
+        <p>在UNIX/Linux系统中，创建一个新进程的方式与其他操作系统（如Windows的CreateProcess）有本质不同。UNIX的做法是：先用<code>fork()</code>复制当前进程，然后用<code>execve()</code>将新进程替换为想要的程序。这种"分步执行"的设计，让UNIX的进程创建变得极其灵活——你可以在fork和exec之间修改新进程的环境，比如重定向文件描述符、设置用户ID等。</p>
+
+        <p>下面这张图展示了进程从创建到消失的完整过程：</p>
+
+        <pre><code>进程生命周期全景图：
+
+    ┌──────────┐
+    │ 父进程   │
+    │ PID=100  │
+    └────┬─────┘
+         │ fork()
+         ▼
+    ┌──────────┐
+    │ 子进程   │  fork()返回后，父子进程几乎是"双胞胎"——
+    │ PID=101  │  共享代码段，拥有独立的堆栈和数据段（写时复制）
+    └────┬─────┘
+         │ execve("/bin/ls", ...)
+         ▼
+    ┌──────────┐
+    │ 新进程   │  execve()把当前进程替换为/bin/ls
+    │ PID=101  │  PID不变，但代码/数据/堆栈全部替换
+    └────┬─────┘
+         │ exit(0)
+         ▼
+    ┌──────────┐
+    │ ZOMBIE   │  进程已死，task_struct未释放
+    │ PID=101  │  等待父进程调用wait()回收
+    └────┬─────┘
+         │ 父进程wait()
+         ▼
+    ┌──────────┐
+    │ 已释放   │  task_struct被释放
+    │ 再见     │  进程彻底消失
+    └──────────┘
+</code></pre>
+
+        <div class="tip">
+            <strong>关键区别</strong>：fork创建的是调用者的"副本"，execve加载的是全新的程序。一个进程可以fork多次，但execve一次之后，它就"变成"了另一个程序。所以Shell的工作方式是：先fork出一个子进程，再在子进程中execve用户输入的命令。
+        </div>
+
+        <h2>fork()源码分析</h2>
+
+        <p>fork()是系统调用号2（<code>sys_fork</code>），它的实现包括两个关键步骤：</p>
+
+        <pre><code>/* kernel/fork.c — fork系统调用 */
+
+int sys_fork(void)
+{
+    struct task_struct *p;
+    int i;
+
+    /* 1. 查找空闲的任务槽 */
+    /* find_empty_process() 遍历task数组，返回第一个空槽的索引 */
+    i = find_empty_process();
+    if (i &lt; 0)
+        return -EAGAIN;  /* 进程数已达上限64 */
+
+    /* 2. 分配并复制进程控制块 */
+    p = (struct task_struct *) get_free_page();  /* 分配一页物理内存 */
+    if (!p)
+        return -EAGAIN;
+
+    *p = *current;  /* 字节对字节复制task_struct！ */
+    p-&gt;pid = get_pid();  /* 分配新PID */
+
+    /* 3. 修改子进程的数据以区别于父进程 */
+    p-&gt;counter = 0;         /* 子进程的初始counter */
+    p-&gt;start_time = jiffies;
+    p-&gt;tss.eax = 0;         /* fork()对子进程返回0 */
+
+    /* 4. 复制页表（不复制物理页——写时复制） */
+    copy_page_tables(p);    /* 复制页目录和页表 */
+
+    /* 5. 复制文件相关数据 */
+    p-&gt;pwd = current-&gt;pwd;  /* 共享当前目录 */
+    if (p-&gt;pwd) p-&gt;pwd-&gt;i_count++;  /* 增加inode引用计数 */
+    /* ... 复制文件描述符表 ... */
+
+    /* 6. 设置TSS和LDT */
+    set_tss_desc(gdt + (i &lt;&lt; 1) + FIRST_TSS_ENTRY, &amp;(p-&gt;tss));
+    set_ldt_desc(gdt + (i &lt;&lt; 1) + FIRST_LDT_ENTRY, &amp;(p-&gt;ldt));
+
+    /* 7. 设置子进程为就绪状态 */
+    p-&gt;state = TASK_RUNNING;  /* 让子进程进入调度队列 */
+    return p-&gt;pid;           /* 对父进程返回子进程PID */
+}</code></pre>
+
+        <p>这段代码有几个值得注意的设计：</p>
+
+        <ul>
+            <li><strong>get_free_page()</strong>：从主内存区分配一页（4KB）来存放新的task_struct。task_struct的大小约为1KB左右，用一整页有点浪费，但简化了页对齐的管理</li>
+            <li><strong>*p = *current</strong>：通过结构体赋值复制整个task_struct，包括所有字段。这意味着子进程"继承"了父进程的大多数属性——打开的文件、信号处理方式、工作目录等</li>
+            <li><strong>tss.eax = 0</strong>：这是fork()"一个调用两次返回"的关键！父进程fork()返回的是子进程的PID（在eax中），而子进程返回的是0。通过直接设置TSS中eax字段的值为0，当子进程被调度执行时，它看到的eax就是0</li>
+            <li><strong>copy_page_tables()</strong>：只复制页表不复制物理页——这是写时复制的基础</li>
+        </ul>
+
+        <h2>写时复制（Copy-on-Write）</h2>
+
+        <p>写时复制是操作系统历史上最重要的性能优化之一。如果不使用写时复制，每次fork()都要完整复制父进程的所有物理页——对于只占用几百KB内存的进程还好，但对于占用几百MB的进程，fork()的代价将大到不可接受。</p>
+
+        <p>写时复制的核心思想是：<strong>fork()时只把物理页标记为"只读"并共享，直到某一方真正写入时才复制物理页</strong>。</p>
+
+        <p>Linux 0.11已经实现了写时复制的基本机制：</p>
+
+        <pre><code>/* kernel/fork.c — copy_page_tables：复制页表 */
+
+int copy_page_tables(struct task_struct *p)
+{
+    int i;
+    unsigned long *from_page_dir, *to_page_dir;
+
+    /* 获取父进程和子进程的页目录基地址 */
+    from_page_dir = (unsigned long *) ((current-&gt;tss.cr3 &amp; 0xFFFFF000));
+    to_page_dir = (unsigned long *) ((p-&gt;tss.cr3 &amp; 0xFFFFF000));
+
+    /* 遍历1024个页目录项 */
+    for (i = 0; i &lt; 1024; i++) {
+        /* 如果页目录项有效，复制页表 */
+        if (*from_page_dir &amp; 1) {  /* Present位为1 */
+            /* 分配新页表，复制旧页表内容 */
+            unsigned long *pg_table;
+            pg_table = (unsigned long *) get_free_page();
+
+            /* 复制页表项 */
+            memcpy(pg_table, (void *)(*from_page_dir &amp; 0xFFFFF000), PAGE_SIZE);
+
+            /* 关键！将新页表项的R/W位清0（写保护） */
+            /* 这样父子进程共享物理页，但都只能读不能写 */
+            /* 写入时触发缺页异常，do_wp_page()再复制 */
+            unsigned long *pte;
+            int j;
+            for (j = 0; j &lt; 1024; j++)
+                pte[j] &amp;= ~2;    /* 清除R/W位（bit 1），设为只读 */
+
+            /* 设置子进程的页目录项 */
+            to_page_dir[i] = ((unsigned long) pg_table) | 7;
+
+            /* 父进程的页表项也要设为只读！ */
+            for (j = 0; j &lt; 1024; j++)
+                from_page_dir[i][j] &amp;= ~2;
+
+            /* 刷新TLB使修改生效 */
+            invalidate();
+        }
+    }
+    return 0;
+}</code></pre>
+
+        <p>关键步骤提炼一下：</p>
+        <ol>
+            <li>fork()只复制页表，不复制物理页</li>
+            <li>父子进程的页表项中的<strong>R/W位都被设置为0</strong>（只读）</li>
+            <li>任何一方尝试写入共享页面时，CPU触发<strong>写保护异常（Page Fault，vector 14）</strong></li>
+            <li>缺页异常处理函数<code>do_wp_page()</code>判断这是写时复制场景，分配新物理页，复制数据，更新页表</li>
+        </ol>
+
+        <div class="highlight">
+            <strong>效率对照</strong>：假设一个进程占用了4MB物理内存（1000个页）。没有写时复制的fork需要：复制1000个物理页 = 4MB数据拷贝。有了写时复制的fork只需要：复制页表（一个页目录+4个页表 = 20KB） + 设置写保护。差距是约200倍！而且如果fork后立即exec，没有写时复制的系统还要再释放这些物理页——做了大量的无用功。
+        </div>
+
+        <h2>execve()加载程序</h2>
+
+        <p><code>execve()</code>是系统调用号11。它的作用：用一个新的可执行程序替换当前进程。PID不变，但代码段、数据段、堆栈全部替换。</p>
+
+        <p>Linux 0.11支持的可执行文件格式是<strong>a.out</strong>（Assembler OUTput），后来才过渡到ELF。a.out的头部结构很简单：</p>
+
+        <pre><code>/* include/linux/a.out.h — a.out可执行文件头 */
+
+struct exec {
+    unsigned long a_info;   /* 包含魔数和标志位 */
+    unsigned long a_text;   /* 代码段长度 */
+    unsigned long a_data;   /* 数据段长度 */
+    unsigned long a_bss;    /* BSS段长度（未初始化数据） */
+    unsigned long a_syms;   /* 符号表长度 */
+    unsigned long a_entry;  /* 程序入口地址 */
+    unsigned long a_trsize; /* 代码段重定位表长度 */
+    unsigned long a_drsize; /* 数据段重定位表长度 */
+};</code></pre>
+
+        <p>do_execve()的核心流程：</p>
+
+        <pre><code>/* kernel/execve.c — do_execve 核心流程（简化） */
+
+int do_execve(unsigned long *eip, long tmp, char *filename, char **argv, char **envp)
+{
+    struct exec ex;
+    unsigned long page;
+
+    /* 1. 打开可执行文件 */
+    if (sys_open(filename, O_RDONLY) &lt; 0)
+        return -ENOENT;
+
+    /* 2. 读取文件头 */
+    read_exec_header(fd, &amp;ex);
+
+    /* 3. 检查魔数是否合法 */
+    if (ex.a_info != 0x0064011B &amp;&amp; ex.a_info != 0x00640103)
+        return -ENOEXEC;
+
+    /* 4. 释放旧进程的页表 */
+    free_page_tables(current-&gt;tss.cr3);  /* 释放所有物理页！ */
+
+    /* 5. 为新的可执行文件分配页表 */
+    /*    将代码段加载到进程线性地址空间 */
+    page = get_free_page();
+    /* ... 从文件读取代码段和数据段 ... */
+
+    /* 6. 设置新程序的栈顶 */
+    current-&gt;brk = ex.a_text + ex.a_data + ex.a_bss;
+    current-&gt;start_stack = setup_arg_pages(argv, envp);  /* 设置参数和环境变量栈 */
+
+    /* 7. 修改TSS中的EIP为新程序的入口 */
+    eip[0] = ex.a_entry;   /* 设置返回用户态后的第一条指令地址 */
+    /* 修改CS:EIP，使得从内核态返回用户态时直接执行新程序 */
+
+    /* 8. 关闭可执行文件并返回 */
+    sys_close(fd);
+    return 0;
+}</code></pre>
+
+        <p>execve()最有趣的一点是：如果它成功了，它永远不会返回——因为当前进程的代码段已经被完全替换了。如果execve()返回了一个错误，说明执行失败（文件不存在、格式不对、权限不够）。所以用户程序通常这样写：</p>
+
+        <pre><code>/* 典型的fork+exec模式 */
+pid_t pid = fork();
+if (pid == 0) {
+    /* 子进程 */
+    execve("/bin/ls", argv, envp);
+    /* 如果execve返回了，说明出错了 */
+    exit(1);
+} else {
+    /* 父进程 */
+    wait(pid);
+}</code></pre>
+
+        <h2>exit()与wait()</h2>
+
+        <p><code>exit()</code>是进程的"死亡"系统调用。Linux 0.11中的<code>do_exit()</code>负责清理进程资源：</p>
+
+        <pre><code>/* kernel/exit.c — 进程退出 */
+
+int do_exit(long code)
+{
+    int i;
+
+    /* 1. 释放进程占用的物理内存 */
+    free_page_tables(current-&gt;tss.cr3);  /* 释放所有用户空间页 */
+
+    /* 2. 关闭所有打开的文件 */
+    for (i = 0; i &lt; NR_OPEN; i++)
+        if (current-&gt;filp[i])
+            sys_close(i);
+
+    /* 3. 释放当前目录和根目录的inode */
+    iput(current-&gt;pwd);
+    current-&gt;pwd = NULL;
+    iput(current-&gt;root);
+    current-&gt;root = NULL;
+
+    /* 4. 释放子进程（将子进程托付给init，PID=1） */
+    for (i = 0; i &lt; NR_TASKS; i++)
+        if (task[i] &amp;&amp; task[i]-&gt;pgrp == current-&gt;pid) {
+            task[i]-&gt;pgrp = task[1]-&gt;pgrp;   /* 收养 */
+            /* ... 设置新的父进程为init ... */
+        }
+
+    /* 5. 向父进程发送SIGCHLD信号 */
+    current-&gt;signal |= (1&lt;&lt;(SIGCHLD-1));
+    /* 通知父进程子进程已退出 */
+
+    /* 6. 状态设为ZOMBIE——保留task_struct但不运行 */
+    current-&gt;state = TASK_ZOMBIE;
+    current-&gt;exit_code = code;   /* 保存退出码 */
+
+    /* 7. 触发调度，让出CPU */
+    schedule();
+    /* 注意：这里永远不会回来——进程已经ZOMBIE了 */
+    return -1;
+}</code></pre>
+
+        <p>最核心的一步是第6步：<strong>状态设为TASK_ZOMBIE</strong>。这意味着进程"已经死了，但尸体还没被收走"——task_struct没有被释放，因为它里面还保留着退出码，等待父进程来取。</p>
+
+        <p>父进程通过<code>wait()</code>或<code>waitpid()</code>来"收尸"：</p>
+
+        <pre><code>/* kernel/exit.c — waitpid */
+
+int sys_waitpid(pid_t pid, unsigned long *stat_addr, int options)
+{
+    struct task_struct **p;
+    int flag;
+
+    while (1) {
+        flag = 0;
+        for (p = &amp;LAST_TASK; p &gt; &amp;FIRST_TASK; --p) {
+            if (!*p || *p == current)
+                continue;   /* 跳过自己和空槽 */
+
+            if (pid != -1 &amp;&amp; (*p)-&gt;pid != pid &amp;&amp; ...)
+                continue;   /* 不匹配等待的PID */
+
+            flag = 1;       /* 找到了子进程 */
+
+            if ((*p)-&gt;state == TASK_ZOMBIE) {
+                /* 找到僵尸子进程！收集退出码 */
+                unsigned long tmp = (*p)-&gt;exit_code;
+                /* 释放task_struct */
+                free_page((unsigned long)*p);
+                task[p - task] = NULL;
+                return tmp;
+            }
+        }
+        if (!flag)   /* 没有子进程 */
+            return -ECHILD;
+        /* 子进程还没退出，当前进程进入睡眠 */
+        current-&gt;state = TASK_INTERRUPTIBLE;
+        schedule();
+        /* 醒来后再检查一遍 */
+    }
+}</code></pre>
+
+        <div class="warning">
+            <strong>注意</strong>：waitpid()中的<code>current-&gt;state = TASK_INTERRUPTIBLE</code>会让父进程进入可中断睡眠。如果父进程在等待期间收到了信号，它会被唤醒并返回-EINTR。这是UNIX系统调用的典型模式——"如果无法立即完成，就主动让出CPU"。
+        </div>
+
+        <h2>孤儿进程与init收养</h2>
+
+        <p>如果父进程在子进程之前退出，会发生什么？子进程会成为<strong>孤儿进程（orphan process）</strong>。在Linux 0.11中，所有孤儿进程会被<strong>init进程（PID=1）</strong>自动收养：</p>
+
+        <p>回顾do_exit()中的这段代码：</p>
+
+        <pre><code>/* 在父进程退出时，将子进程托付给init */
+for (i = 0; i &lt; NR_TASKS; i++)
+    if (task[i] &amp;&amp; task[i]-&gt;pgrp == current-&gt;pid) {
+        task[i]-&gt;pgrp = task[1]-&gt;pgrp;   /* 收养为init的子进程 */
+    }</code></pre>
+
+        <p>init进程（PID=1）是系统启动时创建的第一个用户进程，它的代码中有一个永真循环——不断调用wait()来清理僵尸子进程。所以孤儿进程最终会被init收养并清理，不会形成"永久性孤儿"。</p>
+
+        <h2>踩坑故事——僵尸进程泄漏</h2>
+
+        <p>这是一个每个写C程序的人几乎都遇到过的经典问题。你会发现这个故事的影子出现在几乎所有UNIX/Linux教材的"常见错误"章节里。</p>
+
+        <p>某位开发者写了一个网络服务程序，主进程不断accept连接，每次接收到新连接就fork一个子进程去处理。看起来一切正常——服务上线后稳定运行了好几天。</p>
+
+        <p>但几天后，运维报告：服务进程数达到上限，无法再fork新的子进程。检查ps输出，发现系统里有上百个<code>&lt;defunct&gt;</code>进程——也就是僵尸进程。</p>
+
+        <p>问题出在哪里？</p>
+
+        <p>父进程fork子进程后，<strong>没有调用wait()或waitpid()</strong>来回收子进程的退出状态。子进程处理完请求exit()之后，状态变为TASK_ZOMBIE。父进程没有wait()，子进程的task_struct就永远得不到释放——它占用的进程槽位（task数组的64个位置之一）一直被占用着。</p>
+
+        <p>Linux 0.11的task数组只有64个槽位。当僵尸进程占满所有槽位后，fork()的find_empty_process()找不到空槽，返回-EAGAIN。系统再也无法创建新进程。</p>
+
+        <pre><code>/* 错误的代码模式 */
+while (1) {
+    int fd = accept(listen_fd, ...);
+    if (fork() == 0) {
+        /* 子进程：处理请求 */
+        handle_request(fd);
+        exit(0);
+    }
+    /* 父进程：没有wait()！子进程变僵尸 */
+}
+
+/* 正确的代码模式 */
+while (1) {
+    int fd = accept(listen_fd, ...);
+    if (fork() == 0) {
+        handle_request(fd);
+        exit(0);
+    } else {
+        wait(NULL);  /* 等待子进程结束——但这是同步阻塞的！ */
+    }
+}
+
+/* 更好的方式：使用SIGCHLD信号异步回收 */
+/* 设置SIGCHLD的处理函数为SIG_IGN或自定义处理 */
+signal(SIGCHLD, SIG_IGN);  /* 系统自动回收，不产生僵尸 */</code></pre>
+
+        <p>注意正确的代码模式也有问题——如果父进程同步wait()，就无法同时处理新连接了。所以实际工程中通常使用<strong>信号机制</strong>（SIGCHLD）或<strong>双fork技巧</strong>来异步回收子进程。</p>
+
+        <p>这个故事的教训是：<strong>每个fork()都要对应一个wait()</strong>，否则就会产生僵尸进程。在Linux 0.11的有限进程槽位下（64个），僵尸进程很容易就会把资源耗尽。这个教训也延续到了现代Linux——只是现代系统的进程上限更高（默认数万），但原理完全一样。</p>
+
+        <p>理解了一个进程的"生老病死"，下一章我们将学习进程之间的一种重要的异步通信方式——<strong>信号机制</strong>。信号是UNIX世界中最古老、最基础的进程间通信方式之一，它让进程能够"不经意间"被通知某些事件的发生。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 系统调用</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html" class="active">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们学习了中断与异常机制，看到了CPU如何响应外部事件。但中断还有一个极其重要的用途——<strong>系统调用（System Call）</strong>。这是用户态程序"主动"陷入内核的唯一合法通道，也是操作系统为上层应用提供的服务接口。</p>
+
+        <p>想象一个场景：你在用户态的程序想要读取一个文件。你不能直接操作硬盘——因为硬件操作需要特权指令，而你运行在ring 3。这时候你需要请内核"代劳"：通过系统调用切换到ring 0，让内核帮你完成操作，然后返回结果。这就是系统调用的本质——一个<strong>受控的特权级升降通道</strong>。</p>
+
+        <h2>引言——系统调用是用户态进入内核态的唯一合法入口</h2>
+
+        <p>在Linux 0.11中，系统调用是通过<code>int 0x80</code>指令实现的。调用号放在<code>eax</code>中，参数放在<code>ebx</code>、<code>ecx</code>、<code>edx</code>中（最多3个参数）。内核根据调用号查找<code>sys_call_table</code>，找到对应的处理函数并执行。</p>
+
+        <p>下面是write()系统调用的完整执行路径——这是系统中最重要的系统调用之一：</p>
+
+        <pre><code>用户程序调用write()
+    │
+    ▼
+C库包装函数（libc）
+    │  movl $4, %eax      ; 调用号4 = sys_write
+    │  movl $fd, %ebx     ; 第一个参数：文件描述符
+    │  movl $buf, %ecx    ; 第二个参数：缓冲区地址
+    │  movl $count, %edx   ; 第三个参数：写入字节数
+    │  int $0x80           ; 触发系统调用
+    │
+    ▼
+CPU硬件
+    │  1. 切换到内核栈（从TSS中读取SS0:ESP0）
+    │  2. 保存用户态SS、ESP、EFLAGS、CS、EIP到内核栈
+    │  3. 查IDT[0x80]，找到 system_call 入口地址
+    │  4. 设置CS:EIP为内核态代码段
+    │
+    ▼
+system_call 入口（kernel/system_call.s）
+    │  1. SAVE_ALL — 保存所有寄存器到内核栈
+    │  2. 检查调用号是否合法（eax &lt; NR_syscalls）
+    │  3. call sys_call_table(,%eax,4) — 查表跳转
+    │
+    ▼
+sys_write（kernel/fs/read_write.c）
+    │  1. 验证文件描述符合法性
+    │  2. 通过 file_struct 找到文件操作函数
+    │  3. 写入数据到终端/文件/管道
+    │
+    ▼
+返回路径
+    │  1. 系统调用完成后，返回值在 eax 中
+    │  2. 检查是否有待处理的信号
+    │  3. RESTORE_ALL — 恢复寄存器
+    │  4. iret — 返回用户态，恢复CS:EIP和EFLAGS</code></pre>
+
+        <p>这条路径就是系统调用的"完整链路图"。理解它，你就理解了操作系统用户态和内核态之间<strong>每一次</strong>交互的本质。</p>
+
+        <h2>int 0x80全流程</h2>
+
+        <p>让我们沿着刚才的路径，更详细地走一遍read()系统调用（调用号3）的全过程。</p>
+
+        <h3>第一步：用户态准备</h3>
+
+        <p>用户程序通常不会直接调用<code>int 0x80</code>，而是通过C库（如glibc或早期的libc）包装函数。但本质上，C库做的事情就是设置寄存器并触发中断：</p>
+
+        <pre><code>; 用户态汇编视角的 read() 系统调用
+movl $3, %eax       ; 调用号 3 = sys_read
+movl $0, %ebx       ; 参数1: fd = 0 (stdin)
+movl $buffer, %ecx  ; 参数2: buf 地址
+movl $1024, %edx    ; 参数3: count = 1024
+int $0x80           ; 触发中断 0x80
+; 返回值在 eax 中</code></pre>
+
+        <h3>第二步：CPU硬件切换</h3>
+
+        <p>当CPU执行<code>int $0x80</code>时，它发现这是一个"陷阱门"（因为系统调用使用陷阱门，不关IF），于是执行以下操作：</p>
+
+        <ol>
+            <li>从当前任务的TSS中读取<strong>内核栈指针</strong>（SS0:ESP0）</li>
+            <li>将用户态的<strong>SS、ESP、EFLAGS、CS、EIP</strong>依次压入内核栈</li>
+            <li>如果CPL发生了变化（从3到0），还会压入SS和ESP</li>
+            <li>加载IDT[0x80]指向的代码段选择子和偏移地址，跳转到system_call</li>
+        </ol>
+
+        <div class="tip">
+            <strong>硬件自动压栈的内容</strong>：当通过int指令从ring 3切换到ring 0时，CPU会依次压入SS、ESP、EFLAGS、CS、EIP共5个值（20字节）。如果中断门，还会压入错误码。这就是"硬件保存的现场"，再加上后续汇编代码用SAVE_ALL保存的寄存器，构成了中断返回时恢复的完整现场。
+        </div>
+
+        <h2>system_call.s源码分析</h2>
+
+        <p>Linux 0.11的系统调用入口在<code>kernel/system_call.s</code>中。这是整个系统中最重要的汇编代码之一：</p>
+
+        <pre><code>! kernel/system_call.s — 系统调用入口
+
+! 系统调用中断处理函数
+system_call:
+    pushl %eax          ! 保存调用号到栈顶
+    SAVE_ALL            ! 保存所有寄存器（宏展开为push ds, es, fs, eax, ebp, esi, edi等）
+
+    movl $0x10, %edx    ! 设置内核数据段选择子
+    mov %dx, %ds
+    mov %dx, %es
+    movl $0x17, %edx    ! 设置fs为用户数据段（用于内核访问用户空间数据）
+    mov %dx, %fs
+
+    ! 检查调用号是否在合法范围 [0, NR_syscalls)
+    cmpl _NR_syscalls, %eax
+    jae bad_sys_call    ! 如果 eax >= NR_syscalls，跳转到错误处理
+
+    ! 查系统调用表，调用对应函数
+    ! sys_call_table 是一个函数指针数组
+    ! sys_call_table(,%eax,4) = sys_call_table + eax * 4
+    call _sys_call_table(,%eax,4)
+
+    ! 保存返回值到栈中保存的eax位置
+    ! 这样RESTORE_ALL后，用户态就能通过eax看到返回值
+    movl %eax, _res(%esp)
+
+    ! 检查是否有待处理的信号
+    movl _current, %eax
+    cmpl $0, _signal(%eax)  ! 检查signal位图是否为0
+    jne signal_return        ! 有信号，先处理信号再返回
+
+    RESTORE_ALL              ! 恢复所有寄存器并返回
+
+bad_sys_call:
+    movl $-1, %eax           ! 非法调用号返回-1
+    movl %eax, _res(%esp)
+    jmp ret_from_sys_call</code></pre>
+
+        <p>这段代码有几个关键设计值得关注：</p>
+
+        <ul>
+            <li><strong>SAVE_ALL/RESTORE_ALL</strong>：与硬件中断使用相同的宏，保证现场保存的一致性</li>
+            <li><strong>调用号合法性检查</strong>：如果调用号超出了NR_syscalls，返回-1（而不是访问越界）</li>
+            <li><strong>fs寄存器设置为用户数据段</strong>：这是为了让内核函数能够通过fs间接访问用户空间的数据（比如copy_from_user）</li>
+            <li><strong>信号检查</strong>：在返回用户态之前检查是否有待处理的信号——这是中断处理的标准流程</li>
+        </ul>
+
+        <h2>sys_call_table——系统调用表</h2>
+
+        <p>系统调用表<code>sys_call_table</code>是一个函数指针数组，每个元素指向一个具体的系统调用处理函数。在Linux 0.11中，它定义在<code>include/linux/sys.h</code>中：</p>
+
+        <pre><code>/* include/linux/sys.h — 系统调用表 */
+
+#define NR_syscalls 82    /* 0.11共有82个系统调用 */
+
+extern int sys_setup();
+extern int sys_exit();
+extern int sys_fork();
+extern int sys_read();
+extern int sys_write();
+extern int sys_open();
+extern int sys_close();
+/* ... 更多声明 ... */
+
+fn_ptr sys_call_table[] = {
+    sys_setup,      /* 0 */
+    sys_exit,       /* 1 */
+    sys_fork,       /* 2 */
+    sys_read,       /* 3 */
+    sys_write,      /* 4 */
+    sys_open,       /* 5 */
+    sys_close,      /* 6 */
+    sys_waitpid,    /* 7 */
+    sys_creat,      /* 8 */
+    sys_link,       /* 9 */
+    sys_unlink,     /* 10 */
+    sys_execve,     /* 11 */
+    sys_chdir,      /* 12 */
+    sys_time,       /* 13 */
+    sys_mknod,      /* 14 */
+    sys_chmod,      /* 15 */
+    sys_chown,      /* 16 */
+    sys_break,      /* 17 */
+    sys_stat,       /* 18 */
+    sys_lseek,      /* 19 */
+    sys_getpid,     /* 20 */
+    /* ... 更多系统调用 ... */
+    sys_dup2,       /* 81 */
+};</code></pre>
+
+        <p>下面列出Linux 0.11中的关键系统调用：</p>
+
+        <table>
+            <thead>
+                <tr><th>编号</th><th>名称</th><th>作用</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>0</td><td>setup</td><td>初始化系统（内核内部使用）</td></tr>
+                <tr><td>1</td><td>exit</td><td>终止进程</td></tr>
+                <tr><td>2</td><td>fork</td><td>创建子进程</td></tr>
+                <tr><td>3</td><td>read</td><td>从文件描述符读数据</td></tr>
+                <tr><td>4</td><td>write</td><td>向文件描述符写数据</td></tr>
+                <tr><td>5</td><td>open</td><td>打开文件</td></tr>
+                <tr><td>6</td><td>close</td><td>关闭文件</td></tr>
+                <tr><td>7</td><td>waitpid</td><td>等待子进程结束</td></tr>
+                <tr><td>8</td><td>creat</td><td>创建文件</td></tr>
+                <tr><td>11</td><td>execve</td><td>执行新程序</td></tr>
+                <tr><td>13</td><td>time</td><td>获取系统时间</td></tr>
+                <tr><td>20</td><td>getpid</td><td>获取进程ID</td></tr>
+                <tr><td>24</td><td>kill</td><td>向进程发送信号</td></tr>
+                <tr><td>27</td><td>alarm</td><td>设置定时报警</td></tr>
+                <tr><td>45</td><td>brk</td><td>修改数据段大小（malloc）</td></tr>
+                <tr><td>72</td><td>sigaction</td><td>设置信号处理函数</td></tr>
+                <tr><td>81</td><td>dup2</td><td>复制文件描述符</td></tr>
+            </tbody>
+        </table>
+
+        <p>你可能会问：为什么只有82个系统调用？对比现代Linux内核（超过400个），是不是太少了？答案是：<strong>82个已经足够覆盖POSIX规范的核心功能</strong>。文件操作、进程控制、信号管理、内存管理——该有的都有了。而且你会发现，许多"现代"系统调用（如epoll、sendfile）实际上是现有机制的优化组合，并非全新的概念。</p>
+
+        <h2>参数传递机制</h2>
+
+        <p>系统调用的参数传递经历了几个阶段。在Linux 0.11中，参数通过<strong>寄存器</strong>传递：</p>
+
+        <ul>
+            <li><strong>eax</strong>：系统调用号</li>
+            <li><strong>ebx</strong>：第1个参数</li>
+            <li><strong>ecx</strong>：第2个参数</li>
+            <li><strong>edx</strong>：第3个参数</li>
+        </ul>
+
+        <p>这种传递方式有两大好处：一是<strong>快</strong>——不需要在栈和寄存器之间反复搬数据；二是<strong>简单</strong>——不需要处理用户栈和内核栈之间复杂的参数拷贝问题。</p>
+
+        <p>但寄存器传递只能传3个参数。对于需要更多参数的系统调用（如mmap），Linux 0.11采用了另一种策略：把参数打包成一个结构体，然后把结构体的<strong>指针</strong>通过寄存器传递。内核通过<code>get_fs_byte()</code>系列函数从用户空间读取参数：</p>
+
+        <pre><code>/* 从用户空间复制数据到内核空间 */
+/* Linux 0.11使用fs段寄存器来访问用户空间 */
+/* 这是最原始的 copy_from_user 实现 */
+
+unsigned long copy_from_user(void *to, const void *from, unsigned long n)
+{
+    /* 通过fs段寄存器访问用户空间 */
+    /* memcpy_iasm 内部使用 fs: 前缀来访问用户地址 */
+    memcpy(to, from, n);
+    return 0;
+}
+
+/* 在 system_call 中，fs 被设置为 0x17 (用户数据段) */
+/* 因此内核可以通过 fs: 前缀来访问用户空间的数据 */</code></pre>
+
+        <div class="highlight">
+            <strong>历史小知识</strong>：Linux 0.11通过设置fs段寄存器为0x17来访问用户空间。在现代内核中，这项任务交给了<code>copy_from_user()</code>和<code>copy_to_user()</code>，它们内部封装了更复杂的地址校验逻辑（如访问地址合法性检查）。但本质是一样的——内核需要一种安全的方式去读取用户空间的地址。
+        </div>
+
+        <h2>踩坑故事——系统调用号错位的惨案</h2>
+
+        <p>这是发生在Linux早期开发阶段的一个真实故事，也是一个在新手内核开发者中反复出现的经典错误。</p>
+
+        <p>假设你在给内核增加一个新的系统调用——比如<code>sys_hello()</code>，它在调用号86上。你在<code>sys.h</code>中添加了声明，在<code>sys_call_table[]</code>中增加了对应的条目，在<code>system_call.s</code>中更新了<code>NR_syscalls</code>的值……一切看起来很完美。</p>
+
+        <p>但当你运行测试程序时，终端上打印的却是来自其他系统调用的垃圾数据。更糟糕的是，系统时不时地随机崩溃，完全没有规律可循。</p>
+
+        <p>排查了整整两天后，你终于发现问题所在——<strong>你忘了在<code>sys.h</code>中更新<code>NR_syscalls</code>的值</strong>。</p>
+
+        <p>我们来看看不更新NR_syscalls会出什么事：</p>
+
+        <pre><code>/* include/linux/sys.h */
+#define NR_syscalls 82       /* 你忘了改成86！ */
+
+/* 但 sys_call_table[] 中你添加了3个新条目 */
+fn_ptr sys_call_table[] = {
+    /* ... 前面的82个 ... */
+    sys_hello,       /* 83 */
+    sys_world,       /* 84 */
+    sys_foo,         /* 85 */
+};
+
+! kernel/system_call.s — 系统调用入口
+    cmpl _NR_syscalls, %eax    ; 检查调用号
+    jae bad_sys_call           ; 如果 eax >= 82，返回-1
+
+    call _sys_call_table(,%eax,4)  ; 如果 eax=83，访问了表外内存！</code></pre>
+
+        <p>看出问题了吗？当用户程序调用系统调用83时：</p>
+        <ol>
+            <li><code>cmpl _NR_syscalls, %eax</code> — 检查调用号：83 >= 82，应该跳转到bad_sys_call</li>
+            <li>但<strong>cmpl比较的是无符号值</strong>，83作为无符号数确实大于82，跳转到bad_sys_call，返回-1</li>
+        </ol>
+
+        <p>等等，那为什么系统会崩溃呢？因为还有一种更隐蔽的情况：<strong>当旧的<code>NR_syscalls</code>比实际表大时，高编号的合法调用会落在表外</strong>——比如你把<code>NR_syscalls</code>定为85但没有在表中添加对应条目，那么系统调用84和85会访问到sys_call_table数组之后的区域（可能是其他函数指针或数据），导致跳转到完全随机的位置执行。</p>
+
+        <div class="warning">
+            <strong>教训</strong>：<code>#define NR_syscalls</code>和<code>sys_call_table[]</code>数组必须严格同步。这是新手编写内核模块时最容易犯的错误之一。直到今天，现代内核仍然保留了类似的手工同步检查（通过<code>BUILD_BUG_ON</code>编译时断言来确保两者一致）。在0.11时代，没有这样的保护——少了一条define就是一次系统崩溃。
+        </div>
+
+        <p>这个故事告诉我们：在操作系统这种"一旦出错就可能全盘崩溃"的系统中，<strong>一致性</strong>比什么都重要。一个全局常量与一个数组长度不匹配，就会导致系统调用的边界检查失效，轻则返回错误，重则跳转到随机地址执行。</p>
+
+        <p>理解了系统调用的完整机制后，下一章我们将进入操作系统的核心——<strong>进程调度</strong>。调度器决定了CPU时间片如何分配给各个进程，这是操作系统的"大脑"中最关键的部分。准备好了吗？</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

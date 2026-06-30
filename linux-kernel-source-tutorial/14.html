@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 内存管理(下)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html" class="active">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们学习了物理内存的布局和分配机制——弄清楚了物理页框是如何被分配和回收的。但物理内存就像一个"大通铺"——所有进程共享同一块物理空间。如果没有<strong>地址隔离</strong>，进程A可以随意读写进程B的内存，这是不能接受的。</p>
+
+        <p>解决这个问题的方法就是<strong>分页机制（Paging）</strong>。分页机制是现代操作系统的"魔法"——它为每个进程提供了一堵看不见的"墙"，让每个进程都觉得自己独占了一整片连续内存，而实际上物理内存可能碎片化地分布在各个角落。这堵"墙"还能实现共享、写时复制、按需加载等高级功能。</p>
+
+        <p>这一章，我们深入分页机制的源码实现——页表结构、地址翻译、缺页异常、写时复制。</p>
+
+        <h2>引言——分页机制是内存保护和COW的基础</h2>
+
+        <p>分页机制本质上是一套<strong>地址转换</strong>规则：CPU访问的每个线性地址都要经过页表的转换，才能变成物理地址。这个转换过程由CPU硬件自动完成——你只需要设置好页目录和页表，CPU会在访问内存时自动查表转换。</p>
+
+        <p>但分页带来的不仅仅是地址转换：</p>
+
+        <ul>
+            <li><strong>保护</strong>：页表项中的R/W位和U/S位决定了页面是否可写、是否可在用户态访问</li>
+            <li><strong>按需加载</strong>：页表项中的Present位控制页面是否在物理内存中。访问不存在的页面会触发缺页异常，内核可以按需加载</li>
+            <li><strong>写时复制</strong>：通过清除R/W位，让多个进程共享物理页，写入时再复制</li>
+            <li><strong>共享内存</strong>：多个进程的页表项指向同一个物理页，实现高效数据共享</li>
+        </ul>
+
+        <p>简单来说：<strong>物理内存管理的是"资源"，分页机制管理的是"权限和映射"</strong>。</p>
+
+        <h2>两级页表详解</h2>
+
+        <p>x86 32位保护模式使用<strong>两级页表</strong>结构。理解这种结构是理解所有分页相关代码的前提。</p>
+
+        <p>一个32位的线性地址被分为三部分：</p>
+
+        <pre><code>32位线性地址分解：
+
+31        22 21        12 11         0
+┌────────────┬────────────┬────────────┐
+│   10位      │   10位      │   12位      │
+│ 页目录索引  │  页表索引   │  页内偏移   │
+└────────────┴────────────┴────────────┘
+
+地址翻译过程：
+
+  线性地址:    [页目录索引(10bit)] [页表索引(10bit)] [页内偏移(12bit)]
+
+      ├──────────────────┬───────────────────┤
+      │                  │                   │
+      ▼                  ▼                   ▼
+  ┌─────────┐      ┌──────────┐        ┌─────────┐
+  │页目录   │      │ 页表     │        │物理页   │
+  │(1024项) │─────►│(1024项)  │───────►│(4KB)    │
+  └─────────┘      └──────────┘        └─────────┘
+   每项4字节        每项4字节          最终物理地址=
+   = 4KB页目录       = 4KB页表         页表项中基地址 + 页内偏移
+
+示例：翻译线性地址 0x0040300C
+
+  1. 二进制：0000 0000 0100 0000 0011 0000 0000 1100
+     分解：
+       页目录索引 = 00 0000 0001 = 1
+       页表索引   = 00 0000 1100 = 12
+       页内偏移   = 0000 0000 1100 = 0x00C
+
+  2. 从CR3读取页目录基地址（假设为0x100000）
+  3. 页目录项地址 = 0x100000 + 1*4 = 0x100004
+     读取页目录项 = 0x200007（页表基地址=0x200000，属性=7）
+  4. 页表项地址 = 0x200000 + 12*4 = 0x200030
+     读取页表项 = 0x300007（物理页基地址=0x300000，属性=7）
+  5. 最终物理地址 = 0x300000 + 0x00C = 0x30000C</code></pre>
+
+        <p>页目录项和页表项的结构完全一致：</p>
+
+        <table>
+            <thead>
+                <tr><th>位</th><th>名称</th><th>含义</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>0</td><td>Present (P)</td><td>页面是否在物理内存中。1=在，0=不在（访问时触发缺页）</td></tr>
+                <tr><td>1</td><td>Read/Write (R/W)</td><td>1=可读写，0=只读（写保护页面的关键位）</td></tr>
+                <tr><td>2</td><td>User/Supervisor (U/S)</td><td>1=用户态可访问，0=仅内核态可访问</td></tr>
+                <tr><td>3</td><td>Page Write Through (PWT)</td><td>页级写透缓存策略</td></tr>
+                <tr><td>4</td><td>Page Cache Disable (PCD)</td><td>禁止页级缓存</td></tr>
+                <tr><td>5</td><td>Accessed (A)</td><td>页面被访问过。CPU在读取页面时自动置位</td></tr>
+                <tr><td>6</td><td>Dirty (D)</td><td>页面被写入过。CPU在写入页面时自动置位（仅页表项有效）</td></tr>
+                <tr><td>7</td><td>Page Size (PS)</td><td>页目录项中：1=4MB大页，0=4KB普通页</td></tr>
+                <tr><td>8</td><td>Global (G)</td><td>全局页（TLB不刷新）</td></tr>
+                <tr><td>9-11</td><td>Available</td><td>操作系统可自由使用</td></tr>
+                <tr><td>12-31</td><td>Physical Page Address</td><td>物理页基地址（页目录项指向页表，页表项指向物理页）</td></tr>
+            </tbody>
+        </table>
+
+        <p>对于写时复制，最重要的两个标志位是<strong>Present位和R/W位</strong>。当Present=0时，访问触发缺页异常（vector 14）。当Present=1但R/W=0时，访问触发<strong>写保护异常</strong>——这是do_wp_page()的入口。</p>
+
+        <h2>线性地址翻译示例</h2>
+
+        <p>让我们通过一个具体的例子，一步步走一遍地址翻译过程，直观感受两级页表的运作：</p>
+
+        <pre><code>/* mm/memory.c — 线性地址到物理地址的转换过程 */
+
+/* 模拟CPU硬件查表过程 */
+unsigned long resolve_linear_address(unsigned long linear_addr)
+{
+    unsigned long page_dir_index, page_table_index, offset;
+    unsigned long *page_dir, *page_table;
+    unsigned long page_dir_entry, page_table_entry;
+
+    /* 1. 分解线性地址 */
+    page_dir_index  = (linear_addr >> 22) &amp; 0x3FF;   /* bits 31:22 */
+    page_table_index = (linear_addr >> 12) &amp; 0x3FF;  /* bits 21:12 */
+    offset          = linear_addr &amp; 0xFFF;            /* bits 11:0  */
+
+    printk("addr 0x%08lx: dir=%d table=%d offset=0x%lx\n",
+           linear_addr, page_dir_index, page_table_index, offset);
+
+    /* 2. 从CR3寄存器获取页目录基地址 */
+    page_dir = (unsigned long *) current->tss.cr3;
+
+    /* 3. 读取页目录项 */
+    page_dir_entry = page_dir[page_dir_index];
+    if (!(page_dir_entry &amp; 1))   /* Present? */
+        page_fault();            /* 页目录项不存在 */
+
+    /* 4. 从页目录项获取页表基地址 */
+    page_table = (unsigned long *) (page_dir_entry &amp; 0xFFFFF000);
+
+    /* 5. 读取页表项 */
+    page_table_entry = page_table[page_table_index];
+    if (!(page_table_entry &amp; 1))  /* Present? */
+        page_fault();             /* 页表项不存在 */
+
+    /* 6. 构造物理地址 */
+    return (page_table_entry &amp; 0xFFFFF000) + offset;
+}
+
+/* 示例：
+ * 假设线性地址 0x0040300C
+ * 进程的CR3 = 0x100000（页目录基址）
+ *
+ * 手动计算：
+ *   page_dir_index  = 0x0040300C >> 22 = 1
+ *   page_table_index = (0x0040300C >> 12) & 0x3FF = 0x40300C >> 12 & 0x3FF = 12
+ *   offset          = 0x0040300C & 0xFFF = 0x00C
+ *
+ *   CR3[1] = 0x200007 → 页表在物理地址0x200000
+ *   page_table[12] = 0x300007 → 物理页在0x300000
+ *   最终物理地址 = 0x300000 + 0x00C = 0x30000C
+ */</code></pre>
+
+        <div class="tip">
+            <strong>页表的内存占用</strong>：两级页表的"内存成本"是多少？一个页目录4KB（1024项*4字节），每个页表4KB（1024项*4字节）。32位系统最大需要1024个页表（每个页目录项一个），所以页表最大占用4KB（页目录）+ 1024*4KB（页表）= 4MB+4KB。但0.11只使用前4个页目录项（管理16MB），所以实际页表占用约16KB左右。这就是为什么页表被称为"内存的税"——每管理4KB物理页就需要额外消耗4字节（页表项），税率为0.1%。
+        </div>
+
+        <h2>page.s汇编源码分析——缺页异常处理</h2>
+
+        <p>当CPU尝试访问一个线性地址，而页目录项或页表项的Present位为0时，CPU触发<strong>缺页异常（Page Fault，中断向量14）</strong>。缺页异常的处理函数在<code>mm/page.s</code>中实现：</p>
+
+        <pre><code>! mm/page.s — 缺页异常入口
+
+! 缺页异常处理程序
+! CPU在发生缺页时会自动压入：
+!   错误码(error_code)，包含：
+!     bit 0: 0=非存在页，1=保护错误
+!     bit 1: 0=读，1=写
+!     bit 2: 0=内核态，1=用户态
+
+_page_fault:
+    ! 保存所有寄存器
+    pushl %ds
+    pushl %es
+    pushl %fs
+    pushl %eax
+    pushl %ebp
+    pushl %edi
+    pushl %esi
+    pushl %edx
+    pushl %ecx
+    pushl %ebx
+
+    ! 设置内核段寄存器
+    movl $0x10, %edx
+    mov %dx, %ds
+    mov %dx, %es
+    movl $0x17, %edx
+    mov %dx, %fs
+
+    ! 读取CR2寄存器（被访问的线性地址，CPU自动设置CR2）
+    movl %cr2, %edx
+
+    ! 压入参数并调用C函数
+    pushl %edx          ! 线性地址（导致缺页的地址）
+    pushl %esp          ! 栈指针
+    pushl %eax          ! 错误码（区分缺页类型）
+    call _do_no_page    ! 调用 do_no_page 处理
+    addl $12, %esp      ! 清理栈参数
+
+    ! 恢复寄存器并返回
+    popl %ebx
+    popl %ecx
+    popl %edx
+    popl %esi
+    popl %edi
+    popl %ebp
+    popl %eax
+    pop %fs
+    pop %es
+    pop %ds
+    addl $4, %esp       ! 跳过错误码
+    iret</code></pre>
+
+        <p>缺页异常的C处理函数<code>do_no_page()</code>在<code>mm/memory.c</code>中：</p>
+
+        <pre><code>/* mm/memory.c — 缺页处理 */
+
+void do_no_page(unsigned long error_code, unsigned long address)
+{
+    unsigned long page;
+    int block;
+
+    /* 1. 从线性地址计算缺页所在的线性页面号 */
+    address &=amp; 0xFFFFF000;   /* 页面对齐 */
+    linear_page = address;
+
+    /* 2. 检查地址是否在进程的合法地址范围内 */
+    if (address >= current->end_data &amp;&amp; address < current->brk) {
+        /* 是堆（heap）区域的缺页：分配新物理页 */
+        page = get_free_page();     /* 从主内存区分配 */
+        if (!page) {
+            do_exit(SIGSEGV);        /* 内存耗尽，进程退出 */
+            return;
+        }
+        /* 建立线性地址到物理地址的映射 */
+        put_page(page, address);
+        return;
+    }
+
+    /* 3. 如果是数据段或代码段的缺页：需要从可执行文件读取 */
+    /*    计算数据所在的文件块号 */
+    block = (address - current->start_code) / BLOCK_SIZE;
+
+    /* 4. 分配物理页 */
+    page = get_free_page();
+    if (!page) {
+        do_exit(SIGSEGV);
+        return;
+    }
+
+    /* 5. 尝试从交换设备（或文件）读取数据到物理页 */
+    block_read(current->executable, block, (char *)page);
+    /* 如果读失败（文件不存在等），用0填充 */
+    /* ... */
+
+    /* 6. 建立映射 */
+    put_page(page, address);
+}
+
+/* 建立线性地址到物理地址的映射 */
+unsigned long put_page(unsigned long page, unsigned long address)
+{
+    unsigned long *page_table;
+    unsigned long tmp;
+
+    /* 1. 找到线性地址对应的页表 */
+    page_table = (unsigned long *) ((current->tss.cr3 &amp; 0xFFFFF000) +
+                                    ((address >> 20) &amp; 0xFFC));
+
+    /* 2. 如果页表不存在，分配页表 */
+    if ((*page_table &amp; 1) == 0) {
+        /* 分配一页作为页表 */
+        tmp = get_free_page();
+        *page_table = tmp | 7;   /* Present, R/W, User */
+    }
+
+    /* 3. 获取页表项地址，设置映射 */
+    page_table = (unsigned long *) (*page_table &amp; 0xFFFFF000);
+    /* 计算页表项索引 */
+    tmp = address >> 12;          /* 页面对齐 */
+    tmp &=amp; 0x3FF;                 /* 取低10位 = 页表索引 */
+
+    /* 4. 设置页表项：物理页地址 + 属性 */
+    page_table[tmp] = page | 7;   /* Present, R/W, User */
+
+    /* 5. 刷新TLB */
+    invalidate();
+    return page;
+}</code></pre>
+
+        <p>do_no_page()的逻辑很清晰：</p>
+        <ol>
+            <li>如果缺页发生在堆区域（brk扩展段）：分配新物理页，建立映射</li>
+            <li>如果缺页发生在代码/数据段：从可执行文件读取相应块到物理页，建立映射</li>
+            <li>如果缺页发生在栈区域：分配新物理页作为栈页</li>
+        </ol>
+
+        <p>这就是<strong>按需分页（Demand Paging）</strong>的核心——物理页只在第一次访问时才分配，而不是在execve()时一次性加载。这对于那些"加载了但从未执行"的代码段特别有利。</p>
+
+        <h2>写时复制实现</h2>
+
+        <p>写时复制（Copy-on-Write, COW）的处理流程比缺页复杂一些，因为它涉及多个进程共享物理页的判断。</p>
+
+        <pre><code>/* mm/memory.c — 写时复制处理 */
+
+void do_wp_page(unsigned long error_code, unsigned long address)
+{
+    unsigned long *page_table;
+    unsigned long old_page, new_page;
+
+    /* 1. 获取导致写保护异常的线性地址对应的物理页 */
+    address &=amp; 0xFFFFF000;  /* 页面对齐 */
+    page_table = get_pte(address);   /* 获取页表项地址 */
+    old_page = *page_table;          /* 物理页地址+属性 */
+
+    /* 2. 检查物理页的引用计数 */
+    /*    物理页号 = 物理地址 / 4KB */
+    unsigned long page_num = (old_page &amp; 0xFFFFF000) / PAGE_SIZE;
+
+    if (mem_map[page_num] == 1) {
+        /* 只有当前进程在引用这个物理页！ */
+        /* 直接修改页表项的R/W位为可写即可 */
+        *page_table |= 2;           /* 设置R/W位 */
+        invalidate();               /* 刷新TLB */
+        return;
+    }
+
+    /* 3. 有多个进程共享此物理页——需要复制 */
+    new_page = get_free_page();     /* 分配新物理页 */
+    if (!new_page)
+        do_exit(SIGSEGV);
+
+    /* 4. 复制数据：将旧物理页的内容复制到新物理页 */
+    /* 注意：这里不能直接用memcpy，因为需要处理物理地址！ */
+    copy_page(new_page, old_page &amp; 0xFFFFF000);
+
+    /* 5. 修改当前进程的页表项指向新物理页 */
+    /*    加上可写属性 */
+    *page_table = new_page | 7;     /* Present, R/W, User */
+    invalidate();                    /* 刷新TLB */
+
+    /* 6. 减少旧物理页的引用计数 */
+    free_page(old_page &amp; 0xFFFFF000);
+    /* free_page会把mem_map[page_num]减1 */
+    /* 减到0时，旧物理页才会被真正释放 */
+}</code></pre>
+
+        <p>do_wp_page()的流程可以总结为下面这张图：</p>
+
+        <pre><code>写时复制流程示意：
+
+    fork()后：父子进程共享物理页（R/W=0）
+    ┌─────────────┐      ┌─────────────┐
+    │  父进程页表  │      │  子进程页表  │
+    │  PTE → 0xABC │      │  PTE → 0xABC │
+    │  R/W = 0     │      │  R/W = 0     │
+    └──────┬──────┘      └──────┬──────┘
+           │                    │
+           └────────┬───────────┘
+                    ▼
+              ┌──────────┐
+              │物理页0xABC│
+              │mem_map=2 │  (被两个进程引用)
+              └──────────┘
+
+    子进程写入：触发写保护异常 → do_wp_page()
+    发现mem_map[page]=2，需要复制：
+
+    ┌─────────────┐      ┌─────────────┐
+    │  父进程页表  │      │  子进程页表  │
+    │  PTE → 0xABC │      │  PTE → 0xDEF ◄── 新分配的页
+    │  R/W = 0     │      │  R/W = 1      （可写！）
+    └──────┬──────┘      └──────┬──────┘
+           │                    │
+           ▼                    ▼
+      ┌──────────┐        ┌──────────┐
+      │物理页0xABC│        │物理页0xDEF│
+      │mem_map=1  │        │内容=0xABC的副本│
+      └──────────┘        └──────────┘
+
+    此后父子进程各自拥有独立的物理页，
+    互不影响。</code></pre>
+
+        <p>写时复制的优化效果非常显著。考虑一个典型的场景：Shell执行一个外部命令，先fork()再execve()。如果没有写时复制，fork()需要复制Shell的所有物理页（可能数MB），然后再被execve()全部释放——做了大量无用功。而有了写时复制，fork()只需要复制页表（通常几十KB），然后execve()直接释放页表，不需要移动任何物理数据。</p>
+
+        <div class="highlight">
+            <strong>优化效果</strong>：在0.11的fork()实现中，写时复制使得fork()的开销从"复制所有物理页"降低为"复制页表+遍历仅有的几KB页表项"。对于典型的4MB进程，fork()的速度提升了约100倍。这个优化是现代操作系统能够实现高效进程创建的关键。
+        </div>
+
+        <h2>put_page()/free_page_tables()</h2>
+
+        <p>在\do_no_page()中我们看到了<code>put_page()</code>的用法。还有一个重要的函数是<code>free_page_tables()</code>——当进程退出时，需要递归释放所有页表映射和物理页：</p>
+
+        <pre><code>/* mm/memory.c — 释放进程的整个地址空间 */
+
+void free_page_tables(unsigned long cr3)
+{
+    unsigned long *page_dir;
+    unsigned long *page_table;
+    int i, j;
+
+    /* 页目录基地址 */
+    page_dir = (unsigned long *) (cr3 &amp; 0xFFFFF000);
+
+    /* 遍历页目录所有1024个条目 */
+    for (i = 0; i &lt; 1024; i++) {
+        /* 如果页目录项有效 */
+        if (page_dir[i] &amp; 1) {          /* Present? */
+            /* 获取页表基地址 */
+            page_table = (unsigned long *) (page_dir[i] &amp; 0xFFFFF000);
+
+            /* 遍历页表的1024个条目 */
+            for (j = 0; j &lt; 1024; j++) {
+                if (page_table[j] &amp; 1) {  /* Present? */
+                    /* 释放物理页（减少引用计数） */
+                    free_page(page_table[j] &amp; 0xFFFFF000);
+                }
+            }
+
+            /* 释放页表本身占用的物理页 */
+            free_page((unsigned long) page_table);
+        }
+    }
+
+    /* 最后释放页目录本身 */
+    /* 注意：实际上页目录的物理页也在上面的遍历中被释放了 */
+    /* 这里只需要确保CR3被清空或重新设置 */
+}</code></pre>
+
+        <p>free_page_tables()的递归释放逻辑非常清楚：先遍历页目录，对每个有效的页目录项，遍历对应的页表，释放页表中的每个物理页，然后释放页表本身。这样就完整地释放了一个进程的所有用户空间物理内存。</p>
+
+        <p>注意这里有个微妙之处：<code>free_page()</code>是减少mem_map中的引用计数，只有当计数减到0时才真正释放。如果两个进程共享同一物理页（fork后COW之前），父进程退出时调用free_page_tables()只会减少计数而不会释放物理页——这正是共享机制的优雅之处。</p>
+
+        <h2>踩坑故事——页表不一致导致的幽灵Bug</h2>
+
+        <p>这是早期Linux开发中一个真实存在的、让人抓狂的内存管理Bug。故事涉及两个进程共享同一物理页时的"页表不同步"问题。</p>
+
+        <p>假设两个进程（父进程和子进程）通过共享内存机制（shm）映射到同一个物理页。父进程在这一页上写了一组数据，然后通知子进程去读取。子进程去读的时候，发现读到的数据是"过期的"——数据不对。</p>
+
+        <p>程序员花了整整一周，检查了所有同步逻辑、信号处理、缓存刷新，一切看起来都没问题。为什么子进程读不到最新的数据？</p>
+
+        <p>最终问题定位在<strong>Dirty位（页表项的第6位）</strong>上。</p>
+
+        <p>原来，x86 CPU在写入一个物理页时，会<strong>自动</strong>将页表项的Dirty位置1。但这里有个关键：<strong>CPU更新的是当前进程的页表项中的Dirty位</strong>。如果两个进程的页表项分别指向同一个物理页，但它们的页表项是独立的两个位置，父进程的页表项Dirty=1，子进程的页表项Dirty=0——但物理页的内容其实已经更新了。</p>
+
+        <p>问题出在哪里？出在某个版本的共享内存实现中，释放页面时<strong>根据Dirty位来判断是否需要写回磁盘</strong>。如果父进程修改了共享页面，子进程的页表项Dirty位仍然是0，当子进程退出时，内核认为这个页面"没有被修改过"，就没有将最新数据写回磁盘或通知其他进程——导致数据丢失。</p>
+
+        <pre><code>/* 简化的Bug场景 */
+struct task_struct *parent, *child;
+
+/* 父进程写入数据（Dirty位被自动设置） */
+parent-&gt;page_table[addr]-&gt;dirty = 1;  /* CPU自动设置 */
+/* 物理页内容已更新 */
+
+/* 子进程的页表项指向同一个物理页 */
+child-&gt;page_table[addr]-&gt;dirty = 0;   /* 没有写入过！ */
+/* 但物理页内容已经被父进程更新了 */
+
+/* 子进程exit(): 检查Dirty位，发现是0，
+   认为"页面未修改"，跳过同步操作 */
+/* 数据丢失！ */</code></pre>
+
+        <p>这个Bug的修复方法是在共享内存的映射操作中，<strong>显式同步页表项的Dirty位</strong>。当一个进程通过共享内存修改了物理页后，其他共享该页的进程的页表项中的Dirty位也应该被同步更新。</p>
+
+        <div class="warning">
+            <strong>教训</strong>：共享内存虽然看起来是"多个进程看到同一个物理页"，但实际上每个进程的<strong>页表项是独立的</strong>。CPU自动维护的Accessed和Dirty位只影响"发起访问的那个进程"的页表项。如果你要实现共享内存，必须自己处理页表项属性的同步问题。这个Bug在Linux后续版本中被修复，原理是在munmap或exit时遍历所有共享同一物理页的进程，同步它们的页表项属性位。
+        </div>
+
+        <p>页表一致性Bug是所有操作系统内核开发中最难调试的问题之一——因为它的表现完全随机：有时候数据正确，有时候不正确；取决于CPU的TLB是否被刷新、页表项是否被缓存、Dirty位是否被设置等复杂因素。</p>
+
+        <p>好了，内存管理的核心机制到这里就全部覆盖了。我们用了两章的篇幅，从物理内存布局到页表翻译，从get_free_page()到do_wp_page()，完整地走过了Linux 0.11内存管理模块的所有关键代码。理解了这些，你已经掌握了操作系统内存管理的本质——后面的所有版本都是在这基础上的扩展和优化。</p>
+
+        <p>下一章，我们将进入一个新的、同样重要的领域——<strong>缓冲区管理</strong>。这是连接内存管理和文件系统的桥梁，也是理解块设备I/O的关键。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

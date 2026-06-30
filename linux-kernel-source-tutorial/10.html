@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 进程调度</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html" class="active">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们学习了系统调用的完整流程——用户态程序如何通过int 0x80进入内核执行特权操作。但系统调用只是进程与内核交互的"接口"，在操作系统内部，还有一个更核心的问题需要解决：<strong>谁来决定CPU给哪个进程用？用多久？什么时候收回？</strong></p>
+
+        <p>这就是<strong>进程调度器（Scheduler）</strong>的工作。调度器是操作系统的心脏——它不断地跳动（每次时钟中断），检查当前谁在使用CPU，决定是否该换一个人用。一个好的调度器能让所有进程感觉"自己独占了一台慢一点的CPU"；一个差的调度器会让系统响应迟钝，甚至出现"进程饿死"的极端情况。</p>
+
+        <h2>引言——调度器的核心问题</h2>
+
+        <p>调度器的核心问题可以归结为三个：</p>
+
+        <ol>
+            <li><strong>选择谁？</strong>——就绪队列中有多个进程，选哪个执行？</li>
+            <li><strong>什么时候选？</strong>——何时触发调度决策？时钟中断？进程主动让出？</li>
+            <li><strong>怎么切换？</strong>——如何保存旧进程的上下文、恢复新进程的上下文？</li>
+        </ol>
+
+        <p>Linux 0.11使用的是<strong>多级反馈队列（Multi-Level Feedback Queue）</strong>调度算法的简化版本。之所以说是"简化版本"，是因为0.11只有一级"队列"——一个进程数组，但调度策略已经体现了MLFQ的核心思想：优先级动态调整，I/O密集型进程获得更高优先级，CPU密集型进程优先级下降。</p>
+
+        <div class="tip">
+            <strong>MLFQ核心思想</strong>：进程的优先级不是一成不变的。I/O密集型进程（如交互式shell）通常只需要很少的CPU时间，用完时间片后主动让出CPU，应该获得高优先级；CPU密集型进程（如科学计算）长时间占用CPU，应该降低优先级，把机会让给其他进程。通过这种动态调整，MLFQ实现了"交互式进程响应快，批处理进程不饿死"的目标。
+        </div>
+
+        <h2>task_struct数据结构</h2>
+
+        <p>调度器的核心数据结构是<code>task_struct</code>——每个进程都有一个。它定义在<code>include/linux/sched.h</code>中：</p>
+
+        <pre><code>/* include/linux/sched.h — 进程控制块 */
+
+struct task_struct {
+    /* 进程状态 */
+    long state;              /* -1表示不可运行，0表示就绪，正数表示阻塞 */
+
+    /* 进程标志和计数器 */
+    long counter;            /* 当前时间片剩余滴答数（动态优先级） */
+    long priority;           /* 静态优先级（初始时间片长度） */
+
+    /* 信号相关 */
+    unsigned long signal;    /* 收到的信号位图 */
+    unsigned long blocked;   /* 阻塞的信号位图 */
+    unsigned long flags;     /* 进程标志位 */
+    int errno;               /* 最近一次错误的编号 */
+
+    /* 进程标识 */
+    long pid;                /* 进程ID */
+    long pgrp;               /* 进程组 */
+    long session;            /* 会话ID */
+    long leader;             /* 是否为会话组长 */
+
+    /* 地址空间 */
+    unsigned long start_code, end_code, end_data, brk;
+    unsigned long start_stack;
+    long sgap;               /* 进程使用的栈顶位置 */
+
+    /* 进程间关系 */
+    long uid, euid, suid;
+    long gid, egid, sgid;
+    unsigned long alarm;     /* 报警定时器 */
+
+    /* 文件系统 */
+    unsigned short umask;
+    struct m_inode *pwd;     /* 当前目录的inode */
+    struct m_inode *root;    /* 根目录的inode */
+    struct file *filp[NR_OPEN]; /* 进程打开的文件表 */
+
+    /* 硬件上下文 */
+    struct tss_struct tss;   /* 任务状态段（硬件保存寄存器） */
+    struct desc_struct ldt[2]; /* 局部描述符表 */
+};</code></pre>
+
+        <p>这个结构中，与调度最直接相关的字段解析如下：</p>
+
+        <table>
+            <thead>
+                <tr><th>字段</th><th>作用</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>state</td><td>进程当前状态</td><td>-1=不可运行，0=就绪/运行，>0=阻塞</td></tr>
+                <tr><td>counter</td><td>动态优先级/剩余时间片</td><td>越大优先级越高，每次时钟中断减1</td></tr>
+                <tr><td>priority</td><td>静态优先级</td><td>counter用完时重置为priority</td></tr>
+                <tr><td>signal</td><td>收到的信号位图</td><td>每个bit代表一种信号</td></tr>
+                <tr><td>pid</td><td>进程ID</td><td>唯一标识进程</td></tr>
+                <tr><td>tss</td><td>硬件任务状态段</td><td>CPU硬件切换时自动保存/恢复寄存器</td></tr>
+                <tr><td>ldt[2]</td><td>局部描述符表</td><td>每个进程自己的代码段和数据段描述符</td></tr>
+                <tr><td>filp[NR_OPEN]</td><td>文件描述符表</td><td>进程已打开的文件</td></tr>
+            </tbody>
+        </table>
+
+        <h2>进程状态与切换</h2>
+
+        <p>Linux 0.11的进程有五种状态：</p>
+
+        <pre><code>进程状态转换图：
+
+                  ┌──────────────────────────────┐
+                  │                              │
+                  ▼                              │
+   ┌───────┐  fork()  ┌─────────────┐  schedule()  ┌───────────┐
+   │UNINIT │─────────►│ TASK_RUNNING │◄─────────────│ TASK_RUNNING│
+   └───────┘          └──────┬──────┘  (选择新进程)   └───────────┘
+                             │                            ▲
+                             │        I/O等事件            │
+                             ▼          完成               │
+                    ┌─────────────────┐                   │
+                    │TASK_INTERRUPTIBLE├───────────────────┘
+                    ├─────────────────┤
+                    │TASK_UNINTERRUP  │──── 事件完成 ──────┘
+                    └─────────────────┘
+                             │
+                             │ exit()
+                             ▼
+                    ┌──────────────┐   wait()   ┌──────────────┐
+                    │ TASK_ZOMBIE  │───────────►│  TASK_STOPPED │
+                    └──────────────┘            └──────────────┘
+</code></pre>
+
+        <table>
+            <thead>
+                <tr><th>状态</th><th>值</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>TASK_RUNNING</td><td>0</td><td>正在运行或就绪（等待调度）</td></tr>
+                <tr><td>TASK_INTERRUPTIBLE</td><td>1</td><td>可中断的睡眠（收到信号即唤醒）</td></tr>
+                <tr><td>TASK_UNINTERRUPTIBLE</td><td>2</td><td>不可中断的睡眠（等待I/O完成）</td></tr>
+                <tr><td>TASK_ZOMBIE</td><td>3</td><td>僵尸状态（进程已退出，资源等待回收）</td></tr>
+                <tr><td>TASK_STOPPED</td><td>4</td><td>暂停状态（收到SIGSTOP等信号）</td></tr>
+            </tbody>
+        </table>
+
+        <p>注意TASK_INTERRUPTIBLE和TASK_UNINTERRUPTIBLE的区别：前者可以被信号唤醒（比如进程在等待键盘输入时收到SIGKILL），后者必须等到等待的事件发生（比如进程正在等待磁盘I/O完成，不能被信号打断）。</p>
+
+        <h2>schedule()源码分析</h2>
+
+        <p>Linux 0.11的<code>schedule()</code>函数在<code>kernel/sched.c</code>中，核心逻辑非常简洁——这也是0.11最吸引人的地方：不到40行C代码就实现了一个可用的调度器。</p>
+
+        <pre><code>/* kernel/sched.c — 进程调度函数 */
+
+void schedule(void)
+{
+    int i, next, c;
+    struct task_struct **p;  /* 指向任务数组 */
+
+    /* 1. 检查是否有进程收到了信号但处于可中断睡眠状态 */
+    /*    如果有，将其唤醒（状态设为0=就绪） */
+    for (p = &amp;LAST_TASK; p &gt; &amp;FIRST_TASK; --p) {
+        if (*p &amp;&amp; (*p)->state == TASK_INTERRUPTIBLE
+            &amp;&amp; (*p)->signal &amp; ~(*p)->blocked) {
+            (*p)->state = TASK_RUNNING;  /* 唤醒 */
+        }
+    }
+
+    /* 2. 调度算法核心：找 counter 最大的进程 */
+    next = 0;
+    c = -1;             /* c = 当前找到的最大counter值 */
+    i = NR_TASKS;       /* 最大任务数（0.11中=64） */
+    p = &amp;LAST_TASK;     /* 从后往前遍历 */
+    while (--i) {
+        if (!*--p)       /* 跳过空槽 */
+            continue;
+        if ((*p)->state == TASK_RUNNING &amp;&amp; (*p)->counter &gt; c) {
+            c = (*p)->counter;
+            next = i;   /* 记录找到的进程索引 */
+        }
+    }
+
+    /* 3. 如果所有就绪进程的counter都为0，重新计算时间片 */
+    if (c)               /* 如果c>0，直接切换 */
+        switch_to(next);
+    else {
+        /* 所有进程counter=0，重新分配 */
+        for (p = &amp;LAST_TASK; p &gt; &amp;FIRST_TASK; --p)
+            if (*p)
+                (*p)->counter = ((*p)->counter &gt;&gt; 1) + (*p)->priority;
+        /* 递归调用自己 */
+        schedule();      /* 递归！重新计算后再调度一次 */
+    }
+}</code></pre>
+
+        <p>这段代码的核心逻辑值得仔细品味：</p>
+
+        <ol>
+            <li><strong>唤醒可中断睡眠进程</strong>：先扫一遍所有进程，如果有可中断睡眠（TASK_INTERRUPTIBLE）的进程收到了信号，唤醒它，让它有机会被调度</li>
+            <li><strong>找counter最大的就绪进程</strong>：遍历所有64个任务槽，找到state==TASK_RUNNING且counter最大的进程作为下一个执行者</li>
+            <li><strong>如果所有进程counter都为0</strong>：说明所有就绪进程的时间片都用完了。此时按公式<code>counter = counter/2 + priority</code>重新计算时间片，然后递归调用schedule()再做一次调度</li>
+        </ol>
+
+        <p>这个算法的巧妙之处在于：counter既是<strong>剩余时间片</strong>，也是<strong>动态优先级</strong>。进程执行时counter逐渐减少，优先级随之下降；I/O密集型进程经常主动让出CPU，counter消耗得慢，优先级更高。这就是MLFQ的简化实现。</p>
+
+        <h2>switch_to()切换</h2>
+
+        <p>schedule()最后调用<code>switch_to()</code>完成实际的任务切换。这是<code>kernel/system_call.s</code>中的汇编代码：</p>
+
+        <pre><code>! kernel/system_call.s — 任务切换宏
+
+! switch_to(n) — 通过ljmp切换到任务n的TSS
+! 这个指令会：
+!   1. 自动将当前CPU寄存器保存到当前任务的TSS中
+!   2. 自动从新任务的TSS中恢复所有寄存器
+!   3. 设置CR3为新任务的页目录基地址
+
+switch_to:
+    movl _current, %eax    ; 获取当前进程的task_struct地址
+    cmpl %eax, _TSS(%esp)  ; 如果是同一个进程，不切换
+    je  1f
+
+    ; ljmp到新任务的TSS选择子
+    ; CPU硬件自动完成上下文切换
+    ljmp _TSS(%esp)        ; _TSS = 新任务的TSS选择子
+
+    ; 这里如果调度回来，会继续执行下面的代码
+    ; 但这不是当前进程在执行了——这是被切换回来的旧进程
+1:
+    ret</code></pre>
+
+        <p>这个<code>ljmp</code>指令是x86 CPU最强大的特性之一。当CPU看到ljmp的目标是一个TSS描述符时（而非代码段描述符），它会：</p>
+        <ul>
+            <li>自动将当前CPU寄存器的值保存到当前任务的TSS中</li>
+            <li>从目标任务的TSS中加载所有寄存器的值（包括通用寄存器、段寄存器、CR3、EFLAGS等）</li>
+            <li>如果新任务的CR3不同，还会切换页目录——所以进程切换后看到的内存空间也会改变</li>
+        </ul>
+
+        <p>这意味着<strong>任务切换的"重活"几乎全部由CPU硬件代劳了</strong>。这既是优点（简洁、可靠），也是缺点（慢——ljmp要保存/恢复所有寄存器，很多是冗余的）。现代内核不再使用硬件TSS切换，而是通过软件方式只保存/恢复必需的寄存器，性能高出几个数量级。</p>
+
+        <h2>jiffies与时钟滴答</h2>
+
+        <p>调度不是凭空发生的——它需要一个"驱动力"。这个驱动力就是<strong>时钟中断</strong>。</p>
+
+        <p>Linux 0.11的时钟中断频率是<strong>100Hz</strong>——每10毫秒触发一次。每次时钟中断都会调用<code>do_timer()</code>:</p>
+
+        <pre><code>/* kernel/sched.c — 时钟中断处理 */
+
+void do_timer(long cpl)
+{
+    /* 1. 更新系统全局时钟 */
+    jiffies++;           /* 全局滴答计数，从系统启动到现在的滴答数 */
+
+    /* 2. 递减当前进程的counter（时间片） */
+    if (--current->counter > 0)  /* 时间片没用完 */
+        return;                  /* 继续执行当前进程 */
+    if (cpl)                     /* 如果当前进程运行在用户态 */
+        schedule();              /* 触发调度 */
+    /* 如果在内核态（cpl=0），不调度——保证内核操作原子性 */
+    /* 但注意：当前进程的counter已经为0了 */
+    /* 下次时钟中断会继续调用schedule() */
+}</code></pre>
+
+        <p>这里有一个非常精妙的设计：<code>cpl</code>参数。如果当前进程运行在用户态（cpl=3），时间片用完时<code>schedule()</code>会被直接调用。但如果当前进程正在内核态执行系统调用（cpl=0），即使时间片用完了，也不会立即调度——这是为了保证内核操作不被打断。</p>
+
+        <div class="highlight">
+            <strong>内核不可抢占</strong>：Linux 0.11的内核是<strong>非抢占式（non-preemptive）</strong>的。这意味着一旦进入内核态，无论时间片是否用完，当前进程都会继续执行，直到主动返回用户态。这是早期Linux的设计选择——简单、安全，但牺牲了实时性。现代内核（2.6以后）已经支持了内核抢占。
+        </div>
+
+        <h2>踩坑故事——调度器优先级反转</h2>
+
+        <p>这是早期Linux系统上一个经典的调度问题，直到今天我还能看到有人在嵌入式Linux上踩到类似的坑。</p>
+
+        <p>假设你有两个进程：进程A是一个交互式编辑器，大部分时间在等待键盘输入（TASK_INTERRUPTIBLE），偶尔需要很短的时间处理输入。进程B是一个CPU密集型计算任务，无限循环地进行矩阵运算。</p>
+
+        <p>按照0.11的调度算法，你认为交互式进程A会获得更高优先级——因为它经常睡眠，counter消耗少。但实际运行时，你却看到进程A的响应越来越慢，敲一个键要等好几秒才有反应。</p>
+
+        <p>为什么会这样？</p>
+
+        <p>问题出在counter的重新计算时机上。当所有就绪进程的counter都为0时，schedule()会重新计算counter。但注意重新计算的公式是：</p>
+
+        <pre><code>counter = counter / 2 + priority</code></pre>
+
+        <p>如果进程A长时间处于TASK_INTERRUPTIBLE状态，它的counter确实很少被消耗，所以重新计算时它的counter值很高。但问题在于——Linux 0.11的调度器只在<code>schedule()</code>被调用时才重新计算counter，而schedule()只在以下情况被调用：</p>
+
+        <ul>
+            <li>当前进程时间片用完（时钟中断触发）</li>
+            <li>当前进程主动调用sleep_on()或sys_pause()</li>
+            <li>进程主动让出CPU（如等待I/O）</li>
+        </ul>
+
+        <p>如果CPU密集型进程B一直在运行，它的counter降到0后，确实会触发schedule()。但如果进程A和B的counter同时为0了，重新计算后，A获得高counter，然后被调度执行——但它只用了很少的CPU就进入I/O等待了，counter还很高。然后B被调度，B的counter很低，很快就用完了，再次触发schedule()。看起来没问题？</p>
+
+        <p>问题出在更微妙的场景：当进程A在等待I/O时，它的counter并不会减少（因为它没有被调度）。而进程B在运行，counter在减少。当B的counter降到0，触发schedule()，所有进程的counter重新计算：A的counter（没怎么消耗）变成了 <code>old_counter/2 + priority</code>，B的counter（消耗到0了）变成了 <code>0/2 + priority = priority</code>。看起来A仍然比B高？不一定——如果A的priority本身很低（比如默认的15），B的priority很高（比如20），那么重新计算后B反而比A高。</p>
+
+        <p>这个案例告诉我们：<strong>调度是一个复杂的动态博弈</strong>。在0.11的调度器中，priority（静态优先级）是固定的，counter（动态优先级）是变化的。两者的结合决定了最终的调度行为。如果静态优先级设置不当，就会出现交互式进程响应慢的问题。</p>
+
+        <div class="warning">
+            <strong>实用建议</strong>：在Linux 0.11中，如果你发现交互进程响应太慢，可以尝试增大其priority字段。在<code>sys_nice()</code>系统调用中，你可以调整进程的priority值——但注意，0.11的nice系统调用只影响静态优先级，不会影响counter的计算策略。
+        </div>
+
+        <p>进程调度是操作系统的"心脏"，理解了它，你就理解了操作系统如何在多个进程之间分配CPU资源。下一章，我们将从进程的"一生"视角出发，学习<strong>进程的完整生命周期</strong>——一个进程从出生（fork）到死亡（exit）的完整历程。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

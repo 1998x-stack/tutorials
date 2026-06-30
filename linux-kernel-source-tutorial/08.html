@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 中断与异常</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html" class="active">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们学习了x86保护模式下的分段与特权级机制，弄清楚了GDT、LDT、DPL/RPL/CPL这些核心概念。但保护模式还有一个至关重要的机制我们还没有展开——那就是<strong>中断与异常</strong>。</p>
+
+        <p>如果说CPU是操作系统的"大脑"，那么中断就是驱动这颗大脑运转的"神经信号"。没有中断，CPU只能轮询一切——键盘、鼠标、硬盘、定时器——轮询的效率有多低？想象一下你在厨房盯着电水壶看它什么时候烧开，而不是去干点别的，等水壶"哔"一声再过来。中断就是那声"哔"。</p>
+
+        <h2>引言——中断是操作系统的事件驱动引擎</h2>
+
+        <p>在学习中断机制之前，我们需要先区分两个容易混淆的概念：<strong>中断(Interrupt)</strong>和<strong>异常(Exception)</strong>。</p>
+
+        <p>中断是由<strong>外部硬件设备</strong>触发的，完全是异步的——CPU在执行某条指令时，并不知道下一秒会有一个键盘按键被按下。时钟中断、键盘中断、硬盘中断都属于这一类。</p>
+
+        <p>异常则是由<strong>正在执行的指令本身</strong>触发的，是同步的。除零错误、缺页异常、非法指令都属于异常——它们是CPU在执行指令过程中发现"出问题了"，主动产生的事件。</p>
+
+        <p>虽然触发来源不同，但CPU处理中断和异常的机制是<strong>高度一致的</strong>：保存当前执行现场、跳转到对应的处理函数、处理完成后恢复现场继续执行。理解了这个统一的处理框架，你就理解了中断系统的核心。</p>
+
+        <div class="tip">
+            <strong>关键区别</strong>：中断是异步且可以被屏蔽的（IF标志位控制），异常是同步且不可屏蔽的（如果CPU无法继续执行的话）。外设中断不影响指令的完成，而异常（如缺页）必须在当前指令处理完成后才能返回——因为异常发生在<em>当前指令执行过程中</em>。
+        </div>
+
+        <h2>x86中断向量表</h2>
+
+        <p>x86 CPU硬件定义了一张<strong>中断向量表(IVT, Interrupt Vector Table)</strong>——实际上是一组从0到255的编号，每个编号对应一个中断或异常。CPU拿到编号后，通过IDT（中断描述符表）找到对应的处理函数入口。</p>
+
+        <p>这256个向量分配如下：</p>
+
+        <ul>
+            <li><strong>0-31</strong>：Intel保留的异常和NMI（不可屏蔽中断）</li>
+            <li><strong>32-255</strong>：用户可定义的中断（通常用于外设中断和系统调用）</li>
+        </ul>
+
+        <p>下面是Linux 0.11中用到的一些关键中断向量：</p>
+
+        <table>
+            <thead>
+                <tr><th>向量号</th><th>名称</th><th>类型</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>0</td><td>#DE</td><td>异常</td><td>除零错误（Divide Error）</td></tr>
+                <tr><td>1</td><td>#DB</td><td>异常</td><td>调试异常（Debug）</td></tr>
+                <tr><td>3</td><td>#BP</td><td>异常</td><td>断点异常（Breakpoint）——int 3指令</td></tr>
+                <tr><td>6</td><td>#UD</td><td>异常</td><td>非法指令（Invalid Opcode）</td></tr>
+                <tr><td>8</td><td>#DF</td><td>异常</td><td>双重错误（Double Fault）</td></tr>
+                <tr><td>13</td><td>#GP</td><td>异常</td><td>通用保护错误（General Protection Fault）</td></tr>
+                <tr><td>14</td><td>#PF</td><td>异常</td><td>缺页异常（Page Fault）</td></tr>
+                <tr><td>16</td><td>#MF</td><td>异常</td><td>x87浮点异常</td></tr>
+                <tr><td>32</td><td>IRQ0</td><td>中断</td><td>时钟中断（8259定时器）</td></tr>
+                <tr><td>33</td><td>IRQ1</td><td>中断</td><td>键盘中断</td></tr>
+                <tr><td>36</td><td>IRQ4</td><td>中断</td><td>串口1</td></tr>
+                <tr><td>38</td><td>IRQ6</td><td>中断</td><td>软盘驱动</td></tr>
+                <tr><td>39</td><td>IRQ7</td><td>中断</td><td>并口/打印机</td></tr>
+                <tr><td>44</td><td>IRQ12</td><td>中断</td><td>PS/2鼠标</td></tr>
+                <tr><td>46</td><td>IRQ14</td><td>中断</td><td>硬盘IDE主通道</td></tr>
+                <tr><td>0x80</td><td>int 0x80</td><td>中断</td><td>Linux系统调用入口</td></tr>
+            </tbody>
+        </table>
+
+        <p>注意0x80——这个在Linux中具有特殊地位的向量号。Linus选择0x80作为系统调用入口，是因为它在用户空间和内核空间都有明确的定义，不会与硬件中断冲突。</p>
+
+        <h2>IDT与门描述符</h2>
+
+        <p>在保护模式下，中断/异常的处理入口不再像实模式那样通过IVT（中断向量表）查地址，而是通过<strong>IDT（中断描述符表，Interrupt Descriptor Table）</strong>。IDT中每个表项是一个8字节的<strong>门描述符</strong>，指向一个代码段中的处理函数。</p>
+
+        <p>IDT有三种类型的门描述符：</p>
+
+        <table>
+            <thead>
+                <tr><th>门类型</th><th>作用</th><th>自动关IF?</th><th>使用场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>中断门（Interrupt Gate）</td><td>进入处理函数时自动关IF，防止嵌套</td><td>是</td><td>硬件中断处理</td></tr>
+                <tr><td>陷阱门（Trap Gate）</td><td>进入处理函数时<strong>不</strong>关IF</td><td>否</td><td>异常处理、系统调用</td></tr>
+                <tr><td>任务门（Task Gate）</td><td>通过TSS切换到另一个任务处理</td><td>—</td><td>很少使用（Linux几乎不用）</td></tr>
+            </tbody>
+        </table>
+
+        <p>中断门和陷阱门的核心区别就在于<strong>IF标志位的处理</strong>。中断门会在进入处理函数时自动将IF清零（CLI），从而屏蔽后续中断，防止中断嵌套。陷阱门则保持IF不变——这对于系统调用特别重要，因为系统调用中可能需要中断来处理其他事件。</p>
+
+        <p>IDT的地址由<strong>IDTR寄存器</strong>保存，通过<code>lidt</code>指令加载。在Linux 0.11的boot/head.s中，你可以看到IDT被初始化在物理地址0x0000处，256个门描述符占2,048字节（256 * 8 = 2048）。</p>
+
+        <pre><code>! boot/head.s — 初始化IDT
+!
+! 将IDT设置在物理地址0x0000处
+! 256个中断门，每个8字节，共2048字节
+
+lidt  idt_descr      ! 加载IDT寄存器
+...
+idt_descr:
+    .word 256*8-1    ! IDT的limit（2047）
+    .long 0x0000     ! IDT的基地址（0x0000）</code></pre>
+
+        <h2>8259A中断控制器</h2>
+
+        <p>在x86体系中，硬件中断不是直接送给CPU的，而是经过一个<strong>中断控制器</strong>统一管理。PC/AT架构使用的是两块级联的<strong>8259A可编程中断控制器（PIC）</strong>。</p>
+
+        <p>为什么需要8259A？因为CPU的INTR引脚只有一个，但外设可能有十几个。8259A的作用就是<strong>收集多个外设的中断请求，按优先级排序后，统一向CPU的INTR引脚发送中断信号</strong>。</p>
+
+        <p>Linux 0.11中，主从两个8259A级联工作：</p>
+
+        <ul>
+            <li><strong>主片8259A</strong>：管理IRQ0-IRQ7，其中IRQ2用于连接从片</li>
+            <li><strong>从片8259A</strong>：管理IRQ8-IRQ15，通过IRQ2连接到主片</li>
+        </ul>
+
+        <p>8259A的编程通过<strong>ICW（初始化命令字）</strong>和<strong>OCW（操作命令字）</strong>完成。在Linux 0.11的kernel/init/main.c中，我们可以看到初始化代码：</p>
+
+        <pre><code>/* kernel/init/main.c — 8259A初始化 */
+
+/* 重新对8259A中断控制器编程，把中断向量号映射到32之后 */
+void init_8259A(void)
+{
+    /* 主片ICW1：触发方式=边沿触发，需要ICW4 */
+    outb_p(0x11, 0x20);        /* 0x20 = 主片命令口 */
+    /* 从片ICW1 */
+    outb_p(0x11, 0xA0);        /* 0xA0 = 从片命令口 */
+
+    /* 主片ICW2：中断向量基地址 = 0x20（即IRQ0对应向量32） */
+    outb_p(0x20, 0x21);        /* 0x21 = 主片数据口 */
+    /* 从片ICW2：中断向量基地址 = 0x28 */
+    outb_p(0x28, 0xA1);        /* 0xA1 = 从片数据口 */
+
+    /* 主片ICW3：IRQ2连接从片 */
+    outb_p(0x04, 0x21);
+    /* 从片ICW3：级联标识 */
+    outb_p(0x02, 0xA1);
+
+    /* 主片ICW4：x86模式 */
+    outb_p(0x01, 0x21);
+    outb_p(0x01, 0xA1);
+
+    /* 屏蔽所有中断（先全部关掉，后续按需打开） */
+    outb_p(0xFF, 0x21);
+    outb_p(0xFF, 0xA1);
+}</code></pre>
+
+        <p>注意ICW2中设置的中断向量基地址是0x20（32）——这就是为什么时钟中断（IRQ0）对应向量32的原因。</p>
+
+        <div class="highlight">
+            <strong>为什么不从0开始？</strong>向量0-31被Intel保留给CPU异常，如果硬件中断也用这个范围，CPU将无法区分是异常还是外设中断。Linus将8259A映射到32开始的向量，完美避开了保留区域。系统调用也没有使用硬件中断，而是单独使用了向量0x80——从0.11开始就是如此。
+        </div>
+
+        <h2>asm.s源码分析——通用中断入口</h2>
+
+        <p>当中断发生时，CPU需要保存当前执行现场，跳转到处理函数，处理完毕后再恢复现场。Linux 0.11在<code>kernel/asm.s</code>中实现了一套优雅的通用中断入口。</p>
+
+        <p>每个硬件中断都对应一个汇编入口函数，格式高度统一：</p>
+
+        <pre><code>! kernel/asm.s — 硬件中断通用入口
+
+! 时钟中断入口
+_timer_interrupt:
+    push %ds        ! 保存数据段寄存器
+    push %es
+    push %fs
+    pushl %edx      ! 保存通用寄存器
+    pushl %ecx
+    pushl %ebx
+    pushl %eax
+    pushl %ebp
+    pushl %esi
+    pushl %edi
+    movl $0x10, %eax   ! 重置数据段寄存器为内核数据段
+    mov %ax, %ds
+    mov %ax, %es
+    movl $0x17, %eax   ! 重置为内核FS段（用户数据段）
+    mov %ax, %fs
+    incl _jiffies      ! 更新全局时钟滴答计数
+    pushl $0x20        ! 压入中断向量号（时钟=32=0x20）
+    call _do_IRQ        ! 调用C函数do_IRQ
+    addl $4, %esp      ! 清理栈
+    popl %edi
+    popl %esi
+    popl %ebp
+    popl %eax
+    popl %ebx
+    popl %ecx
+    popl %edx
+    pop %fs
+    pop %es
+    pop %ds
+    iret               ! 中断返回</code></pre>
+
+        <p>这段汇编代码的模式非常清晰：</p>
+
+        <ol>
+            <li><strong>SAVE_ALL（保存所有寄存器）</strong>：将段寄存器（ds, es, fs）和通用寄存器（eax, ebx, ecx, edx, ebp, esi, edi）压栈保存</li>
+            <li><strong>重置段寄存器</strong>：将ds、es设置为内核数据段（0x10），将fs设置为用户数据段（0x17）</li>
+            <li><strong>更新jiffies</strong>：对于时钟中断，递增全局变量_jiffies</li>
+            <li><strong>调用do_IRQ</strong>：压入中断向量号作为参数，调用C函数do_IRQ</li>
+            <li><strong>RESTORE_ALL（恢复所有寄存器）</strong>：从栈中恢复所有保存的寄存器</li>
+            <li><strong>iret返回</strong>：CPU自动从栈中恢复CS、EIP和EFLAGS</li>
+        </ol>
+
+        <p>这个模式——保存现场、处理中断、恢复现场——是所有操作系统中断处理的核心模式，直到今天也没有改变过。</p>
+
+        <h2>异常处理</h2>
+
+        <p>异常处理与硬件中断处理的结构类似，但异常处理函数通常需要更多信息来判断错误原因。Linux 0.11在<code>kernel/traps.c</code>中初始化了所有异常处理函数：</p>
+
+        <pre><code>/* kernel/traps.c — 异常处理初始化 */
+
+void trap_init(void)
+{
+    int i;
+    /* 设置IDT表项：异常0-31 */
+    set_trap_gate(0, &amp;divide_error);
+    set_trap_gate(1, &amp;debug);
+    set_trap_gate(2, &amp;nmi);
+    set_trap_gate(3, &amp;int3);        /* int 3 — 断点 */
+    set_trap_gate(4, &amp;overflow);
+    set_trap_gate(5, &amp;bounds);
+    set_trap_gate(6, &amp;invalid_op);    /* 非法指令 */
+    set_trap_gate(7, &amp;device_not_available);
+    set_trap_gate(8, &amp;double_fault);  /* 双重错误 */
+    set_trap_gate(9, &amp;coprocessor_segment_overrun);
+    set_trap_gate(10, &amp;invalid_TSS);
+    set_trap_gate(11, &amp;segment_not_present);
+    set_trap_gate(12, &amp;stack_segment);
+    set_trap_gate(13, &amp;general_protection);  /* 通用保护异常 */
+    set_trap_gate(14, &amp;page_fault);           /* 缺页异常 */
+    set_trap_gate(15, &amp;reserved);
+    set_trap_gate(16, &amp;coprocessor_error);
+    /* 17-31保留 */
+    for (i = 17; i &lt; 32; i++)
+        set_trap_gate(i, &amp;reserved);
+}</code></pre>
+
+        <p>每个异常对应的处理函数在<code>kernel/asm.s</code>中定义。以除零错误为例：</p>
+
+        <pre><code>! kernel/asm.s
+
+_divide_error:
+    pushl $_do_divide_error  ! 压入处理函数地址
+    jmp error_code           ! 跳转到通用异常处理代码
+
+! 通用异常处理代码
+error_code:
+    pushl %ds        ! 保存所有寄存器
+    pushl %eax
+    xorl %eax, %eax
+    pushl %ebp
+    pushl %esi
+    pushl %edi
+    ...
+    call *%eax        ! 调用具体的异常处理函数</code></pre>
+
+        <p>当异常严重到无法恢复时，内核会调用<code>die()</code>函数——这是Linux内核最初的Panic机制。die()会打印异常信息、寄存器状态，然后进入死循环或重启：</p>
+
+        <pre><code>/* 内核Panic */
+void die(char *str, ...)
+{
+    printk("Kernel panic: %s\n", str);
+    /* 打印寄存器现场 */
+    __asm__("cli");   /* 关闭中断 */
+    while(1);         /* 死循环 */
+}</code></pre>
+
+        <div class="warning">
+            <strong>注意</strong>：内核Panic意味着操作系统已经无法继续安全运行。在早期内核中，die()只是简单地打印信息然后死循环——没有优雅的关机，没有文件系统同步。这是因为0.11的定位是"功能原型"，容错机制后来才逐渐完善。直到今天，"Kernel panic"仍然是Linux遇到不可恢复错误时的最终处理方式。
+        </div>
+
+        <h2>踩坑故事——EOI丢失导致的中断"静默"</h2>
+
+        <p>这是早期PC系统中一个非常经典的Bug，即使是经验丰富的内核开发者也可能中招。</p>
+
+        <p>故事是这样的：某位开发者写了一个简单的设备驱动，在中断处理函数中做了些常规操作——读取设备寄存器、处理数据、返回。在测试时，他发现一个奇怪的现象：时钟中断偶尔会"消失"几秒钟，系统时间变慢，调度器行为异常。</p>
+
+        <p>他花了整整三天调试，最终发现问题出在<strong>EOI（End of Interrupt，中断结束）命令上</strong>。</p>
+
+        <p>8259A中断控制器在收到一个中断后，会<strong>屏蔽</strong>同优先级和更低优先级的中断，直到收到EOI命令才会重新打开。如果驱动在处理中断时没有向8259A发送EOI（通过向0x20端口写0x20），8259A就会认为中断还在处理中，从而阻塞后续所有中断。</p>
+
+        <pre><code>/* 错误写法：缺少EOI */
+void timer_interrupt_bad(void)
+{
+    do_timer();       /* 处理定时器 */
+    /* 忘记发送EOI！8259A会一直屏蔽中断 */
+}
+
+/* 正确写法：必须发送EOI */
+void timer_interrupt_good(void)
+{
+    do_timer();       /* 处理定时器 */
+    outb_p(0x20, 0x20);  /* 向主片8259A端口0x20发送EOI命令(0x20) */
+}</code></pre>
+
+        <p>Linux 0.11的do_IRQ函数中，在调用具体处理函数之后，会检查中断是否来自从片（向量号 >= 0x28），如果是则先向从片发送EOI，然后再向主片发送EOI：</p>
+
+        <pre><code>/* kernel/irq.c — do_IRQ */
+void do_IRQ(unsigned int irq)
+{
+    /* 调用注册的中断处理函数 */
+    if (call_irq(irq))
+        return;
+
+    /* 发送EOI */
+    if (irq &gt;= 8)        /* 从片的中断 */
+        outb_p(0x20, 0xA0);  /* 向从片发EOI */
+    outb_p(0x20, 0x20);      /* 向主片发EOI */
+}</code></pre>
+
+        <p>这个Bug给所有写中断驱动的开发者上了一课：<strong>中断处理和硬件之间有一个严格的协议，任何一步遗漏都可能导致整个系统行为异常</strong>。而且这类问题特别难调试——因为症状不是系统崩溃，而是"间歇性行为异常"——时断时续的响应、偶发的延迟、间歇性的数据传输失败。碰到这种问题，先检查EOI——这几乎成了内核调试的一条"铁律"。</p>
+
+        <p>理解了这个故事，你就会明白为什么Linux 0.11中的中断处理代码看起来如此简洁，却又处处透着稳健——每一行代码背后都是用血的教训换来的工程经验。</p>
+
+        <p>好了，中断和异常我们就讲到这里。下一章，我们将学习基于中断机制的一个重要应用——<strong>系统调用</strong>。我们将看到用户态程序如何通过int 0x80进入内核执行特权操作，以及Linux 0.11中系统调用的完整实现链路。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

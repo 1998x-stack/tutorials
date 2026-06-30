@@ -56,6 +56,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `computer-architecture-tutorial/` | 计算机体系结构 | 28 | `https://1998x-stack.github.io/computer-architecture-tutorial/` |
 | `integrated-circuit-design-tutorial/` | 集成电路设计 | 28 | `https://1998x-stack.github.io/integrated-circuit-design-tutorial/` |
 | `fpga-verilog-tutorial/` | FPGA/Verilog 嵌入式开发 | 28 | `https://1998x-stack.github.io/fpga-verilog-tutorial/` |
+| `sqlite-source-analysis-tutorial/` | SQLite源码分析 | 28 | `https://1998x-stack.github.io/sqlite-source-analysis-tutorial/` |
 
 ### 网络 / 通信 (5)
 | Directory | Topic | Chapters | URL |

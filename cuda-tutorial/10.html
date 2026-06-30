@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 常量内存与纹理内存</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html" class="active">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>常量内存与纹理内存</h2>
+
+        <p>大家好，我是你们的讲师。全局内存优化我们讲完了，共享内存也深入了——那CUDA还有没有别的"内存花招"？有，而且还不止一种。这一章我们来聊聊两种为特定访问模式设计的内存类型：<strong>常量内存（constant memory）</strong>和<strong>纹理内存（texture memory）</strong>。它们不像共享内存那样人尽皆知，但在合适的场景下，它们能带来非常惊人的加速效果。</p>
+
+        <div class="highlight">
+            <strong>一句话总结：</strong> 常量内存 = warp内所有线程访问同一地址时最快；纹理内存 = 2D空间局部性访问时最快。选对内存类型，比拼命优化错误的内存访问高效得多。
+        </div>
+
+        <h3>常量内存机制</h3>
+
+        <p>常量内存是GPU上一块64KB的只读内存区域，它有独立的<strong>常量缓存（constant cache）</strong>，大小因架构而异（通常在10KB左右）。常量内存最神奇的特性是：<strong>如果一个warp的所有32个线程访问同一个常量内存地址，硬件会把这个值广播给所有线程，相当于一次访问完成了32个线程的请求。</strong></p>
+
+        <p>如果warp内的线程访问了不同的地址呢？那就糟糕了——请求会被串行化，每个不同的地址都需要一次独立的内存事务。这就是常量内存的双刃剑：用对场景，极快；用错场景，极慢。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th>常量内存</th>
+                    <th>全局内存</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>容量</td>
+                    <td>64 KB</td>
+                    <td>显存容量（GB级别）</td>
+                </tr>
+                <tr>
+                    <td>延迟（最佳情况）</td>
+                    <td>~1个周期（缓存命中时广播）</td>
+                    <td>数百个周期</td>
+                </tr>
+                <tr>
+                    <td>warp内统一访问</td>
+                    <td>极快（硬件广播）</td>
+                    <td>取决于合并情况</td>
+                </tr>
+                <tr>
+                    <td>warp内发散访问</td>
+                    <td>极慢（串行化，N路地址=N次事务）</td>
+                    <td>取决于合并情况</td>
+                </tr>
+                <tr>
+                    <td>可写性</td>
+                    <td>只读（从内核视角）</td>
+                    <td>可读写</td>
+                </tr>
+                <tr>
+                    <td>缓存策略</td>
+                    <td>专用常量缓存</td>
+                    <td>L1/L2缓存</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>核心原则：</strong> 常量内存最适合"warp内所有线程读取相同地址"的场景。比如所有线程都用同一个滤波器系数做卷积，或者所有线程查同一个预先计算好的查找表。这种情况下常量内存比全局内存快一个数量级。
+        </div>
+
+        <h3>常量内存使用场景</h3>
+
+        <p>常量内存的经典使用场景包括<strong>滤波器系数</strong>和<strong>查找表</strong>。下面是一个图像滤波的例子：</p>
+
+        <pre><code>// 声明常量内存 —— 在全局作用域（所有函数外部）
+__constant__ float filter[9];  // 3x3 高斯滤波器系数
+
+// 主机端初始化常量内存
+float h_filter[9] = {
+    1.0f/16, 2.0f/16, 1.0f/16,
+    2.0f/16, 4.0f/16, 2.0f/16,
+    1.0f/16, 2.0f/16, 1.0f/16
+};
+cudaMemcpyToSymbol(filter, h_filter, 9 * sizeof(float));
+
+// 内核中使用常量内存
+__global__ void gaussian_blur(const float *input, float *output,
+                               int width, int height) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x &gt;= 1 &amp;&amp; x &lt; width - 1 &amp;&amp; y &gt;= 1 &amp;&amp; y &lt; height - 1) {
+        float sum = 0.0f;
+        for (int dy = -1; dy &lt;= 1; ++dy)
+            for (int dx = -1; dx &lt;= 1; ++dx)
+                sum += input[(y + dy) * width + (x + dx)] * filter[(dy + 1) * 3 + (dx + 1)];
+        output[y * width + x] = sum;
+    }
+}</code></pre>
+
+        <p>这里的 <code>filter</code> 放在常量内存中，每个线程计算同一个位置的滤波系数——硬件广播，完美利用常量缓存。如果filter放在全局内存里，每次都要从显存加载，即使有L1缓存也远不如常量缓存的广播效率高。</p>
+
+        <p>另一个陷阱：常量内存的写操作必须通过主机端的 <code>cudaMemcpyToSymbol()</code> 进行。内核内部不能修改常量内存。如果需要修改，你得重新从主机端拷贝。</p>
+
+        <div class="warning">
+            <strong>注意：</strong> 常量内存只有64KB！别想着把所有数据都塞进去。超过64KB会导致编译错误。而且每个warp的"统一访问"原则必须牢记——如果你的warp内32个线程访问了32个不同的常量地址，性能会急剧下降，甚至比全局内存还差。
+        </div>
+
+        <h3>纹理内存机制</h3>
+
+        <p>纹理内存（texture memory）是CUDA从图形学继承来的另一项遗产。它最初是为了图形渲染中的纹理采样而设计的，但通用计算同样可以受益。纹理内存有几个非常独特的特性：</p>
+
+        <ul>
+            <li><strong>2D空间局部性缓存</strong>：纹理缓存的策略是为二维空间局部性优化的。如果你访问了 <code>(x, y)</code>，那么 <code>(x+1, y)</code>、<code>(x, y+1)</code>、<code>(x+1, y+1)</code> 都会被预取到缓存中</li>
+            <li><strong>硬件插值</strong>：纹理硬件支持线性插值、双线性插值等——如果你的计算需要插值，纹理内存可以直接"送"给你，而不需要手动计算</li>
+            <li><strong>灵活的寻址模式</strong>：支持clamp、wrap、mirror等边界处理模式，减少边界检查的代码量</li>
+            <li><strong>只读路径</strong>：纹理加载走只读缓存，不会污染L1缓存</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>与全局内存的关键区别：</strong> 纹理缓存的"缓存行"不是按128字节对齐的连续地址设计的，而是按2D块（tile）组织的。这意味着当你做图像卷积、模板计算等2D邻居访问时，纹理缓存的命中率远高于普通L1缓存。
+        </div>
+
+        <h3>纹理内存使用场景</h3>
+
+        <p>纹理内存最强大的场景是<strong>图像处理</strong>和<strong>任何具有2D空间局部性的计算</strong>。下面的代码展示如何使用纹理对象API（CUDA 5.0+推荐的用法）：</p>
+
+        <pre><code>// 声明纹理对象引用（设备端）
+texture&lt;float, 2, cudaReadModeElementType&gt; texRef;
+
+// 主机端设置纹理
+cudaArray *cuArray;
+cudaChannelFormatDesc desc = cudaCreateChannelDesc&lt;float&gt;();
+cudaMallocArray(&amp;cuArray, &amp;desc, width, height);
+cudaMemcpyToArray(cuArray, 0, 0, h_data, width * height * sizeof(float),
+                  cudaMemcpyHostToDevice);
+
+// 绑定纹理
+cudaBindTextureToArray(texRef, cuArray);
+texRef.addressMode[0] = cudaAddressModeClamp;  // 边界模式
+texRef.addressMode[1] = cudaAddressModeClamp;
+texRef.filterMode = cudaFilterModePoint;       // 不要插值
+
+// 内核中使用纹理
+__global__ void texture_kernel(float *output, int width, int height) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x &lt; width &amp;&amp; y &lt; height) {
+        // tex2D() 返回浮点值，利用纹理缓存的2D空间局部性
+        float val = tex2D(texRef, x + 0.5f, y + 0.5f);
+        output[y * width + x] = val * 2.0f;
+    }
+}
+
+// 解绑纹理
+cudaUnbindTexture(texRef);
+cudaFreeArray(cuArray);</code></pre>
+
+        <p>注意 <code>tex2D()</code> 的坐标是 <code>float</code> 类型的——因为在图形学里纹理坐标是归一化的浮点数，但在通用计算中我们通常传递整型坐标加0.5偏移来对齐到像素中心。如果开启了 <code>cudaFilterModeLinear</code>，硬件会自动做双线性插值——对于某些需要亚像素精度的应用简直完美。</p>
+
+        <div class="tip">
+            <strong>新API推荐：</strong> CUDA 11+ 引入了<strong>纹理对象</strong>（texture object）API——通过 <code>cudaCreateTextureObject()</code> 创建，返回 <code>cudaTextureObject_t</code>，然后在kernel中用 <code>tex2D&lt;float&gt;(texObj, x, y)</code> 访问。相比"纹理引用"API，纹理对象API更灵活、更安全，也更容易与C++代码集成。推荐新项目使用纹理对象API。
+        </div>
+
+        <h3>只读缓存（__restrict__）</h3>
+
+        <p>从Kepler架构开始，NVIDIA引入了<strong>只读缓存（read-only cache）</strong>的概念，并且提供了一个编译器的优化提示——<code>__restrict__</code>。当你在指针上添加 <code>__restrict__</code> 时，你向编译器承诺：这个指针指向的内存区域不会被任何其他指针别名访问。这给了编译器更多的优化空间。</p>
+
+        <pre><code>// 使用 __restrict__ 启用只读缓存路径
+__global__ void kernel_with_restrict(const float * __restrict__ input,
+                                      float * __restrict__ output,
+                                      int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; N) {
+        // 编译器可以安全地生成LDG指令
+        output[idx] = input[idx] * input[idx];
+    }
+}</code></pre>
+
+        <p><code>__restrict__</code> 和 <code>__ldg()</code> 最终做的事情类似——都尝试让数据通过只读缓存加载。区别在于：<code>__ldg()</code> 是显式指定的，而 <code>__restrict__</code> 是给编译器的提示，编译器如果认为合适会自动生成LDG指令。通常两者配合使用效果最好。</p>
+
+        <div class="warning">
+            <strong>重要限制：</strong> <code>__restrict__</code> 是一个"承诺"——如果你违背了承诺（比如两个 <code>__restrict__</code> 指针实际上指向了重叠的区域），结果是未定义行为。编译器可能会生成错误的代码。所以只有在你确信没有别名时才使用。
+        </div>
+
+        <div class="highlight">
+            <strong>真实"踩坑"故事：</strong> 我有一个做医学图像处理的朋友，他优化一个3D图像卷积kernel花了整整两周。他用所有常规手段都试过了：共享内存分块、合并访问检查、向量化加载——性能始终上不去。最后他抱着试试看的心态把输入图像从全局内存改成纹理内存——结果快了3倍。为什么？因为3D卷积核需要频繁访问相邻体素（voxel），而纹理缓存的3D空间局部性恰好完美适配这种访问模式。全局内存的L1缓存是按128字节线性组织的，但卷积核是在一个3D邻域内"乱窜"——线性缓存行在这里命中率极低。纹理缓存则按3D块组织访问，命中率高出几个层次。这个故事告诉我们：<strong>当你的访问模式有明确的空间局部性（特别是2D或3D）时，纹理内存不是"奇技淫巧"，而是正确的工程选择。</strong>
+        </div>
+
+        <p>常量内存和纹理内存是CUDA内存体系中两颗蒙尘的珍珠。它们没有共享内存那么引人注目，但在特定场景下——统一地址访问（常量内存）和空间局部性访问（纹理内存）——它们的效率远远超过全局内存。其实说到底，CUDA的内存优化就是一句话：<strong>把你的数据放在最合适的内存类型里，让硬件为你做最擅长的事。</strong></p>
+
+        <p>下一章我们进入一个完全不同的主题——<strong>原子操作与并行规约</strong>。当多个线程同时写入同一个地址时会发生什么？如果你以为答案是"乱套"，那原子操作就是你的救星。而并行规约——让成百上千个线程协作完成一个归并求和——则是展示原子操作与共享内存协同工作的最佳案例。我们第11章见。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

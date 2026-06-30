@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 事件与性能计时</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html" class="active">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>事件与性能计时</h2>
+
+        <p>大家好，我是你们的讲师。程序员有一句经典的自嘲："我90%的时间都在优化代码，但我从来没真正测量过它。"在CUDA的世界里，这句话会带来灾难性的后果——因为<strong>GPU内核的执行是异步的</strong>，CPU上的计时函数根本得不到正确的结果。如果你用 <code>clock()</code> 或 <code>gettimeofday()</code> 来测量kernel的运行时间，你测到的很可能只是"启动内核的系统调用花了多久"，而不是内核实际执行了多久。</p>
+
+        <p>这一章我们聚焦于CUDA中正确、精确计时的工具和方法。<strong>CUDA事件（event）</strong>是官方推荐的时间测量工具，我们会从基本用法讲到常见陷阱，从GPU vs CPU计时讲到高级的跨流时间测量。优化从来都是检测驱动的——没有准确的计时，优化就是在盲人摸象。</p>
+
+        <div class="highlight">
+            <strong>核心思想：</strong> 正确的计时是性能优化的起点。如果你不能精确测量，你就无法判断优化是有效还是无效。CUDA事件是唯一正确的GPU计时方式。
+        </div>
+
+        <h3>cudaEvent计时机制</h3>
+
+        <p>CUDA事件本质上是一个<strong>时间戳标记点</strong>，你可以把它插入到stream中的任意位置。当stream执行到事件时，GPU硬件会记录当前的时间戳。通过计算两个事件之间的时间差，你就能精确<strong>在GPU侧</strong>测量一段操作的执行时间。</p>
+
+        <pre><code>// CUDA事件的正确计时模式
+
+cudaEvent_t start, stop;
+cudaEventCreate(&amp;start);
+cudaEventCreate(&amp;stop);
+
+// 在流中记录开始事件
+cudaEventRecord(start, 0);  // 0 = default stream
+
+// 要计时的操作
+my_kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(d_data, N);
+cudaMemcpy(d_result, d_data, N * sizeof(float), cudaMemcpyDeviceToDevice);
+
+// 在流中记录结束事件
+cudaEventRecord(stop, 0);
+
+// 等待stop事件被记录（即所有操作完成）
+cudaEventSynchronize(stop);
+
+// 计算时间差（毫秒）
+float elapsed_ms;
+cudaEventElapsedTime(&amp;elapsed_ms, start, stop);
+
+printf("Kernel + memcpy took %.3f ms\n", elapsed_ms);
+
+// 清理
+cudaEventDestroy(start);
+cudaEventDestroy(stop);</code></pre>
+
+        <p>这段代码的关键点：</p>
+        <ul>
+            <li><code>cudaEventRecord</code> 将事件插入stream，是非阻塞操作——CPU立即返回</li>
+            <li><code>cudaEventSynchronize(stop)</code> 阻塞CPU直到stop事件已被GPU记录——这意味着start和stop之间的所有GPU操作都已完成</li>
+            <li><code>cudaEventElapsedTime</code> 计算两个事件之间的时间差（毫秒），精度通常为微秒级</li>
+        </ul>
+
+        <p>注意这里不需要额外的 <code>cudaDeviceSynchronize()</code>——<code>cudaEventSynchronize(stop)</code> 已经足够了。</p>
+
+        <div class="tip">
+            <strong>关于精度：</strong> CUDA事件使用GPU硬件的时间戳计数器，分辨率在大多数GPU上是约0.5微秒。这远高于CPU上的毫秒级定时器。但要注意，在非常短的kernel（几微秒）上，计时本身的误差可能比较显著——需要多次运行取平均值。
+        </div>
+
+        <h3>避免常见计时错误</h3>
+
+        <p>很多CUDA新手在计时上犯的错误，可以汇总成下面的表格。每一条我都见过无数次：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>常见错误</th>
+                    <th>错误的代码</th>
+                    <th>问题</th>
+                    <th>正确的做法</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>使用CPU计时函数</td>
+                    <td><code>clock()</code> / <code>gettimeofday()</code> 包裹kernel launch</td>
+                    <td>kernel是异步的，CPU计时只测量了启动调用的时间</td>
+                    <td>使用cudaEvent或cudaEventSynchronize</td>
+                </tr>
+                <tr>
+                    <td>没有warmup直接计时</td>
+                    <td>分配内存后直接第一次启动kernel就计时</td>
+                    <td>第一次启动包含驱动初始化、JIT编译、内存迁移等开销</td>
+                    <td>先跑一次warmup kernel，再计时</td>
+                </tr>
+                <tr>
+                    <td>忽略了cudaEventSynchronize</td>
+                    <td>在cudaEventRecord后立即调用ElapsedTime</td>
+                    <td>stop事件可能还没被记录，时间差为0或错误值</td>
+                    <td>在ElapsedTime之前调用cudaEventSynchronize(stop)</td>
+                </tr>
+                <tr>
+                    <td>没有考虑时钟频率变化</td>
+                    <td>单次运行后直接报告时间</td>
+                    <td>GPU Boost会根据温度/功耗调整频率，单次测量不可靠</td>
+                    <td>多次运行取平均值，丢弃异常值</td>
+                </tr>
+                <tr>
+                    <td>将传输时间计入内核时间</td>
+                    <td>在cudaMemcpy前后也放start/stop</td>
+                    <td>传输和计算可能在不同引擎上，干扰了真实的内核执行时间</td>
+                    <td>对传输和内核分别计时</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>最常见也最隐蔽的错误：</strong> 没有warmup。GPU在第一次启动kernel时需要做大量"冷启动"工作——加载CUDA驱动、JIT编译PTX代码、分配GPU上下文等。这些开销可以轻松达到几百毫秒甚至几秒。如果你直接计时第一次运行，你测到的根本不是kernel的性能，而是驱动初始化的时间。正确的做法是：先跑一次dummy kernel（完全相同的数据和配置），然后再开始正式的计时。
+        </div>
+
+        <h3>GPU vs CPU计时</h3>
+
+        <p>为什么CPU上的计时函数（<code>clock()</code>、<code>std::chrono</code>、<code>gettimeofday()</code>）在CUDA中不管用？原因很简单：<strong>kernel启动是异步的。</strong></p>
+
+        <p>当你写 <code>my_kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(...)</code> 时，CPU做的事情是：把内核描述符推入命令缓冲区，然后立即返回。实际上kernel可能还没有开始执行。如果用CPU计时包裹这一行，你测到的是"把命令推入队列"的时间——对于现代GPU来说，这个时间通常只有几微秒。而kernel的实际执行时间可能是几毫秒到几十毫秒。差距是1000倍。</p>
+
+        <p>当然，你可以在kernel launch之后加一个 <code>cudaDeviceSynchronize()</code>，然后用CPU计时包裹从launch到sync的整个过程。这样确实能得到正确的时间。但问题是：</p>
+        <ul>
+            <li><code>cudaDeviceSynchronize()</code> 本身有开销（轮询或等待系统信号）</li>
+            <li>它无法精确区分kernel的执行和同步等待的时间</li>
+            <li>在涉及多个流时，它把所有流都同步了——影响并发行为</li>
+        </ul>
+
+        <p>因此，<strong>CUDA事件才是GPU计时的正确方式</strong>。它在GPU侧记录时间戳，不受CPU调度抖动的影响，也不会引入额外的同步开销。</p>
+
+        <div class="highlight">
+            <strong>类比：</strong> CPU计时kernel ≈ 在火车站的候车室用秒表测量"火车从北京到上海需要多久"。你按下秒表时（kernel launch），火车还没出发。秒表走到0.0001秒时，火车出发了。但你的秒表已经停了——因为你在launch之后就按停了（因为kernel是异步的）。CUDA事件相当于在火车上装了一个GPS记录仪，精确记录出发和到达的时间戳。
+        </div>
+
+        <h3>性能基准测试最佳实践</h3>
+
+        <p>下面是一套经过工程实践检验的GPU基准测试流程：</p>
+
+        <pre><code>// 性能基准测试的正确框架
+float benchmark_kernel(int N, int num_warmup, int num_iter) {
+    cudaEvent_t start, stop;
+    cudaEventCreate(&amp;start);
+    cudaEventCreate(&amp;stop);
+
+    // 预热：让GPU达到稳态（初始化、JIT编译、缓存填充）
+    for (int i = 0; i &lt; num_warmup; ++i) {
+        my_kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(d_data, N);
+    }
+    cudaDeviceSynchronize();
+
+    // 正式计时：多次运行取平均值
+    float total_ms = 0.0f;
+    float min_ms = 1e9f;
+    float max_ms = 0.0f;
+
+    for (int i = 0; i &lt; num_iter; ++i) {
+        cudaEventRecord(start, 0);
+        my_kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(d_data, N);
+        cudaEventRecord(stop, 0);
+        cudaEventSynchronize(stop);
+
+        float ms;
+        cudaEventElapsedTime(&amp;ms, start, stop);
+        total_ms += ms;
+        min_ms = min(min_ms, ms);
+        max_ms = max(max_ms, ms);
+    }
+
+    printf("Kernel: avg=%.3f ms, min=%.3f ms, max=%.3f ms\n",
+           total_ms / num_iter, min_ms, max_ms);
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    return total_ms / num_iter;
+}</code></pre>
+
+        <p>几个重要的实践原则：</p>
+        <ul>
+            <li><strong>Warmup</strong>：至少5-10次预热迭代，让GPU进入稳态温度/频率</li>
+            <li><strong>多次运行</strong>：至少10-20次，取平均值对抗随机波动</li>
+            <li><strong>同时报告min和max</strong>：如果min和max差距很大（超过20%），说明系统中有严重的不稳定因素（可能是电源管理、温度限制或内存带宽竞争）</li>
+            <li><strong>排除异常值</strong>：如果有某次运行明显偏离平均值（比如2x以上），可能是其他进程干扰了GPU，应标记并排除</li>
+        </ul>
+
+        <div class="tip">
+            <strong>经验值：</strong> 在数据中心级GPU（A100/H100）上，稳定后的kernel运行时间波动一般在1-3%以内。如果你的波动超过10%，先检查系统是否存在问题——可能是散热不足、PCIe带宽竞争、或者其他进程在共享GPU。
+        </div>
+
+        <h3>事件的高级用法</h3>
+
+        <p>除了基本的计时，CUDA事件还可以用来测量跨流的操作效率和重叠度。比如，你想测量两个流之间的计算重叠到底有多"完美"：</p>
+
+        <pre><code>// 测量两个流之间的重叠效率
+cudaStream_t s1, s2;
+cudaStreamCreate(&amp;s1);
+cudaStreamCreate(&amp;s2);
+
+cudaEvent_t e1_start, e1_stop, e2_start, e2_stop;
+cudaEventCreate(&amp;e1_start); cudaEventCreate(&amp;e1_stop);
+cudaEventCreate(&amp;e2_start); cudaEventCreate(&amp;e2_stop);
+
+// 在流1中记录开始
+cudaEventRecord(e1_start, s1);
+kernel_A&lt;&lt;&lt;grid, block, 0, s1&gt;&gt;&gt;(d1, N);
+cudaEventRecord(e1_stop, s1);
+
+// 在流2中记录开始（几乎与流1同时）
+cudaEventRecord(e2_start, s2);
+kernel_B&lt;&lt;&lt;grid, block, 0, s2&gt;&gt;&gt;(d2, N);
+cudaEventRecord(e2_stop, s2);
+
+// 等待两个流都完成
+cudaDeviceSynchronize();
+
+float t1_start, t1_stop, t2_start, t2_stop;
+cudaEventElapsedTime(&amp;t1_start, e1_start, e1_stop);  // 流1总时间
+cudaEventElapsedTime(&amp;t2_start, e2_start, e2_stop);  // 流2总时间
+
+// 测量重叠部分：从流1开始到流2结束的总时间
+float total;
+cudaEventElapsedTime(&amp;total, e1_start, e2_stop);
+
+// 重叠效率 = (串行总时间 - 实际总时间) / 串行总时间
+float serial_time = t1_start + t2_start;
+float overlap_efficiency = (serial_time - total) / serial_time * 100.0f;
+printf("Overlap efficiency: %.1f%%\n", overlap_efficiency);</code></pre>
+
+        <p>如果重叠效率接近100%，说明两个内核完美并行；如果重叠效率接近0%，说明它们实际上是在串行执行——可能是硬件资源不足、内存带宽饱和、或者有隐式同步在从中作梗。</p>
+
+        <div class="highlight">
+            <strong>真实"踩坑"故事：</strong> 有一次我在优化一个推荐系统的推理内核。我做了几项"优化"：矢量化加载、共享内存tiling、减少寄存器溢出……然后跑benchmark，"优化后的版本"比原始版本快了2倍以上。我欣喜若狂，准备去邀功。但等等——我忘了warmup。去掉第一次运行的"初始化虚高"之后再做严格测试，实际加速只有15%。我仔细一查发现：原始版本在第一次启动时因为包含了PTX JIT编译、上下文初始化等开销，跑了300ms；第二次才开始正常。而我"优化后的版本"在第一次运行时也因为同样的原因变慢了，但我用第一次warmup后开始计时——原始版本同样也应该warmup。这件事教会我一个道理：<strong>不warmup的benchmark就是"作弊"，而且最终骗到的是你自己。</strong> 现在，我的所有benchmark代码里，warmup是第一行注释。不是因为我记性好，而是因为我被骗太多次了。
+        </div>
+
+        <p>准确计时是性能优化的基石。在这一章，我们学习了为什么CPU计时函数在CUDA中无效、如何用CUDA事件精确计时、常见计时错误的规避方法、以及完整的benchmark最佳实践。记住：没有warmup的基准测试、用CPU时钟测GPU内核、一次运行就下结论——这些都是会让你误入歧途的陷阱。下一章我们将进入一个让很多CUDA开发者感到兴奋的领域——<strong>Warp级别编程</strong>。如果说共享内存是线程块内的协作工具，那warp shuffle和投票函数就是warp内的"超高速公路"。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

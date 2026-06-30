@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 CUDA流与并发</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html" class="active">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>CUDA流与并发</h2>
+
+        <p>大家好，我是你们的讲师。到目前为止，我们的所有代码都遵循一个简单的模式：拷贝数据到GPU → 启动内核 → 拷贝结果回CPU → 下一轮。每一步都在等上一步完成。但你有没有想过——<strong>CPU拷贝数据的时候GPU能不能同时做计算？</strong> 答案是：能，而且你应该这样做。实现这种并发的工具就是<strong>CUDA流（stream）</strong>。</p>
+
+        <p>CUDA流是GPU上操作的逻辑队列。同一个流中的操作按顺序执行，但不同流中的操作可以"乱序"——硬件会尽可能地调度它们并发执行。本章我们会从默认流的陷阱讲起，到显式流、计算与传输重叠、流同步与事件，最后到CUDA 11.2引入的Stream Ordered Memory Allocator。掌握流，你就学会了让GPU同时做多件事的能力。</p>
+
+        <div class="highlight">
+            <strong>一句话总结：</strong> CUDA流 = GPU的"多线程"。一个流 = 一个逻辑工作队列。多个流 = GPU可以同时处理多个任务队列，实现计算-传输重叠和并发内核执行。
+        </div>
+
+        <h3>默认流的隐藏陷阱</h3>
+
+        <p>如果你从来没有显式创建过CUDA流，那你一直在用的就是<strong>默认流（default stream）</strong>，也叫"NULL stream"。对于CUDA 7.0之前的代码，默认流有个臭名昭著的行为：<strong>它会和所有其他流做隐式同步。</strong> 这意味着：你在默认流里启动了一个内核，它会在开始之前等待所有其他流中的操作完成，并且在它完成之前，其他流也不能开始新的操作。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th>默认流（CUDA 7.0 前默认行为）</th>
+                    <th>显式流（非阻塞）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>跨流同步</td>
+                    <td>隐式同步——默认流操作会等待所有流，且所有流会等待默认流</td>
+                    <td>不同流之间互不阻塞</td>
+                </tr>
+                <tr>
+                    <td>并发能力</td>
+                    <td>基本没有——默认流会串行化所有操作</td>
+                    <td>完全支持并发</td>
+                </tr>
+                <tr>
+                    <td>适用场景</td>
+                    <td>简单的一次性计算</td>
+                    <td>需要并发的任何场景</td>
+                </tr>
+                <tr>
+                    <td>性能潜力</td>
+                    <td>低——GPU通常处于闲置状态等待同步</td>
+                    <td>高——GPU可以同时做多件事</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>从CUDA 7.0开始，NVIDIA引入了一个编译选项 <code>--default-stream per-thread</code>，让每个host线程有自己的独立默认流，不再有隐式同步。但从最佳实践的角度，我强烈建议你<strong>永远不要依赖默认流做性能敏感的任务，显式创建和管理流才是正确的做法。</strong></p>
+
+        <div class="warning">
+            <strong>历史遗留问题：</strong> 很多老旧代码（尤其是2015年之前写的）用的都是默认流，这些代码在当时的GPU上"好像没什么问题"，但在现代GPU上性能远没有发挥出来。如果你在维护一个老的CUDA代码库，把默认流换成显式流往往是第一个立竿见影的优化。
+        </div>
+
+        <h3>创建和使用显式流</h3>
+
+        <p>创建和使用显式流非常直接。用 <code>cudaStreamCreate()</code> 创建，然后通过 <code>&lt;&lt;&lt;grid, block, smem, stream&gt;&gt;&gt;</code> 的第四个参数指定内核在哪条流上执行。</p>
+
+        <pre><code>// 创建3个流，每个流做一组独立的数据处理
+cudaStream_t streams[3];
+for (int i = 0; i &lt; 3; ++i)
+    cudaStreamCreate(&amp;streams[i]);
+
+// 在每个流中分别启动内核（这三个内核可能并发执行）
+for (int i = 0; i &lt; 3; ++i) {
+    my_kernel&lt;&lt;&lt;grid, block, 0, streams[i]&gt;&gt;&gt;(d_data[i], N);
+}
+
+// 等待所有流完成
+for (int i = 0; i &lt; 3; ++i)
+    cudaStreamSynchronize(streams[i]);
+
+// 清理
+for (int i = 0; i &lt; 3; ++i)
+    cudaStreamDestroy(streams[i]);</code></pre>
+
+        <p>在这个例子中，三个内核分别在不同的流上执行。如果GPU有足够的硬件资源（SM单元、显存带宽等），这三个内核会<strong>在GPU上同时运行</strong>。GPU的硬件调度器（GigaThread Engine）会自动在不同的stream之间切换，尽可能保持所有SM都处于忙碌状态。</p>
+
+        <div class="tip">
+            <strong>实际效果：</strong> 如果你的kernel是小规模的（每个block只需要少量SM资源），并发执行多个kernel可以显著提高GPU利用率。但如果每个kernel已经接近占满整个GPU（比如大型矩阵乘法），额外并发反而可能导致资源竞争导致性能下降。所以流的并发能力需要结合具体kernel的占用率来评估。
+        </div>
+
+        <h3>计算与数据传输重叠</h3>
+
+        <p>CUDA流最实用、最经典的使用场景就是<strong>计算与数据传输重叠</strong>。现代GPU有独立的DMA引擎（称为Copy Engine），可以独立于计算引擎执行 <code>cudaMemcpyAsync</code> 操作。这意味着：在数据从CPU拷贝到GPU的同时，GPU可以同时执行另一个流中的内核——只要它们操作的是不同的显存区域。</p>
+
+        <p>要实现这个重叠，你需要使用<strong>固定内存（pinned memory）</strong>和<strong>异步内存拷贝</strong>：</p>
+
+        <pre><code>// 分配固定内存（pinned memory）—— 异步拷贝的前提
+float *h_data;
+cudaMallocHost(&amp;h_data, total_size * sizeof(float));  // 主机端固定内存
+
+float *d_data;
+cudaMalloc(&amp;d_data, total_size * sizeof(float));
+
+// 将数据分成N个chunk，每个chunk用独立的流处理
+const int N_CHUNKS = 4;
+const int chunk_size = total_size / N_CHUNKS;
+
+cudaStream_t streams[N_CHUNKS];
+for (int i = 0; i &lt; N_CHUNKS; ++i)
+    cudaStreamCreate(&amp;streams[i]);
+
+for (int i = 0; i &lt; N_CHUNKS; ++i) {
+    int offset = i * chunk_size;
+    // 异步拷贝：不会阻塞CPU或GPU上的其他操作
+    cudaMemcpyAsync(&amp;d_data[offset], &amp;h_data[offset],
+                    chunk_size * sizeof(float),
+                    cudaMemcpyHostToDevice,
+                    streams[i]);
+
+    // 在同一个流中启动内核 —— 确保拷贝完成后才执行
+    my_kernel&lt;&lt;&lt;grid, block, 0, streams[i]&gt;&gt;&gt;(&amp;d_data[offset], chunk_size);
+
+    // 异步拷回结果
+    cudaMemcpyAsync(&amp;h_data[offset], &amp;d_data[offset],
+                    chunk_size * sizeof(float),
+                    cudaMemcpyDeviceToHost,
+                    streams[i]);
+}
+
+// 等待所有流完成
+for (int i = 0; i &lt; N_CHUNKS; ++i)
+    cudaStreamSynchronize(streams[i]);</code></pre>
+
+        <p>在这个流水线模式中：</p>
+        <ul>
+            <li>流0在拷贝chunk 0时，流1的内核可以开始处理chunk 1——只要chunk 1的拷贝已完成</li>
+            <li>理想情况下，数据传输的延迟完全被计算掩盖，总耗时 ≈ max(总计算时间, 总传输时间)，而不是 总传输 + 总计算</li>
+            <li>使用的chunk数量需要适当——太少则重叠不充分，太多则增加调度开销</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>管线化深度：</strong> 实际操作中，大多数GPU有两个Copy Engine（一个H2D、一个D2H）和一个Compute Engine。这就是为什么要至少分3个chunk——让H2D、Compute、D2H同时运行。如果系统同时支持双向传输（基于PCIe或NVLink），则管线化效果更明显。
+        </div>
+
+        <h3>流同步与事件</h3>
+
+        <p>流之间的同步主要通过<strong>CUDA事件（event）</strong>实现。事件可以插入到流中，并作为其他流等待的信号点：</p>
+
+        <pre><code>cudaEvent_t event;
+cudaEventCreate(&amp;event);
+
+// 流A：计算中间结果
+kernel_A&lt;&lt;&lt;grid, block, 0, stream_A&gt;&gt;&gt;(d_input, d_intermediate, N);
+// 在流A中记录事件
+cudaEventRecord(event, stream_A);
+
+// 流B：等待流A中的事件完成，然后使用流A的结果
+cudaStreamWaitEvent(stream_B, event, 0);
+kernel_B&lt;&lt;&lt;grid, block, 0, stream_B&gt;&gt;&gt;(d_intermediate, d_output, N);</code></pre>
+
+        <p><code>cudaStreamSynchronize(stream)</code> 阻塞host（CPU）直到指定流中的所有操作完成。<code>cudaDeviceSynchronize()</code> 阻塞host直到设备上所有流中的所有操作完成。一般在benchmarking时使用 <code>cudaDeviceSynchronize()</code> 来确保所有操作都已完成，但在实际应用中应尽量减少同步点——因为每次同步都意味着CPU在空转等待。</p>
+
+        <div class="tip">
+            <strong>最佳实践：</strong> 尽量减少host-side的显式同步。使用 <code>cudaStreamWaitEvent</code> 在设备端完成流之间的依赖管理，而不是在CPU端用 <code>cudaStreamSynchronize</code> 逐个等待。设备端的同步效率远高于CPU端同步。
+        </div>
+
+        <h3>流优先级</h3>
+
+        <p>从CUDA 5.0开始，你可以为流设置优先级。高优先级的流中的操作在硬件调度时会优先执行。创建带优先级的流使用 <code>cudaStreamCreateWithPriority</code>：</p>
+
+        <pre><code>int lo, hi;
+cudaDeviceGetStreamPriorityRange(&amp;lo, &amp;hi);
+// lo = 最低优先级（数值最小），hi = 最高优先级（数值最大）
+
+cudaStream_t high_prio_stream, low_prio_stream;
+cudaStreamCreateWithPriority(&amp;high_prio_stream, cudaStreamNonBlocking, hi);
+cudaStreamCreateWithPriority(&amp;low_prio_stream, cudaStreamNonBlocking, lo);
+
+// 高优先级的kernel会优先调度
+critical_kernel&lt;&lt;&lt;grid, block, 0, high_prio_stream&gt;&gt;&gt;(...);
+background_kernel&lt;&lt;&lt;grid, block, 0, low_prio_stream&gt;&gt;&gt;(...);</code></pre>
+
+        <p>优先级什么时候有用？当你有<strong>延迟敏感的内核</strong>（比如需要快速响应的交互式应用）和<strong>后台任务</strong>（比如批处理）混合执行时。高优先级流确保关键任务不会被后台任务阻塞。但如果GPU没有被饱和，优先级的影响微乎其微——所有内核都能获得足够的资源。</p>
+
+        <div class="warning">
+            <strong>注意：</strong> 不是所有GPU都支持流优先级。从Kepler架构开始支持，但具体的优先级范围因设备而异。如果设备不支持，所有流都是同一优先级。在代码中应使用 <code>cudaDeviceGetStreamPriorityRange</code> 检查支持情况。
+        </div>
+
+        <h3>CUDA Stream Ordered Memory Allocator</h3>
+
+        <p>CUDA 11.2引入了一项重要的改进——<strong>Stream Ordered Memory Allocator</strong>。传统的 <code>cudaMalloc</code> 和 <code>cudaFree</code> 是同步的——它们会阻塞所有流，直到分配/释放完成。这在并发场景中是一个不小的开销。新的API允许在流中异步分配和释放内存：</p>
+
+        <pre><code>// 传统方式 —— 同步分配，阻塞所有流
+float *d_ptr;
+cudaMalloc(&amp;d_ptr, size);  // 同步操作，会等待所有流排空
+
+// Stream Ordered方式 —— 异步分配，不阻塞
+float *d_ptr;
+cudaMallocAsync(&amp;d_ptr, size, stream);  // 在stream中排队分配
+
+// 内核使用
+my_kernel&lt;&lt;&lt;grid, block, 0, stream&gt;&gt;&gt;(d_ptr, N);
+
+// 异步释放 —— 等内核完成后再释放
+cudaFreeAsync(d_ptr, stream);  // 在stream中排队释放</code></pre>
+
+        <p>这个API的主要优点是：</p>
+        <ul>
+            <li><strong>减少同步开销</strong>：分配和释放不再需要隐式同步所有流</li>
+            <li><strong>内存重用</strong>：驱动可以更智能地在不同流之间重用已释放的内存块</li>
+            <li><strong>降低延迟</strong>：适用于需要频繁分配临时缓冲区的工作负载</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>真实"踩坑"故事：</strong> 几年前我为一个视频处理管线做CUDA加速。管线有4个独立的处理阶段：解码、预处理、推理、后处理。我的第一个版本把所有操作都放到默认流里——代码简单，一运行，性能很差。用Nsight Systems一看，GPU利用率不到30%。问题很清晰：解码阶段的DMA传输在跑的时候，内核调度器在空等；内核在跑的时候，DMA引擎在闲置。解决方案就是把4个阶段分别放到4个显式流中，并用事件来管理它们之间的依赖。改完之后，DMA引擎和计算引擎同时运转，GPU利用率从30%飙升到80%以上。端到端吞吐量从原来的每秒处理20帧提升到了64帧——3.2倍的提升，没有动一行计算代码，只是把流安排明白了。所以我想说的是：<strong>在你开始微调内核之前，先看看你的流的安排是不是合理的。</strong> 有时候最大的瓶颈不在内核里，而在内核之外。
+        </div>
+
+        <p>CUDA流是让GPU从"单线程"变成"多线程"的关键工具。正确的流管理可以实现计算与传输的完美重叠，大大提高GPU利用率和端到端的吞吐量。默认流用起来方便，但它会杀死并发——对于任何性能敏感的应用，显式创建和管理流都是必须的。下一章我们聊一个和流密切相关的话题——<strong>事件与性能计时</strong>。你现在的kernel到底是快是慢？你怎么测量？下一章我们做一次"时间警察"。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

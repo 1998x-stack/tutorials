@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 全局内存优化</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html" class="active">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>全局内存优化</h2>
+
+        <p>大家好，我是你们的讲师。说到全局内存（global memory），我得先说一个让很多人沮丧的事实：你的CUDA内核99%的时间不是在"计算"，而是在"等数据"。GPU的计算能力增长速度远远超过了显存带宽，结果是大多数kernel都受限于内存带宽（memory-bound），而不是计算能力（compute-bound）。这意味着：<strong>优化全局内存访问，往往是提升性能最立竿见影的方法。</strong></p>
+
+        <p>第八章我们学了共享内存——那是减少全局内存访问次数的利器。但不管你怎么优化，最终的源数据还是在全局内存里。这一章我们聚焦于一个核心问题：当你不得不访问全局内存时，如何让每一次访问都物尽其用？答案就藏在"合并访问"四个字里。</p>
+
+        <div class="highlight">
+            <strong>核心思想：</strong> 全局内存的延迟是几百个周期起步，但如果你让相邻的线程访问相邻的地址，硬件可以把多个访问合并成一次大的内存事务。这就是"合并访问"——GPU内存优化的第一原理。
+        </div>
+
+        <h3>合并访问（coalesced access）原理</h3>
+
+        <p>合并访问是GPU内存子系统中最重要的概念，没有之一。它的原理其实很简单：当一个warp（32个线程）执行一条加载指令时，硬件并不会为每个线程单独发起一次内存请求——那样效率太低了。相反，内存控制器会检查这32个线程访问地址的连续性：</p>
+
+        <ul>
+            <li>如果32个线程访问的是连续的内存地址（比如线程0读 <code>base[0]</code>，线程1读 <code>base[1]</code>，依此类推），那么硬件可以将这些请求<strong>合并</strong>成一次或少数几次大的内存事务</li>
+            <li>如果地址是随机分散的，每个线程的请求可能都需要单独的一次事务——带宽利用率急剧下降</li>
+        </ul>
+
+        <p>下面这个表展示了不同访问模式对内存事务数量的影响：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>访问模式</th>
+                    <th>示例代码</th>
+                    <th>所需32B事务数</th>
+                    <th>带宽利用率</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>完美合并（步长1）</td>
+                    <td><code>data[threadIdx.x]</code></td>
+                    <td>1（32字节对齐）~ 4（128字节对齐）</td>
+                    <td>~100%</td>
+                </tr>
+                <tr>
+                    <td>步长为2</td>
+                    <td><code>data[threadIdx.x * 2]</code></td>
+                    <td>翻倍</td>
+                    <td>~50%</td>
+                </tr>
+                <tr>
+                    <td>步长为N</td>
+                    <td><code>data[threadIdx.x * N]</code></td>
+                    <td>N倍</td>
+                    <td>~1/N</td>
+                </tr>
+                <tr>
+                    <td>随机访问</td>
+                    <td><code>data[index[threadIdx.x]]</code></td>
+                    <td>最多32</td>
+                    <td>极低</td>
+                </tr>
+                <tr>
+                    <td>按列访问二维数组</td>
+                    <td><code>mat[threadIdx.x][col]</code></td>
+                    <td>取决于行跨度</td>
+                    <td>通常较低</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>关键点在于：一个warp的32个线程执行同一指令，所以它们的地址模式是确定的。如果代码写成了非合并的访问，那就是纯粹的程序员失误——硬件没法帮你优化。</p>
+
+        <div class="tip">
+            <strong>直觉：</strong> 把GPU的内存系统想象成一辆卡车。合并访问 = 32个人的包裹在同一个街区，卡车一趟送完。非合并访问 = 32个人的包裹分散在32个不同的街区，卡车跑32趟。同样的油费（功耗），效率差32倍。
+        </div>
+
+        <h3>AoS vs SoA数据布局</h3>
+
+        <p>合并访问的要求直接影响了一个关键的数据布局决策：当你的数据是结构体数组时，应该用AoS（Array of Structs）还是SoA（Struct of Arrays）？</p>
+
+        <pre><code>// AoS —— Array of Structs（通常不利于合并访问）
+struct Particle {
+    float x, y, z;  // 位置
+    float vx, vy, vz;  // 速度
+    float mass;
+};
+
+Particle particles[N];
+
+// 内核中访问所有粒子的x坐标
+// 线程i访问 particles[i].x
+// 地址分布：每个线程访问相隔 sizeof(Particle) 字节
+// → 非合并访问，大量带宽浪费！
+float xi = particles[threadIdx.x].x;
+
+
+// SoA —— Struct of Arrays（GPU友好）
+struct ParticlesSOA {
+    float *x, *y, *z;
+    float *vx, *vy, *vz;
+    float *mass;
+};
+
+ParticlesSOA p;
+// 内核中访问所有粒子的x坐标
+// 线程i访问 p.x[i]
+// 地址分布：连续 → 完美合并访问！
+float xi = p.x[threadIdx.x];</code></pre>
+
+        <p>AoS在CPU上通常表现良好，因为CPU缓存利用空间局部性：访问 <code>particles[0].x</code> 会把相邻的 <code>particles[0].y</code>、<code>particles[0].z</code> 也加载到缓存行中，刚好后续可能用到。但GPU截然不同：一个warp的32个线程同时执行，需要的是一段连续的显存地址。AoS意味着每个"元素"之间隔着整个结构体的宽度，导致地址跳跃——合并访问彻底失效。</p>
+
+        <div class="warning">
+            <strong>经验法则：</strong> 任何要搬到GPU上的数据结构，优先考虑SoA。除非你有非常特殊的随机访问模式且每次访问需要用到结构体的所有字段——但那太罕见了。默认选SoA，你不会后悔。
+        </div>
+
+        <h3>对齐要求与内存事务</h3>
+
+        <p>GPU的内存控制器以<strong>128字节对齐的缓存行</strong>为单位从DRAM读取数据。当你发起一次全局内存加载时，硬件会尝试只加载必要的128字节缓存行。如果你的起始地址是128字节对齐的，且访问范围正好覆盖1个缓存行，那一次事务就够了。</p>
+
+        <p>如果起始地址不是128字节对齐的——比如 <code>base + 4</code>——硬件需要加载两条缓存行（一条覆盖0~127字节，一条覆盖128~255字节），即使你只需要32个连续的float（128字节）。这就是misaligned access的代价：永远会浪费一定的带宽。</p>
+
+        <p>对于 <code>cudaMalloc</code> 分配的显存，地址至少是256字节对齐的，所以直接使用是安全的。但如果你自己做了地址偏移（比如让 <code>float *ptr = base + offset</code>），就需要操心对齐问题了。使用 <code>cudaMallocPitch</code> 为二维数组分配内存时尤其如此——它会自动填充行宽以保证每行的起始地址对齐。</p>
+
+        <div class="highlight">
+            <strong>对齐规则速记：</strong> 每个warp的访问起始地址要是32字节的整数倍（对于32位元素），整个warp的访问跨度最好是128字节的整数倍。满足这两条，你的内存事务效率就是最优的。
+        </div>
+
+        <h3>只读缓存与 __ldg()</h3>
+
+        <p>从Kepler架构（Compute Capability 3.0+）开始，NVIDIA为全局内存加载引入了一个<strong>只读缓存（read-only cache）</strong>路径。这个缓存的带宽比一级缓存（L1）更高，且不受L1/共享内存容量配置的影响。</p>
+
+        <p>使用 <code>__ldg()</code> 可以显式指示编译器通过只读缓存加载数据：</p>
+
+        <pre><code>__global__ void kernel_with_ldg(const float *input, float *output, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; N) {
+        // 普通加载（可能走L1，也可能走只读缓存，编译器决定）
+        // float val = input[idx];
+
+        // 显式通过只读缓存加载
+        float val = __ldg(&amp;input[idx]);
+        output[idx] = val * 2.0f;
+    }
+}</code></pre>
+
+        <p><code>__ldg()</code> 最适合以下场景：</p>
+        <ul>
+            <li>数据只读且被多个线程重复访问</li>
+            <li>访问模式有比较强的2D空间局部性（比如图像处理中的卷积）</li>
+            <li>数据是只读的查找表</li>
+        </ul>
+
+        <p>从Volta开始 <code>__ldg()</code> 会自动被编译器推断，但显式标注仍然有文档价值。而且，当你的指针加了 <code>const __restrict__</code> 修饰时，编译器更倾向于自动生成LDG指令。</p>
+
+        <div class="tip">
+            <strong>小实验：</strong> 在你的kernel中试试把全局内存读取都换成 <code>__ldg()</code>，然后对比带宽。如果数据访问完全随机（比如graph遍历），LDG可能帮助不大；但如果数据访问有一定规律，LDG的专用缓存策略可以带来可观的提升。
+        </div>
+
+        <h3>向量化加载</h3>
+
+        <p>你的编译器虽然聪明，但有时候它需要一点帮助才能生成最高效的内存指令。一个简单而强大的技巧是<strong>向量化加载（vectorized memory access）</strong>——使用 <code>float4</code> 或 <code>int4</code> 类型，让一条指令加载128位（16字节）的数据。</p>
+
+        <pre><code>// 标量加载 —— 一条指令加载4字节
+__global__ void vec_add_scalar(float *a, float *b, float *c, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; N) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+
+// 向量化加载 —— 一条指令加载16字节
+__global__ void vec_add_vectorized(float *a, float *b, float *c, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // 用float4处理对齐的部分
+    float4 *a4 = reinterpret_cast&lt;float4*&gt;(a);
+    float4 *b4 = reinterpret_cast&lt;float4*&gt;(b);
+    float4 *c4 = reinterpret_cast&lt;float4*&gt;(c);
+
+    int n = N / 4;
+    if (idx &lt; n) {
+        float4 va = a4[idx];
+        float4 vb = b4[idx];
+        float4 vc;
+        vc.x = va.x + vb.x;
+        vc.y = va.y + vb.y;
+        vc.z = va.z + vb.z;
+        vc.w = va.w + vb.w;
+        c4[idx] = vc;
+    }
+
+    // 处理剩余元素
+    int rem = idx + n * 4;
+    if (rem &lt; N) {
+        c[rem] = a[rem] + b[rem];
+    }
+}</code></pre>
+
+        <p>向量化加载为什么快？原因有两条：</p>
+        <ul>
+            <li><strong>减少指令数量</strong>：每个线程加载4个float只需要1条指令，而不是4条。指令发射单元的负担减轻了，warp的吞吐量提高</li>
+            <li><strong>更好地利用内存总线宽度</strong>：128位加载正好匹配GPU内存控制器的总线宽度，一次事务就能拉满4个连续的元素</li>
+        </ul>
+
+        <p>不过要注意前提：起始地址必须是16字节对齐的，且元素数量最好是4的倍数。否则你得处理边界情况——上面的代码中 <code>rem</code> 部分就是在处理余数。</p>
+
+        <div class="warning">
+            <strong>注意：</strong> 向量化加载并不是无条件加速的。如果你的kernel是compute-bound（计算密集），减少内存指令可能没有帮助。另外，在地址空间不足或编译器做了更好的循环展开时，向量化可能被自动优化掉。始终以profiling结果为准。
+        </div>
+
+        <div class="highlight">
+            <strong>真实"踩坑"故事：</strong> 前几年我接手了一个从CPU移植到GPU的分子动力学模拟代码。项目组说"代码已经移植完了，但比CPU还慢"。我一看数据布局——纯AoS。每个原子有几十个属性：坐标、速度、力、电荷、键合信息，全部塞在一个巨大的结构体里。内核里更新坐标时，32个线程分别读取32个原子的不同属性——每个线程的地址跨度是整个结构体的大小（超过200字节）。用Nsight Systems一测，全局内存带宽利用率只有不到20%。这意味着80%的带宽被白白浪费了。我们花了三天把整个代码改成SoA布局，带宽利用率从20%直接跳到90%以上，整体kernel性能提升了4倍。移植CPU代码到GPU时最常见的错误，就是保持着CPU时代的AoS数据布局不放。记住：<strong>GPU喜欢SoA，CPU喜欢AoS。</strong> 这不是个人偏好，这是由内存子系统的设计决定的。
+        </div>
+
+        <p>全局内存是GPU上最慢也最重要的存储层次。优化它的核心就四句话：让warp访问连续的地址（合并访问）；偏向SoA而非AoS；注意128字节对齐；善用向量化加载和只读缓存。下一章我们聊聊两种特殊的内存——<strong>常量内存与纹理内存</strong>，它们用好了，能在特定场景下带来比全局内存更高的效率。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

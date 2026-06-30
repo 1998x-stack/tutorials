@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 原子操作与并行规约</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html" class="active">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>原子操作与并行规约</h2>
+
+        <p>大家好，我是你们的讲师。从前面的章节我们学到一件事：GPU擅长让千千万万个线程同时工作。但有一个问题我们一直没有正面回答——<strong>当所有这些线程都想同时修改同一个内存地址时，会发生什么？</strong> 答案是一场"数据竞争"（data race）——两个线程同时读-改-写同一个变量，结果取决于谁最后写到内存，而那个结果大概率是错误的。</p>
+
+        <p>这一章我们就要解决这个问题。我们会先讲<strong>原子操作（atomic operations）</strong>——确保并发修改安全的硬件级原语。然后我们会用一个经典的算法——<strong>并行规约（parallel reduction）</strong>——来展示如何在实际问题中高效地使用原子操作和共享内存。最后我们会看看warp shuffle如何让规约操作快到飞起。</p>
+
+        <div class="highlight">
+            <strong>核心思想：</strong> 原子操作 = 安全的慢。共享内存规约 = 快的安全。warp shuffle = 最快的安全。从慢到快，逐级进阶。
+        </div>
+
+        <h3>原子操作类型</h3>
+
+        <p>CUDA提供了丰富的原子操作函数，下表列出了常用的原子操作及其支持的数据类型：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>函数</th>
+                    <th>功能</th>
+                    <th>支持类型</th>
+                    <th>计算能力要求</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>atomicAdd</code></td>
+                    <td>原子加法</td>
+                    <td>int, unsigned int, unsigned long long, float, double</td>
+                    <td>1.0+（float: 2.0+, double: 6.0+）</td>
+                </tr>
+                <tr>
+                    <td><code>atomicSub</code></td>
+                    <td>原子减法</td>
+                    <td>int, unsigned int</td>
+                    <td>1.0+</td>
+                </tr>
+                <tr>
+                    <td><code>atomicExch</code></td>
+                    <td>原子交换</td>
+                    <td>int, unsigned int, unsigned long long, float</td>
+                    <td>1.0+</td>
+                </tr>
+                <tr>
+                    <td><code>atomicMin</code></td>
+                    <td>原子最小值</td>
+                    <td>int, unsigned int, unsigned long long, long long</td>
+                    <td>1.1+</td>
+                </tr>
+                <tr>
+                    <td><code>atomicMax</code></td>
+                    <td>原子最大值</td>
+                    <td>int, unsigned int, unsigned long long, long long</td>
+                    <td>1.1+</td>
+                </tr>
+                <tr>
+                    <td><code>atomicAnd</code></td>
+                    <td>原子按位与</td>
+                    <td>int, unsigned int, unsigned long long</td>
+                    <td>1.1+</td>
+                </tr>
+                <tr>
+                    <td><code>atomicOr</code></td>
+                    <td>原子按位或</td>
+                    <td>int, unsigned int, unsigned long long</td>
+                    <td>1.1+</td>
+                </tr>
+                <tr>
+                    <td><code>atomicXor</code></td>
+                    <td>原子按位异或</td>
+                    <td>int, unsigned int, unsigned long long</td>
+                    <td>1.1+</td>
+                </tr>
+                <tr>
+                    <td><code>atomicCAS</code></td>
+                    <td>原子比较并交换（读-改-写的"万能原语"）</td>
+                    <td>int, unsigned int, unsigned long long, unsigned short</td>
+                    <td>1.1+</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>其中 <code>atomicCAS</code>（Compare-And-Swap）是最强大的原子操作。你可以用它实现任何自定义的原子操作——比如对 <code>double</code> 的原子加法：用 <code>atomicCAS</code> 在循环中不断尝试更新，直到成功为止。这就是所谓的"CAS循环"模式。</p>
+
+        <div class="tip">
+            <strong>冷知识：</strong> 从Pascal架构开始，<code>atomicAdd</code> 对 <code>float</code> 类型有了硬件原生支持，不需要CAS循环模拟了。而从Volta开始，共享内存上的 <code>atomicAdd</code> 也获得了硬件支持。这意味着在较新的GPU上，原子操作的性能有了显著提升。
+        </div>
+
+        <h3>原子操作的性能代价</h3>
+
+        <p>原子操作虽然安全，但代价不小。当一个warp中的线程同时调用 <code>atomicAdd(&amp;counter, 1)</code> 时——虽然每个线程调用的是同一个地址——硬件不得不将这些操作<strong>串行化</strong>。32个线程，即使没有其他warp竞争，也需要至少32个周期才能完成所有操作（实际上更多，因为内存延迟）。</p>
+
+        <p>如果多个warp甚至多个block竞争同一个地址（即"热门地址" contention），性能会急剧恶化。一张A100上，对全局内存的 <code>atomicAdd</code> 吞吐量大约是：</p>
+        <ul>
+            <li>低争用（32个线程/少数据冲突）：约 1.2 GB/s 的原子操作吞吐</li>
+            <li>高争用（大规模并发）：可能降到 100 MB/s 以下</li>
+            <li>相比之下，普通全局内存加载带宽约 2 TB/s——差了几个数量级</li>
+        </ul>
+
+        <div class="warning">
+            <strong>教训：</strong> 原子操作不要滥用。一个常见的反模式是让数千个线程同时对同一个全局变量做 <code>atomicAdd</code>——这会把GPU硬生生变成单线程CPU。正确的做法是先在共享内存中做局部规约，最后只让少量线程做一个全局原子操作。
+        </div>
+
+        <h3>并行规约算法</h3>
+
+        <p>并行规约（parallel reduction）是并行计算中最基础也最重要的算法之一。它的任务是：给定一个数组，计算其所有元素的和（或最大值、最小值等）。在串行世界里，一个循环就搞定了。但在并行世界里，<strong>如何让成百上千个线程协作完成一个归并？</strong></p>
+
+        <p>经典的方法是"树形规约"（tree reduction）：每一轮，一半的线程将两个元素相加，然后数组大小减半。重复直到只剩下一个元素。</p>
+
+        <pre><code>// 共享内存规约 —— 交错寻址（interleaved addressing）
+__global__ void reduce_interleaved(float *g_data, float *g_out, int n) {
+    __shared__ float sdata[256];  // block大小 = 256
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // 加载数据到共享内存
+    sdata[tid] = (i &lt; n) ? g_data[i] : 0.0f;
+    __syncthreads();
+
+    // 树形规约
+    for (int s = 1; s &lt; blockDim.x; s *= 2) {
+        if (tid % (2 * s) == 0) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // block 0的线程0输出结果
+    if (tid == 0)
+        atomicAdd(g_out, sdata[0]);
+}
+
+
+// 共享内存规约 —— 连续寻址（sequential addressing，更优）
+__global__ void reduce_sequential(float *g_data, float *g_out, int n) {
+    __shared__ float sdata[256];
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
+
+    // 一个线程加载两个元素，消除第一次规约的bank conflict
+    sdata[tid] = (i &lt; n ? g_data[i] : 0.0f)
+               + (i + blockDim.x &lt; n ? g_data[i + blockDim.x] : 0.0f);
+    __syncthreads();
+
+    // 连续寻址规约 —— 每次减半，warp内无bank conflict
+    for (int s = blockDim.x / 2; s &gt; 0; s &gt;&gt;= 1) {
+        if (tid &lt; s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0)
+        atomicAdd(g_out, sdata[0]);
+}</code></pre>
+
+        <p>连续寻址版本相比交错寻址版本有两个优势：一是每个线程加载两个元素，减少了全局内存访问次数；二是内层循环的共享内存访问是连续的——<code>sdata[tid] += sdata[tid + s]</code>，当 <code>s &gt;= 32</code> 时没有bank conflict，当 <code>s &lt; 32</code> 时也只有有限的冲突。</p>
+
+        <div class="highlight">
+            <strong>关键洞察：</strong> 规约算法的核心是让active的线程数每轮减半，但整体的数据吞吐量不变。理想情况下，每一轮都应该用满GPU的计算资源。当warp内的线程数少于32时，情况变得微妙——这就是下一节warp shuffle大显身手的场景。
+        </div>
+
+        <h3>Warp Shuffle规约优化</h3>
+
+        <p>当共享内存规约进行到最后5轮（s = 16, 8, 4, 2, 1），active的线程数已经少于32了——也就是说，只需要一个warp就能完成。这时候，我们可以抛弃共享内存，改用<strong>warp shuffle</strong>指令在寄存器之间直接交换数据。这消除了共享内存的读写延迟和bank conflict问题，而且不需要 <code>__syncthreads()</code>。</p>
+
+        <pre><code>// 使用 warp shuffle 优化最后的规约阶段
+__global__ void reduce_shuffle(float *g_data, float *g_out, int n) {
+    __shared__ float sdata[256];
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
+
+    sdata[tid] = (i &lt; n ? g_data[i] : 0.0f)
+               + (i + blockDim.x &lt; n ? g_data[i + blockDim.x] : 0.0f);
+    __syncthreads();
+
+    // 共享内存规约到32个元素
+    for (int s = blockDim.x / 2; s &gt; 32; s &gt;&gt;= 1) {
+        if (tid &lt; s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // 最后32个元素用warp shuffle完成
+    float val = sdata[tid];
+    if (tid &lt; 32) {
+        val += __shfl_down_sync(0xFFFFFFFF, val, 16);
+        val += __shfl_down_sync(0xFFFFFFFF, val, 8);
+        val += __shfl_down_sync(0xFFFFFFFF, val, 4);
+        val += __shfl_down_sync(0xFFFFFFFF, val, 2);
+        val += __shfl_down_sync(0xFFFFFFFF, val, 1);
+    }
+
+    if (tid == 0) {
+        // 规约后的val是当前warp的和
+        sdata[0] = val;  // 存回共享内存
+        // 因为是blockDim.x &lt;= 1024, 最多32个warp, 只需要再做一次warp-level规约
+        // 简化起见：直接原子加到全局输出
+        atomicAdd(g_out, val);
+    }
+}</code></pre>
+
+        <p>warp shuffle的关键函数 <code>__shfl_down_sync(mask, val, delta)</code> 的意思是："在当前warp中，将线程 <code>i</code> 的 <code>val</code> 复制给线程 <code>i + delta</code>"。因此 <code>__shfl_down_sync(0xFFFFFFFF, val, 16)</code> 会让低16个线程拿到高16个线程的值并就地相加——一次操作就把32个值规约成了16个。如此往复，最后线程0持有完整的warp规约结果。</p>
+
+        <div class="tip">
+            <strong>性能对比：</strong> 同样做求和规约，单纯用 <code>atomicAdd</code> 在全局内存上操作，吞吐大约是几十MB/s；共享内存规约版可以做到几百GB/s（受限于带宽）；而加上warp shuffle优化后，最后阶段完全不需要访问共享内存，可以再提升10-20%。越大的数组，优势越明显。
+        </div>
+
+        <h3>混合精度原子操作</h3>
+
+        <p>从Compute Capability 6.x（Pascal）开始，NVIDIA为 <code>atomicAdd</code> 增加了对 <code>float</code> 和 <code>double</code> 的硬件原生支持。而在Volta（7.0）上，共享内存上的 <code>atomicAdd</code> 也获得了硬件加速。到了Turing（7.5），甚至加入了 <code>atomicAdd</code> 对 <code>__half</code>（FP16）的支持。</p>
+
+        <p>如果你需要实现一个CUDA没有直接提供的原子操作（比如对 <code>double</code> 的 <code>atomicMin</code>），可以利用 <code>atomicCAS</code> 的通用性：</p>
+
+        <pre><code>// 用 atomicCAS 实现 double 的原子最小值
+__device__ double atomicMinDouble(double *addr, double val) {
+    unsigned long long *addr_as_ull = (unsigned long long *)addr;
+    unsigned long long old = __double_as_longlong(*addr);
+    unsigned long long assumed;
+
+    do {
+        assumed = old;
+        double old_val = __longlong_as_double(assumed);
+        double new_val = min(old_val, val);
+        unsigned long long new_ull = __double_as_longlong(new_val);
+        old = atomicCAS(addr_as_ull, assumed, new_ull);
+    } while (assumed != old);  // CAS失败则重试
+
+    return __longlong_as_double(old);
+}</code></pre>
+
+        <p>这个模式——读出、计算、CAS尝试写入、失败则重试——是CUDA中实现自定义原子操作的标准方法。在低争用场景下，CAS循环通常一次就成功了，开销可以接受。</p>
+
+        <div class="warning">
+            <strong>性能陷阱：</strong> 在高争用场景下，CAS循环可能退化为"活锁"——大量线程反复尝试但都无法成功。此时更好的做法是重新设计算法，减少对全局原子操作的依赖。比如先做共享内存规约，再放一个全局原子操作——这是CUDA社区公认的最佳实践。
+        </div>
+
+        <div class="highlight">
+            <strong>真实"踩坑"故事：</strong> 我曾经遇到过一个让我抓狂的bug。同事写了一个GPU上的直方图统计——简单来说就是每个像素有一个值，我们要统计每个值的出现次数。他的做法是：每个线程读入一个像素值，然后对 <code>histogram[value]</code> 做 <code>atomicAdd(histogram + value, 1)</code>。整个kernel跑完用了把整个显存带宽跑满，但耗时还是不可接受——比CPU还慢5倍。我一看：<strong>百万个线程在同时对一个数组做原子操作！</strong> 这个数组就是"热点"——所有线程都在激烈竞争。正确的做法是：每个block先在共享内存中做一个局部直方图，再用 <code>atomicAdd</code> 把局部直方图合并到全局直方图。改完后，耗时从200ms降到了0.8ms——250倍的提升，完全是因为消除了全局原子操作的争用。<strong>原子操作本身没有错，但让百万线程抢同一个地址就是灾难。</strong>
+        </div>
+
+        <p>原子操作和并行规约是CUDA编程中绕不开的两个话题。原子操作让你在必须共享写入时保持正确性，而并行规约则是"如何高效地在并行环境中做串行操作"的经典答案。记住"先局部后全局"的原则，你的kernel就能既正确又高效。下一章我们进入一个全新的维度——<strong>CUDA流与并发</strong>，看看如何让GPU同时做多件事，而不是把所有的操作串行排队。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

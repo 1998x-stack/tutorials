@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 Warp级别编程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html" class="active">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>Warp级别编程</h2>
+
+        <p>大家好，我是你们的讲师。如果你觉得前面几章的内容已经让CUDA性能优化达到了极致，那这一章会刷新你的认知。前几章我们讨论的优化都是在block级别——共享内存、全局内存合并访问、原子操作——这些工具让一个block内的线程高效协作。但还有一个更底层的协作层次你还没用上：<strong>warp</strong>。</p>
+
+        <p>warp是GPU上真正"同时执行"的最小单位——一个warp内的32个线程在物理上是同步的（至少在Volta之前的架构上是这样）。利用这一事实，CUDA提供了一系列warp级别的原语：投票函数、shuffle指令、Cooperative Groups和WMMA。这些原语允许线程在warp内通过寄存器直接交换数据，无需经过共享内存——更快、更低延迟、更少功耗。</p>
+
+        <div class="highlight">
+            <strong>核心思想：</strong> warp级别编程 = 在硬件最自然的执行单元上做通信。寄存器↔寄存器直接交换数据，比通过共享内存快一个数量级。这是CUDA性能优化的"最后一级"优化手段。
+        </div>
+
+        <h3>Warp投票函数</h3>
+
+        <p>投票函数（vote functions）是warp级别最简单的通信原语。它们允许一个warp内的线程"投票"——判断某个条件是否成立，并让所有线程知道结果。CUDA 9.0之后，所有投票函数都要求传入 <code>_sync</code> 后缀和 <code>mask</code> 参数（参与线程的bitmask）：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>函数</th>
+                    <th>功能</th>
+                    <th>返回值</th>
+                    <th>典型用例</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>__all_sync(mask, predicate)</code></td>
+                    <td>所有参与线程的predicate都为true？</td>
+                    <td>非0 = 全部为真</td>
+                    <td>检查所有线程的边界条件是否都满足</td>
+                </tr>
+                <tr>
+                    <td><code>__any_sync(mask, predicate)</code></td>
+                    <td>任一参与线程的predicate为true？</td>
+                    <td>非0 = 至少一个为真</td>
+                    <td>检测是否有线程遇到特殊值</td>
+                </tr>
+                <tr>
+                    <td><code>__ballot_sync(mask, predicate)</code></td>
+                    <td>收集所有线程的predicate到32-bit掩码</td>
+                    <td>32-bit掩码，bit i对应线程i的predicate</td>
+                    <td>标记活跃线程、动态warp决策</td>
+                </tr>
+                <tr>
+                    <td><code>__activemask()</code></td>
+                    <td>返回当前warp中活跃线程的bitmask</td>
+                    <td>32-bit掩码</td>
+                    <td>在条件执行中获取warp状态</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>一个实用的例子：在规约kernel中，用 <code>__ballot_sync</code> 来检测warp内还有哪些线程是"活跃"的（数据有效），避免无效线程的干扰：</p>
+
+        <pre><code>// 用 __ballot_sync 实现动态warp规约
+__device__ float warp_reduce_ballot(float val, int tid, int N) {
+    // 生成mask：只有数据在有效范围内的线程参与
+    unsigned mask = __ballot_sync(0xFFFFFFFF, tid &lt; N);
+
+    // warp shuffle规约
+    for (int offset = 16; offset &gt; 0; offset &gt;&gt;= 1)
+        val += __shfl_down_sync(mask, val, offset);
+
+    return val;  // 线程0持有规约结果
+}</code></pre>
+
+        <div class="tip">
+            <strong>关于mask参数：</strong> CUDA 9.0引入的 <code>_sync</code> 后缀要求显式传递 <code>mask</code>。通常可以直接传 <code>0xFFFFFFFF</code>（所有32个线程参与）。但如果warp中的某些线程因为条件分支而"提前退出"了，传 <code>0xFFFFFFFF</code> 会导致这些线程的predicate为0——结果是正确的但效率可能降低。用 <code>__activemask()</code> 获取真正的活跃mask是一个好习惯。
+        </div>
+
+        <h3>Warp Shuffle指令</h3>
+
+        <p>Warp shuffle 是CUDA中性价比最高的优化工具之一。它允许warp内的线程直接互相读取对方的寄存器值，而不需要经过共享内存。这意味着：零共享内存延迟、零bank conflict、不需要 <code>__syncthreads()</code>。</p>
+
+        <p>shuffle系列函数提供了四种数据交换模式：</p>
+        <ul>
+            <li><code>__shfl_sync(mask, val, srcLane)</code>：所有线程获取srcLane线程的val</li>
+            <li><code>__shfl_up_sync(mask, val, delta)</code>：线程i获取线程i-delta的val（低位向高位流动）</li>
+            <li><code>__shfl_down_sync(mask, val, delta)</code>：线程i获取线程i+delta的val（高位向低位流动）</li>
+            <li><code>__shfl_xor_sync(mask, val, laneMask)</code>：线程i获取线程i^laneMask的val（蝶形交换，用于FFT等）</li>
+        </ul>
+
+        <p>下面是一个完整的warp级inclusive scan（前缀和）实现——不需要共享内存：</p>
+
+        <pre><code>// Warp级 Inclusive Scan（前缀和） —— 纯寄存器操作
+__device__ float warp_inclusive_scan(float val) {
+    // 第一轮：offset = 1
+    float t = __shfl_up_sync(0xFFFFFFFF, val, 1);
+    if (threadIdx.x % 32 &gt;= 1) val += t;
+
+    // 第二轮：offset = 2
+    t = __shfl_up_sync(0xFFFFFFFF, val, 2);
+    if (threadIdx.x % 32 &gt;= 2) val += t;
+
+    // 第三轮：offset = 4
+    t = __shfl_up_sync(0xFFFFFFFF, val, 4);
+    if (threadIdx.x % 32 &gt;= 4) val += t;
+
+    // 第四轮：offset = 8
+    t = __shfl_up_sync(0xFFFFFFFF, val, 8);
+    if (threadIdx.x % 32 &gt;= 8) val += t;
+
+    // 第五轮：offset = 16
+    t = __shfl_up_sync(0xFFFFFFFF, val, 16);
+    if (threadIdx.x % 32 &gt;= 16) val += t;
+
+    return val;
+}</code></pre>
+
+        <p>这段代码不需要任何共享内存，不需要 <code>__syncthreads()</code>，完全在寄存器之间完成。而且因为shuffle指令的延迟很低（通常约几个时钟周期），整个scan可以在几十个周期内完成——比共享内存版本快几倍。</p>
+
+        <div class="warning">
+            <strong>重要限制：</strong> Warp shuffle 只在一个warp内有效（32个线程）。跨warp的数据交换仍然需要共享内存。所以常见的模式是：warp内用shuffle，warp之间用共享内存。另外，shuffle操作的数据类型必须是32位（int/float）或64位（double/long long）——不支持8位或16位类型。
+        </div>
+
+        <h3>Cooperative Groups入门</h3>
+
+        <p>Cooperative Groups是CUDA 9.0引入的一个编程模型，它为线程分组提供了更灵活、更安全的抽象。传统的 <code>__shfl_sync</code> 要求你手动传入mask，但Cooperative Groups让你以类型安全的方式操作线程组。</p>
+
+        <pre><code>#include &lt;cooperative_groups.h&gt;
+using namespace cooperative_groups;
+
+__global__ void kernel_with_cg(const float *input, float *output, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // 获取当前线程所在的线程块
+    thread_block block = this_thread_block();
+
+    // 将block细分为warp大小的tile
+    // tiled_partition 返回一个大小为32的thread_group
+    thread_group tile32 = tiled_partition(block, 32);
+
+    // 获取当前线程在tile中的索引
+    int tid_in_tile = tile32.thread_rank();
+
+    // 使用tile进行安全的warp级操作
+    float val = (idx &lt; N) ? input[idx] : 0.0f;
+
+    // 在tile内做shuffle规约 —— 无需手动管理mask
+    for (int offset = tile32.size() / 2; offset &gt; 0; offset &gt;&gt;= 1) {
+        val += tile32.shfl_down(val, offset);
+    }
+
+    // 线程0输出结果
+    if (tile32.thread_rank() == 0)
+        output[blockIdx.x] = val;
+}</code></pre>
+
+        <p>Cooperative Groups的好处：</p>
+        <ul>
+            <li><strong>类型安全</strong>：不需要手动管理 <code>mask</code> 参数，Cooperative Groups自动处理</li>
+            <li><strong>灵活性</strong>：可以创建任意大小的子组（不一定非要32），虽然底层仍然是warp调度</li>
+            <li><strong>可移植性</strong>：同一代码可以在不同架构上正确运行</li>
+        </ul>
+
+        <p>不过要注意：<code>tiled_partition</code> 的大小必须是2的幂且不超过32。如果你创建大小为16的tile，两个tile共享一个warp——shuffle操作在tile内正常工作，但跨tile的shuffle就不行了。</p>
+
+        <div class="tip">
+            <strong>建议：</strong> 新项目推荐使用Cooperative Groups API来替代原始的 <code>__shfl_sync</code> 调用。代码更清晰、更安全。但如果你需要极致的性能控制（比如自定义mask处理部分活跃的warp），原始的warp内在函数仍然不可替代。
+        </div>
+
+        <h3>Warp Matrix Multiply-Accumulate (WMMA)</h3>
+
+        <p>WMMA是CUDA 9.0（Volta架构）随Tensor Cores一起引入的API，用于利用硬件上的矩阵乘累加单元。它抽象了Tensor Core的编程接口——你不用直接操作warp级的矩阵分块，而是通过"fragment"声明来让编译器为你生成正确的指令。</p>
+
+        <pre><code>#include &lt;mma.h&gt;
+using namespace nvcuda;
+
+// WMMA —— 使用Tensor Core进行矩阵乘法
+__global__ void wmma_matmul(half *A, half *B, float *C,
+                             int M, int N, int K) {
+    // 声明wmma fragment
+    wmma::fragment&lt;wmma::matrix_a, 16, 16, 16, half, wmma::row_major&gt; a_frag;
+    wmma::fragment&lt;wmma::matrix_b, 16, 16, 16, half, wmma::col_major&gt; b_frag;
+    wmma::fragment&lt;wmma::accumulator, 16, 16, 16, float&gt; c_frag;
+
+    // 初始化累加器为0
+    wmma::fill_fragment(c_frag, 0.0f);
+
+    // 加载矩阵分块
+    wmma::load_matrix_sync(a_frag, A + blockIdx.y * 16 * K, K);
+    wmma::load_matrix_sync(b_frag, B + blockIdx.x * 16, N);
+
+    // 执行矩阵乘累加 —— 一个warp协作完成
+    wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+
+    // 存储结果
+    wmma::store_matrix_sync(C + blockIdx.y * 16 * N + blockIdx.x * 16,
+                            c_frag, N, wmma::mem_row_major);
+}</code></pre>
+
+        <p>WMMA中的关键概念：</p>
+        <ul>
+            <li><strong>Fragment</strong>：一个逻辑上的矩阵分块，物理上分布在warp的32个线程的寄存器中。每个线程只持有整个分块的一部分</li>
+            <li><strong>类型参数</strong>：<code>&lt;matrix_a/b, M, N, K, dtype, layout&gt;</code> —— M, N, K 定义了分块大小（必须是16的倍数）</li>
+            <li><strong>mma_sync</strong>：真正的Tensor Core操作——这是一个warp同步指令，所有32个线程协同完成一个 <code>M x K</code> 乘 <code>K x N</code> 的矩阵乘法</li>
+        </ul>
+
+        <p>WMMA的威力在于：你不用关心Tensor Core的底层细节——数据怎么在warp内分布、什么指令序列——你只需要声明fragment，加载数据，调用 <code>mma_sync</code>，剩下的交给硬件。</p>
+
+        <div class="highlight">
+            <strong>性能潜力：</strong> 在A100上，一个SM每个周期可以执行4个Tensor Core操作——每个操作做 <code>4x4x4</code> 的矩阵乘法（FP16）。换算下来，A100的Tensor Core峰值吞吐达到312 TFLOPS（FP16），是普通CUDA核心的8倍以上。WMMA让你以不到20行代码就能触及这个性能。
+        </div>
+
+        <h3>Warp级别的条件执行</h3>
+
+        <p>最后一个话题：warp级别的条件执行优化。我们知道warp内线程是"锁步"执行的——如果出现分支分歧（divergence），两个分支会被串行执行。但有时候，你可以利用warp投票函数来避免这种分歧：</p>
+
+        <pre><code>// 不使用ballot —— 有分支分歧的问题
+__global__ void kernel_divergent(float *data, float threshold, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; N) {
+        // 分支分歧！warp内线程走不同路径
+        if (data[idx] &gt; threshold) {
+            data[idx] = data[idx] * 2.0f;  // 路径A
+        } else {
+            data[idx] = data[idx] * 0.5f;  // 路径B
+        }
+    }
+}
+
+
+// 使用ballot —— 先检查，如果warp一致则避免分支
+__global__ void kernel_ballot_optimized(float *data, float threshold, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &gt;= N) return;
+
+    int pred = (data[idx] &gt; threshold);
+    unsigned warp_mask = __ballot_sync(0xFFFFFFFF, pred);
+
+    if (warp_mask == 0 || warp_mask == 0xFFFFFFFF) {
+        // warp一致：全部走同一路径，无分歧
+        if (pred) {
+            data[idx] = data[idx] * 2.0f;
+        } else {
+            data[idx] = data[idx] * 0.5f;
+        }
+        // 注意：这里的else不会导致分歧，因为warp_mask检查已确保一致性
+    } else {
+        // warp不一致：有分歧，各自处理
+        if (pred) {
+            data[idx] = data[idx] * 2.0f;
+        } else {
+            data[idx] = data[idx] * 0.5f;
+        }
+    }
+}</code></pre>
+
+        <p>第二个版本的优化点在于：当warp内所有线程的判断一致时（<code>warp_mask == 0</code> 或 <code>0xFFFFFFFF</code>），<code>if(pred)</code> 和 <code>else</code> 不会真的产生分支分歧——因为硬件在执行时看到所有线程都走同一路径。但编译器可能无法自动推断这一点，通过显式的ballot检查，你帮助编译器生成了更好的代码。</p>
+
+        <div class="tip">
+            <strong>实际收益：</strong> 上面的优化在数据分布极端不平衡时特别有效——比如90%的数据都满足条件。此时大部分warp都是一致的，分支分歧带来的串行化开销被消除。但如果数据完全随机（每个warp内一半满足一半不满足），这个优化的收益就很小——因为额外的ballot开销可能会抵消节省的分支成本。再次强调：用profiler说话。
+        </div>
+
+        <div class="highlight">
+            <strong>真实"踩坑"故事：</strong> 我维护过一个生产环境中的规约kernel，它规约的是一个非常大的数组（数亿个元素）。最初的版本使用共享内存做了完整的树形规约——性能不错，但也不出彩。一个同事问我："你最后几轮规约active线程数已经小于32了，为什么还用共享内存？"我一看代码——确实，最后几轮（s=16, 8, 4, 2, 1）每个warp独自工作，但我们的代码还在用共享内存来通信。我把最后5轮改成warp shuffle，kernel整体快了几乎2倍。为什么差别这么大？因为最后几轮其实包含了规约中大约一半的数据搬移操作！而且warp shuffle避免了共享内存的读写和同步开销。这个教训是：<strong>不要满足于"还可以"的性能，检查你代码的每一个部分——特别是那些你习以为常的"模板"——很可能隐藏着巨大的优化空间。</strong>
+        </div>
+
+        <p>Warp级别编程代表了CUDA优化"最深"的层次——你已经在硬件最原生的执行单元上做操作了。这一章我们学习了投票函数（all/any/ballot）、warp shuffle、Cooperative Groups、WMMA的Tensor Core编程，以及warp级别的条件执行优化。掌握这些工具，你就真正掌握了CUDA性能优化的全部武器库。</p>
+
+        <p>下一章我们要从"写代码"转向"分析和调试"——<strong>性能分析工具</strong>。我们会学习Nsight Systems、Nsight Compute等工具，它们能让你看到你的代码到底在GPU上做了什么。毕竟，光会优化不够——你得知道优化什么、怎么验证优化有效。第十五章见。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 共享内存深入</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html" class="active">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>共享内存深入</h2>
+
+        <p>大家好，我是你们的讲师。如果你问一个用过CUDA五年的工程师："GPU上什么优化最立竿见影？"十个有九个会告诉你——<strong>共享内存（shared memory）</strong>。共享内存是CUDA内存层次结构中一颗真正的明珠：它是用户可控的片上缓存，延迟只有全局内存的十分之一甚至更低。用好它，你的内核性能可以翻几倍；用不好——或者更糟，根本不用它——你的内核可能连显存带宽的10%都用不到。</p>
+
+        <p>第七章我们了解了同步机制，那时候你已经在用 <code>__syncthreads()</code> 配合共享内存做block内的线程协作了。但说实话，那只是冰山一角。这一章我们要深入共享内存的本质：它的物理结构、Bank冲突的来龙去脉、如何用Padding避免冲突、以及一个经典的分块矩阵乘法实战。准备好，这一章的信息量会很大。</p>
+
+        <div class="highlight">
+            <strong>核心思想：</strong> 共享内存是"程序员管理的高速缓存"。用它减少对全局内存的访问——这是CUDA性能优化的第一条黄金法则。
+        </div>
+
+        <h3>共享内存基础回顾</h3>
+
+        <p>先快速回顾一下共享内存的基本用法。在CUDA中，共享内存用 <code>__shared__</code> 修饰符声明，它是每个线程块（block）私有的，同一个block内的所有线程都可以读写。有两种分配方式：</p>
+
+        <p><strong>静态分配</strong>是在编译时确定大小的。你在内核函数内部直接声明：</p>
+
+        <pre><code>__global__ void kernel_static() {
+    __shared__ float cache[256];  // 编译时固定256个float
+    // ...
+}</code></pre>
+
+        <p><strong>动态分配</strong>则允许在运行时指定大小。声明时用 <code>extern __shared__</code> 加上 <code>[]</code>，然后在启动内核时用第三个尖括号参数传入大小（以字节为单位）：</p>
+
+        <pre><code>__global__ void kernel_dynamic() {
+    extern __shared__ float cache[];  // 大小由启动参数决定
+    // ...
+}
+
+// 启动时指定共享内存大小（字节）
+kernel_dynamic&lt;&lt;&lt;grid, block, 256 * sizeof(float)&gt;&gt;&gt;();</code></pre>
+
+        <p>注意动态分配只能有一个 <code>extern __shared__</code> 数组，如果要同时分配多个不同类型的数组，你需要手动计算偏移量。这是很多新手会踩坑的地方。</p>
+
+        <div class="tip">
+            <strong>小贴士：</strong> 现代CUDA架构（Compute Capability 7.0+）允许你通过 <code>cudaFuncSetAttribute()</code> 设置每个block能用的最大共享内存，默认是48KB，但许多GPU支持最多配置到164KB。如果你的kernel需要更多共享内存，记得要显式调用这个API，否则 <code>&lt;&lt;&lt;&gt;&gt;&gt;</code> 参数里设再多也会被截断。
+        </div>
+
+        <h3>Bank与Bank Conflict</h3>
+
+        <p>共享内存之所以速度快，是因为它在硬件上被分成了32个<strong>存储体（bank）</strong>，每个bank的宽度是4字节（32位）。这32个bank可以同时被访问——理论上，如果你的32个线程分别访问32个不同的bank，那么一次内存访问就能完成所有线程的请求。但如果两个（或更多）线程访问了同一个bank中的不同地址，就会发生<strong>bank conflict</strong>——这些访问会被串行化，性能随之下降。</p>
+
+        <p>下面这张表总结了不同的访问模式及其冲突程度：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>访问模式</th>
+                    <th>示例</th>
+                    <th>Bank冲突程度</th>
+                    <th>实际带宽利用率</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>所有线程访问同一地址（广播）</td>
+                    <td><code>s_data[0]</code></td>
+                    <td>无冲突（硬件广播）</td>
+                    <td>100%</td>
+                </tr>
+                <tr>
+                    <td>线程i访问地址i（步长1）</td>
+                    <td><code>s_data[threadIdx.x]</code></td>
+                    <td>无冲突</td>
+                    <td>100%</td>
+                </tr>
+                <tr>
+                    <td>线程i访问地址2i（步长2）</td>
+                    <td><code>s_data[threadIdx.x * 2]</code></td>
+                    <td>2-way</td>
+                    <td>50%</td>
+                </tr>
+                <tr>
+                    <td>线程i访问地址4i（步长4）</td>
+                    <td><code>s_data[threadIdx.x * 4]</code></td>
+                    <td>4-way</td>
+                    <td>25%</td>
+                </tr>
+                <tr>
+                    <td>线程i访问地址32i（步长32）</td>
+                    <td><code>s_data[threadIdx.x * 32]</code></td>
+                    <td>32-way（最坏情况）</td>
+                    <td>3.125%</td>
+                </tr>
+                <tr>
+                    <td>随机访问</td>
+                    <td><code>s_data[rand() % N]</code></td>
+                    <td>高概率冲突</td>
+                    <td>不可预测</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>一个很重要的细节：bank编号是根据地址计算出来的——对于float类型（4字节），地址 <code>addr</code> 对应的bank编号是 <code>(addr / 4) % 32</code>。所以 <code>s_data[0]</code> 到 <code>s_data[31]</code> 恰好分属32个不同bank，步长为1的访问完美对齐。但如果声明的是 <code>__shared__ char s_data[128]</code>，每个bank包含4个字节，情况就不同了——这也是为什么共享内存通常用 <code>float</code> 或 <code>int</code> 操作的原因之一。</p>
+
+        <div class="warning">
+            <strong>重要：</strong> Bank conflict只发生在<strong>同一个warp</strong>内的线程之间。不同warp的线程访问共享内存不会相互冲突，因为warp是独立调度的。所以"32个bank"的设计恰好对应了一个warp的32个线程——这不是巧合，是有意为之。
+        </div>
+
+        <h3>内存填充（Padding）技巧</h3>
+
+        <p>当你的线程需要按列访问一个二维共享内存数组时，bank conflict几乎是必然的。比如我们要在一个block内处理一个 <code>32 x 32</code> 的矩阵，每个线程处理一行：</p>
+
+        <pre><code>// 有bank conflict的版本：列访问导致2-way冲突
+__shared__ float tile[32][32];
+
+// 线程threadIdx.x 访问第j列
+float val = tile[threadIdx.x][j];  // 连续线程访问连续行 → bank冲突！
+
+// Padding版本：每行多开一个float
+__shared__ float tile_padded[32][33];  // 注意第二维是33不是32
+
+// 同样的访问模式，这次无冲突
+float val = tile_padded[threadIdx.x][j];  // Padding让列偏移避免了bank冲突</code></pre>
+
+        <p>为什么加一个padding就能消除冲突？因为 <code>tile[0][j]</code> 和 <code>tile[1][j]</code> 的地址差从 <code>32 * 4 = 128</code> 字节变成了 <code>33 * 4 = 132</code> 字节。128字节能被4整除，映射到同一个bank mod 32的偏移上；而132字节就不一样了——它把相邻行的同一列推到了不同的bank。这是一个极其廉价却极其有效的优化技巧。</p>
+
+        <div class="tip">
+            <strong>口诀：</strong> 二维共享内存，列访问加padding。多加一个元素，往往能省下数倍的带宽。在古老的Fermi架构上，我见过一个加了padding的kernel比不加速了整整4倍。
+        </div>
+
+        <h3>分块矩阵乘法——共享内存实战</h3>
+
+        <p>共享内存最经典的应用就是分块矩阵乘法（tiled matrix multiplication）。不用共享内存的朴素版本，每个线程需要多次读取全局内存来获取A和B的元素；而分块版本让同一block的线程协作：先把子矩阵从全局内存加载到共享内存，然后从共享内存读取数据进行计算。</p>
+
+        <pre><code>#define TILE_SIZE 16
+
+__global__ void matmul_tiled(float *A, float *B, float *C,
+                              int M, int N, int K) {
+    // 声明共享内存块
+    __shared__ float As[TILE_SIZE][TILE_SIZE];
+    __shared__ float Bs[TILE_SIZE][TILE_SIZE];
+
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+    float sum = 0.0f;
+
+    // 遍历所有tile
+    for (int t = 0; t &lt; (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
+        // 协作加载A的子块到共享内存
+        if (row &lt; M &amp;&amp; t * TILE_SIZE + threadIdx.x &lt; K)
+            As[threadIdx.y][threadIdx.x] = A[row * K + t * TILE_SIZE + threadIdx.x];
+        else
+            As[threadIdx.y][threadIdx.x] = 0.0f;
+
+        // 协作加载B的子块到共享内存
+        if (col &lt; N &amp;&amp; t * TILE_SIZE + threadIdx.y &lt; K)
+            Bs[threadIdx.y][threadIdx.x] = B[(t * TILE_SIZE + threadIdx.y) * N + col];
+        else
+            Bs[threadIdx.y][threadIdx.x] = 0.0f;
+
+        __syncthreads();  // 确保所有线程都加载完毕
+
+        // 从共享内存读取并计算
+        for (int k = 0; k &lt; TILE_SIZE; ++k)
+            sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+
+        __syncthreads();  // 防止下一轮覆盖时还有线程在读取
+    }
+
+    if (row &lt; M &amp;&amp; col &lt; N)
+        C[row * N + col] = sum;
+}</code></pre>
+
+        <p>这个kernel的关键步骤解析：</p>
+        <ul>
+            <li><strong>第8-9行</strong>：每个block声明自己的 <code>TILE_SIZE x TILE_SIZE</code> 共享内存，用于缓存矩阵A和B的子块</li>
+            <li><strong>第17-22行</strong>：block内的 <code>TILE_SIZE * TILE_SIZE</code> 个线程并行从全局内存加载数据到共享内存。每个线程负责一个元素</li>
+            <li><strong>第24行</strong>：<code>__syncthreads()</code> 确保所有数据加载完成——这一步不能少，否则有些线程可能还没把数据写进共享内存，其他线程就开始读了</li>
+            <li><strong>第27行</strong>：从共享内存读取数据做乘累加。这里的 <code>As[threadIdx.y][k]</code> 和 <code>Bs[k][threadIdx.x]</code> 的访问模式是步长为1的——避免了bank conflict</li>
+            <li><strong>第29行</strong>：第二个 <code>__syncthreads()</code> 确保所有线程在下一轮覆盖共享内存前都已完成读取</li>
+        </ul>
+
+        <p>对比朴素版本：对于 <code>TILE_SIZE = 16</code>，每个元素从共享内存读取了16次（内层循环），但从全局内存只读了1次（加载阶段）。而朴素版本每个元素要从全局内存读16次。共享内存的延迟是全局内存的1/10到1/20，性能差异可想而知。</p>
+
+        <div class="highlight">
+            <strong>关键数字：</strong> 一张A100 GPU上，全局内存带宽约2 TB/s，共享内存带宽约13 TB/s。如果你的算法可以主要用共享内存工作，等效带宽可以提升6倍以上。
+        </div>
+
+        <h3>共享内存的Bank Conflict检测</h3>
+
+        <p>你怎么知道自己的共享内存访问有没有bank conflict？肉眼检查当然可以，但实际项目中的访问模式往往复杂得多。最可靠的方法是用<strong>NVIDIA Nsight Compute（ncu）</strong>进行profiling。</p>
+
+        <p>在Nsight Compute的Memory Workload分析部分，有一项叫 <code>L1/Shared Memory Bank Conflicts</code> 的指标。它会显示每个warp的平均bank conflict次数。理想值是0——意味着所有32个线程的访问都被完美调度。如果这个值接近warp大小（32），说明几乎是每个访问都在冲突，性能损失巨大。</p>
+
+        <div class="warning">
+            <strong>真实"踩坑"故事：</strong> 我几年前优化过一个流体力学模拟的kernel。直觉告诉我"加共享内存肯定能加速"，于是我把所有全局内存访问都换成了共享内存。结果——kernel变慢了2倍！我当时百思不得其解，直到用Nsight Compute跑了一遍才发现：我的共享内存访问模式造成了32-way全冲突。因为我是按列访问一个 <code>32 x 32</code> 的二维数组，而声明是 <code>__shared__ float data[32][32]</code>，32个线程恰好全部命中同一个bank。这就是你们听说的"好心办坏事"的典型例子——加了共享内存，但因为bank conflict，实际带宽还不如直接读全局内存。后来加了一列padding（改成 <code>[32][33]</code>），性能立刻回升，最终比原始版本快了2倍。
+        </div>
+
+        <p>这个故事告诉我们：<strong>共享内存不是银弹</strong>。它确实快，但前提是你必须理解它的bank结构，并确保访问模式是友好的。一个简单的工具——padding——就能解决大部分问题。但更重要的是，永远不要假设优化有效，要用profiler数据说话。</p>
+
+        <div class="tip">
+            <strong>日常检查清单：</strong> 使用共享内存后，顺手检查三点——（1）访问模式是否步长为1？（2）二维数组有没有按列访问？（3）Nsight Compute的bank conflict计数是不是0？三问全过，基本就没问题了。
+        </div>
+
+        <p>好了，这一章我们从共享内存的分配方式讲到了bank conflict的物理原理，从padding技巧讲到了经典的分块矩阵乘法，还聊了一个真实的踩坑案例。共享内存用好了，你的CUDA编程水平就真正上了一个台阶。下一章我们要讨论的是另一个同样重要的话题——<strong>全局内存优化</strong>。GPU上最慢的内存就是全局内存，但很多人在写kernel的时候根本没有意识到它的访问模式有多糟糕。下一章我们来拆解这个问题。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

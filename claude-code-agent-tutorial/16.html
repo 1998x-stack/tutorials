@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 实现权限控制</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html" class="active">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第16章 实现权限控制 🔨</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们拆解了 Claude Code 的权限系统架构——七种模式、规则链引擎、ML 分类器、Bubble 机制。今天我们要进入 BUILD 模式，亲手实现一个权限控制模块，把它集成到我们一直在构建的 Agent 中。</p>
+
+        <p>为什么会有一个独立的"实现权限控制"章节？因为权限系统不是某种锦上添花的功能——它是 Agent 安全运行的地基。如果你跳过了权限控制，Agent 就会有"指哪打哪"的能力——你让它读个文件，它顺手把整个目录删了，权限系统是唯一能拦住它的东西。而且，权限系统的设计质量直接影响用户体验：做得太松不安全，做得太紧用户想摔键盘。</p>
+
+        <p>另外分享一个我的亲身经历。我之前参与过一个 Agent 项目，上线第一天就出了安全问题——一个测试同学在 prompt 里写了"help me clean up the project directory"，Agent 直接执行了 <code>rm -rf .</code>。因为当时没有权限控制，这个操作被即时执行了。幸好那只是个测试环境，但也够我们喝一壶的。那个下午，我写下了第一版 PermissionManager——就是从那时起，我深信权限系统应该是 Agent Harness 的第一优先级模块，而不是最后才想起来的"附加功能"。</p>
+
+        <h3>权限系统的接口设计</h3>
+
+        <p>我们先把接口定下来。一个好的接口应该让调用方在 5 秒钟内理解如何使用，同时具备足够的灵活性来应对不同的安全策略。</p>
+
+        <p>核心 API 只有一个方法：</p>
+
+        <pre><code>class PermissionManager:
+    def check(self, tool_name: str, params: dict) -> dict:
+        \"\"\"
+        检查工具调用是否被允许。
+
+        返回:
+            allowed: bool              — 是否允许执行
+            reason: str                — 原因说明
+            requires_confirmation: bool — 是否需要用户确认
+        \"\"\"</code></pre>
+
+        <p>你可能会问：为什么不做成返回 <code>True/False</code> 的简单接口？两个原因。第一，我们需要 <code>reason</code> 字段——当操作被拒绝时，Agent 需要知道原因，这样才能告知用户"为什么这个操作不被允许"。第二，<code>requires_confirmation</code> 字段实现了我们上一章讨论的"中间地带"——不是简单的允许/拒绝，而是"可以执行但需要你确认一下"。</p>
+
+        <p>接下来我们定义四种模式，覆盖从最安全到最高效的整个光谱：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>模式</th>
+                    <th>读取操作</th>
+                    <th>写入操作</th>
+                    <th>命令执行</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>safe</code></td>
+                    <td>自动允许</td>
+                    <td>拒绝</td>
+                    <td>拒绝</td>
+                    <td>代码审查、文件浏览</td>
+                </tr>
+                <tr>
+                    <td><code>normal</code></td>
+                    <td>自动允许</td>
+                    <td>需确认</td>
+                    <td>需确认</td>
+                    <td>日常开发，默认模式</td>
+                </tr>
+                <tr>
+                    <td><code>dangerous</code></td>
+                    <td>自动允许</td>
+                    <td>自动允许</td>
+                    <td>需确认</td>
+                    <td>高强度编码，信任 Agent 编辑</td>
+                </tr>
+                <tr>
+                    <td><code>paranoid</code></td>
+                    <td>需确认</td>
+                    <td>需确认</td>
+                    <td>需确认 + 超时</td>
+                    <td>审计、生产操作、高风险环境</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>注意 <code>paranoid</code> 模式甚至对读取操作都要确认——你可能觉得这有点过头，但在某些场景下（比如读取包含密钥的配置文件），这确实有道理。它还引入了<strong>超时机制</strong>：如果用户在一定时间内没有响应确认请求，操作自动被拒绝（而不是默认通过）。</p>
+
+        <h3>工具白名单与黑名单</h3>
+
+        <p>有了模式，我们还需要更精细的控制粒度——具体到单个工具层面。这就是白名单和黑名单发挥作用的地方。</p>
+
+        <p><strong>白名单模式</strong>：只有列在清单中的工具可以被使用。任何不在白名单中的工具调用都会直接被拒绝。这种模式的默认行为是"拒绝一切"，安全等级最高。</p>
+
+        <p><strong>黑名单模式</strong>：除了列在清单中的工具，其他都可以使用。这种模式的默认行为是"允许一切"，灵活性最高。</p>
+
+        <p>在我们的实现中，两种模式同时存在——白名单优先于黑名单。也就是说，一个工具只有在通过了白名单检查（如果在白名单模式下）且不在黑名单中时，才会继续进入下一步的权限评估。</p>
+
+        <p>白名单和黑名单的匹配使用 glob 模式——这比精确匹配灵活得多，又比正则表达式更容易理解。例如 <code>Read*</code> 匹配所有以 <code>Read</code> 开头的工具，<code>Write:*</code> 匹配 <code>Write</code> 命名空间下的所有子工具。</p>
+
+        <pre><code>import fnmatch
+from enum import Enum
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+class PermissionMode(Enum):
+    SAFE = "safe"
+    NORMAL = "normal"
+    DANGEROUS = "dangerous"
+    PARANOID = "paranoid"
+
+
+@dataclass
+class ToolPolicy:
+    """单个工具的安全策略配置"""
+    default_action: str = "ask"         # allow / deny / ask
+    danger_level: str = "low"           # low / medium / high / critical
+    requires_confirmation: bool = True
+
+
+# 工具安全分类
+TOOL_SAFETY_MAP = {
+    "Read": ToolPolicy("allow", "low", False),
+    "Grep": ToolPolicy("allow", "low", False),
+    "ReadFile": ToolPolicy("allow", "low", False),
+    "ListDir": ToolPolicy("allow", "low", False),
+    "TodoWrite": ToolPolicy("allow", "low", False),
+    "TodoList": ToolPolicy("allow", "low", False),
+    "WebSearch": ToolPolicy("ask", "medium", True),
+    "WebFetch": ToolPolicy("ask", "medium", True),
+    "Write": ToolPolicy("ask", "medium", True),
+    "Edit": ToolPolicy("ask", "medium", True),
+    "WriteFile": ToolPolicy("ask", "high", True),
+    "Bash": ToolPolicy("ask", "high", True),
+    "RunCommand": ToolPolicy("ask", "high", True),
+    "DeleteFile": ToolPolicy("deny", "critical", True),
+    "BatchWrite": ToolPolicy("deny", "critical", True),
+}
+
+
+class PermissionManager:
+    def __init__(self, mode: PermissionMode = PermissionMode.NORMAL):
+        self.mode = mode
+        self._whitelist: list[str] = []
+        self._blacklist: list[str] = []
+        self._configure_for_mode(mode)
+
+    def _configure_for_mode(self, mode: PermissionMode):
+        """根据模式设置默认策略"""
+        if mode == PermissionMode.SAFE:
+            self._whitelist = ["Read*", "Grep*", "Todo*", "ListDir"]
+            self._blacklist = ["*"]
+        elif mode == PermissionMode.NORMAL:
+            self._whitelist = []       # 允许全部（通过逐项检查控制）
+            self._blacklist = ["Delete*", "Batch*"]
+        elif mode == PermissionMode.DANGEROUS:
+            self._whitelist = []
+            self._blacklist = ["Delete*", "Batch*"]
+        elif mode == PermissionMode.PARANOID:
+            self._whitelist = ["Read*", "Grep*", "ListDir"]
+            self._blacklist = ["Bash*", "Write*", "Edit*", "Delete*"]
+
+    def check(self, tool_name: str, params: dict) -> dict:
+        # 白名单检查：如果有白名单，工具必须在白名单中
+        if self._whitelist:
+            if not any(fnmatch.fnmatch(tool_name, p) for p in self._whitelist):
+                return {
+                    "allowed": False,
+                    "reason": f"工具 {tool_name} 不在白名单中",
+                    "requires_confirmation": False,
+                }
+
+        # 黑名单检查：如果工具在黑名单中，拒绝
+        if self._blacklist:
+            if any(fnmatch.fnmatch(tool_name, p) for p in self._blacklist):
+                return {
+                    "allowed": False,
+                    "reason": f"工具 {tool_name} 在黑名单中",
+                    "requires_confirmation": False,
+                }
+
+        # 工具安全策略检查
+        policy = TOOL_SAFETY_MAP.get(tool_name)
+        if policy is None:
+            # 未注册的工具：paranoid 模式拒绝，其他模式询问
+            if self.mode == PermissionMode.PARANOID:
+                return {"allowed": False, "reason": "未知工具",
+                        "requires_confirmation": False}
+            return {"allowed": True, "reason": "未注册工具，按默认策略处理",
+                    "requires_confirmation": True}
+
+        if policy.default_action == "deny":
+            return {"allowed": False, "reason": f"{tool_name} 默认不允许",
+                    "requires_confirmation": False}
+
+        if policy.default_action == "allow":
+            if self.mode == PermissionMode.PARANOID and\
+               policy.danger_level != "low":
+                return {"allowed": True, "reason": "paranoid 模式下需确认",
+                        "requires_confirmation": True}
+            return {"allowed": True, "reason": "自动允许",
+                    "requires_confirmation": False}
+
+        # default_action == "ask"
+        return {"allowed": True, "reason": f"需要用户确认",
+                "requires_confirmation": True}
+
+    def set_whitelist(self, patterns: list[str]):
+        self._whitelist = patterns
+
+    def set_blacklist(self, patterns: list[str]):
+        self._blacklist = patterns</code></pre>
+
+        <h3>用户确认回调实现</h3>
+
+        <p>当权限检查返回 <code>requires_confirmation=True</code> 时，我们需要在工具执行前插入一个确认步骤。这是典型的 <strong>PreToolUse Hook</strong> 模式——在工具执行前，调用一个钩子函数来决定是否继续。</p>
+
+        <p>我们的实现包括三种确认选项：</p>
+
+        <ul>
+            <li><strong>y</strong> — 确认执行本次操作</li>
+            <li><strong>n</strong> — 拒绝本次操作</li>
+            <li><strong>q</strong> — 退出当前任务（拒绝所有后续操作）</li>
+        </ul>
+
+        <p>还有一个重要的细节：<strong>超时机制</strong>。在 <code>paranoid</code> 模式下，如果用户在 30 秒内没有响应，操作自动被拒绝。这不只是为了用户体验——更重要的是防止 Agent 在用户离开时静默执行危险操作。</p>
+
+        <pre><code>import sys
+import select
+import time
+
+
+class ConfirmationCallback:
+    def __init__(self, timeout: int = 30):
+        self.timeout = timeout          # 超时秒数，0 表示不超时
+        self.session_trusted: set = set()  # 当前会话中已信任的工具
+        self.always_allow_session = False
+
+    def confirm(self, tool_name: str, params: dict, reason: str) -> bool:
+        if self.always_allow_session:
+            return True
+
+        # 会话级信任：同一个工具同一类操作不再重复确认
+        trust_key = f"{tool_name}:{type(params)}"
+        if trust_key in self.session_trusted:
+            return True
+
+        # 显示确认信息
+        print(f"\n⚠️  需要确认操作:")
+        print(f"  工具: {tool_name}")
+        print(f"  参数: {params}")
+        print(f"  原因: {reason}")
+        print(f"  [y] 允许  [n] 拒绝  [q] 退出任务  [a] 会话中全部允许")
+        print(f"  ({self.timeout}s 超时后自动拒绝)", end=" ")
+
+        # 带超时的输入读取
+        start = time.time()
+        while True:
+            elapsed = time.time() - start
+            remaining = self.timeout - int(elapsed)
+            if self.timeout > 0 and remaining <= 0:
+                print("\n  ⏱ 超时，操作已拒绝")
+                return False
+
+            try:
+                if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
+                    choice = sys.stdin.readline().strip().lower()
+                    if choice == "y":
+                        return True
+                    elif choice == "n":
+                        return False
+                    elif choice == "q":
+                        sys.exit("用户退出任务")
+                    elif choice == "a":
+                        self.always_allow_session = True
+                        return True
+                    else:
+                        print(f"  输入错误，请选择 y/n/q/a: ", end="")
+            except (EOFError, KeyboardInterrupt):
+                print("\n  输入中断，操作已拒绝")
+                return False</code></pre>
+
+        <h3>危险操作检测</h3>
+
+        <p>除了工具的权限级别，我们还需要对操作参数进行深度检查——尤其是在 Bash 命令这个高危领域。即使权限系统允许 Bash 执行，某些命令模式也应该被自动拦截。</p>
+
+        <p>这就是危险操作检测层。它使用正则表达式匹配已知的危险模式，并检查路径是否在安全边界内。</p>
+
+        <pre><code>import re
+import os
+
+
+class DangerousOperationDetector:
+    """危险操作检测——正则匹配 + 路径检查"""
+
+    # 危险命令模式
+    DANGEROUS_PATTERNS = [
+        (r'\brm\s+-rf\s+/\s', '高危: 尝试删除根目录'),
+        (r'\brm\s+-rf\s+/\*', '高危: 尝试删除根目录下所有文件'),
+        (r'\bsudo\s+', '高危: 使用 sudo 提权'),
+        (r'\bchmod\s+777\b', '高危: 将文件权限设为 777'),
+        (r'\bchown\b', '高危: 修改文件所有者'),
+        (r'\bmount\b', '高危: 挂载操作'),
+        (r'>\s*/dev/sd[a-z]', '高危: 直接写入块设备'),
+        (r'\bdd\s+if=', '高危: dd 写入磁盘'),
+        (r'\bcurl\s+.*\|\s*(ba|sh)\b', '高危: curl 管道执行 shell'),
+        (r'\bwget\s+.*-O-\s*\|\s*(ba|sh)\b', '高危: wget 管道执行 shell'),
+        (r'\b(?:mkfs|fdisk|parted)\b', '高危: 磁盘分区/格式化操作'),
+        (r'`[^`]*rm\s+-rf[^`]*`', '高危: 反引号中嵌入 rm -rf'),
+        (r'\$\s*\([^)]*rm\s+-rf[^)]*\)', '高危: 命令替换中嵌入 rm -rf'),
+    ]
+
+    # 限制写入的路径前缀
+    PROTECTED_PATHS = [
+        '/etc',
+        '/usr',
+        '/bin',
+        '/sbin',
+        '/boot',
+        '/dev',
+        '/proc',
+        '/sys',
+        # Windows 路径也可以加，但以 Linux 为主
+    ]
+
+    def __init__(self, project_root: str = "."):
+        self.project_root = os.path.abspath(project_root)
+
+    def check_command(self, command: str) -> Optional[dict]:
+        """检查 Bash 命令是否包含危险操作"""
+        for pattern, reason in self.DANGEROUS_PATTERNS:
+            if re.search(pattern, command):
+                return {"allowed": False, "reason": reason}
+        return None
+
+    def check_path(self, path: str) -> Optional[dict]:
+        """检查路径是否在安全范围内"""
+        abs_path = os.path.abspath(path)
+
+        # 检查是否在项目目录内
+        if abs_path.startswith(self.project_root):
+            return None
+
+        # /tmp 是允许的
+        if abs_path.startswith('/tmp'):
+            return None
+
+        # 检查是否在受保护路径中
+        for protected in self.PROTECTED_PATHS:
+            if abs_path.startswith(protected):
+                return {"allowed": False,
+                        "reason": f"写入受保护路径: {protected}"}
+
+        # 项目目录之外的其他路径需要警告
+        return {"allowed": True,
+                "reason": "目标路径在项目目录之外，需要确认",
+                "requires_confirmation": True}
+
+    def check(self, tool_name: str, params: dict) -> Optional[dict]:
+        """综合检查——根据工具类型调用对应的检查"""
+        if tool_name in ("Bash", "RunCommand"):
+            cmd = params.get("command", params.get("cmd", ""))
+            return self.check_command(cmd)
+
+        if tool_name in ("Write", "WriteFile", "Edit", "DeleteFile"):
+            path = params.get("path", params.get("file_path", ""))
+            return self.check_path(path)
+
+        return None</code></pre>
+
+        <h3>集成到 Agent</h3>
+
+        <p>有了 PermissionManager 和 DangerousOperationDetector，我们把它们集成到 Agent 的主循环中。集成点只有一个：<strong>在工具执行之前调用权限检查</strong>。</p>
+
+        <pre><code>class AgentWithPermissions:
+    def __init__(self, mode: PermissionMode = PermissionMode.NORMAL):
+        self.permission = PermissionManager(mode)
+        self.detector = DangerousOperationDetector(project_root="/home/user/project")
+        self.confirmer = ConfirmationCallback(timeout=30)
+
+    def execute_tool(self, tool_name: str, params: dict) -> str:
+        # 第1步：检查危险操作
+        danger_result = self.detector.check(tool_name, params)
+        if danger_result and not danger_result.get("allowed", True):
+            return f"❌ 危险操作被拦截: {danger_result['reason']}"
+
+        # 第2步：权限检查
+        perm_result = self.permission.check(tool_name, params)
+        if not perm_result["allowed"]:
+            return f"❌ 权限被拒绝: {perm_result['reason']}"
+
+        # 第3步：需要用户确认
+        if perm_result.get("requires_confirmation", False):
+            confirmed = self.confirmer.confirm(
+                tool_name, params, perm_result["reason"]
+            )
+            if not confirmed:
+                return f"❌ 用户取消了操作"
+
+        # 第4步：执行工具
+        return f"✅ 执行 {tool_name}({params})"</code></pre>
+
+        <p>在 <code>normal</code> 模式下实际运行的效果：</p>
+
+        <ul>
+            <li>用户说"读取 main.py" → Agent 调用 <code>Read("main.py")</code> → 自动允许，直接执行</li>
+            <li>用户说"修改 config.py 中的端口号" → Agent 调用 <code>Edit("config.py")</code> → 弹确认框，用户确认后执行</li>
+            <li>用户说"删掉临时目录" → Agent 调用 <code>Bash("rm -rf /tmp/cache")</code> → 危险检测通过（在 /tmp 内），但 Bash 需要确认 → 弹确认框</li>
+            <li>用户说"清理系统" → Agent 调用 <code>Bash("rm -rf /var/log")</code> → 危险检测拦截（/var 是受保护路径），拒绝执行</li>
+        </ul>
+
+        <div class="tip">
+            <strong>渐进信任的最佳实践：</strong>你可能注意到 ConfirmationCallback 支持"会话级信任"——当你对同一个工具确认了多次后，可以自动放行。这解决了 Permission Fatigue 问题。实践中，我们建议这样配置渐进信任策略：前 3 次同类操作需要确认 → 之后自动放行 → 但如果操作参数包含从未见过的模式（比如 Bash 中出现了一个新的危险命令），重新要求确认。这种"信任但验证"的模式，在安全性和效率之间取得了很好的平衡。
+        </div>
+
+        <p>至此，我们拥有了一个功能完整的权限控制系统。它支持四种安全模式、工具白名单/黑名单、逐工具安全策略、危险操作检测、以及带超时的用户确认回调。下一章我们将把目光转向所有工具中最危险的那个——Bash 沙箱。我们会深入讨论如何在 Agent 中安全地执行 Shell 命令，以及 Claude Code 的四层纵深防御体系是如何设计的。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

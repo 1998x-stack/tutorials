@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 MCP 协议深度解析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html" class="active">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第18章 MCP 协议深度解析</h2>
+
+        <p>大家好，我是你们的讲师。今天我们要聊一个改变 AI 工具集成格局的协议——MCP，全称 Model Context Protocol。</p>
+
+        <p>在 MCP 出现之前，每个 AI 工具的集成方式都是"手搓"的。你想让 Claude 能查 GitHub？写个 API 封装。想让 Cursor 能读 PostgreSQL？再写一套封装。想让 Gemini 能操作 Slack？再来一套。每个工具、每个模型、每个平台之间都在重复发明轮子。这就像 1990 年代的外设市场——每家打印机都有自己的接口协议，直到 USB 的出现终结了这场混乱。MCP 就是这个领域的 USB。</p>
+
+        <p>我清晰记得一个场景：2024 年底，我在做一个多 Agent 协作项目，需要让不同的 Agent 共享同一个文件系统接口和代码搜索接口。当时每个 Agent 框架（LangChain、AutoGPT、CrewAI）都有自己的工具定义格式，互相不兼容。我需要为同一个"搜索代码"功能写三套不同的工具适配器。就是在那一刻，我深深体会到：<strong>AI 行业需要一个标准化的工具协议</strong>。MCP 的出现，恰好填补了这个空白。今天我们来深度解析它的设计哲学、协议细节和生态现状。和我一起把 MCP 的每一个关键设计决策理解透彻，下一章我们就能直接动手实现 MCP 集成了。</p>
+
+        <h3>MCP 的诞生与设计哲学</h3>
+
+        <p>MCP 是 Anthropic 在 2024 年底提出的开放协议，全称 Model Context Protocol。它的目标是为 AI 模型与外部工具、数据源之间的交互提供一个标准化的接口。2025 年 3 月，Anthropic 正式发布了 MCP 规范 1.0，并在 2025-03-26 的更新中引入了重要的传输层改进（Streamable HTTP）。截至 2026 年中，MCP 已经被 JetBrains、VS Code、Sourcegraph、Zed 等主流开发工具采纳，成为事实上的行业标准。</p>
+
+        <p>MCP 的核心设计哲学可以概括为三个分离：</p>
+
+        <ul>
+            <li><strong>能力定义与执行分离</strong>：一个工具"能做什么"（它的 schema、功能描述）与"怎么执行"（它的后端实现）是分开定义的。客户端只需要知道工具的接口，不需要关心它的实现细节。</li>
+            <li><strong>数据与操作分离</strong>：Resources（数据源）和 Tools（可执行操作）是 MCP 中的两个独立概念。Resources 提供读取访问，Tools 提供写入/执行访问。代理可以独立发现和使用这两类能力。</li>
+            <li><strong>传输与协议分离</strong>：MCP 的语义层（初始化、工具调用、资源读取等）与传输层（STDIO、HTTP、SSE）是正交的。你可以在本地用 STDIO 通信，也可以在远程用 HTTP 通信，语义完全一致。</li>
+        </ul>
+
+        <p>MCP 虽然是由 Anthropic 发起的，但它是一个<strong>开放标准</strong>，不是 Anthropic 的专有协议。任何人都可以实现 MCP 的客户端或服务端。目前社区已经涌现了数百个 MCP 服务器实现——从 GitHub、Slack 到 Figma、Notion，几乎所有主流 SaaS 平台都有对应的 MCP 服务器。</p>
+
+        <h3>协议生命周期</h3>
+
+        <p>MCP 的交互流程定义得非常清晰，一个完整的会话包含以下几个阶段：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>阶段</th>
+                    <th>Client → Server</th>
+                    <th>Server → Client</th>
+                    <th>消息格式</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Initialize</td>
+                    <td><code>{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{...}}}</code></td>
+                    <td>Server 返回支持的协议版本和能力</td>
+                    <td>JSON-RPC 请求/响应</td>
+                </tr>
+                <tr>
+                    <td>ListTools</td>
+                    <td><code>{"jsonrpc":"2.0","method":"tools/list"}</code></td>
+                    <td>工具列表（名称、描述、JSON Schema 参数）</td>
+                    <td>JSON-RPC 请求/响应</td>
+                </tr>
+                <tr>
+                    <td>CallTool</td>
+                    <td><code>{"jsonrpc":"2.0","method":"tools/call","params":{"name":"tool_name","arguments":{...}}}</code></td>
+                    <td>工具执行结果</td>
+                    <td>JSON-RPC 请求/响应</td>
+                </tr>
+                <tr>
+                    <td>ListResources</td>
+                    <td><code>{"jsonrpc":"2.0","method":"resources/list"}</code></td>
+                    <td>资源列表（URI、MIME 类型、描述）</td>
+                    <td>JSON-RPC 请求/响应</td>
+                </tr>
+                <tr>
+                    <td>ReadResource</td>
+                    <td><code>{"jsonrpc":"2.0","method":"resources/read","params":{"uri":"..."}}</code></td>
+                    <td>资源内容</td>
+                    <td>JSON-RPC 请求/响应</td>
+                </tr>
+                <tr>
+                    <td>ListPrompts</td>
+                    <td><code>{"jsonrpc":"2.0","method":"prompts/list"}</code></td>
+                    <td>提示模板列表</td>
+                    <td>JSON-RPC 请求/响应</td>
+                </tr>
+                <tr>
+                    <td>GetPrompt</td>
+                    <td><code>{"jsonrpc":"2.0","method":"prompts/get","params":{"name":"...","arguments":{...}}}</code></td>
+                    <td>渲染后的提示模板</td>
+                    <td>JSON-RPC 请求/响应</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>所有这些消息都使用 JSON-RPC 2.0 协议作为通信格式。这不是巧合——JSON-RPC 足够简单（比 REST 更轻量，比 GraphQL 更直接），同时又能很好地映射到函数调用语义上。</p>
+
+        <p><strong>Initialize 阶段</strong>是整个会话的起点。客户端发送自己支持的协议版本和能力声明（比如"我支持工具注释"或"我支持提示模板"），服务端回复它支持的版本和能力。两边取交集确定最终的交互能力。这也是为什么 MCP 能够向前兼容——新的协议版本只是在能力声明中增加新字段，旧客户端不会请求它们不理解的能力。</p>
+
+        <p><strong>ListTools</strong> 是 Agent 最常用的操作。这一步让 Agent 发现所有可用工具——每个工具有名称、描述和 JSON Schema 格式的参数定义。Agent 根据这些信息决定调用哪个工具。需要注意的是，ListTools 是一个动态查询——同一个 MCP 服务器在不同上下文中可能返回不同的工具列表（比如在只读模式下只返回读取工具）。</p>
+
+        <p><strong>CallTool</strong> 是实际执行工具的地方。客户端传入工具名和参数，服务端执行并返回结果。结果可以是文本、JSON、图片（base64 编码）或者资源链接。客户端（也就是 Agent）会把结果作为新的观察内容追加到上下文中。</p>
+
+        <p><strong>ListResources 和 ReadResource</strong> 提供了"数据源"式的访问模式——不同于工具的"执行-返回"模式，Resources 更接近于文件系统中的文件：它们有 URI、有内容、有 MIME 类型。Agent 可以通过 ListResources 发现可用数据，然后通过 ReadResource 读取具体数据。</p>
+
+        <p><strong>ListPrompts 和 GetPrompt</strong> 是一个容易被忽视但非常有用的功能。MCP 服务器可以定义可复用的提示模板——比如一个 GitHub MCP 服务器可以提供"创建 PR"的提示模板，里面包含 PR 描述的结构化模板和参数占位符。</p>
+
+        <h3>三种传输层对比</h3>
+
+        <p>MCP 支持三种传输层，它们各有优劣，适用于不同的场景。</p>
+
+        <p><strong>STDIO 传输</strong>是最原始也是性能最好的方式。客户端通过子进程启动 MCP 服务器，然后通过标准输入/输出进行 JSON-RPC 通信。这种方法延迟最低（进程间通信没有网络开销），配置最简单（不需要端口分配、不需要处理 CORS 等），适合本地工具集成。</p>
+
+        <p>使用 STDIO 时，客户端负责管理 MCP 服务器的生命周期：启动进程、发送请求到 stdin、从 stdout 读取响应、在不需要时终止进程。stderr 用于记录日志和调试信息。</p>
+
+        <pre><code># STDIO 传输的工作流程
+# 客户端                         MCP 服务器（子进程）
+#   |                                  |
+#   |--- stdin: {"method":"initialize"} --> |
+#   |<-- stdout: {"result":{...}} ------ |
+#   |--- stdin: {"method":"tools/list"} --> |
+#   |<-- stdout: {"result":[{...}]} ---- |
+#   |--- stdin: {"method":"tools/call", --> |
+#   |    "params":{"name":"read_file",   |
+#   |              "arguments":{"path":"x.py"}}}
+#   |<-- stdout: {"result":{...}} ------ |
+#   |                                  |
+#   |--- stdin: {"method":"shutdown"} -->  |
+#   |--- 关闭 stdin                  --> |  进程退出</code></pre>
+
+        <p><strong>Streamable HTTP</strong> 是2005-03-26 版本中推荐的新传输方式。与旧版 HTTP/SSE 不同，Streamable HTTP 使用单一的 <code>/mcp</code> 端点来处理所有请求。它的主要优势是：不需要服务器端的事件流连接（SSE），与标准的 HTTP 基础设施兼容（负载均衡、反向代理、认证中间件等），并且支持跨机器通信。</p>
+
+        <p>Streamable HTTP 的工作方式很简单：客户端发送 POST 请求到 <code>/mcp</code> 端点，请求体是 JSON-RPC 消息。服务端返回 JSON-RPC 响应。对于需要流式返回的操作（比如长时间运行的工具调用），服务端可以在响应中使用 Transfer-Encoding: chunked。</p>
+
+        <p><strong>HTTP/SSE</strong>（Server-Sent Events）是 MCP 原始规范中定义的传输方式，但自 2025-03-26 规范更新后已被标记为<strong>弃用</strong>。它使用两个连接：一个 SSE 连接从服务端到客户端（推送事件），一个 HTTP POST 连接从客户端到服务端（发送消息）。这种双连接设计在代理和负载均衡环境下产生了复杂的运维问题，因此被 Streamable HTTP 取代。</p>
+
+        <p>如何选择传输层？一个实用的决策框架：</p>
+        <ul>
+            <li>如果工具和被集成的服务<strong>运行在同一台机器上</strong>，使用 STDIO——它最简单、最快、最安全。</li>
+            <li>如果工具是<strong>远程服务</strong>（比如集成 GitHub、Slack 等 SaaS），使用 Streamable HTTP——它是目前推荐的标准，支持跨机器通信，兼容现有 HTTP 基础设施。</li>
+            <li>如果是<strong>遗留系统</strong>或已经实现了 SSE 的服务，可以继续使用 HTTP/SSE，但新项目不应该再选择它。</li>
+        </ul>
+
+        <h3>工具注释（Tool Annotations）</h3>
+
+        <p>MCP 1.0 引入了一个非常重要的特性：工具注释。这是协议层面支持权限系统的一个优雅设计。</p>
+
+        <p>工具注释是一组元数据字段，用于描述工具调用的<strong>副作用特征</strong>。目前定义了四种注释：</p>
+
+        <ul>
+            <li><code>readOnlyHint</code>：标记为 <code>true</code> 表示工具是只读的，不产生任何副作用。文件读取、数据查询、搜索等工具应该设置这个注释。权限系统可以利用这个注释来自动批准所有只读调用——不需要用户确认。</li>
+            <li><code>destructiveHint</code>：标记为 <code>true</code> 表示工具的执行可能删除数据或覆盖文件。删除文件、清理数据库记录、重置配置等工具应该设置这个注释。权限系统看到这个标志应该要求明确的用户确认。</li>
+            <li><code>idempotentHint</code>：标记为 <code>true</code> 表示工具是幂等的——相同输入产生相同结果，多次调用没有额外副作用。这对于重试机制非常重要。如果一个网络请求失败，Agent 可以安全地重试一个幂等的工具调用。</li>
+            <li><code>openWorldHint</code>：标记为 <code>true</code> 表示工具会访问外部网络服务。搜索、API 调用、Web 抓取等工具应该设置这个注释。在某些安全敏感的部署环境中，这个标志可以用来限制网络访问。</li>
+        </ul>
+
+        <p>这些注释的组合可以精确描述一个工具的行为特征。考虑几个例子：</p>
+        <ul>
+            <li><code>read_file</code>：<code>readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false</code> ——完全安全的只读操作，可以自动批准。</li>
+            <li><code>delete_branch</code>：<code>readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true</code> ——破坏性操作，需要确认。</li>
+            <li><code>search_web</code>：<code>readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=true</code> ——只读但涉及外部网络，需要根据网络策略判断。</li>
+        </ul>
+
+        <p>在 Claude Code 中，工具注释直接与权限系统挂钩。当 ML 分类器（我们在第15章讨论过）评估一个工具调用的安全性时，它会优先参考工具的注释。如果一个工具声明自己是 <code>readOnlyHint=true</code>，即使 Agent 的推理文本看起来有点可疑，分类器也会更多地信任这个工具。</p>
+
+        <h3>Elicitation：人机交互协议</h3>
+
+        <p>MCP 中一个相对不为人知但极其重要的特性是 <strong>Elicitation</strong>——当工具需要从用户那里获取额外信息时使用的标准协议。</p>
+
+        <p>考虑一个场景：Agent 调用了一个"创建 GitHub PR"的 MCP 工具，但该工具发现用户没有提供 PR 的标题——这个信息是必需的。在没有 Elicitation 的情况下，Agent 只能返回一个错误消息"缺少标题参数"，然后由 Agent 再问用户"请提供 PR 标题"。这就像打电话时你说"帮我定个披萨"，对方说"地址呢"，然后你再打一次说"地址是 X"——效率极低且对话历史割裂。</p>
+
+        <p>Elicitation 解决了这个问题。MCP 服务器在遇到参数缺失时，不是返回错误，而是返回一个 Elicitation 请求：</p>
+
+        <pre><code>{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+        "type": "elicit",
+        "mode": "form",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Pull Request 标题"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "PR 描述（可选）"
+                },
+                "draft": {
+                    "type": "boolean",
+                    "description": "是否创建 Draft PR"
+                }
+            },
+            "required": ["title"]
+        }
+    }
+}</code></pre>
+
+        <p>客户端（Agent）收到这个 Elicitation 响应后，会向用户呈现一个表单，收集缺失的信息，然后重新提交工具调用。整个过程在同一个会话中完成，不需要 Agent 和用户之间来回"解释"。</p>
+
+        <p>Elicitation 支持两种模式：</p>
+        <ul>
+            <li><strong>Form 模式</strong>：返回 JSON Schema，客户端渲染为结构化表单。适用于大多数参数收集场景。</li>
+            <li><strong>URL 模式</strong>：返回一个外部 URL，客户端打开该 URL（通常是浏览器）让用户完成交互。适用于 OAuth 授权、CAPTCHA 验证、多步认证等场景。</li>
+        </ul>
+
+        <p>Elicitation 的设计体现了 MCP 的一个核心思想：<strong>工具不应该假装自己什么都知道</strong>。好的工具设计明确知道自己在什么时候需要人类帮助，并通过标准化的方式请求帮助，而不是报错了事。</p>
+
+        <p>下面是一个完整的 MCP 客户端实现——使用 STDIO 传输层，展示初始化、工具发现和工具调用的完整流程：</p>
+
+        <pre><code>import json
+import subprocess
+import uuid
+from typing import Any
+
+
+class MCPClient:
+    """MCP 客户端——STDIO 传输实现"""
+
+    def __init__(self, server_command: list[str]):
+        self.server_command = server_command
+        self.process: subprocess.Popen | None = None
+        self.capabilities: dict = {}
+        self.server_version: str = ""
+
+    def connect(self):
+        """启动 MCP 服务器子进程并完成初始化握手"""
+        self.process = subprocess.Popen(
+            self.server_command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        # 发送 initialize 请求
+        init_response = self._send_request("initialize", {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {
+                "tools": {"annotations": True},
+                "resources": {},
+                "prompts": {},
+            },
+            "clientInfo": {
+                "name": "custom-agent",
+                "version": "1.0.0",
+            },
+        })
+
+        self.server_version = init_response.get("protocolVersion", "unknown")
+        self.capabilities = init_response.get("capabilities", {})
+        return self.capabilities
+
+    def list_tools(self) -> list[dict]:
+        """获取服务器可用工具列表"""
+        result = self._send_request("tools/list")
+        return result.get("tools", [])
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        """调用指定工具"""
+        return self._send_request("tools/call", {
+            "name": name,
+            "arguments": arguments,
+        })
+
+    def list_resources(self) -> list[dict]:
+        """获取可用资源列表"""
+        result = self._send_request("resources/list")
+        return result.get("resources", [])
+
+    def read_resource(self, uri: str) -> dict:
+        """读取指定资源"""
+        return self._send_request("resources/read", {"uri": uri})
+
+    def _send_request(self, method: str, params: dict = None) -> Any:
+        """发送 JSON-RPC 请求并等待响应"""
+        request_id = str(uuid.uuid4())[:8]
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+        }
+        if params:
+            request["params"] = params
+
+        # 发送请求到服务器 stdin
+        request_json = json.dumps(request) + "\n"
+        self.process.stdin.write(request_json)
+        self.process.stdin.flush()
+
+        # 从服务器 stdout 读取响应
+        response_line = self.process.stdout.readline()
+        response = json.loads(response_line)
+
+        if "error" in response:
+            raise RuntimeError(
+                f"MCP 错误 [{response['error']['code']}]: "
+                f"{response['error']['message']}"
+            )
+
+        return response.get("result", {})
+
+    def close(self):
+        """关闭 MCP 连接"""
+        if self.process:
+            try:
+                self._send_request("shutdown")
+            except Exception:
+                pass
+            self.process.stdin.close()
+            self.process.terminate()
+            self.process.wait(timeout=5)
+            self.process = None
+
+
+# 使用示例
+if __name__ == "__main__":
+    # 连接到文件系统 MCP 服务器
+    client = MCPClient(["python", "mcp_filesystem_server.py"])
+    capabilities = client.connect()
+    print(f"服务器能力: {capabilities}")
+
+    # 发现工具
+    tools = client.list_tools()
+    for tool in tools:
+        print(f"  工具: {tool['name']} — {tool.get('description', '')[:50]}")
+
+    # 调用工具
+    result = client.call_tool("read_file", {"path": "/tmp/test.txt"})
+    print(f"读取结果: {result}")
+
+    client.close()</code></pre>
+
+        <h3>MCP 生态现状（2026）</h3>
+
+        <p>截至 2026 年中，MCP 的生态系统已经相当成熟。下面是一些值得关注的生态数据和发展趋势：</p>
+
+        <ul>
+            <li><strong>官方参考实现</strong>：Anthropic 官方维护了 Python 和 TypeScript 的 SDK，分别提供客户端和服务端的参考实现。</li>
+            <li><strong>热门 MCP 服务器</strong>：GitHub（PR/Issue/代码搜索管理）、Slack（消息发送与频道管理）、Postgres（数据库查询与 Schema 分析）、Filesystem（文件读写与目录操作）、Brave Search（网络搜索）、Puppeteer（浏览器自动化）、Figma（设计文件读取）、Notion（文档管理）、Jira（项目管理）——这些是目前社区最常用的 MCP 服务器。</li>
+            <li><strong>注册与发现</strong>：社区建立了多个 MCP 服务器目录和注册表，开发者可以发布自己的 MCP 服务器供他人使用。Anthropic 官方也提供了一个经过安全审核的 MCP 服务器市场。</li>
+            <li><strong>框架集成</strong>：LangChain、Vercel AI SDK、Playwright 等主流 AI 开发框架都已经内置了对 MCP 的支持，开发者可以像使用本地工具一样使用 MCP 服务器提供的工具。</li>
+            <li><strong>编辑器支持</strong>：VS Code 通过 GitHub Copilot 内置了 MCP 客户端，JetBrains 的 AI Assistant 也全面支持 MCP 协议。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>MCP 可能是 Anthropic 对 AI 行业最大的贡献——不是模型本身，而是一个让所有模型和工具互操作的开放标准。</strong> 想想 USB 的历史：在 USB 出现之前，每个外设都需要自己的接口和驱动程序；USB 标准化后，一个接口可以连接数千种设备。MCP 正在为 AI 工具做同样的事。值得关注的下一个趋势是"MCP-native"工具——那些从一开始就原生支持 MCP 协议的应用和服务，而不是通过额外的适配器桥接。当新一代的 SaaS 产品都自带 MCP 端点时，Agent 的能力边界将不再受限于集成工作，而是只受限于模型的推理能力。
+        </div>
+
+        <p>协议搞清楚了，下一章我们动手给 Agent 加上 MCP 集成，让它能连接 GitHub、文件系统等外部服务。我们将基于本章讨论的 STDIO 传输层实现，搭建一个真正的 MCP 工具注册中心，让我们的 Agent 能够动态发现和调用外部工具。准备好了吗？</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

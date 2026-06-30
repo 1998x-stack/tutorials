@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 47 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 48 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
@@ -40,7 +40,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `olympiad-number-theory-tutorial/` | 数论(高中奥数竞赛) | 22 | `https://1998x-stack.github.io/olympiad-number-theory-tutorial/` |
 | `combinatorial-olympiad-tutorial/` | 高中奥数组合理论 | 28 | `https://1998x-stack.github.io/combinatorial-olympiad-tutorial/` |
 
-### 系统 / 基础设施 (13)
+### 系统 / 基础设施 (15)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `vllm-tutorial/` | vLLM推理引擎 | 28 | `https://1998x-stack.github.io/vllm-tutorial/` |
@@ -57,6 +57,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `integrated-circuit-design-tutorial/` | 集成电路设计 | 28 | `https://1998x-stack.github.io/integrated-circuit-design-tutorial/` |
 | `fpga-verilog-tutorial/` | FPGA/Verilog 嵌入式开发 | 28 | `https://1998x-stack.github.io/fpga-verilog-tutorial/` |
 | `sqlite-source-analysis-tutorial/` | SQLite源码分析 | 28 | `https://1998x-stack.github.io/sqlite-source-analysis-tutorial/` |
+| `redis-source-analysis-tutorial/` | Redis源码分析 | 28 | `https://1998x-stack.github.io/redis-source-analysis-tutorial/` |
 
 ### 网络 / 通信 (5)
 | Directory | Topic | Chapters | URL |

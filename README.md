@@ -1,6 +1,6 @@
 # 1998x-stack Tutorials
 
-A collection of 47 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 48 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
@@ -38,7 +38,7 @@ A collection of 47 free, comprehensive technical tutorials in Chinese — from f
 | 🔢 | 数论(高中奥数竞赛) | 22 | [olympiad-number-theory-tutorial](https://1998x-stack.github.io/olympiad-number-theory-tutorial/) |
 | 🧮 | 高中奥数组合理论 · 从入门到精通 | 28 | [combinatorial-olympiad-tutorial](https://1998x-stack.github.io/combinatorial-olympiad-tutorial/) |
 
-### 系统 / 基础设施 (14 courses)
+### 系统 / 基础设施 (15 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -56,6 +56,7 @@ A collection of 47 free, comprehensive technical tutorials in Chinese — from f
 | 🔧 | 集成电路设计 · 从入门到精通 | 28 | [integrated-circuit-design-tutorial](https://1998x-stack.github.io/integrated-circuit-design-tutorial/) |
 | 🔧 | FPGA/Verilog 嵌入式开发 · 从入门到精通 | 28 | [fpga-verilog-tutorial](https://1998x-stack.github.io/fpga-verilog-tutorial/) |
 | 🗄️ | SQLite源码分析 · 从入门到精通 | 28 | [sqlite-source-analysis-tutorial](https://1998x-stack.github.io/sqlite-source-analysis-tutorial/) |
+| 🔧 | Redis源码分析 · 从入门到精通 | 28 | [redis-source-analysis-tutorial](https://1998x-stack.github.io/redis-source-analysis-tutorial/) |
 
 ### 网络 / 通信 (5 courses)
 

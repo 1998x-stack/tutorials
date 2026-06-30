@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 43 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 44 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
@@ -25,7 +25,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `tts-model-history-tutorial/` | TTS模型发展史 | 28 | `https://1998x-stack.github.io/tts-model-history-tutorial/` |
 | `llm-training-deployment-tutorial/` | 大模型训练与部署 | 28 | `https://1998x-stack.github.io/llm-training-deployment-tutorial/` |
 
-### 数学基础 (6)
+### 数学基础 (7)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `numerical-analysis-tutorial/` | 数值分析 | 28 | `https://1998x-stack.github.io/numerical-analysis-tutorial/` |
@@ -34,6 +34,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `electromagnetism-tutorial/` | 电磁学 | 28 | `https://1998x-stack.github.io/electromagnetism-tutorial/` |
 | `operations-research-scheduling-tutorial/` | 运筹学与调度理论 | 28 | `https://1998x-stack.github.io/operations-research-scheduling-tutorial/` |
 | `random-signal-analysis-tutorial/` | 随机信号分析 | 28 | `https://1998x-stack.github.io/random-signal-analysis-tutorial/` |
+| `digital-signal-processing-tutorial/` | 数字信号处理DSP | 28 | `https://1998x-stack.github.io/digital-signal-processing-tutorial/` |
 
 ### 系统 / 基础设施 (13)
 | Directory | Topic | Chapters | URL |
@@ -61,7 +62,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `antenna-propagation-tutorial/` | 电波传播与天线 | 28 | `https://1998x-stack.github.io/antenna-propagation-tutorial/` |
 | `sensor-network-tutorial/` | 传感网技术 | 28 | `https://1998x-stack.github.io/sensor-network-tutorial/` |
 
-### 经济 / 金融 (6)
+### 经济 / 金融 (7)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `economics-principles-tutorial/` | 经济学原理 | 28 | `https://1998x-stack.github.io/economics-principles-tutorial/` |
@@ -70,6 +71,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `financial-analysis-tutorial/` | 金融分析 | 28 | `https://1998x-stack.github.io/financial-analysis-tutorial/` |
 | `financial-statement-analysis-tutorial/` | 财报实战分析 | 28 | `https://1998x-stack.github.io/financial-statement-analysis-tutorial/` |
 | `cryptocurrency-tutorial/` | 加密货币 | 28 | `https://1998x-stack.github.io/cryptocurrency-tutorial/` |
+| `shenlun-tutorial/` | 申论体系 | 28 | `https://1998x-stack.github.io/shenlun-tutorial/` |
 
 ### 机器人 / 控制 (1)
 | Directory | Topic | Chapters | URL |

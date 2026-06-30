@@ -1,6 +1,6 @@
 # 1998x-stack Tutorials
 
-A collection of 42 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 44 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
@@ -22,7 +22,7 @@ A collection of 42 free, comprehensive technical tutorials in Chinese — from f
 | 🎙️ | TTS模型发展史 | 28 | [tts-model-history-tutorial](https://1998x-stack.github.io/tts-model-history-tutorial/) |
 | 🤖 | 大模型训练与部署深度分析 | 28 | [llm-training-deployment-tutorial](https://1998x-stack.github.io/llm-training-deployment-tutorial/) |
 
-### 数学基础 (6 courses)
+### 数学基础 (7 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -32,6 +32,7 @@ A collection of 42 free, comprehensive technical tutorials in Chinese — from f
 | ⚡ | 电磁学 · 从入门到精通 | 28 | [electromagnetism-tutorial](https://1998x-stack.github.io/electromagnetism-tutorial/) |
 | 📐 | 运筹学与调度理论 · 从入门到精通 | 28 | [operations-research-scheduling-tutorial](https://1998x-stack.github.io/operations-research-scheduling-tutorial/) |
 | 📊 | 随机信号分析 · 从入门到精通 | 28 | [random-signal-analysis-tutorial](https://1998x-stack.github.io/random-signal-analysis-tutorial/) |
+| 🎛️ | 数字信号处理DSP · 从入门到精通 | 28 | [digital-signal-processing-tutorial](https://1998x-stack.github.io/digital-signal-processing-tutorial/) |
 
 ### 系统 / 基础设施 (13 courses)
 
@@ -61,7 +62,7 @@ A collection of 42 free, comprehensive technical tutorials in Chinese — from f
 | 📡 | 电波传播与天线 · 从入门到精通 | 28 | [antenna-propagation-tutorial](https://1998x-stack.github.io/antenna-propagation-tutorial/) |
 | 📡 | 传感网技术 · 从入门到精通 | 28 | [sensor-network-tutorial](https://1998x-stack.github.io/sensor-network-tutorial/) |
 
-### 经济 / 金融 (6 courses)
+### 经济 / 金融 (7 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -71,6 +72,7 @@ A collection of 42 free, comprehensive technical tutorials in Chinese — from f
 | 💹 | 金融分析实战体系 | 28 | [financial-analysis-tutorial](https://1998x-stack.github.io/financial-analysis-tutorial/) |
 | 📊 | 财报实战分析 | 28 | [financial-statement-analysis-tutorial](https://1998x-stack.github.io/financial-statement-analysis-tutorial/) |
 | 🪙 | 比特币与加密货币 | 28 | [cryptocurrency-tutorial](https://1998x-stack.github.io/cryptocurrency-tutorial/) |
+| 📝 | 申论体系 · 从入门到精通 | 28 | [shenlun-tutorial](https://1998x-stack.github.io/shenlun-tutorial/) |
 
 ### 机器人 / 控制 (1 course)
 

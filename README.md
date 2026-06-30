@@ -24,7 +24,7 @@ A collection of 47 free, comprehensive technical tutorials in Chinese — from f
 | 🤖 | 大模型训练与部署深度分析 | 28 | [llm-training-deployment-tutorial](https://1998x-stack.github.io/llm-training-deployment-tutorial/) |
 | 📊 | 抽样技术 · 从入门到精通 | 28 | [sampling-tutorial](https://1998x-stack.github.io/sampling-tutorial/) |
 
-### 数学基础 (8 courses)
+### 数学基础 (9 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -36,6 +36,7 @@ A collection of 47 free, comprehensive technical tutorials in Chinese — from f
 | 📊 | 随机信号分析 · 从入门到精通 | 28 | [random-signal-analysis-tutorial](https://1998x-stack.github.io/random-signal-analysis-tutorial/) |
 | 🎛️ | 数字信号处理DSP · 从入门到精通 | 28 | [digital-signal-processing-tutorial](https://1998x-stack.github.io/digital-signal-processing-tutorial/) |
 | 🔢 | 数论(高中奥数竞赛) | 22 | [olympiad-number-theory-tutorial](https://1998x-stack.github.io/olympiad-number-theory-tutorial/) |
+| 🧮 | 高中奥数组合理论 · 从入门到精通 | 28 | [combinatorial-olympiad-tutorial](https://1998x-stack.github.io/combinatorial-olympiad-tutorial/) |
 
 ### 系统 / 基础设施 (13 courses)
 

@@ -27,7 +27,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `llm-training-deployment-tutorial/` | 大模型训练与部署 | 28 | `https://1998x-stack.github.io/llm-training-deployment-tutorial/` |
 | `sampling-tutorial/` | 抽样技术 | 28 | `https://1998x-stack.github.io/sampling-tutorial/` |
 
-### 数学基础 (8)
+### 数学基础 (9)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `numerical-analysis-tutorial/` | 数值分析 | 28 | `https://1998x-stack.github.io/numerical-analysis-tutorial/` |
@@ -38,6 +38,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `random-signal-analysis-tutorial/` | 随机信号分析 | 28 | `https://1998x-stack.github.io/random-signal-analysis-tutorial/` |
 | `digital-signal-processing-tutorial/` | 数字信号处理DSP | 28 | `https://1998x-stack.github.io/digital-signal-processing-tutorial/` |
 | `olympiad-number-theory-tutorial/` | 数论(高中奥数竞赛) | 22 | `https://1998x-stack.github.io/olympiad-number-theory-tutorial/` |
+| `combinatorial-olympiad-tutorial/` | 高中奥数组合理论 | 28 | `https://1998x-stack.github.io/combinatorial-olympiad-tutorial/` |
 
 ### 系统 / 基础设施 (13)
 | Directory | Topic | Chapters | URL |

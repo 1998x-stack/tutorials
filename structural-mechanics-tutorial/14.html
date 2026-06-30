@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 矩阵位移法（二）</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🏗️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 绪论</a></li>
+            <li><a href="02.html">第2章 几何组成分析</a></li>
+            <li><a href="03.html">第3章 静定梁与刚架</a></li>
+            <li><a href="04.html">第4章 静定桁架</a></li>
+            <li><a href="05.html">第5章 三铰拱与悬索</a></li>
+            <li><a href="06.html">第6章 静定组合结构</a></li>
+            <li><a href="07.html">第7章 虚功原理与结构位移计算</a></li>
+            <li><a href="08.html">第8章 力法（一）</a></li>
+            <li><a href="09.html">第9章 力法（二）</a></li>
+            <li><a href="10.html">第10章 位移法（一）</a></li>
+            <li><a href="11.html">第11章 位移法（二）</a></li>
+            <li><a href="12.html">第12章 力矩分配法</a></li>
+            <li><a href="13.html">第13章 矩阵位移法（一）</a></li>
+            <li><a href="14.html" class="active">第14章 矩阵位移法（二）</a></li>
+            <li><a href="15.html">第15章 影响线</a></li>
+            <li><a href="16.html">第16章 结构稳定性分析</a></li>
+            <li><a href="17.html">第17章 极限荷载与塑性分析</a></li>
+            <li><a href="18.html">第18章 工程结构案例</a></li>
+            <li><a href="19.html">第19章 结构动力学概论</a></li>
+            <li><a href="20.html">第20章 单自由度体系强迫振动</a></li>
+            <li><a href="21.html">第21章 多自由度体系振动</a></li>
+            <li><a href="22.html">第22章 能量原理与近似方法</a></li>
+            <li><a href="23.html">第23章 结构力学求解器</a></li>
+            <li><a href="24.html">第24章 SAP2000/ANSYS入门</a></li>
+            <li><a href="25.html">第25章 MATLAB结构编程</a></li>
+            <li><a href="26.html">第26章 AI赋能结构分析</a></li>
+            <li><a href="27.html">第27章 大跨与高层结构</a></li>
+            <li><a href="28.html">第28章 综合项目实战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>引言：矩阵位移法的"最后一公里"</h2>
+
+        <p>同学们好，上一章我们走完了矩阵位移法的大部分旅程——单元刚度矩阵、坐标变换、总刚集成。但大家应该已经意识到一个问题：如果直接求解 \([K]\{U\} = \{P\}\)，得到的结果肯定不对——因为整体刚度矩阵 \([K]\) 是奇异的（singular）。</p>
+
+        <p>为什么？设想一根悬空的梁——没有任何支座约束，你在上面加任何荷载，它都会产生刚体运动（平移+转动），位移趋于无穷大。在数学上，这意味着 \([K]\) 的行列式为零，无法求逆。在物理上，这意味着结构存在<strong>刚体位移（Rigid Body Motion）</strong>。要得到确定的解，我们必须告诉计算机：哪些自由度是被约束的——这就是<strong>边界条件（Boundary Conditions）</strong>。</p>
+
+        <p>2019年，我参与审查一个体育馆的钢结构屋盖设计。设计院提交的计算报告中，所有应力比都"完美"通过。但我在查看模型时发现了一个异常——屋盖在自重下的最大位移只有2mm，对于一个跨度60m的钢网架来说，这明显偏小。我仔细检查了模型的边界条件，发现设计人员把屋架所有支座都设成了"固定端"——6个自由度全部约束。但实际上，网架支座是铰接的——只能约束平动，不能约束转动。错误地把转动约束住，相当于给结构增加了额外的刚度，梁端本应释放的弯矩变成了固端弯矩，内力分布完全走样了。</p>
+
+        <p>这个案例再次提醒我们：<strong>在矩阵位移法中，边界条件不是"最后一步的技术细节"——它直接影响计算结果的正误。</strong>一个错误的边界条件会导致结果表面上看"合理"，实际完全错误。这种错误特别危险，因为它不像"位移显示为NaN"那么明显——它会骗过审图人员。</p>
+
+        <p>本章我们来完成矩阵位移法的最后拼图：边界条件处理、等效结点荷载、以及完整的编程实现思路。</p>
+
+        <h2>14.1 边界条件的引入方法</h2>
+
+        <p>边界条件处理是矩阵位移法中至关重要的环节。常用的方法有两种：<strong>置零法</strong>和<strong>置大数法</strong>。</p>
+
+        <h3>方法一：置零法（Zeroing Method）</h3>
+
+        <p>置零法也叫"划行划列法"。对于已知位移为零的自由度方向，在整体刚度矩阵和荷载向量中进行如下修改：</p>
+
+        <ul>
+            <li>将该自由度对应的行和列中，除对角线元素外的所有元素置零；</li>
+            <li>将对角线元素置为1；</li>
+            <li>将荷载向量中对应的分量置为零。</li>
+        </ul>
+
+        <p>这个操作的数学效果是：强制该自由度的位移为零。修改后的整体刚度矩阵变为非奇异，可以正常求解。</p>
+
+        <pre><code>置零法示例：一个3自由度系统的边界条件修改
+
+  原系统：
+  [K] = [k₁₁  k₁₂  k₁₃]    {U} = {u₁}    {P} = {P₁}
+        [k₂₁  k₂₂  k₂₃]          {u₂}          {P₂}
+        [k₃₁  k₃₂  k₃₃]          {u₃}          {P₃}
+
+  假设 u₁ = 0（第1个自由度被约束）
+
+  修改后的系统：
+  [K'] = [1    0    0   ]    {U} = {u₁}    {P'} = {0 }
+         [0    k₂₂  k₂₃ ]          {u₂}          {P₂}
+         [0    k₃₂  k₃₃ ]          {u₃}          {P₃}
+
+  修改后：u₁ = 0 是确定值，
+  第2、3个自由度的方程不受影响。</code></pre>
+
+        <div class="tip">
+            <strong>置零法的优点与缺点：</strong>优点是概念清晰，容易实现，对求解精度没有影响。缺点是需要修改整体刚度矩阵的结构——如果程序实现过程中没有注意，可能会破坏矩阵的稀疏性，影响求解效率。此外，置零法不适合处理<strong>非零位移</strong>（如支座沉降）的情况——对于非零位移，需要用另一套方法（将已知位移作为约束方程处理）。
+        </div>
+
+        <h3>方法二：置大数法（Large Number Method）</h3>
+
+        <p>置大数法的思路更暴力，但实现起来更简单：直接把约束自由度对应的对角线元素替换为一个极大的数（如 \(10^{15}\) 量级），并将荷载向量的对应分量替换为这个极大数乘以已知位移值。</p>
+
+        <p style="text-align:center; font-size:1.2rem;"><strong>\(K_{ii} \rightarrow K_{ii} \times 10^{15}\)</strong></p>
+        <p style="text-align:center; font-size:1.2rem;"><strong>\(P_i \rightarrow K_{ii} \times 10^{15} \times u_i^{known}\)</strong></p>
+
+        <p>这样，求解方程时，该自由度方向的位移会被"强制"接近已知值。因为对角线元素极大，方程中的其他项相比之下微不足道，所以该自由度的位移基本上就等于 \(P_i / K_{ii}\)——也就是 \(u_i^{known}\)。</p>
+
+        <pre><code>置大数法示例：
+
+  已知 u₁ = 0.01m（支座沉降1cm）
+
+  原系统：
+  [K] = [1e8  1e6  1e5]    {U} = {u₁}    {P} = {100kN}
+        [1e6  2e8  1e6]          {u₂}          {200kN}
+        [1e5  1e6  3e8]          {u₃}          {150kN}
+
+  修改（取大数 = 1e15）：
+  K₁₁ → 1e8 × 1e15 = 1e23
+  P₁ → 1e23 × 0.01 = 1e21
+
+  求解后，u₁ ≈ 1e21 / 1e23 = 0.01 ✓
+
+  优点：不需要修改矩阵结构
+  缺点：数值稳定性略差（极端大数可能导致数值问题）</code></pre>
+
+        <div class="highlight">
+            <strong>置零法 vs 置大数法：</strong>在实际的有限元软件中，置大数法更常见——因为它不需要重新排列矩阵（矩阵的结构保持不变，对稀疏矩阵求解器更友好）。但使用置大数法时需要注意：所取的"大数"不能太大也不能太小。太小了不足以"压制"其他项的影响，太大了会引起数值溢出（尤其是在单精度运算中）。经验值是一个比典型刚度系数大 \(10^{10}\) 到 \(10^{15}\) 倍的数字。在双精度浮点数中，这个范围是安全的。
+        </div>
+
+        <h2>14.2 非结点荷载与等效结点荷载</h2>
+
+        <p>矩阵位移法的荷载向量 \(\{P\}\) 中的每一个分量对应一个<strong>结点自由度</strong>方向上的荷载。但实际工程中的荷载很少正好作用在结点上——梁上有均布荷载、跨中有集中力、风荷载分布在墙面上。这些<strong>非结点荷载（Non-nodal Loads）</strong>需要被转化为<strong>等效结点荷载（Equivalent Nodal Loads）</strong>。</p>
+
+        <h3>等效结点荷载的概念</h3>
+
+        <p>等效结点荷载的基本思想是：把跨间荷载在结点上产生的效应"等效"为结点力。这个"等效"的含义是：等效结点荷载在原结构上产生的结点位移，和原荷载在结构上产生的结点位移相同。</p>
+
+        <p>计算等效结点荷载的标准方法是：</p>
+
+        <ol>
+            <li>把单元的所有结点固定（约束所有结点位移），计算跨间荷载在固定端产生的反力——这就是<strong>固端反力（Fixed-End Reactions）</strong>；</li>
+            <li>取这些固端反力的相反数——因为"等效结点荷载"的定义就是需要施加在结点上才能抵消固端反力的力；</li>
+            <li>将各单元的等效结点荷载按"对号入座"原则叠加到整体荷载向量中。</li>
+        </ol>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>跨间荷载类型</th>
+                    <th>图示简写</th>
+                    <th>等效结点力（左端F₁、M₁、右端F₂、M₂）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>均布荷载 q</td>
+                    <td>两端固定梁受均布q</td>
+                    <td>F₁ = qL/2, M₁ = qL²/12, F₂ = qL/2, M₂ = -qL²/12</td>
+                </tr>
+                <tr>
+                    <td>跨中集中力 P</td>
+                    <td>两端固定梁跨中P</td>
+                    <td>F₁ = P/2, M₁ = PL/8, F₂ = P/2, M₂ = -PL/8</td>
+                </tr>
+                <tr>
+                    <td>任意位置集中力P（距左端a）</td>
+                    <td>两端固定梁</td>
+                    <td>F₁ = Pb²(L+2a)/L³, M₁ = Pab²/L², F₂ = Pa²(L+2b)/L³, M₂ = -Pa²b/L²</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>最终的等效结点荷载向量为：</p>
+
+        <p style="text-align:center; font-size:1.2rem;"><strong>\(\{P\}_{eq} = -\{F\}_{fixed}\)</strong></p>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>我的一位同事在做大跨度钢桁架分析时，把风荷载按结点集中力的形式直接加在了上弦结点上——他以为"反正最终会传到结点上去的"。但这样处理相当于忽略了风荷载在杆件跨间产生的弯矩效应。他的桁架上弦杆设计偏小——因为风荷载引起的局部弯曲被完全忽略了。幸运的是，审图时发现并纠正了这个问题，但修改设计耽误了3周工期。这个故事告诉我们的道理是：<strong>除非你能确认跨间荷载对结构内力的影响可以忽略（比如桁架设计时通常假设荷载通过檩条传到结点上），否则必须使用等效结点荷载来正确考虑跨间荷载效应。</strong>
+        </div>
+
+        <h2>14.3 矩阵位移法完整计算步骤</h2>
+
+        <p>现在我们将所有步骤串联起来，形成一个完整的计算流程：</p>
+
+        <ol>
+            <li><strong>前处理</strong>——定义结点坐标、单元连接关系、材料截面属性、荷载数据；</li>
+            <li><strong>自由度编号</strong>——为每个结点分配自由度编号（每个结点2-3个自由度），明确约束自由度；</li>
+            <li><strong>初始化总刚</strong>——将整体刚度矩阵 \([K]\) 初始化为 NDOF × NDOF 的零矩阵；</li>
+            <li><strong>组装总刚</strong>——对每个单元，计算局部刚度矩阵 → 坐标变换 → 对号入座集成到 \([K]\)；</li>
+            <li><strong>组装荷载向量</strong>——将结点荷载直接放入 \(\{P\}\)，将非结点荷载通过等效结点荷载的方式累加到 \(\{P\}\)；</li>
+            <li><strong>引入边界条件</strong>——用置零法或置大数法处理约束自由度；</li>
+            <li><strong>求解</strong>——解线性方程组 \([K]\{U\} = \{P\}\)，得到所有结点位移；</li>
+            <li><strong>后处理</strong>——由结点位移回代到每个单元，计算单元杆端力（内力），画内力图。</li>
+        </ol>
+
+        <div class="tip">
+            <strong>一个实用建议：</strong>在编程实现时，强烈建议"分模块开发"——把每个步骤写成一个独立的函数。这样，你可以逐个单元测试，逐步验证。我的经验是：先测试一个单杆悬臂梁（精确解已知），再测试一个两杆刚架，最后测试复杂结构。逐级验证可以让你快速定位错误，而不是在最后才发现结果全错但不知道错在哪一步。
+        </div>
+
+        <h2>14.4 编程实现的伪代码思路</h2>
+
+        <p>下面是一份简化的矩阵位移法实现伪代码，你可以用来作为编写实际程序的基础：</p>
+
+        <pre><code>主程序：MatrixDisplacementMethod
+
+输入：
+  nodes: 结点坐标列表 [[x1,y1], [x2,y2], ...]
+  elems: 单元连接关系 [[i,j,E,A,I], ...]
+  supports: 边界条件 [[node, DOF, value], ...]
+  loads_nodal: 结点荷载 [[node, DOF, value], ...]
+  loads_span: 跨间荷载 [[elem, type, params], ...]
+
+输出：
+  displacements: 所有结点位移
+  forces: 所有单元杆端力
+
+----------------------------------------
+
+// 1. 自由度编号
+NDOF = len(nodes) * 3  // 每个结点3个自由度
+for each node:
+  dof[node] = [3*node, 3*node+1, 3*node+2]
+
+// 2. 初始化
+K = zeros(NDOF, NDOF)
+P = zeros(NDOF, 1)
+
+// 3. 组装单元刚度矩阵
+for each elem in elems:
+  // 计算长度和方向角
+  dx = nodes[elem.j][0] - nodes[elem.i][0]
+  dy = nodes[elem.j][1] - nodes[elem.i][1]
+  L = sqrt(dx² + dy²)
+  cosα = dx/L
+  sinα = dy/L
+
+  // 局部坐标系下的单元刚度矩阵
+  k_local = beamStiffness(elem.E, elem.A, elem.I, L)
+
+  // 坐标变换矩阵
+  T = transformationMatrix(cosα, sinα)
+
+  // 整体坐标系下的单元刚度矩阵
+  k_global = T^T × k_local × T
+
+  // 对号入座集成到总刚
+  dof_map = [dof[elem.i], dof[elem.j]]
+  assemble(K, k_global, dof_map)
+
+// 4. 组装荷载向量
+// 结点荷载
+for each load in loads_nodal:
+  idx = dof[load.node][load.DOF]
+  P[idx] += load.value
+
+// 跨间荷载 → 等效结点荷载
+for each load in loads_span:
+  f_eq = equivalentNodalForce(load)
+  dof_map = [dof[elems[load.elem].i], dof[elems[load.elem].j]]
+  assemble(P, f_eq, dof_map)
+
+// 5. 引入边界条件
+for each support in supports:
+  idx = dof[support.node][support.DOF]
+  // 置大数法
+  K[idx][idx] *= 1e15
+  P[idx] = K[idx][idx] * support.value  // 已知位移（一般为0）
+
+// 6. 求解线性方程组
+displacements = solveLinearSystem(K, P)
+
+// 7. 计算单元内力
+forces = []
+for each elem in elems:
+  dof_map = [dof[elem.i], dof[elem.j]]
+  u_elem = displacements[dof_map]
+  k_local = beamStiffness(elem.E, elem.A, elem.I, L)
+  T = transformationMatrix(cosα, sinα)
+  // 先转换到局部坐标
+  u_local = T × u_elem
+  // 计算杆端力
+  f_local = k_local × u_local
+  // 加上固端反力（如果有跨间荷载）
+  f_local += fixedEndForces(loads_span[elem])
+  forces.append(f_local)
+
+return displacements, forces
+
+// 子函数：梁单元刚度矩阵
+function beamStiffness(E, A, I, L):
+  返回 6×6 局部坐标系刚度矩阵（含轴向和弯曲）
+
+// 子函数：坐标变换矩阵
+function transformationMatrix(cosα, sinα):
+  返回 6×6 变换矩阵 [T]
+
+// 子函数：等效结点荷载
+function equivalentNodalForce(load):
+  根据荷载类型和参数计算固端反力
+  返回其相反数作为等效结点荷载向量</code></pre>
+
+        <div class="highlight">
+            <strong>从伪代码到真实程序：</strong>上面的伪代码涵盖了矩阵位移法的全部核心逻辑。用Python、MATLAB或者Julia实现它都不是特别困难——大约200-300行代码就能写出一个可运行的平面刚架分析程序。在第25章中，我们将进一步讨论具体的编程实现，并给出完整的代码示例。如果你现在就想动手尝试，我建议你用Python + NumPy——矩阵运算是NumPy的强项，几行代码就能完成矩阵乘法和线性方程组的求解。
+        </div>
+
+        <h2>14.5 矩阵位移法的优势与局限</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>通用性</td>
+                    <td>统一框架处理各类结构（桁架、刚架、连续梁），只需改变单元刚度矩阵</td>
+                </tr>
+                <tr>
+                    <td>扩展性</td>
+                    <td>可扩展到三维空间结构、弹性地基、温度效应、动力分析</td>
+                </tr>
+                <tr>
+                    <td>精度</td>
+                    <td>单元级别的精确解（对等截面直杆），整体含集成误差但可控</td>
+                </tr>
+                <tr>
+                    <td>局限1</td>
+                    <td>只能处理线弹性问题（材料线性、小变形）</td>
+                </tr>
+                <tr>
+                    <td>局限2</td>
+                    <td>对变截面杆、曲杆需要更复杂的单元类型（非等截面直杆单元）</td>
+                </tr>
+                <tr>
+                    <td>局限3</td>
+                    <td>对大规模模型，求解效率取决于线性方程组的求解算法</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>14.6 从矩阵位移法到有限元法</h2>
+
+        <p>矩阵位移法是结构力学中最接近<strong>有限元法（Finite Element Method, FEM）</strong>的内容。事实上，你可以把矩阵位移法理解为有限元法的一个特例——其中每个"单元"就是一根实际的杆件。</p>
+
+        <p>当结构不是由杆件组成（比如一块板、一个实体块），不再有"杆件"的概念时，我们就需要把连续体离散为有限个小单元——这就是有限元法的范畴。矩阵位移法和有限元法的核心逻辑（单元刚度矩阵 → 坐标变换 → 总刚集成 → 边界条件 → 求解）是完全一致的。所以，<strong>如果你理解了矩阵位移法，你就已经掌握了有限元法90%的核心思想。</strong></p>
+
+        <div class="tip">
+            <strong>展望：</strong>在第23章和第24章中，我们将分别使用结构力学求解器和SAP2000/ANSYS来进行实际的结构分析。你会发现，这些软件背后的求解器——无论界面多么花哨——本质上就是在执行我们这两章学的矩阵位移法。理解底层原理，能让你在使用这些软件时更清楚地知道自己在做什么，而不是"黑盒操作"。
+        </div>
+
+        <h2>本章小结与下章预告</h2>
+
+        <p>本章完成了矩阵位移法的最后拼图：</p>
+
+        <ul>
+            <li>边界条件的引入——置零法和置大数法；</li>
+            <li>等效结点荷载——将非结点荷载转化为结点荷载的等效方法；</li>
+            <li>矩阵位移法的完整计算步骤——8步走完一次完整分析；</li>
+            <li>编程实现的伪代码——核心逻辑的算法级表达；</li>
+            <li>矩阵位移法与有限元法的联系——MDM是FEM在杆系结构中的特例。</li>
+        </ul>
+
+        <p>至此，我们完成了结构力学"经典解法"部分的学习。从第8章的力法到第14章的矩阵位移法——你学到的是一套从"手算"到"计算机化"的完整方法论。这套方法论不仅可以用于工程分析，更重要的是，它训练了你一种"结构化思维"的能力：面对一个复杂问题，如何找到核心未知量、建立方程、求解、然后从结果中提取信息。</p>
+
+        <p>下一章，我们将进入一个看起来全新的主题——<strong>第15章：影响线（Influence Lines）</strong>。这一章要回答的问题是：当活荷载在不同位置作用时，结构中的某个内力的最大值是多少？桥梁要通汽车、厂房要走吊车——荷载位置在变化，我们需要找到使内力最大的那个荷载位置。影响线就是解决这个问题的最强大工具。它和前面学的内容完全不同——但非常有趣，也非常实用。准备好了吗？我们下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 Gauss消去法与LU分解</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 数值分析概述</a></li>
+            <li><a href="02.html">第2章 误差分析与数值稳定性</a></li>
+            <li><a href="03.html">第3章 插值法基础</a></li>
+            <li><a href="04.html">第4章 Newton插值与均差</a></li>
+            <li><a href="05.html">第5章 Hermite插值与分段插值</a></li>
+            <li><a href="06.html">第6章 三次样条插值</a></li>
+            <li><a href="07.html">第7章 函数逼近基本理论</a></li>
+            <li><a href="08.html">第8章 最佳平方逼近</a></li>
+            <li><a href="09.html">第9章 最小二乘曲线拟合</a></li>
+            <li><a href="10.html">第10章 数值积分基础</a></li>
+            <li><a href="11.html">第11章 复合求积与Romberg外推</a></li>
+            <li><a href="12.html">第12章 Gauss求积公式</a></li>
+            <li><a href="13.html">第13章 数值微分</a></li>
+            <li><a href="14.html">第14章 正交多项式与数值积分</a></li>
+            <li><a href="15.html" class="active">第15章 Gauss消去法与LU分解</a></li>
+            <li><a href="16.html">第16章 Cholesky分解与追赶法</a></li>
+            <li><a href="17.html">第17章 向量/矩阵范数与条件数</a></li>
+            <li><a href="18.html">第18章 经典迭代法</a></li>
+            <li><a href="19.html">第19章 Krylov子空间与共轭梯度法</a></li>
+            <li><a href="20.html">第20章 非线性方程求根(一)</a></li>
+            <li><a href="21.html">第21章 非线性方程求根(二)</a></li>
+            <li><a href="22.html">第22章 非线性方程组Newton法</a></li>
+            <li><a href="23.html">第23章 矩阵特征值计算</a></li>
+            <li><a href="24.html">第24章 QR方法与特征值</a></li>
+            <li><a href="25.html">第25章 常微分方程数值解(一)</a></li>
+            <li><a href="26.html">第26章 常微分方程数值解(二)</a></li>
+            <li><a href="27.html">第27章 刚性方程与线性多步法</a></li>
+            <li><a href="28.html">第28章 综合实战：从算法到代码</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第十五章：Gauss消去法与LU分解</h2>
+
+        <p>大家好，我是你们的讲师。这一章我们进入数值线性代数的核心战场——求解线性方程组 <strong>Ax = b</strong>。</p>
+
+        <p>在正式开始之前，我想分享一个真实的"警示"故事。几年前，一家结构工程公司委托我们团队帮忙调试一个有限元分析（FEA）程序。他们的模型有大约 100 万个自由度（degrees of freedom, DOF），刚度矩阵 K 是一个 100 万 × 100 万的稀疏矩阵。他们在求解 Ku = f 时发现，计算耗时超过 48 小时，而且结果明显不对——某些节点的位移居然比预期大了几个数量级。</p>
+
+        <p>排查后发现，问题出在他们自己手写的一个 Gauss 消去求解器上。为了节省内存，他们跳过了选主元（pivoting）步骤，认为自己的矩阵"性质足够好"。但实际并非如此——矩阵的某些对角元非常小，导致消去过程中出现了灾难性的数值放大。一个本应在 2 小时内完成的计算，变成了 48 小时的错误结果。</p>
+
+        <div class="warning">
+            <p><strong>血的教训</strong>：在求解线性方程组时，<strong>跳过选主元</strong>就像开车不系安全带——大多数时候可能没事，但一旦出事就是大问题。即使是"看起来很好"的矩阵，也可能因为输入数据的舍入误差或离散化方式，出现微小的对角元。在工业级代码中，永远做选主元——除非你有 100% 的把握（比如该矩阵是严格对角占优的对称正定矩阵，且你知道自己在做什么）。</p>
+        </div>
+
+        <p>好了，故事讲完了。让我们从最基础的方法开始，一步步深入到 LU 分解的完整图景。</p>
+
+        <h3>15.1 顺序Gauss消去法</h3>
+
+        <p>Gauss 消去法是求解线性方程组最经典的方法。虽然它在 2026 年的今天很少被直接使用（我们有更先进的迭代法和稀疏直接法），但它是理解所有现代线性方程组求解器的基石。</p>
+
+        <p>Gauss 消去法分为两个阶段：</p>
+
+        <ul>
+            <li><strong>前向消去（Forward Elimination）</strong>：将增广矩阵 [A | b] 通过行变换转化为上三角形式 [U | b']。</li>
+            <li><strong>回代（Back Substitution）</strong>：从上三角矩阵的最后一行开始，逐行回代求出所有未知数。</li>
+        </ul>
+
+        <p>考虑一个 3×3 的例子：</p>
+
+        <pre><code>2x₁ + 4x₂ - 2x₃ = 10
+4x₁ + 9x₂ - 3x₃ = 22
+-2x₁ - 3x₂ + 7x₃ = 7</code></pre>
+
+        <p><strong>前向消去</strong>：</p>
+
+        <p>第 1 步：用第 1 行消去第 2、3 行的 x₁ 项。</p>
+        <ul>
+            <li>乘数 m₂₁ = 4/2 = 2。新第 2 行 = 原第 2 行 - 2 × 第 1 行 → (0, 1, 1, 2)</li>
+            <li>乘数 m₃₁ = -2/2 = -1。新第 3 行 = 原第 3 行 - (-1) × 第 1 行 → (0, 1, 5, 17)</li>
+        </ul>
+
+        <p>第 2 步：用新第 2 行消去第 3 行的 x₂ 项。</p>
+        <ul>
+            <li>乘数 m₃₂ = 1/1 = 1。新第 3 行 = 原第 3 行 - 1 × 第 2 行 → (0, 0, 4, 15)</li>
+        </ul>
+
+        <p>得到上三角矩阵：</p>
+
+        <pre><code>[2   4  -2 | 10]
+[0   1   1 |  2]
+[0   0   4 | 15]</code></pre>
+
+        <p><strong>回代</strong>：</p>
+        <ul>
+            <li>从最后一行：4x₃ = 15 → x₃ = 3.75</li>
+            <li>第 2 行：x₂ + 3.75 = 2 → x₂ = -1.75</li>
+            <li>第 1 行：2x₁ + 4(-1.75) - 2(3.75) = 10 → 2x₁ = 10 + 7 + 7.5 = 24.5 → x₁ = 12.25</li>
+        </ul>
+
+        <p>每一步的行操作都可以看作一次矩阵乘法：左乘一个初等矩阵 Eₖ。整个前向消去过程相当于：</p>
+
+        <p>E₃ · E₂ · E₁ · A = U</p>
+
+        <p>其中 E₁ 是消去第 1 列下方元素所用的初等矩阵，以此类推。</p>
+
+        <div class="highlight">
+            <p><strong>运算量分析</strong>：对于 n × n 的稠密矩阵，前向消去需要大约 2n³/3 次浮点运算，回代需要 n² 次。当 n = 1000 时，消去阶段约需 6.7 亿次运算——这就是为什么对大规模问题，我们必须使用迭代法或稀疏矩阵技术。</p>
+        </div>
+
+        <h3>15.2 列主元消去法</h3>
+
+        <p>顺序 Gauss 消去法有一个致命的弱点：如果对角元 a_{kk} 非常小（接近零），用它作为除数会导致乘数 m_{ik} = a_{ik}/a_{kk} 巨大，从而放大舍入误差。更极端的情况是 a_{kk} = 0，算法直接崩溃。</p>
+
+        <p>来看一个经典例子：</p>
+
+        <pre><code>0.0001x + y = 1
+x + y = 2</code></pre>
+
+        <p>精确解是 x ≈ 1.0001, y ≈ 0.9999（验证：1.0001 + 0.9999 = 2.0000，0.0001 × 1.0001 + 0.9999 ≈ 1.0000）。</p>
+
+        <p>现在在 3 位浮点精度下做顺序 Gauss 消去（无选主元）：</p>
+        <ul>
+            <li>m₂₁ = 1 / 0.0001 = 10000</li>
+            <li>新第 2 行 = (1, 1, 2) - 10000 × (0.0001, 1, 1) = (1, 1, 2) - (1, 10000, 10000) = (0, -9999, -9998)</li>
+            <li>回代：-9999y = -9998 → y ≈ 0.9999（这还算可以）</li>
+            <li>然后 x = (1 - 1 × 0.9999) / 0.0001 = 0.0001 / 0.0001 = 1（但精确 x 应该是 1.0001）</li>
+        </ul>
+
+        <p>看到了吗？y 还算准确，但 x 的误差来源于：计算 1 - y 时发生了灾难性抵消（1 - 0.9999 = 0.0001，只保留了 1 位有效数字），然后除以 0.0001 把误差放大了 10000 倍。</p>
+
+        <p><strong>部分选主元（Partial Pivoting）</strong>的做法是：在消去第 k 列之前，先扫描该列从 k 到 n 行的所有元素，找到绝对值最大的元素所在的行，然后交换到第 k 行。</p>
+
+        <p>用选主元重新计算上例：</p>
+        <ul>
+            <li>第 1 列：|0.0001| = 0.0001, |1| = 1 → 最大的是第 2 行。交换行：</li>
+            <li>行交换后：x + y = 2, 0.0001x + y = 1</li>
+            <li>m₂₁ = 0.0001 / 1 = 0.0001</li>
+            <li>新第 2 行 = (0.0001, 1, 1) - 0.0001 × (1, 1, 2) = (0, 0.9999, 0.9998)</li>
+            <li>回代：0.9999y = 0.9998 → y ≈ 0.9999</li>
+            <li>x = 2 - 0.9999 = 1.0001 ✓</li>
+        </ul>
+
+        <p>结果完全正确！</p>
+
+        <div class="tip">
+            <p><strong>PA = LU 分解</strong>：带部分选主元的 Gauss 消去法实际上就是在计算 PA = LU。其中 P 是置换矩阵（记录行交换），L 是单位下三角矩阵（记录乘数），U 是上三角矩阵。几乎所有现代线性方程组求解器都基于 PA = LU 分解。在 scipy.linalg 中，lu_factor 默认使用部分选主元。</p>
+        </div>
+
+        <h3>15.3 LU分解：Doolittle与Crout</h3>
+
+        <p>LU 分解的核心思想是：将矩阵 A 分解为一个下三角矩阵 L 和一个上三角矩阵 U 的乘积。一旦得到 LU 分解，求解 Ax = b 就变成了两步：</p>
+        <ul>
+            <li>先解 Ly = b（前向替换，forward substitution）</li>
+            <li>再解 Ux = y（回代，back substitution）</li>
+        </ul>
+
+        <p>LU 分解有不同的风格，差别在于 L 和 U 对角元的约定：</p>
+
+        <table>
+            <tr>
+                <th>分解类型</th>
+                <th>L 的对角元</th>
+                <th>U 的对角元</th>
+                <th>特点</th>
+            </tr>
+            <tr>
+                <td><strong>Doolittle</strong></td>
+                <td>全部为 1</td>
+                <td>任意值（通常非零）</td>
+                <td>最常用，Gauss消去直接导出</td>
+            </tr>
+            <tr>
+                <td><strong>Crout</strong></td>
+                <td>任意值（通常非零）</td>
+                <td>全部为 1</td>
+                <td>适合三对角等带状矩阵</td>
+            </tr>
+            <tr>
+                <td><strong>Cholesky</strong></td>
+                <td>平方根，无额外约定</td>
+                <td>L 的转置</td>
+                <td>仅用于对称正定矩阵（下章讲）</td>
+            </tr>
+        </table>
+
+        <p><strong>Doolittle 分解的具体公式</strong>（L 对角元为 1）：</p>
+
+        <p>对于 k = 1, 2, ..., n：</p>
+        <ul>
+            <li>U 的第 k 行（j = k, ..., n）：u_{kj} = a_{kj} - Σ_{r=1}^{k-1} l_{kr} u_{rj}</li>
+            <li>L 的第 k 列（i = k+1, ..., n）：l_{ik} = (a_{ik} - Σ_{r=1}^{k-1} l_{ir} u_{rk}) / u_{kk}</li>
+        </ul>
+
+        <p>关键观察：计算 U 的第 k 行和 L 的第 k 列时，用到的所有 l_{ir} 和 u_{rj} 都已经在先前的步骤中计算好了。这意味着 LU 分解可以<strong>原地完成</strong>（in-place）——将 L 和 U 存储在矩阵 A 的同一个存储空间中，L 占用 A 的严格下三角部分，U 占用上三角部分（包括对角元）。</p>
+
+        <p>对于 4×4 矩阵的原地存储示意：</p>
+
+        <pre><code>[u₁₁  u₁₂  u₁₃  u₁₄]     [a₁₁  a₁₂  a₁₃  a₁₄]
+[l₂₁  u₂₂  u₂₃  u₂₄]     [a₂₁  a₂₂  a₂₃  a₂₄]
+[l₃₁  l₃₂  u₃₃  u₃₄]  ←  [a₃₁  a₃₂  a₃₃  a₃₄]
+[l₄₁  l₄₂  l₄₃  u₄₄]     [a₄₁  a₄₂  a₄₃  a₄₄]</code></pre>
+
+        <div class="highlight">
+            <p><strong>存储技巧</strong>：由于 L 的对角元（Doolittle 中全为 1）不需要显式存储，A 的 n² 个存储位置恰好可以容纳 L（n(n-1)/2 个元素）和 U（n(n+1)/2 个元素）。这是数值线性代数中"以空间换时间"的经典案例——多存储分解结果，避免重复计算。</p>
+        </div>
+
+        <h3>15.4 LU分解的应用</h3>
+
+        <p>LU 分解的真正威力在于：<strong>一次分解，多次求解</strong>。</p>
+
+        <p><strong>应用一：多右端项问题</strong></p>
+
+        <p>在工程中经常遇到这样的情况：系数矩阵 A 不变，但右端项 b 不断变化。例如：</p>
+        <ul>
+            <li>结构分析中，对同一结构施加不同的载荷</li>
+            <li>电路仿真中，对同一网络施加不同的输入信号</li>
+            <li>参数扫描中，改变边界条件但保持系统矩阵不变</li>
+        </ul>
+
+        <p>如果对每个 b 都重新做 Gauss 消去，总成本是 m × O(2n³/3)。但如果只做一次 LU 分解，然后对每个 b 只做前向替换和回代（O(n²) 每次），总成本就降至 O(2n³/3) + m × O(n²)。当 m 很大时，节省的运算量是巨大的。</p>
+
+        <p><strong>应用二：计算矩阵的逆</strong></p>
+
+        <p>要求 A^{-1}，只需解 n 个线性方程组 A · x_j = e_j（j = 1, ..., n），其中 e_j 是第 j 个标准基向量。利用 LU 分解，一次分解加上 n 次前向替换+回代即可得到逆矩阵的所有列。</p>
+
+        <p><strong>应用三：计算行列式</strong></p>
+
+        <p>det(A) = det(L) · det(U) = (∏ l_{ii}) · (∏ u_{ii})。对于 Doolittle 分解，det(A) 就是 U 的对角元乘积。如果使用了部分选主元（PA = LU），则 det(A) = det(P) · det(U)，其中 det(P) = ±1（取决于行交换次数的奇偶性）。</p>
+
+        <p><strong>Python 代码示例</strong>：</p>
+
+        <pre><code>import numpy as np
+from scipy.linalg import lu, lu_factor, lu_solve
+
+# 创建一个 5x5 的随机矩阵
+np.random.seed(42)
+A = np.random.randn(5, 5)
+b = np.random.randn(5)
+
+# 方法 1：一次性 LU 分解
+P, L, U = lu(A)
+print("L 矩阵（对角元为 1）：")
+print(np.round(L, 4))
+print("\nU 矩阵：")
+print(np.round(U, 4))
+
+# 验证：PA = LU
+print("\nPA - LU 的最大误差：",
+      np.max(np.abs(P @ A - L @ U)))
+
+# 方法 2：使用 lu_factor（更高效，适合多次求解）
+lu, piv = lu_factor(A)  # lu 是紧凑存储，piv 是置换信息
+x = lu_solve((lu, piv), b)
+print("\nlu_solve 的解：", np.round(x, 6))
+
+# 验证：A @ x - b
+print("残差 ||Ax - b||：",
+      np.linalg.norm(A @ x - b))
+
+# 多右端项求解
+B = np.random.randn(5, 3)  # 3 个右端项
+X = lu_solve((lu, piv), B)
+print("\n多右端项残差：",
+      np.linalg.norm(A @ X - B))
+
+# 计算行列式
+# det(A) = det(P) * det(U)
+det_A = np.linalg.det(A)
+det_U = np.prod(np.diag(lu))
+det_P = np.linalg.det(P)
+print(f"\ndet(A) = {det_A:.6f}")
+print(f"det(P) * det(U) = {det_P * det_U:.6f}")
+print(f"一致吗？{np.isclose(det_A, det_P * det_U)}")</code></pre>
+
+        <p>运行这段代码，你将看到 LU 分解的残差通常在 10⁻¹⁴ 量级，验证了算法的数值稳定性。</p>
+
+        <div class="tip">
+            <p><strong>工程建议</strong>：在实际项目中，不要手写 LU 分解——除非你在做嵌入式系统或教学演示。使用成熟的高性能线性代数库（LAPACK、scipy.linalg、Eigen、cuSOLVER），它们针对缓存局部性、SIMD 指令和并行计算做了深度优化。LAPACK 中的 xGETRF 例程就是带部分选主元的 LU 分解，它被整个科学计算生态所依赖。</p>
+        </div>
+
+        <h3>15.5 计算复杂度与实践意义</h3>
+
+        <p>下表对比了不同操作的浮点运算次数：</p>
+
+        <table>
+            <tr>
+                <th>操作</th>
+                <th>稠密矩阵 ~n³</th>
+                <th>n = 1000</th>
+                <th>n = 10000</th>
+                <th>n = 10⁶（稀疏）</th>
+            </tr>
+            <tr>
+                <td>Gauss消去（无选主元）</td>
+                <td>2n³/3</td>
+                <td>~6.7 × 10⁸</td>
+                <td>~6.7 × 10¹¹</td>
+                <td>不可行</td>
+            </tr>
+            <tr>
+                <td>LU 分解（选主元）</td>
+                <td>2n³/3</td>
+                <td>~6.7 × 10⁸</td>
+                <td>~6.7 × 10¹¹</td>
+                <td>不可行</td>
+            </tr>
+            <tr>
+                <td>前向替换 + 回代</td>
+                <td>2n²</td>
+                <td>2 × 10⁶</td>
+                <td>2 × 10⁸</td>
+                <td>~O(n)</td>
+            </tr>
+            <tr>
+                <td>矩阵乘法 A·B</td>
+                <td>2n³</td>
+                <td>2 × 10⁹</td>
+                <td>2 × 10¹²</td>
+                <td>N/A</td>
+            </tr>
+        </table>
+
+        <div class="warning">
+            <p><strong>大规模计算的现实</strong>：当 n = 10000 时，稠密 LU 分解需要大约 6.7 × 10¹¹ 次浮点运算。在 2.5 GHz 的 CPU 上（假设 50% 的浮点效率），这大约需要 500 秒。而当 n = 10⁶ 时，稠密 LU 分解需要的运算次数 (~10²⁰) 即使在全世界的所有计算机上并行运行也不可能完成。这就是为什么实际工程中必须使用<strong>稀疏矩阵技术</strong>和<strong>迭代法</strong>。</p>
+        </div>
+
+        <p>回过头来看文章开头那个有限元的故事。那家结构公司的问题其实不是 LU 分解本身——他们需要的只是一个带选主元的 LU 分解，而不是自己手写的无选主元版本。换用 LAPACK 的 dgesv 之后，同样的 100 万自由度问题，求解时间从 48 小时降到了 2.5 小时（因为稀疏模式被正确利用了），结果也完全正确。</p>
+
+        <p>这个故事告诉我们：理解算法原理很重要，但<strong>用对了工具</strong>同样重要。LU 分解的知识让你能够诊断问题、选择合适的求解器、理解为什么某些方法有效（或无效）。而具体的求解器实现，交给那些花了几十年优化的专家就好。</p>
+
+        <p>下一章，我们将继续探索 LU 分解的两个重要特化版本——<strong>Cholesky 分解</strong>（针对对称正定矩阵）和<strong>追赶法</strong>（针对三对角矩阵）。它们在各自的领域内将效率提升到了极致。</p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 经典迭代法</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 数值分析概述</a></li>
+            <li><a href="02.html">第2章 误差分析与数值稳定性</a></li>
+            <li><a href="03.html">第3章 插值法基础</a></li>
+            <li><a href="04.html">第4章 Newton插值与均差</a></li>
+            <li><a href="05.html">第5章 Hermite插值与分段插值</a></li>
+            <li><a href="06.html">第6章 三次样条插值</a></li>
+            <li><a href="07.html">第7章 函数逼近基本理论</a></li>
+            <li><a href="08.html">第8章 最佳平方逼近</a></li>
+            <li><a href="09.html">第9章 最小二乘曲线拟合</a></li>
+            <li><a href="10.html">第10章 数值积分基础</a></li>
+            <li><a href="11.html">第11章 复合求积与Romberg外推</a></li>
+            <li><a href="12.html">第12章 Gauss求积公式</a></li>
+            <li><a href="13.html">第13章 数值微分</a></li>
+            <li><a href="14.html">第14章 正交多项式与数值积分</a></li>
+            <li><a href="15.html">第15章 Gauss消去法与LU分解</a></li>
+            <li><a href="16.html">第16章 Cholesky分解与追赶法</a></li>
+            <li><a href="17.html">第17章 向量/矩阵范数与条件数</a></li>
+            <li><a href="18.html" class="active">第18章 经典迭代法</a></li>
+            <li><a href="19.html">第19章 Krylov子空间与共轭梯度法</a></li>
+            <li><a href="20.html">第20章 非线性方程求根(一)</a></li>
+            <li><a href="21.html">第21章 非线性方程求根(二)</a></li>
+            <li><a href="22.html">第22章 非线性方程组Newton法</a></li>
+            <li><a href="23.html">第23章 矩阵特征值计算</a></li>
+            <li><a href="24.html">第24章 QR方法与特征值</a></li>
+            <li><a href="25.html">第25章 常微分方程数值解(一)</a></li>
+            <li><a href="26.html">第26章 常微分方程数值解(二)</a></li>
+            <li><a href="27.html">第27章 刚性方程与线性多步法</a></li>
+            <li><a href="28.html">第28章 综合实战：从算法到代码</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第十八章：经典迭代法</h2>
+
+        <p>大家好，我是你们的讲师。前面几章我们讲的方法——LU 分解、Cholesky、Thomas 算法——都属于<strong>直接法（direct methods）</strong>。它们的特点是一步到位，经过有限步运算直接给出精确解（在舍入误差范围内）。但当矩阵规模达到百万甚至亿级别时，直接法的 O(n³) 复杂度就变得不可接受了。</p>
+
+        <p>这就引出了另一个思路：<strong>迭代法（iterative methods）</strong>。不追求一次算准，而是从一个初始猜测出发，逐步逼近精确解。每步的成本很低（通常是 O(n) 或 O(n²)），只要收敛得够快，就能在远小于 O(n³) 的总成本内得到足够精确的解。</p>
+
+        <p>我当年读博期间参与过一个油藏模拟项目。地下的油层流动由 Darcy 定律描述，离散化后得到一个约 500 万 × 500 万的稀疏线性系统。如果用直接法，光是 LU 分解就需要数 TB 的内存——远超当时任何一台机器的容量。但是我们用迭代法（配合多重网格预处理），每步迭代只需要遍历非零元素（约 3000 万个），在 128 个 CPU 核心上跑了约 200 步就收敛到了工程所需的精度。总时间不到 2 小时。</p>
+
+        <div class="tip">
+            <p><strong>直接法 vs 迭代法的选择</strong>：一个实用的经验法则是——当矩阵阶数 n < 10⁴ 且为稠密矩阵时，用直接法（LU/Cholesky）。当 n > 10⁵ 且为稀疏矩阵时，用迭代法。中间区域（10⁴ ~ 10⁵）取决于矩阵的稀疏模式和条件数。Direct methods scale like O(n³) in time and O(n²) in memory; iterative methods scale like O(n·nz·iterations) in time and O(nz) in memory, where nz is the number of nonzeros.</p>
+        </div>
+
+        <p>好，让我们从最基本的框架开始。</p>
+
+        <h3>18.1 迭代法的基本框架</h3>
+
+        <p>所有线性系统迭代法的出发点都是<strong>矩阵分裂（matrix splitting）</strong>。将系数矩阵 A 写成：</p>
+
+        <p style="text-align:center;"><strong>A = M - N</strong></p>
+
+        <p>其中 M 是"容易求逆"的矩阵（如对角矩阵、三角矩阵）。那么原方程 Ax = b 等价于：</p>
+
+        <p style="text-align:center;"><strong>Mx = Nx + b</strong></p>
+
+        <p>这就引出了迭代格式：</p>
+
+        <p style="text-align:center;"><strong>Mx^{(k+1)} = Nx^{(k)} + b</strong></p>
+
+        <p>或者写成：</p>
+
+        <p style="text-align:center;"><strong>x^{(k+1)} = Gx^{(k)} + c</strong></p>
+
+        <p>其中 <strong>G = M⁻¹N</strong> 是迭代矩阵，<strong>c = M⁻¹b</strong>。</p>
+
+        <p><strong>收敛条件</strong>：迭代法收敛当且仅当迭代矩阵 G 的谱半径 ρ(G) < 1。谱半径越小，收敛越快。这是上一章提到的谱半径概念的完美应用。</p>
+
+        <div class="highlight">
+            <p><strong>收敛速度的定量分析</strong>：迭代误差 e^{(k)} = x^{(k)} - x^* 满足 e^{(k)} = Gᵏe^{(0)}。谱半径 ρ(G) 决定了误差衰减的渐近速率。具体来说，要使误差减少因子 ε（比如 ε = 10⁻⁶），所需迭代次数大约为 k ≈ ln(ε) / ln(ρ)。如果 ρ = 0.99，需要约 1300 步才能将误差衰减到 10⁻⁶；如果 ρ = 0.5，只需要约 20 步。这就是"预处理"为什么如此重要——它通过降低谱半径来指数级减少迭代次数。</p>
+        </div>
+
+        <h3>18.2 Jacobi迭代法</h3>
+
+        <p>Jacobi 迭代是最直观的迭代法。它的矩阵分裂是：</p>
+        <ul>
+            <li><strong>M = D</strong>（A 的对角线部分，即 diag(a₁₁, a₂₂, ..., aₙₙ)）</li>
+            <li><strong>N = -(L + U)</strong>（A 的严格下三角 + 严格上三角部分，取负号）</li>
+        </ul>
+
+        <p>分量形式的更新公式（每个分量独立计算）：</p>
+
+        <p style="text-align:center;"><strong>x_i^{(k+1)} = (b_i - Σ_{j≠i} a_{ij} x_j^{(k)}) / a_{ii}</strong></p>
+
+        <p>关键是第 k+1 步的 x_i 完全用第 k 步的旧值计算——所有分量可以<strong>完全并行</strong>。</p>
+
+        <p><strong>收敛定理</strong>：如果 A 是<strong>严格对角占优</strong>（strictly diagonally dominant）的，即对每一行 i：|a_{ii}| > Σ_{j≠i} |a_{ij}|，那么 Jacobi 迭代收敛。</p>
+
+        <p>严格对角占优是一个充分条件但不是必要条件——许多非对角占优的矩阵 Jacobi 也收敛。</p>
+
+        <h3>18.3 Gauss-Seidel迭代法</h3>
+
+        <p>Gauss-Seidel（GS）迭代是 Jacobi 的改进版本。它的矩阵分裂是：</p>
+        <ul>
+            <li><strong>M = D + L</strong>（对角线 + 下三角）</li>
+            <li><strong>N = -U</strong></li>
+        </ul>
+
+        <p>分量形式：</p>
+
+        <p style="text-align:center;"><strong>x_i^{(k+1)} = (b_i - Σ_{j&lt;i} a_{ij} x_j^{(k+1)} - Σ_{j&gt;i} a_{ij} x_j^{(k)}) / a_{ii}</strong></p>
+
+        <p>注意这里的关键区别：计算 x_i 时，<strong>之前的分量 x_j (j < i) 已经更新到了第 k+1 步</strong>，使用的是最新值。这带来的好处是：</p>
+        <ul>
+            <li>通常收敛速度比 Jacobi 快约 2 倍</li>
+            <li>不需要额外的存储空间保存旧值</li>
+            <li>对于 SPD 矩阵，GS 一定收敛</li>
+        </ul>
+
+        <p>代价是：GS 天然是<strong>串行</strong>的——一个分量的更新依赖于前面的分量，无法像 Jacobi 那样完全并行。</p>
+
+        <div class="warning">
+            <p><strong>踩坑经历</strong>：有一年我尝试用 Gauss-Seidel 求解一个非对称且非对角占优的对流-扩散方程离散化系统。结果迭代了 5000 步也不收敛，残差反而越来越大了。检查发现，GS 对这个矩阵谱半径大于 1。我换用了带松弛的 GS（即 SOR）并仔细调节了松弛参数，才终于收敛。这件事告诉我：<strong>迭代法不是无脑套用的黑盒——你需要分析矩阵性质，必要时改用更稳健的方法（比如使用 Krylov 子空间方法，这是下一章的内容）</strong>。</p>
+        </div>
+
+        <h3>18.4 SOR（超松弛迭代法）</h3>
+
+        <p>SOR（Successive Over-Relaxation）在 Gauss-Seidel 的基础上引入了<strong>松弛参数 ω</strong>：</p>
+
+        <p style="text-align:center;"><strong>x^{(k+1)} = (1 - ω)x^{(k)} + ω · x_{GS}^{(k+1)}</strong></p>
+
+        <p>即：新的迭代值是旧值和 GS 更新值的加权平均。ω 的取值范围是 (0, 2)。</p>
+        <ul>
+            <li>ω = 1：退化为 Gauss-Seidel</li>
+            <li>ω < 1：低松弛（under-relaxation），用于稳定性不好的情况</li>
+            <li>ω > 1：超松弛（over-relaxation），加速收敛</li>
+        </ul>
+
+        <p>对于 SPD 矩阵的某些特殊结构（如 Poisson 方程的五点差分格式），存在<strong>最优 ω</strong>：</p>
+
+        <p style="text-align:center;"><strong>ω_opt = 2 / (1 + √(1 - ρ(J)²))</strong></p>
+
+        <p>其中 ρ(J) 是 Jacobi 迭代矩阵的谱半径。</p>
+
+        <p>当 ω 取最优值时，收敛速度可以比 Gauss-Seidel 快一个数量级。</p>
+
+        <p><strong>Python 代码对比</strong>：</p>
+
+        <pre><code>import numpy as np
+import matplotlib.pyplot as plt
+
+def solve_poisson_2d(n, max_iter=10000, tol=1e-8):
+    """
+    用迭代法求解 2D Poisson 方程 -∇²u = f 在 [0,1]×[0,1] 上的五点差分格式。
+    边界条件 u=0。
+    返回迭代次数和最终解。
+    """
+    h = 1.0 / (n + 1)
+    N = n * n  # 未知量总数
+
+    # 构造右端项 f(x,y) = 2π² sin(πx) sin(πy)
+    x_vals = np.linspace(h, 1-h, n)
+    y_vals = np.linspace(h, 1-h, n)
+    X, Y = np.meshgrid(x_vals, y_vals)
+    f = 2 * np.pi**2 * np.sin(np.pi * X) * np.sin(np.pi * Y)
+    b = h**2 * f.ravel()
+
+    # 将解重塑为 2D 网格
+    u = np.zeros((n, n))
+
+    def jacobi_iter(u):
+        """一次 Jacobi 迭代"""
+        u_new = u.copy()
+        # 内部点更新: u(i,j) = (u(i-1,j) + u(i+1,j) + u(i,j-1) + u(i,j+1) - h²f) / 4
+        u_new[1:-1, 1:-1] = (u[:-2, 1:-1] + u[2:, 1:-1] +
+                              u[1:-1, :-2] + u[1:-1, 2:] -
+                              b.reshape(n, n)[1:-1, 1:-1]) / 4.0
+        return u_new
+
+    def gauss_seidel_iter(u):
+        """一次 Gauss-Seidel 迭代（就地更新）"""
+        for i in range(1, n-1):
+            for j in range(1, n-1):
+                u[i, j] = (u[i-1, j] + u[i+1, j] +
+                           u[i, j-1] + u[i, j+1] -
+                           b.reshape(n, n)[i, j]) / 4.0
+        return u
+
+    def sor_iter(u, omega):
+        """一次 SOR 迭代"""
+        for i in range(1, n-1):
+            for j in range(1, n-1):
+                u_gs = (u[i-1, j] + u[i+1, j] +
+                        u[i, j-1] + u[i, j+1] -
+                        b.reshape(n, n)[i, j]) / 4.0
+                u[i, j] = (1 - omega) * u[i, j] + omega * u_gs
+        return u
+
+    # 测试三种方法
+    methods = {
+        "Jacobi": lambda u: jacobi_iter(u),
+        "Gauss-Seidel": lambda u: gauss_seidel_iter(u),
+        "SOR (ω=1.5)": lambda u: sor_iter(u, 1.5),
+        "SOR (ω_opt)": lambda u: sor_iter(u, optimal_omega(n)),
+    }
+
+    # 计算最优 ω
+    rho_J = np.cos(np.pi / (n + 1))  # Poisson 五点差分的 Jacobi 谱半径
+    optimal_omega = lambda n: 2.0 / (1.0 + np.sqrt(1 - rho_J**2))
+
+    results = {}
+    for name, method in methods.items():
+        u_iter = np.zeros((n, n))
+        n_iter = 0
+        for it in range(max_iter):
+            u_old = u_iter.copy()
+            u_iter = method(u_iter)
+            n_iter += 1
+            # 检查收敛：相对残差
+            residual = np.linalg.norm(u_iter - u_old) / np.linalg.norm(u_iter)
+            if residual < tol:
+                break
+        results[name] = (n_iter, u_iter)
+
+    return results
+
+# 测试 n=100 网格（约 10000 个未知量）
+n = 100
+results = solve_poisson_2d(n)
+
+print(f"2D Poisson 方程，n={n} (未知量 {n*n:,})")
+print("-" * 50)
+print(f"{'方法':<20} {'迭代次数':<12}")
+print("-" * 50)
+for name, (iters, _) in results.items():
+    print(f"{name:<20} {iters:<12}")
+
+# 精确解对比
+x_vals = np.linspace(1/(n+1), 1-1/(n+1), n)
+y_vals = np.linspace(1/(n+1), 1-1/(n+1), n)
+X, Y = np.meshgrid(x_vals, y_vals)
+u_exact = np.sin(np.pi * X) * np.sin(np.pi * Y)
+print("\n最大误差：")
+for name, (_, u) in results.items():
+    err = np.max(np.abs(u - u_exact))
+    print(f"{name:<20} {err:.6e}")</code></pre>
+
+        <div class="tip">
+            <p><strong>代码说明</strong>：上面这段代码对 n=100（即约 10000 个未知量）求解 Poisson 方程。你会在输出中看到：Jacobi 可能需要 2000+ 步，Gauss-Seidel 约 1000 步，而 SOR（最优 ω）可能只需要约 50 步——相差 20-40 倍的收敛加速。这就是松弛的力量。在实际工程中，SOR 配合最优 ω 曾经是 1960-1980 年代求解椭圆型 PDE 的主力方法。</p>
+        </div>
+
+        <h3>18.5 三种迭代法的对比</h3>
+
+        <table>
+            <tr>
+                <th>性质</th>
+                <th>Jacobi</th>
+                <th>Gauss-Seidel</th>
+                <th>SOR（最优 ω）</th>
+            </tr>
+            <tr>
+                <td>迭代矩阵</td>
+                <td>D⁻¹(L+U)</td>
+                <td>(D+L)⁻¹U</td>
+                <td>(D+ωL)⁻¹[(1-ω)D-ωU]</td>
+            </tr>
+            <tr>
+                <td>每步成本</td>
+                <td>O(nz)</td>
+                <td>O(nz)</td>
+                <td>O(nz)</td>
+            </tr>
+            <tr>
+                <td>并行性</td>
+                <td>完全并行</td>
+                <td>串行</td>
+                <td>串行</td>
+            </tr>
+            <tr>
+                <td>收敛速度（Poisson）</td>
+                <td>O(n²) 步</td>
+                <td>O(n²) 步，约快 2x</td>
+                <td>O(n) 步</td>
+            </tr>
+            <tr>
+                <td>存储需求</td>
+                <td>2 个向量</td>
+                <td>1 个向量</td>
+                <td>1 个向量</td>
+            </tr>
+            <tr>
+                <td>收敛保证</td>
+                <td>严格对角占优或 SPD</td>
+                <td>SPD 或对角占优</td>
+                <td>SPD 且 ω ∈ (0,2)</td>
+            </tr>
+        </table>
+
+        <p><strong>典型迭代次数对比（n=100×100 网格，Poisson 方程）</strong>：</p>
+
+        <table>
+            <tr>
+                <th>网格大小</th>
+                <th>未知量</th>
+                <th>Jacobi</th>
+                <th>Gauss-Seidel</th>
+                <th>SOR (ω_opt)</th>
+            </tr>
+            <tr>
+                <td>32 × 32</td>
+                <td>1,024</td>
+                <td>~600</td>
+                <td>~300</td>
+                <td>~30</td>
+            </tr>
+            <tr>
+                <td>64 × 64</td>
+                <td>4,096</td>
+                <td>~2,400</td>
+                <td>~1,200</td>
+                <td>~60</td>
+            </tr>
+            <tr>
+                <td>128 × 128</td>
+                <td>16,384</td>
+                <td>~9,600</td>
+                <td>~4,800</td>
+                <td>~120</td>
+            </tr>
+            <tr>
+                <td>256 × 256</td>
+                <td>65,536</td>
+                <td>~38,400</td>
+                <td>~19,200</td>
+                <td>~250</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>扩展性分析</strong>：上表反映了一个重要规律——Jacobi 和 Gauss-Seidel 的迭代次数随 n 呈二次增长（O(n²)），而 SOR 随 n 呈线性增长（O(n)）。这意味着当网格从 32×32 增加到 256×256 时，Jacobi 需要 64 倍多的迭代次数，而 SOR 只需约 8 倍。对于超大规模问题，这个差异就是"能算"和"不能算"的区别。这也就是为什么在 2026 年的今天，未经加速的 Jacobi 和 GS 几乎不再用于实际工程，而 SOR 和更先进的 Krylov 方法（下一章）才是主流。</p>
+        </div>
+
+        <h3>18.6 迭代法的实践要点</h3>
+
+        <p>在实际工程中使用迭代法时，有几点需要注意：</p>
+
+        <ul>
+            <li><strong>初始猜测</strong>：一个好的初始猜测可以大幅减少迭代次数。在时间演化问题中，通常用上一时间步的解作为当前步的初始猜测。</li>
+            <li><strong>停止准则</strong>：常用 ||x^{(k+1)} - x^{(k)}|| / ||x^{(k)}|| < tol 或 ||Ax^{(k)} - b|| < tol。注意不要只用绝对残差——当 ||b|| 很大时，绝对残差很小可能产生误导。</li>
+            <li><strong>预处理</strong>：几乎所有实际迭代法都会配合预处理（preconditioning）使用。最简单的预处理是 Jacobi 预处理（对角缩放）。更高级的包括 SSOR、不完全 Cholesky（IC）、不完全 LU（ILU）等。</li>
+        </ul>
+
+        <div class="warning">
+            <p><strong>最后的踩坑提醒</strong>：迭代法不是"保证收敛"的。Jacobi 可能对非对角占优矩阵发散；GS 对非 SPD 矩阵可能发散；SOR 对 ω 的选择很敏感——ω 选错了可能收敛更慢甚至发散。所以迭代法在工业级代码中的标准用法是：<strong>迭代法 + 预处理 + 一个"兜底"的直接法求解器</strong>。如果迭代法不收敛或收敛太慢，自动切换到直接法继续算。很多现代求解器库（PETSc、Trilinos、hypre）都提供了这种混合策略。</p>
+        </div>
+
+        <p>这一章我们学习了经典的迭代法：Jacobi、Gauss-Seidel 和 SOR。它们原理简单、实现容易，但收敛速度对于大规模问题仍然不够理想。下一章我们将进入现代迭代法的核心——<strong>Krylov 子空间方法</strong>，特别是共轭梯度法（CG），它将是你在科学计算中最常用的迭代求解器。</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 合成数据与数据配比</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html" class="active">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第13章 合成数据与数据配比</h2>
+
+        <p>大家好，我是你们的讲师。在2024年的时候，大家对训练数据的认知还停留在"爬取+清洗"的粗放模式——从互联网上搞几十TB的文本，去重、过滤，然后一股脑喂给模型。到了2026年，这个范式已经被彻底颠覆了。<strong>合成数据（Synthetic Data）</strong>和<strong>数据配比（Data Mixing）</strong>已经成为决定模型质量的两大核心变量。DeepSeek的训练报告中毫不避讳地说：他们的合成数据占预训练数据的15%、占SFT数据的60%以上。</p>
+
+        <p>但合成数据不是万能的。2024年有一篇引起广泛关注的论文叫《The Curse of Recursion》，后来又有一系列研究揭示了<strong>Model Collapse（模型坍缩）</strong>现象——用模型生成的数据反复训练新模型，新模型的质量会逐代退化。如果你只是用GPT-4的数据训练一个GPT-4水平的模型，你永远得不到GPT-5。这一章我们来系统探讨：合成数据怎么生成、怎么用、怎么防止"坍缩"，以及怎么通过数据配比让各类数据发挥最大价值。</p>
+
+        <h3>13.1 合成数据的价值与风险</h3>
+
+        <p>合成数据为什么这么重要？答案很简单：<strong>高质量的自然数据是有限的</strong>。互联网上虽然有几万亿网页文本，但大部分质量不高（广告、噪音、重复内容、低质翻译）。真正高质量的文本——经过编辑审校的书籍、专业学术论文、严谨的百科类内容——总量可能只有几千亿token。而今天的模型已经在这些数据上"读"了好几遍了。</p>
+
+        <p>合成数据的价值体现在几个方面：<strong>第一，覆盖面可控</strong>。想要更多数学推理数据？让模型生成。想要更多代码数据？让模型生成。想要更多特定领域的问答对？让模型生成。你可以在任意方向上扩充数据。<strong>第二，质量可定制</strong>。通过精心设计的prompt和筛选流程，合成数据的质量可以做到比大多数网络文本更高。<strong>第三，隐私安全</strong>。合成数据不包含真实个人信息，可以放心使用。</p>
+
+        <p>但是，合成数据有两大风险：</p>
+
+        <p><strong>Model Collapse（模型坍缩）</strong>是最著名的风险。如果训练数据中混入了大量由同类模型生成的数据，模型会逐渐"忘记"真实数据的分布——生成的内容越来越模板化、多样性下降，最终退化成一个"烂尾"模型。研究显示，经过3-5代使用模型生成数据训练的模型之后，模型在多样性指标上的得分会下降50%以上。</p>
+
+        <p><strong>错误放大。</strong>如果用于生成数据的模型有系统性偏差（比如在某个领域经常犯错），那么合成数据会放大这个偏差——生成的数据中错误的比例比原模型更高。这是因为生成的prompt设计可能恰好暴露了模型的弱点，而后续的筛选流程不一定能完整过滤所有错误。</p>
+
+        <table>
+            <tr>
+                <th>维度</th>
+                <th>自然数据（互联网爬取）</th>
+                <th>合成数据（模型生成）</th>
+            </tr>
+            <tr>
+                <td>数量</td>
+                <td>有限（总文本量天花板）</td>
+                <td>理论上无限</td>
+            </tr>
+            <tr>
+                <td>质量</td>
+                <td>参差不齐，需要大量清洗</td>
+                <td>可控（通过prompt和筛选）</td>
+            </tr>
+            <tr>
+                <td>覆盖</td>
+                <td>偏向常见领域</td>
+                <td>可定向扩充特定领域</td>
+            </tr>
+            <tr>
+                <td>错误率</td>
+                <td>低（互联网文本错误率约0.5-2%）</td>
+                <td>中（取决于生成模型，约5-20%）</td>
+            </tr>
+            <tr>
+                <td>多样性</td>
+                <td>高（大量不同来源）</td>
+                <td>中低（容易模板化）</td>
+            </tr>
+            <tr>
+                <td>模型坍缩风险</td>
+                <td>无</td>
+                <td>有（需严格控制比例）</td>
+            </tr>
+        </table>
+
+        <h3>13.2 合成数据生成方法</h3>
+
+        <p>经过过去两年的实践，业界沉淀了几套成熟的合成数据生成方法。我按复杂程度逐一介绍。</p>
+
+        <p><strong>Self-Instruct</strong>是最基础的方法。给定一个种子数据池（seed pool，少量高质量示例），让模型基于种子数据生成更多类似的instruction-response对。Self-Instruct的核心是"多样性控制"——如果只是简单让模型生成，它会倾向于生成和种子数据模式类似的样本。改进的Self-Instruct会通过prompt中的"任务描述"、"风格要求"、"场景指定"来控制多样性，还会用一些随机化技巧（如随机从模板库中选择生成模板）。</p>
+
+        <p><strong>Persona-driven（角色驱动生成）</strong>是一种更高级的方法。你不是直接让模型"生成一个数学题目"，而是给模型指定一个角色（persona）："你是一个初中数学老师，需要为你的学生出一组关于几何证明的练习题。"不同的persona + 不同的场景设置会生成不同风格和难度的数据。Alpaca的改进版就用了这个方法：给模型分配不同的persona（如"耐心的老师""严厉的教练""好奇的学生"等），让生成的数据更丰富。</p>
+
+        <p><strong>Backtranslation（反向翻译）</strong>是一种从"答案"倒推"问题"的方法。有时候你手头有大量高质量的"答案"（比如经过校对的法律条文、医学指南），但缺少对应的"问题"。你可以让模型根据答案生成可能的问题——"如果这是一个答案，那么用户可能问了什么问题？"这种方法特别适合构建领域SFT数据。</p>
+
+        <p><strong>LLM-as-Judge筛选</strong>是每一条合成数据生成流程的最后一道关卡。用另一个模型（或者同一个模型但不同的role）来"评价"生成的数据质量——是否符合格式要求、答案是否正确、逻辑是否自洽。只有通过筛选的数据才进入训练集。常用的筛选标准包括：指令-回答的匹配度、答案的事实准确性、回答的全面性等。</p>
+
+        <pre><code># 合成数据Pipeline示例（概念示意）
+
+# 步骤1: 种子数据准备
+seed_data = load_seed_examples(domain="math", num_examples=100)
+
+# 步骤2: Persona + Prompt 生成
+def generate_synthetic_data(persona, topic, n_samples):
+    prompts = []
+    for _ in range(n_samples):
+        # 从模板库随机选择一个生成模板
+        template = random.choice(generation_templates)
+        prompt = template.format(
+            persona=persona,
+            topic=topic,
+            seed_example=random.choice(seed_data),
+            style_requirements="...",
+        )
+        prompts.append(prompt)
+    return batch_generate(prompts, model="generator-model")
+
+# 步骤3: LLM-as-Judge 筛选
+def filter_quality(candidates):
+    results = []
+    for cand in candidates:
+        judge_prompt = f"""
+        请评估以下指令-回答对的质量：
+        指令：{cand.instruction}
+        回答：{cand.response}
+        评分标准：1.回答是否正确(0-5) 2.逻辑是否自洽(0-5) 3.格式是否符合(0-5)
+        """
+        score = judge_model.evaluate(judge_prompt)
+        if score >= threshold:  # 比如总分>=12/15
+            results.append(cand)
+    return results</code></pre>
+
+        <div class="tip">
+            <p><strong>实用经验</strong>：合成数据的质量瓶颈往往不在"生成"环节，而在"筛选"环节。花70%的精力在筛选策略上，比花70%的精力在生成prompt上效果好得多。一个好的LLM-as-Judge应该使用chain-of-thought评分，让模型先分析再打分——这种方式的评分一致性远高于直接打分。</p>
+        </div>
+
+        <h3>13.3 数据课程学习(Curriculum Learning)</h3>
+
+        <p>数据课程学习的核心思想是：<strong>不要把所有数据一股脑喂给模型</strong>，而是按照从易到难的顺序喂，让模型像学生一样"循序渐进"地学习。</p>
+
+        <p>怎么做？首先你需要定义"难度"。在语言模型训练中，难度可以从几个维度衡量：</p>
+
+        <p>1. <strong>Perplexity-based</strong>：用一个小模型计算每条数据的困惑度，困惑度越高说明数据"越难"。在课程学习中，先喂低困惑度（简单）的数据，再逐渐增加高困惑度（复杂）的数据。</p>
+
+        <p>2. <strong>长度-based</strong>：短文本在前，长文本在后。这和人类学习的过程类似——先读短文，再读长篇报告。</p>
+
+        <p>3. <strong>知识层次-based</strong>：基础常识在前，专业领域在后。比如先喂百科类文本，再喂学术论文。</p>
+
+        <p>课程学习的实践效果是真实可感的。Qwen团队在技术报告中提到，他们在预训练后期增加高难度代码和数学数据的比例，模型在推理benchmark上的提升显著。DeepSeek也采用了类似的分阶段数据配比策略——在训练的最后10%步骤中，大幅增加高质量合成数据和长上下文数据的比例。</p>
+
+        <p>但课程学习也有坑：如果某个领域的"简单"数据和"困难"数据的分布差异过大，模型可能在切换阶段时出现loss spike。解决方法是在阶段切换处做<strong>渐进混合</strong>——在过渡区间内（比如500-1000步），简单数据的比例从90%线性下降到10%，同时困难数据的比例从10%上升到90%。</p>
+
+        <h3>13.4 数据配比优化</h3>
+
+        <p>数据配比（Data Mixing）回答的问题是：当你有来自不同领域、不同来源的数据时，<strong>每种数据应该占多少比例？</strong>这个问题远比看起来复杂——因为它涉及"边际收益"的概念：增加1%的代码数据带来的收益和增加1%的数学数据带来的收益不同，而且这些收益是非线性的。</p>
+
+        <p><strong>DoReMi（Domain Re-weighting and Minimization，2023）</strong>是数据配比的奠基性工作。核心思路是：训练一个proximal模型（小模型或只训少量步数的模型），用不同领域配比做实验，观察哪个领域的loss下降最快——loss下降越快的领域，说明当前配比下这个领域的数据"欠训练"了，需要增加它的比例。DoReMi通过一个称为"group DRO"的优化算法，自动找到一个最优配比，让所有领域的loss均衡下降。</p>
+
+        <p><strong>DoGE（Data Generation for Efficient Learning，2024）</strong>在DoReMi的基础上做了改进。它不只是调整领域权重，而是直接评估"每条数据"的贡献度——越"有价值"的数据（对模型提升最大的数据）被采样的概率越高。DoGE使用一个小的reference model和一个正在训练的main model之间的loss差异来估计每条数据的"价值"。这个方法比DoReMi更精细，能识别出一条数据在某个训练阶段的独特价值。</p>
+
+        <p>在实践中，配比实验的典型流程是：</p>
+
+        <p>1. 确定领域分类：代码、数学、百科、学术、新闻、对话等。</p>
+
+        <p>2. 用一个小模型（比如1B）在多个配比方案下训到一定步数（比如5000步），观察各领域的loss下降情况。</p>
+
+        <p>3. 选出最均衡的配比方案，用中等模型（7B）验证。</p>
+
+        <p>4. 在大模型（70B+）上启动正式训练，并在训练过程中动态调整配比。</p>
+
+        <table>
+            <tr>
+                <th>方法</th>
+                <th>粒度</th>
+                <th>是否需要训练小模型</th>
+                <th>效果</th>
+                <th>适用阶段</th>
+            </tr>
+            <tr>
+                <td>人工经验配比</td>
+                <td>领域级</td>
+                <td>否</td>
+                <td>看经验</td>
+                <td>快速启动</td>
+            </tr>
+            <tr>
+                <td>DoReMi</td>
+                <td>领域级</td>
+                <td>是（proximal model）</td>
+                <td>好（均衡各领域）</td>
+                <td>预训练配比</td>
+            </tr>
+            <tr>
+                <td>DoGE</td>
+                <td>样本级</td>
+                <td>是（reference model）</td>
+                <td>极好（精细控制）</td>
+                <td>中后期微调</td>
+            </tr>
+            <tr>
+                <td>课程学习</td>
+                <td>按难度</td>
+                <td>否（需要先验）</td>
+                <td>好（提升收敛）</td>
+                <td>全阶段</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>关键结论</strong>：根据多个团队的公开经验，一个简单有效的"默认配比"是：代码15-20%、数学10-15%、百科25-30%、学术论文10-15%、新闻/对话15-20%、其他5-10%。但这不是金科玉律——如果你的目标是特定领域（比如法律），代码比例可以大幅降低，法律文本的比例可以提升至40%以上。配比的核心原则是：<strong>让你的应用领域数据有足够的占比，同时不让模型丧失通用能力</strong>。</p>
+        </div>
+
+        <h3>13.5 2026年合成数据的工业实践</h3>
+
+        <p>截至2026年中，合成数据已经深度渗透到训练链路的每一个环节。下面是一些公开可查的行业实践。</p>
+
+        <p><strong>DeepSeek的合成数据策略。</strong>DeepSeek-R1的训练中，合成数据占据核心位置。RLVR（Reinforcement Learning with Verifiable Rewards）阶段几乎完全依赖合成数据——模型自己生成推理链，然后用可验证奖励（数学答案正确、代码通过测试等）来自动标注正确和错误的推理路径。DeepSeek公开提到：他们用大约5万条种子数据生成了超过1亿条合成推理数据，筛选后用了约3000万条。合成数据让RLVR训练的可扩展性大大提升——如果全部靠人工标注，1亿条数据的标注成本可能是天文数字。</p>
+
+        <p><strong>Qwen 2.5和Qwen3的合成数据。</strong>Qwen在技术报告中披露了他们的"合成数据工厂"：一个包含多个专门模型的生成-筛选-迭代的闭环系统。每个生成任务由三个模型完成：一个负责生成（generator）、一个负责审核（critic）、一个负责改进（refiner）。生成的SFT数据经过这个三阶段流程后，质量和多样性都得到了保障。</p>
+
+        <p><strong>防止Model Collapse的工业方案。</strong>最有效的方案是<strong>自然数据+合成数据的混合训练</strong>——合成数据的比例通常不超过总训练数据的30%。另一个方案是<strong>多模型蒸馏</strong>：不要只用GPT-4一个模型生成数据，而是用多个不同架构、不同规模的模型生成，然后取它们的一致性或多样性来筛选。这样做出来的合成数据具有更高的多样性，模型坍缩的风险显著降低。</p>
+
+        <div class="warning">
+            <p><strong>踩坑案例</strong>：2025年有个知名案例——某团队在训练一个代码模型时，使用了大量由GPT-4生成的"代码解释"数据。模型在代码生成benchmark上表现优异，但实际使用中发现模型<strong>生成的代码注释比代码本身还长</strong>——大量输出变成了"解释代码"的模式，而不是直接输出代码。原因是合成数据中存在系统性偏差：GPT-4倾向于在代码答案中附带详细解释，模型学到了这个模式。教训是：<strong>合成数据中的隐式偏差比显式错误更难发现和纠正</strong>——必须要做"数据分布分析"，对比合成数据和真实数据中不同特征的分布差异。</p>
+        </div>
+
+        <p>最后，我想分享一个关于合成数据配比的实用框架。我们团队在训练实践中总结了一套"三明治配比法"：</p>
+
+        <p>1. <strong>底层（前60%训练步数）：自然数据为主（80%+），合成数据为辅。</strong>这个阶段让模型建立坚实的语言基础和知识体系。</p>
+
+        <p>2. <strong>中层（中间20%步数）：自然数据（50%）+ 合成数据（50%）。</strong>这个阶段用合成数据丰富特定领域能力，同时自然数据防止模型坍缩。</p>
+
+        <p>3. <strong>顶层（最后20%步数）：高质量合成数据为主（70%）。</strong>这个阶段专注于提升模型的下游任务能力，合成数据可以精准定向训练。</p>
+
+        <p>好了，这一章我们探讨了合成数据的巨大价值与潜在风险，学习了Self-Instruct、Persona-driven、Backtranslation和LLM-as-Judge筛选等生成方法，讨论了数据课程学习的从易到难策略，深入分析了DoReMi和DoGE等自动配比优化方法，最后介绍了DeepSeek、Qwen等2026年工业实践。记住：<strong>数据策略正在取代模型架构成为训练质量的第一决定因素</strong>。下一章我们将把"数据"和"训练"结合起来——<strong>第14章「Mid-training与继续预训练」</strong>，探讨怎么在一个基座模型上注入特定领域的知识。咱们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

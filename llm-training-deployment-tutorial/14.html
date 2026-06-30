@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 Mid-training与继续预训练</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html" class="active">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第14章 Mid-training与继续预训练</h2>
+
+        <p>大家好，我是你们的讲师。想象这样一个场景：你是一家医疗AI公司的技术负责人，公司拿到了一个经过通用预训练的LLaMA-3基座模型。你们的目标是让它变成"世界上最懂医学"的模型——能够看懂病历、理解临床试验报告、辅助诊断。你应该怎么做？</p>
+
+        <p>绝大多数人的第一反应是"做SFT"——找一批医疗问答数据微调一下。这确实是最快的路径，但结果往往不尽如人意。为什么呢？因为<strong>基座模型在预训练阶段根本没"读"过多少医学文献</strong>。它不知道"MYH9基因突变导致的血小板减少症"是什么——不是它听不懂问题，而是它脑子里根本没有这个知识。如果你只做SFT，你最多只能教会模型"当我问XX时，你应该回答YY"，但模型并没有真正理解YY。这就是为什么在SFT之前需要<strong>Mid-training（中间训练）或继续预训练（Continued Pre-Training, CPT）</strong>。</p>
+
+        <p>我见过一个金融领域的团队，花了一个月收集了200万条金融问答数据做SFT，结果模型在金融领域的专业评测上只提升了3%。后来他们改成先用5000亿金融语料做CPT，再用那200万条SFT数据做微调，同样的评测上提升了22%。<strong>CPT的ROI远远高于SFT</strong>——当你需要注入大量新知识时，不要跳过这一步。</p>
+
+        <h3>14.1 Mid-training的定位</h3>
+
+        <p>为了更好地理解Mid-training在训练链路中扮演的角色，我们把它放到训练的完整流程中来看：</p>
+
+        <p><strong>Step 1: 通用预训练（General Pre-training）。</strong>在海量互联网数据上训base model。目标是让模型掌握语言能力、常识知识和基础推理。这一阶段的产出是"通才"——什么都懂一些，但什么都不专精。</p>
+
+        <p><strong>Step 2: Mid-training / 领域继续预训练（Domain Continued Pre-training）。</strong>在高质量领域数据上做额外的预训练。目标是让模型获得特定领域的深度知识。这一阶段的产出是"专才"——在目标领域方面有了扎实的知识储备。</p>
+
+        <p><strong>Step 3: SFT + 偏好对齐。</strong>用指令数据微调，让模型学会输出有用、安全的回答。这一阶段不注入新知识，而是教会模型怎么"使用"已有知识。</p>
+
+        <p>Mid-training之所以被称为"Mid"（中间），是因为它位于通用预训练和SFT之间——补知识，而不是教对话。它的定位非常清晰：<strong>当模型缺少你需要的领域知识时，SFT解决不了；只有CPT才能把新知识"写进"模型参数里</strong>。</p>
+
+        <div class="highlight">
+            <p><strong>一个形象的类比</strong>：通用预训练相当于"读万卷书"——建立完整的知识框架。SFT相当于"练习怎么考"——学会回答问题。CPT相当于"补充阅读"——在某个领域上比别人多读几百本书。CPT之后再做SFT，就好比先学透了知识再刷题，效果自然好。反之，如果知识本身就不具备，再怎么刷题（做SFT）也考不了高分。</p>
+        </div>
+
+        <h3>14.2 继续预训练(CPT)策略</h3>
+
+        <p>CPT不是简单地"在领域数据上多训一会儿"。它有几个关键的策略参数需要精心设计。</p>
+
+        <p><strong>数据混合比例。</strong>CPT最大的技术问题之一是<strong>灾难性遗忘（Catastrophic Forgetting）</strong>——只训领域数据会导致模型忘记通用能力。比如你只训医疗数据，模型可能开始"什么都往医学上扯"——问它"今天天气怎么样"，它回答"建议您关注空气质量对呼吸系统的影响"。解决方法是<strong>混合通用数据</strong>：在CPT数据中混入10-30%的通用预训练数据（或者高质量的通用数据子集）。这个比例是关键超参数——领域数据比例太高会遗忘，太低则领域知识注入不够。</p>
+
+        <p><strong>学习率调度。</strong>CPT的学习率比通用预训练小得多。通用预训练的峰值学习率可能是3e-4，而CPT的峰值学习率通常在1e-5到5e-5之间。原因是模型已经有了一套训练好的参数，用一个较大的学习率去做CPT，相当于"用力过猛"——会破坏已经学到的一般知识。另外，CPT通常使用<strong>constant学习率+cosine decay的变体</strong>：先用一个很小的恒定学习率训大部分步数，最后再decay到0。</p>
+
+        <p><strong>训练步数规划。</strong>CPT的步数取决于你要注入的数据量和学习率。一个经验法则是：<strong>CPT的token数不应该超过通用预训练token数的10%</strong>。比如通用预训练用了3T token，CPT用100-300B token就够了。更多的CPT未必更好——边际收益递减，且遗忘风险增加。</p>
+
+        <table>
+            <tr>
+                <th>参数</th>
+                <th>通用预训练</th>
+                <th>领域CPT（Mid-training）</th>
+                <th>SFT</th>
+            </tr>
+            <tr>
+                <td>训练数据量</td>
+                <td>数万亿 token</td>
+                <td>百亿~千亿 token</td>
+                <td>数万~百万条</td>
+            </tr>
+            <tr>
+                <td>数据组成</td>
+                <td>全部通用数据</td>
+                <td>70-90%领域 + 10-30%通用</td>
+                <td>指令-回答对</td>
+            </tr>
+            <tr>
+                <td>峰值学习率</td>
+                <td>3e-4 ~ 5e-4</td>
+                <td>1e-5 ~ 5e-5</td>
+                <td>1e-5 ~ 2e-5</td>
+            </tr>
+            <tr>
+                <td>优化器</td>
+                <td>AdamW</td>
+                <td>AdamW（有时用SGD）</td>
+                <td>AdamW</td>
+            </tr>
+            <tr>
+                <td>批次大小</td>
+                <td>非常大（数百万token）</td>
+                <td>适中（同预训练）</td>
+                <td>小（数百条）</td>
+            </tr>
+            <tr>
+                <td>主要风险</td>
+                <td>收敛失败</td>
+                <td>灾难性遗忘</td>
+                <td>过拟合、对齐税</td>
+            </tr>
+        </table>
+
+        <pre><code># CPT训练配置示例
+
+cpt_config = {
+    # 数据
+    "domain_data_ratio": 0.8,   # 领域数据占80%
+    "general_data_ratio": 0.2,  # 通用数据占20%（防止遗忘）
+    "total_tokens": 200e9,      # 总共训200B token
+
+    # 优化器
+    "optimizer": "AdamW",
+    "learning_rate": 3e-5,      # CPT典型学习率
+    "min_lr": 3e-6,             # 最终学习率
+    "lr_schedule": "cosine",    # cosine下降
+    "warmup_steps": 500,        # 前500步学习率线性上升
+    "weight_decay": 0.1,
+    "beta1": 0.9,
+    "beta2": 0.95,
+
+    # 训练
+    "batch_size_tokens": 4e6,   # 每步4M token
+    "gradient_clip": 1.0,       # 梯度裁剪
+    "total_steps": 50000,       # 总步数
+
+    # 检查点
+    "checkpoint_every": 1000,   # 每1000步保存一次
+    # 每个检查点都评测领域和通用任务，检测遗忘
+}</code></pre>
+
+        <h3>14.3 灾难性遗忘</h3>
+
+        <p>灾难性遗忘（Catastrophic Forgetting）是CPT最棘手的挑战。模型在通用预训练中学到的知识，在做领域CPT过程中可能被"覆盖"——神经网络参数在梯度更新中逐渐偏向新的数据分布，旧知识被"挤"出去了。</p>
+
+        <p><strong>如何检测遗忘？</strong>最直接的方法是在CPT训练过程中定期评测通用benchmark（如MMLU、HellaSwag、WinoGrande等）。如果你发现模型在通用任务上的score开始下降，说明遗忘正在发生。通常在训练的前10%步数内就应该看到是否出现问题——如果在5000步内MMLU下降了超过2%，说明你的CPT数据配比或学习率有问题。</p>
+
+        <p><strong>如何缓解遗忘？</strong>业界有几种主流方法：</p>
+
+        <p><strong>Replay（经验回放）。</strong>最简单的方案——在CPT数据中混入一定比例的通用预训练数据。这个"通用数据"可以是从原始预训练数据中随机采样的子集，也可以是一个经过挑选的"核心知识集"（包含模型应该保留的关键能力对应的训练数据）。前面提到的10-30%的通用数据混合就是一种replay策略。</p>
+
+        <p><strong>EWC（Elastic Weight Consolidation）。</strong>这是一类参数级的方法。在CPT的loss上加一个正则项，惩罚参数偏离它们的原始值太多。对于每个参数，EWC会计算一个"重要性权重"——模型在通用任务上对这个参数有多依赖。重要参数被改变时会受到更大惩罚，不重要参数可以自由变化。EWC的优点是保留通用知识的效果很好，缺点是实现复杂度高、计算开销大（需要计算Fisher信息矩阵）。</p>
+
+        <p><strong>LoRA-MoE混合方案。</strong>这是2025-2026年出现的较新方法。在CPT时，不在原始参数上直接做梯度更新，而是训练一组额外的LoRA（Low-Rank Adaptation）适配器——每个领域一个LoRA模块。推理时，通过一个小的路由器来选择应该使用哪个LoRA。这样原始参数完全不受影响，遗忘问题被彻底绕过了。代价是推理时需要额外加载LoRA参数，且路由决策增加了推理复杂度。</p>
+
+        <div class="tip">
+            <p><strong>实战建议</strong>：对于大多数场景，replay策略（CPT数据中混10-30%通用数据）就足够了——它简单、有效、没有额外开销。如果replay还不够（你的领域和通用任务差异非常大），再考虑EWC。LoRA-MoE更适合需要对同一个基座模型做多个领域CPT的场景（比如一个基座又做法律、又做医疗、又做金融），每个领域训练独立的LoRA，推理时动态选。</p>
+        </div>
+
+        <h3>14.4 实践案例：法律/医疗/金融CPT</h3>
+
+        <p>理论讲完了，我们来看看几个真实的CPT实践案例。这些数据来自公开的论文和技术报告，有些来自我个人的经验。</p>
+
+        <p><strong>法律领域CPT。</strong>法律文本的特点是：用词精准、逻辑严密、格式规范、存在大量引用和交叉引用。一个经典的法律CPT案例是某律所团队用LLaMA-3-8B做基座，在法律数据上做了150B token的CPT（加上20%通用数据混合）。关键发现：法律CPT的"甜点"学习率是3e-5，比通用预训练低了一个数量级。CPT后的模型在法律考试benchmark上提升了18%，同时通用benchmark只下降了0.5%（几乎没遗忘）。他们的秘诀是：法律数据中包含了"法律推理链"——不只是法律条文，还包括了解释如何从条文推导出结论的过程文本。</p>
+
+        <p><strong>医疗领域CPT。</strong>医疗数据的特点是：专业术语多、需要精确理解解剖/生理/病理关系、诊断推理链条长。一个公开的案例是用PubMed Central的论文摘要和全文做CPT（约200B token），混入10%通用数据。这个案例中的特殊发现是：医疗CPT需要<strong>非常高频率的数据去重</strong>——PubMed中有大量同一研究的重复报道（不同作者写的相似摘要），如果不做去重，模型会在这些模式上过拟合。去重后，模型的诊断准确率提升了12%。</p>
+
+        <p><strong>金融领域CPT。</strong>金融数据的特点是：时间序列性、数值敏感、需要理解财务报表和经济学概念。一个金融CPT项目公开了他们遇到的特殊问题——<strong>日期泄露</strong>。他们使用的金融新闻数据中大部分是2024年的，导致模型在涉及"current year"的推理时总是输出"2024"。解决方案：在数据预处理阶段做日期归一化（把绝对日期转换为相对日期），然后在CPT中掺入少量不同时间段的金融数据。CPT后，模型在金融NLP benchmark（FinBench）上提升了25%。</p>
+
+        <table>
+            <tr>
+                <th>领域</th>
+                <th>数据来源</th>
+                <th>CPT数据量</th>
+                <th>通用数据混合比</th>
+                <th>学习率</th>
+                <th>领域提升</th>
+                <th>通用遗忘</th>
+            </tr>
+            <tr>
+                <td>法律</td>
+                <td>法律文书、判决书、法规</td>
+                <td>150B tokens</td>
+                <td>20%</td>
+                <td>3e-5</td>
+                <td>+18%</td>
+                <td>-0.5%</td>
+            </tr>
+            <tr>
+                <td>医疗</td>
+                <td>PubMed论文、临床指南</td>
+                <td>200B tokens</td>
+                <td>10%</td>
+                <td>2e-5</td>
+                <td>+12%</td>
+                <td>-1.2%</td>
+            </tr>
+            <tr>
+                <td>金融</td>
+                <td>财报、新闻、研报</td>
+                <td>120B tokens</td>
+                <td>15%</td>
+                <td>4e-5</td>
+                <td>+25%</td>
+                <td>-0.8%</td>
+            </tr>
+        </table>
+
+        <div class="warning">
+            <p><strong>踩坑案例</strong>：某法律AI团队做了一个CPT实验，数据量200B token，全是法律文本，没有混合任何通用数据。结果30B token之后（约15%进度），模型在通用对话能力上已经严重退化——你问它"什么是苹果"，它开始回答"根据《中华人民共和国苹果国家标准》……"。更严重的是，他们直到训练结束都没有发现这个问题，因为监控指标只看法律领域的loss。直到用户反馈"模型变傻了"他们才意识到。教训是：<strong>CPT时必须监控通用benchmark</strong>，而且这个监控应该从训练的第一天就开始，不是训练结束后再做。</p>
+        </div>
+
+        <h3>14.5 Mid-training vs SFT: 什么时候用哪个？</h3>
+
+        <p>这是工程团队中最常被问的问题。我总结了一个非常简单的决策树：</p>
+
+        <p><strong>只做SFT就够了，如果：</strong></p>
+        <ul>
+            <li>你的任务不需要新的知识——模型已有的知识足够覆盖你的场景。</li>
+            <li>你的目标是改变模型的行为方式（比如让输出更简洁、更结构化）。</li>
+            <li>你只需要几百到几千条高质量示例就能定义任务。</li>
+            <li>你已有的base model在open-book评测中表现良好（说明知识储备够了，只是不会用）。</li>
+        </ul>
+
+        <p><strong>需要CPT + SFT，如果：</strong></p>
+        <ul>
+            <li>你的领域有大量专业知识不在通用模型的训练数据中（比如中国法律条文、最新医学论文）。</li>
+            <li>你的base model在close-book评测中表现很差（说明模型不知道这些知识）。</li>
+            <li>你的领域有独特的语言模式或术语体系（比如生物信息学中的基因命名规则）。</li>
+            <li>你希望模型"深入理解"你的领域，不仅仅是"记住答案"。SFT只能记住具体问题的答案，CPT让模型理解背后的原理。</li>
+        </ul>
+
+        <p><strong>既不需要SFT也不需要CPT，如果：</strong></p>
+        <ul>
+            <li>你的任务可以通过prompt engineering解决。</li>
+            <li>你只需要RAG（Retrieval-Augmented Generation）——让模型从检索到的文档中提取答案。</li>
+            <li>你的场景是一个现成的API已经做得足够好了（比如翻译、摘要）。</li>
+        </ul>
+
+        <pre><code># 决策树：Mid-training vs SFT
+#
+# Q1: 你的base model在目标领域的close-book评测中表现如何？
+#   ├─ 良好（>80% on domain benchmark）→ Q2
+#   └─ 差（<60%）→ 需要CPT → Q3
+#
+# Q2: 你的需求主要是改变行为方式还是注入新知识？
+#   ├─ 改变行为 → 只做SFT就够了
+#   └─ 注入知识 → 需要CPT
+#
+# Q3: 你有多少领域数据？
+#   ├─ < 10B tokens → SFT可能就够（先把少量数据做SFT）
+#   ├─ 10B-100B tokens → 优先做CPT
+#   └─ > 100B tokens → 强烈推荐CPT
+#
+# Q4: 你的时间和预算约束？
+#   ├─ 紧（1周内交付）→ 先做SFT，后续迭代再加CPT
+#   └─ 宽松（1-2月）→ 先做CPT，再做SFT</code></pre>
+
+        <p>最后，我想强调一个容易被忽略的点：<strong>CPT和SFT的边界正在模糊</strong>。2026年的新趋势是"CPT-instruct"——在CPT阶段就混入部分指令格式的数据。比如在领域文本中穿插一些"问题→答案"格式的片段，让模型在"学知识"的同时也"学对话模式"。这种做法的好处是：既注入了知识，又准备好了对齐基础，后续的SFT只需要较少的数据就能达到很好的效果。DeepSeek和Qwen的最新报告中都提到了类似的做法。</p>
+
+        <p>好了，这一章我们深入探讨了Mid-training在整个训练链路中的定位，学到了继续预训练（CPT）的关键策略参数（数据混合比例、学习率调度、训练步数），深入分析了灾难性遗忘的检测和缓解方法，了解了法律/医疗/金融领域的真实CPT案例，并给出了判断"什么时候需要CPT"的决策框架。从下一章开始，我们将进入训练链路的"后训练"阶段——<strong>第15章「监督微调(SFT)原理与实践」</strong>，看看怎么用高质量的指令数据把base model变成真正能用的助手。咱们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

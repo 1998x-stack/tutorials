@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 长上下文训练技术</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html" class="active">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第12章 长上下文训练技术</h2>
+
+        <p>大家好，我是你们的讲师。"你好，请阅读以下300页PDF文档，然后回答……"——这是2025-2026年LLM应用中最常见的需求之一。从法律合同审查到学术文献综述，从代码仓库分析到长篇小说理解，用户希望模型能"记住"越来越多的上下文。于是我们看到了一场"上下文军备竞赛"：GPT-4从8K到128K，Claude从100K到200K，DeepSeek和Qwen直接冲到了1M token级别。</p>
+
+        <p>但一个残酷的事实是：<strong>绝大多数模型在长上下文任务上的表现远不如短上下文</strong>。我测试过一个号称128K上下文的模型，用一篇5万字的法律判决书问细节问题时，准确率不到40%。更讽刺的是，同样的模型在8K上下文内的准确率有85%。问题出在哪？出在训练——你拿训练时只在4K长度上训过的模型，直接推理128K文本，位置编码会"崩溃"，注意力机制无法有效覆盖长距离依赖。这一章我们深入探讨怎么让模型真正"学会"处理长上下文。</p>
+
+        <h3>12.1 位置编码的上下文外推</h3>
+
+        <p>所有长上下文能力的起点是<strong>位置编码（Position Encoding）</strong>。Transformer本身不具备序列顺序感知能力，必须通过位置编码告诉模型token的相对或绝对位置。目前在主流模型中占统治地位的是<strong>RoPE（Rotary Position Embedding）</strong>。</p>
+
+        <p>RoPE的工作机制可以理解为：它将每个token的位置信息编码到Q和K向量的旋转角度中。在Attention计算时，两个token之间的位置差决定了它们的旋转角度差——这个角度差影响点积结果，从而让Attention"感知"到距离。RoPE有一个关键性质：<strong>相对位置递减</strong>——距离越远的token对点积的影响越小。这在短序列场景下是合理的，但到了长序列就会出问题：在训练时没见过的位置上，旋转角度会超出设计范围，导致Attention的计算不稳定。</p>
+
+        <p>这就是"训练短、推理长"的矛盾。假设你训练时最大序列长度是4096，RoPE的旋转频率（frequency）是在这个范围内优化的。当推理时输入长度达到8192，从未见过的位置（4096-8192）的旋转角度会让QK点积出现异常大的值，softmax后这些位置的attention weight近乎为0——实际上相当于模型忽略了后半段大部分内容。</p>
+
+        <p>要解决这个问题，有两大技术路线：<strong>位置插值（Position Interpolation）</strong>和<strong>频率外推（Frequency Extrapolation）</strong>。我们逐一来看。</p>
+
+        <div class="highlight">
+            <p><strong>核心概念</strong>：RoPE的旋转频率决定了每个位置编码的"波长"。低频分量（波长长）负责长距离依赖，高频分量（波长短）负责局部位置区分。成功的长上下文扩展的关键是：让模型在更长序列上仍然能区分相邻位置（高频保留），同时让长距离位置的编码不出界（低频调整）。</p>
+        </div>
+
+        <h3>12.2 位置插值方法</h3>
+
+        <p>位置插值的核心思想很直接：既然训练时没见过那些"远"的位置，那我们把推理时的位置"压缩"到训练见过的范围内。就像你把一张大图缩放到相框能容纳的尺寸。</p>
+
+        <p><strong>Linear PI（线性位置插值）。</strong>这是最早提出的方法。假设训练时最大序列长度为L_train，推理时期望长度为L_test，将位置索引i缩放到 i × L_train / L_test。这样推理时的位置永远在[0, L_train)范围内，RoPE永远不会遇到未训练过的位置。优点是实现简单，缺点是损失了相邻token的区分度——因为不同位置被"挤"在一起了。实验表明，Linear PI在2-4倍的扩展范围内表现良好，超过8倍后性能下降明显。</p>
+
+        <p><strong>NTK-aware插值。</strong>这是Linear PI的改进版。它的洞察是：RoPE的不同频率分量在不同范围内起作用——高频分量负责局部区分（需要保持拉伸），低频分量负责长距离感知（需要插值压缩）。NTK-aware方法对高频分量做更少的插值（保持分辨力），对低频分量做更多的插值（扩展覆盖范围）。这种方法在8倍甚至16倍扩展时仍能保持较好的性能。</p>
+
+        <p><strong>YaRN（Yet another RoPE extensioN）</strong>是目前最先进的位置插值方法。它在NTK-aware的基础上加上了两个关键改进：（1）对Attention logits做温度缩放（temperature scaling），因为插值后的attention distribution比训练时更"平"；（2）使用更精细的频率分组和缩放策略。YaRN在128K到1M的超长扩展中表现最优。</p>
+
+        <table>
+            <tr>
+                <th>方法</th>
+                <th>核心思路</th>
+                <th>最大扩展比</th>
+                <th>是否需要微调</th>
+                <th>代表模型</th>
+            </tr>
+            <tr>
+                <td>Linear PI</td>
+                <td>位置索引等比例缩放</td>
+                <td>2-4x</td>
+                <td>推荐微调</td>
+                <td>LLaMA系列早期版本</td>
+            </tr>
+            <tr>
+                <td>NTK-aware</td>
+                <td>高频少压缩、低频多压缩</td>
+                <td>4-16x</td>
+                <td>推荐微调</td>
+                <td>CodeLLaMA, Qwen 2.5</td>
+            </tr>
+            <tr>
+                <td>YaRN</td>
+                <td>NTK + 温度缩放 + 精细频率</td>
+                <td>16-32x</td>
+                <td>需要微调</td>
+                <td>LLaMA 3.1, DeepSeek-V2</td>
+            </tr>
+            <tr>
+                <td>ReRoPE</td>
+                <td>滑动窗口 + 位置重置</td>
+                <td>32x+</td>
+                <td>无需微调（但微调后更好）</td>
+                <td>学术研究</td>
+            </tr>
+        </table>
+
+        <p><strong>ReRoPE（Rectified RoPE）</strong>是一种不需要微调就能扩展上下文的方法。它设定一个"局部窗口"——在窗口内使用正常的位置编码，在窗口外使用重置的位置编码（从0重新开始）。这样模型总是处理"近距离"的token，超长序列被分解成一个一个的局部上下文段。ReRoPE的缺点是需要修改注意力实现，且在跳变的边界处可能损失连贯性。</p>
+
+        <h3>12.3 Ring Attention</h3>
+
+        <p>有了位置编码支持长序列还不够——你还得能在显存里放下长序列的注意力计算。这里的问题很直接：<strong>标准Attention的计算量是O(n²)</strong>，n是序列长度。当n=128K时，单层Attention的KV矩阵就需要128K×128K×2字节 ≈ 32GB显存（FP16）。一百多层下来，显存需求轻松突破TB级别。</p>
+
+        <p><strong>Ring Attention</strong>就是为解决这个问题而生的。它的设计非常巧妙：</p>
+
+        <p>1. 将长序列沿序列维度切分成多个块，每个GPU持有其中一个块。</p>
+
+        <p>2. GPU之间形成一个"环"（ring拓扑），每个GPU依次把它的KV块传给环上的下一个GPU。</p>
+
+        <p>3. 当环完成一圈时，每个GPU已经收到了所有其他GPU的KV块——从而在一个GPU上拼出了完整的attention结果。</p>
+
+        <p>4. 计算和通信高度重叠：收到上一块KV的同时做当前块的计算，通信延迟被计算时间掩盖。</p>
+
+        <p>Ring Attention的通信量分析：每个GPU需要把它的KV块发给下一个人，同时从上一个接收。假设总长度为L，P个GPU，每个块的KV大小是O(L/P × d)。一圈下来，每个GPU发送和接收的总数据量是O(L×d)——和序列长度L成正比，和GPU数P无关。这意味着<strong>Ring Attention的通信开销不随GPU数增加而增加</strong>，这是它最大的优势。</p>
+
+        <pre><code># Ring Attention的通信-计算重叠示意（伪代码）
+# P个GPU形成环，每个GPU持有长度为 L/P 的序列块
+
+def ring_attention(query_block, kv_block_initial, num_gpus):
+    """query_block: 本设备的Q, kv_block: 本设备的K,V（初始）"""
+    output = 0
+    for step in range(num_gpus):
+        # Step 1: 异步发送本设备的KV块给下一个GPU
+        next_rank = (rank + 1) % num_gpus
+        send_async(kv_block, to=next_rank)
+
+        # Step 2: 异步从上一个GPU接收KV块
+        prev_rank = (rank - 1) % num_gpus
+        next_kv = recv_async(from=prev_rank)
+
+        # Step 3: 用当前的KV块做局部attention（通信和计算重叠）
+        local_attn = compute_attention(query_block, kv_block)
+        output = merge_with_previous(output, local_attn, kv_block)
+
+        # Step 4: 等待传输完成，更新KV块
+        wait_all()
+        kv_block = next_kv  # 处理下一块
+
+    return output</code></pre>
+
+        <div class="tip">
+            <p><strong>性能要点</strong>：Ring Attention要发挥最佳效果，需要做到"计算时间 >= 通信时间"。如果计算太快而通信太慢，GPU会空等数据。所以Ring Attention最适合的场景是：序列极长（每个块的计算量大）+ 高速互联（NVLink或IB）。如果你的网络是千兆以太网，Ring Attention可能不如朴素实现。</p>
+        </div>
+
+        <h3>12.4 序列并行方案的选择</h3>
+
+        <p>除了Ring Attention，业界还有其他几种序列并行方案，各有适用场景。</p>
+
+        <p><strong>DeepSpeed-Ulysses</strong>采用all-to-all通信模式。它的核心思路是把序列维度切分，在Attention前通过all-to-all把QKV分散到各设备，让每个设备做全局attention（在整个序列上），计算完后再通过all-to-all把结果重组。Ulysses的优势是实现简单，和现有的数据并行框架整合方便。但它对通信带宽的要求较高（all-to-all是全局通信，不像Ring是点对点）。</p>
+
+        <p><strong>Megatron Sequence Parallelism（SP）</strong>是NVIDIA的方案。它和张量并行（TP）紧密结合：在TP切分隐藏维度的基础上，再沿序列维度切分。SP中，TP负责通信隐藏维度结果，SP负责通信序列维度结果，两者共享同一个通信域。SP的优势是和Megatron-LM的TP原生集成，通信可以复用TP的通信组。缺点是灵活性不如Ulysses和Ring Attention——如果你的训练框架不用TP，SP也用不了。</p>
+
+        <table>
+            <tr>
+                <th>方案</th>
+                <th>通信模式</th>
+                <th>和TP的兼容性</th>
+                <th>超长序列效率</th>
+                <th>实现复杂度</th>
+            </tr>
+            <tr>
+                <td>Ring Attention</td>
+                <td>P2P环形</td>
+                <td>独立，可叠加</td>
+                <td>极高（128K-1M）</td>
+                <td>高</td>
+            </tr>
+            <tr>
+                <td>DeepSpeed-Ulysses</td>
+                <td>All-to-All</td>
+                <td>独立，可叠加</td>
+                <td>高（32K-128K）</td>
+                <td>中</td>
+            </tr>
+            <tr>
+                <td>Megatron SP</td>
+                <td>All-Reduce + All-Gather</td>
+                <td>和TP绑定</td>
+                <td>中（8K-32K）</td>
+                <td>低（配合TP使用）</td>
+            </tr>
+        </table>
+
+        <p>怎么选？我的建议是：如果序列长度在32K以内，Megatron SP + TP就足够了，不需要额外引入序列并行。32K-128K之间，DeepSpeed-Ulysses是最平衡的方案——兼顾效率与实现复杂度。128K以上，必须上Ring Attention，因为只有它能做到通信量不随设备数增长。</p>
+
+        <h3>12.5 百万Token训练实践</h3>
+
+        <p>把理论落实到实践中，百万token训练需要解决几个工程问题。</p>
+
+        <p><strong>数据准备。</strong>百万token的序列从哪来？通常的做法是"拼接"——把多个相关文档拼接成一个超长序列，用特殊分隔符隔开。但拼接会带来两个问题：（1）不同文档之间没有语义关系，模型可能需要学习"忽略"文档边界；（2）数据混合——长文档（如一本完整的书）和短文档（如一篇文章）需要配比好。在实践中，数据拼接的pipeline大概占长上下文训练数据准备工作的70%的工作量。</p>
+
+        <p><strong>显存规划。</strong>假设用YaRN把位置编码扩展到1M，用Ring Attention做序列并行（P=8）。当L=1M，head_dim=128，num_heads=32时，单层Attention需要存储KV块的显存：每块L/P × head_dim × num_heads = 125K × 128 × 32 = 512M（FP16）。乘以层数（56层）≈ 28GB——加上参数和优化器状态，一张H100（80GB）勉强能装下。但这还没有考虑activation checkpointing的额外开销。实际训练1M上下文时，一张H100需要约40-50GB显存——很紧张但可行。</p>
+
+        <p><strong>训练效率。</strong>长序列训练的另一个瓶颈是<strong>数据加载</strong>——从磁盘读一个1M token的样本（约2MB文本），网络加载和tokenize的时间可能比计算时间还长。解决办法是pre-shuffle和预tokenize：在训练开始之前把所有数据tokenize好，存成二进制文件，打乱顺序。训练时直接读二进制文件，跳过tokenize这一步。</p>
+
+        <div class="warning">
+            <p><strong>踩坑案例</strong>：某团队在扩展上下文到128K时，发现训练loss很低但下游评测效果很差。花了两周排查才找到原因——他们把位置编码从4K扩展到128K时用的是Linear PI，但微调用的仍然是4K长度的数据，只不过padding加到了128K。这意味着模型大部分时间看到的其实是padding token（占序列的96%），只在少量4K区域做了有效训练。正确的做法应该是：<strong>使用逐步扩展的训练数据</strong>——先用8K数据微调，再用16K、32K……逐步拉长。每一步都需要在对应长度的数据上做充分的训练。</p>
+        </div>
+
+        <p>这里给出一套经过验证的百万token训练"三步走"策略：</p>
+
+        <p><strong>第一步：位置编码扩展。</strong>用YaRN将RoPE扩展到目标长度（比如1M）。这一步不需要训练，只是改变位置编码的计算方式。在目标长度的几个小batch上做前向测试，确保loss不爆炸。</p>
+
+        <p><strong>第二步：长上下文微调（continued pre-training）。</strong>用逐步增长的数据（8K→32K→128K→512K→1M）做持续的预训练。每个阶段用对应长度的数据训练5000-10000步。注意：这一阶段用的数据必须是高质量的、需要长上下文才能理解的任务（如整本书的问答、多跳推理等）。</p>
+
+        <p><strong>第三步：SFT with long context。</strong>用长上下文的SFT数据（如"阅读以下100页文档并回答"的指令数据）来微调，让模型学会"使用"扩展后的上下文能力。这是很多人忽略的一步——即使模型能"看"1M token，它需要学会怎么从中找到需要的信息。</p>
+
+        <pre><code># 百万token训练的数据构造策略（概念示意）
+# 阶段1: 8K → 和普通预训练一致
+# 阶段2: 32K → 拼接2-4篇高质量长文档
+# 阶段3: 128K → 拼接1本书 + 4-8篇长文章
+# 阶段4: 512K → 拼接半本书 + 多篇关联论文
+# 阶段5: 1M → 拼接1-2本完整长文档 + 关联资料
+
+# 关键：每个阶段的拼接策略要"有意义的上下文"
+# 拼接同一个主题的文档比随机拼接效果好得多
+# 需要在文档间插入special token让模型感知边界</code></pre>
+
+        <p>好了，这一章我们从位置编码的上下文外推讲起，对比了Linear PI、NTK-aware、YaRN和ReRoPE等位置插值方法的优劣，介绍了Ring Attention的通信-计算重叠机制，分析了三大序列并行方案的选型，最后给出了百万token训练的工程实践指南。长上下文能力已经成为大模型的"标配"，掌握这些技术是训练工程师的必修课。下一章我们将转向一个和数据相关的重要话题——<strong>第13章「合成数据与数据配比」</strong>，探讨高质量合成数据如何改变训练游戏规则。咱们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

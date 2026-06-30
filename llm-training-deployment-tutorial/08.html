@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 3D并行与大规模训练</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html" class="active">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第8章 3D并行与大规模训练</h2>
+
+        <p>大家好，我是你们的讲师。前面几章我们聊了混合精度、优化器调度，这些都假设模型能放进一张GPU。可现实是，一个70B的模型用FP16存权重就占了140GB，加上优化器状态（AdamW存两份动量）和梯度，总共超过400GB——H100才80GB显存。怎么办？答案只有一个：<strong>拆分</strong>。</p>
+
+        <p>我见过太多团队在这个环节翻车。有个朋友第一次训13B模型，信心满满地上了8张A100，结果跑了三天发现GPU利用率不到15%。一查，他只用数据并行（Data Parallelism），每张卡都要放完整的模型副本——13B模型光参数就26GB，加上优化器状态和激活值，8张卡的显存全部耗尽，根本跑不了大batch size。这就是典型的"并行策略选错"。今天我们就把3D并行讲透——TP、PP、DP各自怎么拆、怎么合，以及怎么根据你的情况选。</p>
+
+        <h3>8.1 3D并行的全景图</h3>
+
+        <p>3D并行，顾名思义是<strong>三种并行方式的组合</strong>：数据并行（DP）、张量并行（TP）、流水线并行（PP）。它们从三个维度拆分训练计算，互不冲突。</p>
+
+        <p><strong>数据并行（Data Parallelism, DP）</strong>是最直观的：你把数据切成N份，每张卡放一份完整的模型，各自前向反向，然后用all-reduce同步梯度。DP的优点是实现简单、通信模式固定；缺点是每张卡都要存一份完整模型，模型一大就放不下了。所以DP通常作为"最后一道并行维度"——当TP和PP把模型拆到能放进单卡之后，再用DP来扩展吞吐。</p>
+
+        <p><strong>张量并行（Tensor Parallelism, TP）</strong>是把一个层的计算拆分到多张卡上。比如一个Linear层有4096×4096的权重矩阵，你可以切成两块2048×4096，分到两张卡上分别做矩阵乘法，最后通信合并。TP的通信密集——每做一个matmul就要做一次all-reduce——所以TP通信必须是NVLink或NVSwitch这种高速互联，一般只在单节点（8卡）内做。</p>
+
+        <p><strong>流水线并行（Pipeline Parallelism, PP）</strong>是把模型的层分成多个stage，每个stage放到不同的设备上。比如一个32层的Transformer，切成4个stage，每张卡负责8层。数据像流水线一样依次经过每个stage。PP的通信量很小——每个micro-batch只传一次激活值和梯度——但会有气泡问题（GPU闲着等数据）。</p>
+
+        <p>在实际大规模训练中，这三种并行是嵌套叠加的。下面这个表总结了它们的特性：</p>
+
+        <table>
+            <tr>
+                <th>并行类型</th>
+                <th>拆分维度</th>
+                <th>通信粒度</th>
+                <th>通信硬件要求</th>
+                <th>典型规模</th>
+            </tr>
+            <tr>
+                <td>DP (数据并行)</td>
+                <td>batch维度</td>
+                <td>每个step一次all-reduce</td>
+                <td>RDMA网络即可</td>
+                <td>数十~数百卡</td>
+            </tr>
+            <tr>
+                <td>TP (张量并行)</td>
+                <td>层内参数</td>
+                <td>每个matmul一次all-reduce</td>
+                <td>NVLink/NVSwitch</td>
+                <td>4~8卡（单节点）</td>
+            </tr>
+            <tr>
+                <td>PP (流水线并行)</td>
+                <td>层间切分</td>
+                <td>每个micro-batch一次point-to-point</td>
+                <td>任意互联</td>
+                <td>4~32 stage</td>
+            </tr>
+            <tr>
+                <td>组合（3D）</td>
+                <td>三者叠用</td>
+                <td>混合通信</td>
+                <td>节点内NVLink + 跨节点RDMA</td>
+                <td>数百~数千卡</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>一个关键原则</strong>：通信密集的并行（TP）放在节点内部，利用NVLink的高速带宽；通信量适中的并行（PP）跨节点但保持小通信量；通信量最小的DP放在最外层跨节点all-reduce。这个"通信分层"原则是设计3D并行策略的基石。</p>
+        </div>
+
+        <h3>8.2 张量并行(TP)深入</h3>
+
+        <p>张量并行的核心思路来自NVIDIA Megatron-LM框架。它的基本操作是将一个线性变换拆成<strong>列并行（Column Parallel）</strong>和<strong>行并行（Row Parallel）</strong>两种模式。</p>
+
+        <p><strong>列并行（Column Parallelism）</strong>：假设你有一个权重矩阵 W ∈ R^{d×h}，输入 X ∈ R^{b×d}，做 Y = XW。列并行把 W 沿列维度（输出维度）切成 T 份，每份 W_i ∈ R^{d×(h/T)}。每张卡计算 Y_i = X·W_i，然后做一次all-reduce合并所有Y_i得到完整的Y。通信量：每张卡发送和接收 b×h（或h/T经过all-reduce最终等于h）个元素。</p>
+
+        <p><strong>行并行（Row Parallelism）</strong>：把 W 沿行维度（输入维度）切成 T 份，每份 W_i ∈ R^{(d/T)×h}。输入 X 也沿列维度切成 T 份 X_i ∈ R^{b×(d/T)}。每张卡计算 Y_i = X_i·W_i，得到的是 Y 的部分和。然后做一次all-reduce获得最终的 Y。行并行常用于MLP的第二个线性层和Attention的输出投影层。</p>
+
+        <p>在Transformer中，TP的典型分配方式是：Attention的QKV投影用列并行，Attention的输出投影用行并行；MLP的第一个线性层用列并行+GeLU，第二个线性层用行并行。这样每层只做两次all-reduce——一次在Attention内，一次在MLP内。</p>
+
+        <pre><code># Megatron-LM的TP通信模式示意
+# 一个Transformer层的前向，TP=4
+# 步骤1: QKV投影（列并行）
+X → split_col(QKV_W) → matmul → all-reduce → Q, K, V
+
+# 步骤2: Attention计算（每个TP rank独立做自己的head）
+Q, K, V → self_attention → attn_out
+
+# 步骤3: 输出投影（行并行）
+attn_out → all-reduce → merge → attn_final
+# 注意：行并行的输入需要先做reduce-scatter
+
+# 步骤4: MLP第一个Linear（列并行）
+attn_final → split_col(MLP_W1) → matmul + GeLU → all-reduce
+
+# 步骤5: MLP第二个Linear（行并行）
+hidden → reduce_scatter(MLP_W2) → matmul → all-gather → output</code></pre>
+
+        <p><strong>TP度数的选择</strong>直接影响训练效率。TP=2时通信开销几乎可以忽略（因为每个matmul的通信量和计算量完全重叠）。TP=4时通信占比约5-10%。TP=8时通信占比可能到20%以上。所以TP一般不超过节点内的GPU数——8卡节点常用TP=8，4卡节点用TP=4。超过节点范围做TP，跨节点通信延迟会把训练拖垮。</p>
+
+        <h3>8.3 流水线并行(PP)</h3>
+
+        <p>流水线并行把模型按层切分到不同设备。最朴素的方式是<strong>GPipe</strong>的做法：将batch分成多个micro-batch，依次送入流水线。但GPipe有个致命问题——<strong>气泡（bubble）</strong>。</p>
+
+        <p>假设一个4-stage的流水线，每张卡做一次前向+反向的时间是1个单位，总共有16个micro-batch。第一个stage在发出前4个micro-batch后，最后一个stage才开始接收第一个micro-batch。在整个流水线启动和排空阶段，很多GPU是空闲的。这就是"气泡"。GPipe的气泡率公式是：</p>
+
+        <p><strong>Bubble ratio = (P-1) / M</strong>，其中 P 是流水线stage数，M 是micro-batch数量。当M远大于P时，气泡率趋近于0。但M受显存限制不能无限大，因为每个micro-batch的激活值都要存着用于反向传播。</p>
+
+        <p>为了解决气泡问题，NVIDIA提出了<strong>1F1B（One-Forward-One-Backward）调度算法</strong>。1F1B的核心改变是：不等所有micro-batch的前向都跑完再开始反向，而是每做完一个micro-batch的前向就立刻开始它的反向（如果资源允许）。这样做的好处是：</p>
+
+        <p>1. 显存占用大幅降低：因为反向尽早开始，激活值不需要保留太久，<strong>峰值激活内存从O(M)降到O(P)</strong>。</p>
+
+        <p>2. 气泡率更优：在理想情况下，1F1B的气泡率同样是(P-1)/M，但因为可以在更小的M下运行，实际气泡率更低。</p>
+
+        <p>3. 通信与计算可以更好重叠：前向和反向之间穿插点对点通信，减少空闲时间。</p>
+
+        <table>
+            <tr>
+                <th>调度算法</th>
+                <th>气泡率</th>
+                <th>峰值显存</th>
+                <th>实现难度</th>
+                <th>推荐场景</th>
+            </tr>
+            <tr>
+                <td>GPipe（Naive）</td>
+                <td>(P-1)/M</td>
+                <td>O(M × 激活值)</td>
+                <td>低</td>
+                <td>小规模、stage数少</td>
+            </tr>
+            <tr>
+                <td>1F1B</td>
+                <td>(P-1)/M</td>
+                <td>O(P × 激活值)</td>
+                <td>中</td>
+                <td>大规模训练主流</td>
+            </tr>
+            <tr>
+                <td>Interleaved 1F1B</td>
+                <td>(P-1)/(M×K)</td>
+                <td>O(P × 激活值 / K)</td>
+                <td>高</td>
+                <td>超大规模、需要极致气泡优化</td>
+            </tr>
+        </table>
+
+        <p>Interleaved 1F1B是进一步的优化：把每张卡的layer再细分成K份，让单张卡交替处理多个layer chunk，进一步降低气泡率。代价是实现复杂度高，且通信次数增加。</p>
+
+        <div class="tip">
+            <p><strong>实践建议</strong>：PP的stage数通常设为节点数的整数倍（每个节点放1-2个stage），确保跨节点通信可以充分利用网络带宽。在实际训练中，PP是最容易调优的维度——只要保证micro-batch数量 >= 4×PP_stage数，气泡率就会低于25%。如果不追求极致效率，保持micro-batch = 4×PP_stage是一个简单有效的规则。</p>
+        </div>
+
+        <h3>8.4 序列并行与专家并行</h3>
+
+        <p>3D并行覆盖了参数和数据两个维度，但还有一个维度没有被触及——<strong>序列长度</strong>。当训练序列长度从2K扩展到128K甚至1M时，单卡存不下完整的序列激活值，于是<strong>序列并行（Sequence Parallelism）</strong>应运而生。</p>
+
+        <p><strong>DeepSpeed-Ulysses</strong>是微软提出的序列并行方案。它的核心思想是把序列维度切分到多个GPU上，每个GPU只处理序列的一部分。在Attention计算时，利用all-to-all通信在序列维度上做全局的QKV聚合。Ulysses适合长序列场景，而且和TP可以天然叠加——TP拆隐藏维度，Ulysses拆序列维度，互不干扰。</p>
+
+        <p><strong>Ring Attention</strong>是另一种序列并行方式。它把序列块分散到多个设备上，通过环形通信让每个设备依次访问所有序列块的部分KV，在设备本地做部分attention计算。Ring Attention的优点是：通信量和计算量可以被流水线重叠，几乎没有额外的通信开销。缺点是实现复杂度高，且对硬件拓扑有要求。</p>
+
+        <p><strong>Expert Parallelism（专家并行）</strong>专门用于MoE模型。在MoE中，不同的Expert可以放在不同的GPU上。每个token通过门控网络被路由到对应的Expert做计算，然后结果再聚合回来。Expert Parallelism本质上是把MoE的FFN层做了一种"稀疏"的数据并行——每个token只激活部分Expert，而每个Expert只处理被路由过来的那部分token。通信模式是all-to-all，比all-reduce更复杂。</p>
+
+        <p>下面这个表总结了三种"新维度"并行：</p>
+
+        <table>
+            <tr>
+                <th>并行技术</th>
+                <th>拆分维度</th>
+                <th>通信算子</th>
+                <th>适用场景</th>
+            </tr>
+            <tr>
+                <td>Ulysses 序列并行</td>
+                <td>序列长度</td>
+                <td>all-to-all</td>
+                <td>长序列（>32K），和TP兼容</td>
+            </tr>
+            <tr>
+                <td>Ring Attention</td>
+                <td>序列长度</td>
+                <td>P2P环形</td>
+                <td>超长序列（>128K），通信重叠</td>
+            </tr>
+            <tr>
+                <td>Expert Parallelism</td>
+                <td>Expert维度</td>
+                <td>all-to-all</td>
+                <td>MoE模型，和DP/TP/PP组合</td>
+            </tr>
+        </table>
+
+        <h3>8.5 实战：如何选择并行策略</h3>
+
+        <p>面对一个具体的训练任务，怎么选并行策略？我总结了一个<strong>"三板斧"决策框架</strong>，帮你快速定位。</p>
+
+        <p><strong>第一板斧：确定模型能否塞进单卡。</strong>用公式估算：模型显存 ≈ 参数量×字节数×2（权重+优化器状态）+ 激活值。如果单卡放得下且利用率高（>50%），直接DP就行了——别为了炫技上3D并行。如果一个8卡节点放不下完整模型，才考虑TP。</p>
+
+        <p><strong>第二板斧：确定TP度数。</strong>确保模型按TP度数拆分后，每一块的参数量+激活值能放进单卡。TP度数一般等于节点内GPU数（8或4），因为跨节点做TP通信太慢。如果TP=8还放不下，说明模型太大了，必须上PP。</p>
+
+        <p><strong>第三板斧：确定PP stage数和DP规模。</strong>PP把模型按层切分，每个stage的层数尽量均匀。PP stage数乘以每个stage需要的GPU数（TP度数）不能超过总GPU数。剩余GPU分配给DP维度。DP规模 = 总GPU数 / (TP度数 × PP stage数)。</p>
+
+        <pre><code># 示例：用512张H100训练一个70B Dense模型
+# 参数：70B参数，FP16训练，TP=8，序列长度4096
+# 单卡可放：~40GB参数+优化器（用ZeRO-3）+ 激活值（用activation checkpointing）
+# 估算每层参数量：约1.2亿参数/层（70B/56层）
+
+# 方案1: TP=8, PP=8, DP=8 → 共512卡
+# 说明：TP=8用满单节点（8卡/节点），PP=8（跨8个节点），DP=8（8个流水线副本）
+# 每个DP副本使用64张卡（8TP × 8PP）
+# 总GPU数 = 8 × 8 × 8 = 512 ✓
+
+# 方案2: TP=8, PP=4, DP=16 → 共512卡
+# 适用于PP气泡敏感的场景，DP越大吞吐越高
+# 但每个流水线更短（14层/每stage），可能切不匀
+
+# 方案3: TP=4, PP=8, DP=16 → 共512卡
+# TP=4降低通信开销，适合跨节点TP的场景
+# 但单卡模型更大，对显存要求更高</code></pre>
+
+        <p>说个踩坑故事。去年有个团队训7B模型，用了128张A100，他们选择了TP=8、PP=2、DP=8。结果发现GPU利用率只有30%。排查发现PP=2导致bubble率太高——micro-batch数量被显存限制在4个，气泡率高达(P-1)/M = 1/4 = 25%。因为大部分时间都在等流水线排空，计算利用率极低。后来改成TP=4、PP=4、DP=4，虽然每张卡的模型大了一些，但气泡率降到(4-1)/16 ≈ 19%（用interleaved 1F1B可以降到更低），利用率提升到70%。<strong>教训是：PP的stage数要慎重，不是越多越好</strong>。</p>
+
+        <div class="warning">
+            <p><strong>踩坑经验</strong>：很多团队一开始就上3D并行，忽视了"最简单够用"的原则。我建议的路线是：单卡能跑 → 只用DP → 单节点能跑（放不进单卡但一个8卡节点够）→ 加TP → 单节点放不下 → 加PP → 需要更大吞吐 → 加DP。每一步加一个维度，每次只改变一个变量，便于定位问题。</p>
+        </div>
+
+        <p>另外切记，<strong>通信拓扑的物理分布</strong>对并行策略有决定性影响。如果集群是DGX架构（每节点8卡NVLink全互联，跨节点IB），TP=8是自然的。但如果集群是"廉租屋式"——每节点4卡PCIe互联，跨节点以太网——你可能根本做不了TP，只能走纯DP+PP路线。</p>
+
+        <p>好了，这一章我们深入探讨了3D并行的三个维度：TP负责层内拆分（通信密集）、PP负责层间切分（气泡与效率的平衡）、DP负责数据扩充（最外层的吞吐扩展）。我们还介绍了序列并行和专家并行这两个新趋势，以及如何根据硬件条件选择并行策略。下一章我们将进入当前大模型训练中最热门的架构——<strong>第9章「MoE混合专家架构」</strong>，看看稀疏模型如何在几乎不增加计算量的情况下倍增参数容量。咱们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

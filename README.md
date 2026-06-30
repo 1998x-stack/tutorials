@@ -26,6 +26,7 @@ A collection of 51 free, comprehensive technical tutorials in Chinese — from f
 | 🦙 | LLaMA大模型技术 · 从入门到精通 | 28 | [llama-tutorial](https://1998x-stack.github.io/llama-tutorial/) |
 | 🤖 | DeepSeek模型系列 · 深度解析 | 28 | [deepseek-tutorial](https://1998x-stack.github.io/deepseek-tutorial/) |
 | 👁️ | YOLO系列 · 从入门到精通 | 28 | [yolo-tutorial](https://1998x-stack.github.io/yolo-tutorial/) |
+| 🤖 | AIGC生成模型 · 从入门到精通 | 28 | [aigc-tutorial](https://1998x-stack.github.io/aigc-tutorial/) |
 
 ### 数学基础 (9 courses)
 

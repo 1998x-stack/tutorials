@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 主从复制（下）</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html" class="active">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第21章：主从复制（下）—— 高级场景</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们吃透了全量同步和 PSYNC 部分同步这两个核心机制。但真正把主从复制放到生产环境中时，你会遇到更多"基础之外"的问题：全量同步时磁盘 IO 打满怎么办？几十个从库同时连接主库，带宽扛不住怎么办？从库重启后 PSYNC 还是失败了怎么办？</p>
+
+        <p>本章我们继续深入 <code>replication.c</code> 的剩余部分，覆盖无盘复制、级联复制拓扑、数据一致性保障、安全机制等高级话题。这些都是生产环境架构师必须掌握的硬知识。</p>
+
+        <h2>无盘复制</h2>
+
+        <p>上一章提到的全量同步中，主库需要执行一次 BGSAVE 将数据库写入 RDB 文件，再从磁盘读取这个文件发送给从库。这意味着一轮全量同步涉及<strong>写一次 + 读一次</strong>的磁盘 IO。如果从库数量多，磁盘就成了瓶颈。</p>
+
+        <p>无盘复制（Diskless Sync）的出现就是为了绕开这个问题。当 <code>repl-diskless-sync yes</code> 开启时，主库的 RDB 子进程直接将数据通过 socket 写入从库的 TCP 连接，不经过磁盘。我们来仔细看看这个流程：</p>
+
+        <pre><code>/* replication.c - 无盘复制的启动逻辑 */
+void startBgsaveForReplication(int mincapa) {
+    int socket_target = server.repl_diskless_sync &amp;&amp; (mincapa &amp; SLAVE_CAPA_EOF);
+
+    if (socket_target) {
+        /* 无盘模式：不写文件，直接通过 socket 发送 RDB */
+        serverLog(LL_NOTICE, "开始无盘复制 BGSAVE");
+        if (rdbSaveToSlavesSockets(
+                rdbflags, &amp;slaves, &amp;best_error) != C_OK)
+        {
+            /* 失败处理 */
+        }
+    } else {
+        /* 磁盘模式：写入 RDB 文件 */
+        if (rdbSaveBackground(server.rdb_filename, rdbflags) != C_OK) {
+            /* 失败处理 */
+        }
+    }
+}</code></pre>
+
+        <p>无盘复制的数据传输过程在 <code>rdbSaveToSlavesSockets()</code> 函数中实现。它同样是 fork 子进程，但子进程直接将 RDB 格式的数据逐块（chunk）写入从库的 socket 描述符：</p>
+
+        <pre><code>/* rdb.c - rdbSaveToSlavesSockets 核心流程（简化） */
+int rdbSaveToSlavesSockets(int rdbflags, list *slaves, int *error) {
+    /* 1. fork 子进程 */
+    if ((childpid = fork()) == 0) {
+        /* 子进程 */
+
+        /* 2. 关闭不需要的 fd */
+        closeListeningSockets(0);
+
+        /* 3. 为每个从库创建专用的 socket 连接 */
+        /* 子进程持有所有从库连接的 fd 副本 */
+
+        /* 4. 遍历数据库，序列化写入 socket */
+        if (rdbSaveRioWithEOFMark(&amp;rdb, &amp;slavecfds, numfds) == C_OK) {
+            /* 数据发送完毕 */
+            exit(0);
+        }
+    }
+
+    /* 5. 父进程继续正常服务 */
+    /* 子进程完成后父进程收到 SIGCHLD 信号 */
+    /* 在 backgroundSaveDoneHandler() 中进行收尾处理 */
+}</code></pre>
+
+        <p>从库的 <code>readSyncBulkPayload()</code> 也需要相应支持 EOF marker 协议（无盘传输时 stream 结束的标记方式）。主库在数据末尾添加一个特定的 EOF 标记，从库读到标记就知道接收完毕了。</p>
+
+        <p>注意 <code>repl-diskless-sync-delay</code> 配置（默认 5 秒）——在无盘模式下，主库不会立即为第一个连接的从库启动 BGSAVE，而是等待这个延迟时间，让更多从库加入。这样一次 BGSAVE 就能服务多个从库，避免了多次 fork 子进程的开销。</p>
+
+        <div class="tip">
+            <strong>选择建议：</strong>无盘复制适合磁盘 IO 是瓶颈的场景（比如 HDD 磁盘或 IOPS 受限的云盘）。但如果网络带宽才是瓶颈，无盘模式反而会加剧问题——因为它不再依赖磁盘的"缓冲"作用，数据直接从内存到网络，带宽消耗更集中。在 SSD 实例上，磁盘模式可能更稳妥。
+        </div>
+
+        <h2>级联复制拓扑</h2>
+
+        <p>想象一个场景：你的主库有 30 个从库，每个从库全量同步时都需要主库 fork 子进程并发送数据。30 次全量同步的带宽消耗足以打垮任何网卡。这时候就需要<strong>级联复制</strong>（Cascading Replication / Chain Replication）。</p>
+
+        <p>级联复制的核心思路是：<strong>从库也可以有自己的从库</strong>。主库只服务有限的几个"一级从库"，这些一级从库再去服务更多的"二级从库"。这样就形成了复制链（replication chain）：</p>
+
+        <pre><code>Master
+ ├── Replica A  (replica-priority = 100)
+ │    └── Replica A1 (通过 REPLICAOF Replica_A_IP Port 设置)
+ │    └── Replica A2
+ └── Replica B  (replica-priority = 200)
+      └── Replica B1
+      └── Replica B2</code></pre>
+
+        <p>配置级联复制的方式很简单——让一个从库执行 <code>REPLICAOF &lt;上级从库IP&gt; &lt;端口&gt;</code> 即可。对 Redis 来说，这个"上级从库"同样扮演主库的角色，它的复制逻辑完全相同。</p>
+
+        <p>级联复制中有一个重要的控制参数——<code>replica-priority</code>（旧称 <code>slave-priority</code>）。它在 Sentinel 故障转移时用于决定谁应该成为新主库：<strong>优先级数字越小，权重越高</strong>（100 优于 200）。如果你的级联拓扑中某个一级从库性能更强、位置更优，就给它设更小的 priority。</p>
+
+        <div class="highlight">
+            <strong>拓扑设计：</strong>级联复制能减轻主库的负担，但也有代价——数据链路的每一级都会增加复制延迟。如果你的业务对一致性要求很高（比如要求读取自己写入的数据），建议复制链不超过 2 层（主 -> 一级从 -> 二级从）。对于读写分离架构，前端应用应该连接一级从库而非二级从库。
+        </div>
+
+        <h2>复制过程中的数据一致性</h2>
+
+        <p>前面提到，全量同步期间主库不会停止写入。那么问题来了：从库在加载 RDB 文件期间，主库一直在生产新的写入命令，这部分数据怎么同步？</p>
+
+        <p>答案还是 <strong>replication backlog</strong>。全量同步期间，所有写入命令除了正常执行，还会被复制传播并写入 backlog：</p>
+
+        <pre><code>/* replication.c - feedReplicationBuffer 命令传播写入 */
+void feedReplicationBuffer(char *s, size_t len) {
+    /* 写入 backlog 环形缓冲区 */
+    while (len > 0) {
+        size_t avail = server.repl_backlog_size - server.repl_backlog_histlen;
+        size_t towrite = len > avail ? avail : len;
+
+        /* 检查是否覆盖了未消费的数据 */
+        if (avail &lt; len) {
+            /* 要覆盖了！将最早的数据丢弃 */
+            server.repl_backlog_histlen -= ...;
+        }
+
+        /* 数据写入环形缓冲区 */
+        memcpy(server.repl_backlog->buf + server.repl_backlog_idx, s, towrite);
+        server.repl_backlog_idx = (server.repl_backlog_idx + towrite) % server.repl_backlog_size;
+        server.repl_backlog_histlen += towrite;
+        server.master_repl_offset += towrite;
+
+        s += towrite;
+        len -= towrite;
+    }
+}</code></pre>
+
+        <p>从库加载完 RDB 后，会立即向主库发送 <code>REPLCONF ACK &lt;offset&gt;</code>，然后主库根据这个 offset 从 backlog 中取出从库尚未收到的命令，追加发送。</p>
+
+        <p>这个机制保证了从库最终能与主库保持一致——即使全量同步持续了 10 分钟，这 10 分钟内主库的所有写入也不会丢失。从库跟上主库之后，就会进入"稳态复制"模式，实时接收主库传播的命令。</p>
+
+        <h2>复制安全机制</h2>
+
+        <p>生产环境中，主从之间的网络不可能永远稳定。Redis 提供了多层安全机制来保障复制的可靠性：</p>
+
+        <h3>心跳保活</h3>
+        <p>主库会定期向从库发送 <code>REPLCONF ACK</code> 请求，这既是心跳检测，也是延迟测量。相关参数：</p>
+        <ul>
+            <li><code>repl-ping-replica-period</code>（默认 10 秒）：主库向从库发送 PING 的间隔。</li>
+            <li><code>repl-timeout</code>（默认 60 秒）：如果在这段时间内没有收到从库的响应，主库判定从库已断开，清理连接资源。</li>
+        </ul>
+
+        <h3>写入安全阀</h3>
+        <p><code>min-replicas-to-write</code> 和 <code>min-replicas-max-lag</code> 是一对配合使用的参数，用于控制主库在从库不足时拒绝写入：</p>
+
+        <pre><code>/* replication.c - 检查最小从库数量 */
+int replicationCheckMinReplicas(void) {
+    /* 如果配置了 min-replicas-to-write */
+    if (server.repl_min_replicas_to_write &amp;&amp;
+        server.repl_min_replicas_max_lag)
+    {
+        int replicas = 0;
+        listIter li;
+        listNode *ln;
+        listRewind(server.slaves, &amp;li);
+        while ((ln = listNext(&amp;li)) != NULL) {
+            client *slave = ln-&gt;value;
+            /* 计算从库的延迟是否在 max_lag 范围内 */
+            if (slave-&gt;repl_ack_time + server.repl_min_replicas_max_lag >= server.unixtime)
+                replicas++;
+        }
+        if (replicas &lt; server.repl_min_replicas_to_write) {
+            /* 可用从库不足，拒绝写入 */
+            server.repl_min_replicas_avail = 0;
+            return 0;
+        }
+    }
+    server.repl_min_replicas_avail = 1;
+    return 1;
+}</code></pre>
+
+        <p>当启用了 <code>min-replicas-to-write</code>，如果当前延迟合格的从库数量不足，主库会返回 "No writeable replicas" 错误给客户端。这是应对"主库网断了但从库还没感知"场景的一种保护——避免了主库收不到确认就盲目写入导致的数据差异。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>某公司运维工程师在维护 Redis 集群时，为了防止主库在从库全部掉线时继续写入导致数据丢失，设置了 <code>min-replicas-to-write=3</code> 和 <code>min-replicas-max-lag=10</code>。听起来很合理对吧？但问题是他的架构只有 3 个从库。某次短暂的网络抖动导致其中一个从库的延迟超标——从库数量降到 2，不满 3 个——主库<strong>立即拒绝所有写入请求</strong>，整个服务写入瘫痪了 30 秒，直到从库重新跟上。运维同学复盘时说："我以为我在保护数据安全，其实我在生产环境关上了写入的大门。"这个教训告诉我们：<code>min-replicas-to-write</code> 一定要预留余量。如果你有 3 个从库，建议设成 <code>min-replicas-to-write=2</code>，容忍 1 个从库故障。高可用性和数据安全性之间需要谨慎平衡。
+        </div>
+
+        <h2>从库只读与命令传播</h2>
+
+        <p>从库默认是只读的，这个行为由 <code>replica-read-only yes</code> 控制。但有同学可能会好奇：如果我在从库上执行 <code>SET key value</code> 会怎样？</p>
+
+        <pre><code>/* server.c - processCommand 中的权限检查 */
+int processCommand(client *c) {
+    /* ... */
+
+    /* 如果是从库，且不是只读命令，且开启了只读模式，拒绝 */
+    if (server.masterhost &amp;&amp; server.repl_slave_ro
+        &amp;&amp; !(c-&gt;flags &amp; CLIENT_MASTER)
+        &amp;&amp; c-&gt;cmd-&gt;flags &amp; CMD_WRITE)
+    {
+        addReplyError(c, "READONLY You can't write against a read only replica.");
+        return C_OK;
+    }
+
+    /* ... */
+}</code></pre>
+
+        <p>从库不接受写入不是"功能限制"而是"策略限制"——即使你在从库上成功写入了一份数据，主库下一次全量同步或这条数据所属 key 的过期删除也会把它抹掉。从库的设计初衷就是"主库数据的完整副本"。</p>
+
+        <p>命令传播的核心函数是 <code>propagate()</code> 和 <code>feedReplicationBuffer()</code>。前者负责将写命令同步写入 AOF 和从库缓冲区，后者负责将其实际写入 backlog 和每个从库的输出缓存：</p>
+
+        <pre><code>/* replication.c - propagate 函数 */
+void propagate(int dbid, robj **argv, int argc, int target) {
+    /* target 可以是 PROPAGATE_AOF、PROPAGATE_REPL 或两者 */
+    if (server.aof_state != AOF_OFF &amp;&amp; target &amp; PROPAGATE_AOF)
+        feedAppendOnlyFile(dbid, argv, argc);   /* 写入 AOF 缓冲区 */
+    if (target &amp; PROPAGATE_REPL)
+        replicationFeedSlaves(server.slaves, dbid, argv, argc);  /* 传播给从库 */
+}
+
+/* 进一步调用 feedReplicationBuffer 将命令写入 backlog */
+void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
+    /* 将命令序列化为 Redis 协议格式 */
+    char buf[256];
+    int buflen = redisFormatCommand(buf, sizeof(buf), argv, argc);
+
+    /* 写入 backlog */
+    feedReplicationBuffer(buf, buflen);
+
+    /* 写入每个从库的输出缓冲区 */
+    listRewind(slaves, &amp;li);
+    while ((ln = listNext(&amp;li)) != NULL) {
+        client *slave = ln-&gt;value;
+        if (slave-&gt;replstate == SLAVE_STATE_ONLINE)
+            addReply(slave, buf, buflen); /* 添加到从库的输出缓存 */
+    }
+}</code></pre>
+
+        <p>注意 <code>addReply()</code> 只是把数据写入从库连接的输出缓冲区，真正的网络传输由事件循环中的 <code>sendReplyToClient()</code> 完成——这也是 Redis 单线程事件驱动模型的特点：所有 IO 都是非阻塞的。</p>
+
+        <h2>复制配置参数速查</h2>
+
+        <p>下面这张表汇总了主从复制涉及的所有关键配置参数，方便你在生产运维中快速参考：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>配置项</th>
+                    <th>默认值</th>
+                    <th>说明</th>
+                    <th>建议</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>replicaof</code></td>
+                    <td>无</td>
+                    <td>设置主库的 IP 和端口</td>
+                    <td>配置文件设定，避免运行时变更</td>
+                </tr>
+                <tr>
+                    <td><code>replica-read-only</code></td>
+                    <td>yes</td>
+                    <td>从库是否只读</td>
+                    <td>保持默认</td>
+                </tr>
+                <tr>
+                    <td><code>repl-diskless-sync</code></td>
+                    <td>no</td>
+                    <td>是否启用无盘复制</td>
+                    <td>磁盘 IO 瓶颈时设为 yes</td>
+                </tr>
+                <tr>
+                    <td><code>repl-diskless-sync-delay</code></td>
+                    <td>5</td>
+                    <td>无盘模式下等待更多从库的延迟（秒）</td>
+                    <td>根据从库数量调整</td>
+                </tr>
+                <tr>
+                    <td><code>repl-backlog-size</code></td>
+                    <td>1MB</td>
+                    <td>复制积压缓冲区大小</td>
+                    <td>写密集场景设为 100~512MB</td>
+                </tr>
+                <tr>
+                    <td><code>repl-backlog-ttl</code></td>
+                    <td>3600</td>
+                    <td>无从库时 backlog 保留时间（秒）</td>
+                    <td>保持默认</td>
+                </tr>
+                <tr>
+                    <td><code>repl-ping-replica-period</code></td>
+                    <td>10</td>
+                    <td>主库 PING 从库的间隔（秒）</td>
+                    <td>保持默认</td>
+                </tr>
+                <tr>
+                    <td><code>repl-timeout</code></td>
+                    <td>60</td>
+                    <td>复制超时时间（秒）</td>
+                    <td>网络不稳定时适当加大</td>
+                </tr>
+                <tr>
+                    <td><code>repl-disable-tcp-nodelay</code></td>
+                    <td>no</td>
+                    <td>是否关闭 TCP_NODELAY</td>
+                    <td>保持 no（低延迟优先）</td>
+                </tr>
+                <tr>
+                    <td><code>replica-priority</code></td>
+                    <td>100</td>
+                    <td>故障转移时的选举优先级</td>
+                    <td>高性能节点设更小值</td>
+                </tr>
+                <tr>
+                    <td><code>min-replicas-to-write</code></td>
+                    <td>0</td>
+                    <td>至少 N 个从库在线才可写入</td>
+                    <td>按总从库数 - 1 设置</td>
+                </tr>
+                <tr>
+                    <td><code>min-replicas-max-lag</code></td>
+                    <td>10</td>
+                    <td>从库最大允许延迟（秒）</td>
+                    <td>配合 min-replicas-to-write</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>主从复制解决了数据冗余，但故障切换还依赖人工操作吗？如果主库挂了，难道要运维人员半夜爬起来手动执行 <code>REPLICAOF NO ONE</code>？显然不能。下一章我们迎来 Redis 高可用的两座大山——Sentinel 哨兵和 Cluster 集群，它们将实现真正的自动故障转移。我们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

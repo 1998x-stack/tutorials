@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 键过期与内存淘汰</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html" class="active">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第19章：键过期与内存淘汰</h2>
+
+        <p>大家好，我是你们的讲师。前两章我们深入了 RDB 和 AOF 持久化机制，它们解决的是数据"落地"的问题。但 Redis 作为一个内存数据库，还有一个更基础也更棘手的问题要面对：<strong>内存不是无限的</strong>。</p>
+
+        <p>用过 Redis 的同学都知道可以给 key 设置 TTL，到期后 key 自动消失。但你有没有想过：如果同时有几百万个 key 在同一秒内到期，Redis 是怎么处理而不卡死的？如果内存用满了但还有 key 没到期，它又会怎么选择"牺牲品"？很多线上故障的根因，就是对这些机制的理解不够深——比如过期 key 集中到期导致的 latency 毛刺，或者淘汰策略选错引发的缓存雪崩。今天我们就从源码层面把这些机制彻底讲清楚。</p>
+
+        <h2>过期键存储机制</h2>
+
+        <p>Redis 的键空间（key space）本身就是一个 <code>dict</code>，所有的 key-value 都存在里面。但过期时间并不是直接混在 key-value 结构里的，而是单独放在另一个叫做 <code>expires</code> 的字典中：</p>
+
+        <pre><code>/* server.h 中 redisDb 结构体 */
+typedef struct redisDb {
+    dict *dict;                 /* 键空间：所有 key-value 对 */
+    dict *expires;              /* 过期字典：key -> 过期时间戳(ms) */
+    dict *blocking_keys;        /* 被 BLPOP 等阻塞的 key */
+    dict *ready_keys;           /* 收到 push 的阻塞 key */
+    dict *watched_keys;         /* 被 WATCH 的 key（事务用） */
+    int id;                     /* 数据库编号 */
+    long long avg_ttl;          /* 平均 TTL 统计 */
+    unsigned long expires_slot[8]; /* 过期 key slot 位图 */
+    list *defrag_later;         /* 待碎片整理的 key */
+} redisDb;</code></pre>
+
+        <p>注意 <code>dict</code> 和 <code>expires</code> 是两个独立的字典，但它们共享同一个键对象——<code>expires</code> 字典的 key 指针指向 <code>dict</code> 中同一个 robj 对象，不会额外复制一份 key 的字符串。这是一种很巧妙的内存优化：过期时间和键值数据共享 key 字符串，但 value（过期时间戳）是独立存储的。</p>
+
+        <p>当我们执行 <code>EXPIRE mykey 100</code> 时，Redis 内部将其转换为 <code>PEXPIREAT mykey &lt;current_ms + 100000&gt;</code>，然后把 key 和这个绝对时间戳写入 <code>expires</code> 字典。底层通过 <code>setExpire()</code> 函数完成：</p>
+
+        <pre><code>/* db.c */
+void setExpire(client *c, robj *key, long long when) {
+    dictEntry *kde, *de;
+
+    /* 从主键空间查找 key */
+    kde = dictFind(c-&gt;db-&gt;dict, key-&gt;ptr);
+    serverAssertWithInfo(c, key, kde != NULL);
+
+    /* 在 expires 字典中设置过期时间戳 */
+    de = dictAddOrFind(c-&gt;db-&gt;expires, dictGetKey(kde));
+    dictSetSignedIntegerVal(de, when);
+}</code></pre>
+
+        <p>这段代码非常简洁：先在 <code>dict</code> 中找到 key，然后在 <code>expires</code> 中添加或更新相同的 key 指针，value 设为绝对毫秒时间戳。</p>
+
+        <div class="tip">
+            <strong>小提示：</strong>一个 key 最多只有一个过期时间，再次调用 <code>EXPIRE</code> 会覆盖之前的设置。<code>PERSIST</code> 命令本质上就是从 <code>expires</code> 字典中删除这个 entry。如果想知道一个 key 还有多久过期，<code>TTL</code> 命令就是查 <code>expires</code> 字典中的值减去当前时间。
+        </div>
+
+        <h2>惰性删除</h2>
+
+        <p>过期删除的第一道防线，叫做<strong>惰性删除</strong>（Lazy Expiration）。它非常直白：<strong>每次访问一个 key 之前，先检查它是否过期，如果过期就删掉，然后当作这个 key 不存在处理</strong>。</p>
+
+        <p>所有命令在操作 key 之前都会调用 <code>expireIfNeeded()</code> 函数。这个函数是过期检查的入口，来看看它的核心逻辑：</p>
+
+        <pre><code>/* db.c - expireIfNeeded 简化核心逻辑 */
+int expireIfNeeded(redisDb *db, robj *key) {
+    /* 1. 如果 expires 字典中找不到这个 key，直接返回（没有过期时间） */
+    if (!dictFind(db-&gt;expires, key-&gt;ptr)) return 0;
+
+    /* 2. 检查 key 是否真的过期 */
+    if (expire &lt; mstime()) {
+        /* key 已过期，准备删除 */
+
+        /* 3. 如果是只读从库（slave），不执行删除，而是返回过期 */
+        /*    主库的过期删除会通过命令传播同步给从库 */
+        if (server.masterhost != NULL) return 1;
+
+        /* 4. 删除过期 key：从 dict 和 expires 两字典中删除 */
+        server.stat_expired_time_cap_reached_count++;
+        server.stat_expired_stale_perc++;
+        propagateExpire(db, key, lazyfree ? LAZYFREE : DEL); /* 传播到 AOF 和从库 */
+        return dbSyncDelete(db, key);  /* 实际删除 */
+    }
+    return 0;
+}</code></pre>
+
+        <p>这里有一个非常重要的细节：第3步中，如果当前 Redis 是一个从库，它不会主动删除过期 key，而是返回"已过期"。为什么？因为过期删除会触发命令传播，如果每个从库各自独立删除，主从之间就会产生不一致——主库删了会广播一条 DEL，从库收到 DEL 再删一次。所以从库的过期删除完全依赖主库的命令传播，它自己只做"逻辑过期"的判断，不执行实际删除。</p>
+
+        <p>惰性删除的好处是"按需执行"——一个 key 永远不访问就永远不需要检查过期，CPU 开销几乎为零。缺点是如果一个 key 过期了但再也没有人访问它，它就会一直躺在内存里，变成"僵尸 key"。这就需要第二道防线了。</p>
+
+        <h2>定期删除</h2>
+
+        <p>第二道防线是<strong>定期删除</strong>（Active Expiration），由 <code>activeExpireCycle()</code> 函数实现。它不像惰性删除那样被动等待，而是主动出击：Redis 的周期性定时任务会调用这个函数，每次取一批样本 key 出来检查，如果过期就删除。</p>
+
+        <p>为什么要设计成"每批取一部分"而不是"遍历整个 expires 字典"？答案很简单：如果 expires 字典里有几百万个 key，一次性全部扫描会阻塞事件循环长达几百毫秒，这在 Redis 的单线程模型下是不可接受的。</p>
+
+        <pre><code>/* server.c - activeExpireCycle 核心逻辑（简化） */
+void activeExpireCycle(int type) {
+    /* FAST 模式限时 1ms，SLOW 模式最多 25% CPU 时间 */
+    unsigned long max_work;
+    if (type == ACTIVE_EXPIRE_CYCLE_FAST) {
+        max_work = ACTIVE_EXPIRE_CYCLE_FAST_DURATION;  /* 1000 微秒 */
+    } else {
+        max_work = ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC;  /* 25% */
+        max_work *= server.hz;  /* 乘以 hz 频率 */
+    }
+
+    do {
+        /* 从 expires 字典中随机取 20 个 key 作为样本 */
+        num = dictGetSomeKeys(db-&gt;expires, samples, ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP);
+
+        /* 遍历样本，删除过期的 key */
+        for (j = 0; j &lt; num; j++) {
+            dictEntry *de = samples[j];
+            long long ttl = dictGetSignedIntegerVal(de) - now;
+            if (ttl &lt; 0) {
+                deleteExpiredKeyAndPropagate(db, de);
+                expired++;
+            }
+        }
+
+        total++;
+        /* 如果过期 key 比例 &gt; 25%，说明还有很多过期 key，继续扫描 */
+    } while (expired &gt; ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP / 4
+             &amp;&amp; max_work-- &gt; 0
+             &amp;&amp; timelimit_exit == 0);
+}</code></pre>
+
+        <p>定期删除有两个工作模式：<strong>FAST</strong> 和 <strong>SLOW</strong>。它们的区别在于时间和频率：</p>
+
+        <ul>
+            <li><strong>FAST 模式：</strong>在每次事件循环返回前执行，限时 1 毫秒。如果上次 FAST 执行后时间不足 1 毫秒，或者过期比例太低，就跳过。目的是在空闲时快速清理一小批。</li>
+            <li><strong>SLOW 模式：</strong>由 <code>serverCron</code> 周期性任务触发（默认每秒 10 次，由 <code>hz</code> 配置控制），每次最多占用 25% 的 CPU 时间（即每秒最多 2.5 个时间片用于过期删除）。</li>
+        </ul>
+
+        <p>控制循环退出的关键条件之一是"如果本次 20 个样本中过期的超过 5 个（25%），就继续下一轮扫描"。这是一个自适应算法：过期比例越高，Redis 就越频繁地扫描，反之则逐步降低扫描频率。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>某电商大促活动中，运营团队一次性设置了 50 万个优惠券 key，TTL 全部设为当天 23:59:59 过期。23:59:59 一到，大量 key 同时到期，activeExpireCycle 单次扫描不完，下一轮 SLOW 模式还没轮到，期间又有大量新请求访问这些已经逻辑过期但尚未被物理删除的 key——结果 CPU 瞬间飙到 100%，latency 从 1ms 飙升到 5s。好在 Redis 的过期删除有 <code>timelimit_exit</code> 机制强行退出，不至于完全 hang 死，但整个缓存层近乎不可用。事后分析，<code>INFO stats</code> 中的 <code>expired_time_cap_reached_count</code> 暴涨到数十万。教训是：大规模 key 的过期时间一定要加入<strong>随机抖动</strong>，比如在 TTL 基础上加一个 ±10% 的随机偏移量，避免同时到期。
+        </div>
+
+        <h2>内存淘汰策略</h2>
+
+        <p>过期删除解决的是"TTL 到了"的问题，但还有另一种情况：<strong>TTL 还没到，但内存已经满了</strong>。这时候 Redis 必须主动驱逐一些 key，为新数据腾出空间——这就是内存淘汰（Eviction）。</p>
+
+        <p>Redis 提供了 <strong>8 种淘汰策略</strong>，通过 <code>maxmemory-policy</code> 配置项来选择。理解它们的差异是生产环境调优的必备技能：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>策略名</th>
+                    <th>适用范围</th>
+                    <th>算法</th>
+                    <th>典型场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>noeviction</code></td>
+                    <td>所有 key</td>
+                    <td>不淘汰，写入返回 OOM 错误</td>
+                    <td>不允许丢数据的缓存</td>
+                </tr>
+                <tr>
+                    <td><code>allkeys-lru</code></td>
+                    <td>所有 key</td>
+                    <td>近似 LRU</td>
+                    <td>通用缓存，最常用</td>
+                </tr>
+                <tr>
+                    <td><code>volatile-lru</code></td>
+                    <td>仅 TTL key</td>
+                    <td>近似 LRU</td>
+                    <td>区分持久 key 与临时 key</td>
+                </tr>
+                <tr>
+                    <td><code>allkeys-random</code></td>
+                    <td>所有 key</td>
+                    <td>随机淘汰</td>
+                    <td>请求分布均匀、无热点</td>
+                </tr>
+                <tr>
+                    <td><code>volatile-random</code></td>
+                    <td>仅 TTL key</td>
+                    <td>随机淘汰</td>
+                    <td>同 allkeys-random 但需保护持久 key</td>
+                </tr>
+                <tr>
+                    <td><code>volatile-ttl</code></td>
+                    <td>仅 TTL key</td>
+                    <td>最短 TTL 优先</td>
+                    <td>希望尽快淘汰快过期的 key</td>
+                </tr>
+                <tr>
+                    <td><code>allkeys-lfu</code></td>
+                    <td>所有 key</td>
+                    <td>近似 LFU</td>
+                    <td>访问频率差异显著的场景</td>
+                </tr>
+                <tr>
+                    <td><code>volatile-lfu</code></td>
+                    <td>仅 TTL key</td>
+                    <td>近似 LFU</td>
+                    <td>只对 TTL key 按频率淘汰</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>淘汰操作发生在每次命令执行之前。在 <code>processCommand()</code> 中，如果 <code>server.maxmemory</code> 被设置，且当前内存超出限制，就会调用 <code>freeMemoryIfNeededAndSafe()</code> → <code>freeMemoryIfNeeded()</code>。注意：<code>noeviction</code> 模式下如果内存超限，写入命令直接返回 <code>OOM command not allowed when used memory &gt; 'maxmemory'</code> 错误。</p>
+
+        <div class="tip">
+            <strong>设计建议：</strong>大多数缓存场景推荐使用 <code>allkeys-lru</code>，因为它同时淘汰有 TTL 和没有 TTL 的 key，避免了"永不过期的 key 占满内存"的问题。如果你需要确保某些 key 永不被淘汰（比如配置数据），使用 <code>volatile-lru</code> 并为这些 key 不设 TTL。还有一种高级用法：用 <code>allkeys-lfu</code> 配合业务的热度标签来获得更高的缓存命中率。
+        </div>
+
+        <h2>LRU 近似算法</h2>
+
+        <p>标准的 LRU（Least Recently Used，最近最少使用）算法要求在每次访问时记录时间戳，并在淘汰时精确找到最久未访问的那个 key。在真正的 CPU cache 硬件中，这通过全相联的硬件电路实现。但在 Redis 的纯软件实现中，"精确 LRU"意味着需要维护一个全局有序链表，每次访问都要 O(1) 的链表移动操作——这在 Redis 的单线程模型下是巨大的开销。</p>
+
+        <p>所以 Redis 采用了<strong>近似 LRU</strong>（Approximated LRU）算法。核心思想是：<strong>不追求最精确的"最久未使用"，而是在样本中找出最久的那一个</strong>。</p>
+
+        <p>每个 redisObject 中有一个 24 位的字段 <code>lru</code>，存储 LRU 时钟值：</p>
+
+        <pre><code>/* server.h - redisObject 中的 LRU 字段 */
+typedef struct redisObject {
+    unsigned type:4;      /* 类型 */
+    unsigned encoding:4;  /* 编码 */
+    unsigned lru:24;      /* LRU 时间戳 (秒级) 或 LFU 计数器 */
+    int refcount;         /* 引用计数 */
+    void *ptr;            /* 指向实际数据 */
+} robj;</code></pre>
+
+        <p>24 bits 可以存储约 194 天内的秒数（2^24 / 3600 / 24 ≈ 194）。这个 <code>lru</code> 值由全局的 <code>server.lruclock</code> 赋值，而 <code>lruclock</code> 由 <code>serverCron</code> 每 100ms 更新一次（调用 <code>getLRUClock()</code>）。所以它不是精确到毫秒的实时时钟，而是存在一定的精度损耗——但对淘汰决策来说已经足够。</p>
+
+        <p>淘汰时，<code>freeMemoryIfNeeded()</code> 会调用 <code>evictionPoolPopulate()</code> 构建一个候选池：</p>
+
+        <pre><code>/* evict.c - evictionPoolPopulate 核心逻辑 */
+void evictionPoolPopulate(int dbid, dict *sampledict,
+                          dict *keydict, struct evictionPoolEntry *pool) {
+    int count = dictGetSomeKeys(sampledict, samples, EVICTION_SAMPLES_ARRAY_SIZE);
+    /* EVICTION_SAMPLES_ARRAY_SIZE 默认为 16 */
+
+    for (int i = 0; i &lt; count; i++) {
+        /* 计算 idle 值：LRU 模式下 = 当前 lruclock - 对象的 lru 值 */
+        /* LFU 模式下 = LFUDecrAndReturn 计算的热度值 */
+        idle = estimateObjectIdleTime(o);
+        /* 将 key 及其 idle 值插入候选池（按 idle 递减排序） */
+        /* ... 插入排序逻辑，池满时淘汰 idle 最小的 */
+    }
+}</code></pre>
+
+        <p>关键点在于 <code>evictionPoolPopulate</code> 维护的是一个大小为 <strong>16</strong> 的候选池（默认 <code>EVICTION_POOL_SIZE</code>）。每次先从全局键空间中随机采样 N 个 key（默认 5 个，可通过 <code>maxmemory-samples</code> 调整），计算每个 key 的空闲时间（当前 LRU 时钟减去对象的 LRU 值），然后插入候选池。池中的 key 按空闲时间从大到小排列，淘汰时直接从池顶取出即可。</p>
+
+        <p>这种近似算法的命中率非常接近理论 LRU。根据 antirez 的 benchmark，<code>maxmemory-samples=10</code> 时，近似 LRU 的命中率已接近精确 LRU 的 99%。</p>
+
+        <h2>LFU 对数计数器</h2>
+
+        <p>Redis 4.0 引入了另一种淘汰算法——<strong>LFU</strong>（Least Frequently Used，最不经常使用）。它衡量的是"访问频率"而不是"最近访问时间"。对于有明显的"冷热"分布的业务场景（比如热点新闻比历史文章访问多得多），LFU 比 LRU 更合适。</p>
+
+        <p>但 LFU 有一个经典问题：历史数据的"惯性"——一个 key 曾经很热，即使现在不再有人访问，它的计数器可能仍然很高，导致它占着内存不被淘汰。为了解决这个问题，Redis 设计了一套精巧的<strong>对数计数器 + 衰减机制</strong>。</p>
+
+        <p>还记得那个 24 位的 <code>lru</code> 字段吗？在 LFU 模式下，这 24 位被拆分成两部分：</p>
+
+        <ul>
+            <li><strong>高 16 位：</strong>上次衰减时间（分钟级的时间戳）</li>
+            <li><strong>低 8 位：</strong>访问频次计数器（对数值，取值范围 0~255）</li>
+        </ul>
+
+        <p>计数器的增长采用<strong>对数概率</strong>方式：访问次数越多，继续增长就越难。这是为了避免高频 key 的计数器过快达到 255 而饱和。</p>
+
+        <pre><code>/* evict.c - LFU 计数器增长 */
+uint8_t LFULogIncr(uint8_t counter) {
+    /* 计数器已经最大，直接返回 */
+    if (counter == 255) return 255;
+
+    /* 随机概率增长：counter 越大，增长概率越低 */
+    double r = (double)rand() / RAND_MAX;
+    double baseval = counter - LFU_INIT_VAL;  /* 减去初始值 5 */
+    if (baseval &lt; 0) baseval = 0;
+    double p = 1.0 / (baseval * server.lfu_log_factor + 1);
+
+    if (r &lt; p) counter++;
+    return counter;
+}</code></pre>
+
+        <p>这个公式的精妙之处在于：当 <code>counter</code> 较小时，<code>p</code> 接近 1，几乎每次访问都会增长；当 <code>counter</code> 达到 100 时，<code>p</code> 约等于 1/(100 * lfu_log_factor + 1)，默认 <code>lfu_log_factor=10</code> 时，增长概率只有 0.1%。</p>
+
+        <p>计数器衰减通过 <code>LFUDecrAndReturn</code> 实现：</p>
+
+        <pre><code>/* evict.c - LFU 计数器衰减 */
+unsigned long LFUDecrAndReturn(robj *o) {
+    /* 读取高 16 位中的上次衰减时间戳 */
+    unsigned long ldt = o-&gt;lru &gt;&gt; 8;
+    /* 读取低 8 位中的计数器值 */
+    unsigned long counter = o-&gt;lru &amp; 255;
+
+    /* 计算距离上次衰减过去了多少个 lfu_decay_time 周期 */
+    unsigned long num_periods = server.lfu_decay_time ?
+        (server.unixtime - ldt) / server.lfu_decay_time : 0;
+
+    if (num_periods) {
+        /* 衰减 = counter - 周期数，最小为 0 */
+        counter = (num_periods &gt; counter) ? 0 : counter - num_periods;
+    }
+    return counter;
+}</code></pre>
+
+        <p>衰减因子 <code>lfu_decay_time</code> 默认是 1（分钟），意思是每过 1 分钟，counter 减少 1。你可以根据业务调整这个值——对新闻类场景，衰减快一些更合适（旧文章应该快速冷却）；对持久配置类 key，衰减设大甚至设为 0（不衰减）。</p>
+
+        <div class="highlight">
+            <strong>面试常考：</strong>你知道 LFU 和 LRU 各自的优缺点吗？一个经典例子是——某个 key 昨天被访问了 10000 次，今天一次都没被访问过。LFU 因为计数值很高会认为它"热"，LRU 因为 idle 值很大会认为它"冷"。所以如果你的业务有明显的时间局部性（比如热榜、新闻流），LRU 更适合；如果访问模式有稳定的"层级分布"（比如 VIP 用户的数据访问频率明显高于普通用户），LFU 效果更好。
+        </div>
+
+        <h2>淘汰流程串联</h2>
+
+        <p>现在我们把整个流程串起来。当一条写入命令到达时：</p>
+
+        <ol>
+            <li><code>processCommand()</code> 检查 <code>server.maxmemory</code>，如果当前内存超过限制，调用 <code>freeMemoryIfNeeded()</code>。</li>
+            <li><code>freeMemoryIfNeeded()</code> 根据策略选择淘汰方式：LRU/LFU 模式下调用 <code>evictionPoolPopulate()</code> 采样并构建候选池。</li>
+            <li>从候选池中取出最"冷"的 key，执行异步或同步删除，释放内存。</li>
+            <li>如果一次释放不够，继续循环，直到内存低于 <code>maxmemory</code> 或者没有可淘汰的 key。</li>
+            <li>释放过程中不会阻塞太久，每释放 16 个 key 检查一次是否超时。</li>
+        </ol>
+
+        <p>整个淘汰过程是<strong>同步阻塞</strong>的——因为内存不足时，不腾出空间，后续命令也无法执行。这也是为什么淘汰策略配置不当会导致写入延迟飙高。如果你的 Redis 实例写入吞吐很高，务必关注淘汰耗时。</p>
+
+        <p>好了，单机版 Redis 的内存管理机制——过期删除和内存淘汰——到这里就全部讲清楚了。下一章我们将走出单机，进入分布式世界的第一站：主从复制。Redis 如何把数据从一台机器复制到另一台？全量同步和部分同步有什么区别？我们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

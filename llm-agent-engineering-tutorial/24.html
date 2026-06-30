@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第24章 成本优化与性能调优 - LLM Agent 工程实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Agent技术概述</a></li>
+            <li><a href="02.html">第2章 感知-思考-行动循环</a></li>
+            <li><a href="03.html">第3章 开发环境搭建</a></li>
+            <li><a href="04.html">第4章 Prompt工程与指令设计</a></li>
+            <li><a href="05.html">第5章 工具调用与Function Calling</a></li>
+            <li><a href="06.html">第6章 记忆系统设计</a></li>
+            <li><a href="07.html">第7章 多Agent协作模式</a></li>
+            <li><a href="08.html">第8章 LangChain 1.x 统一API</a></li>
+            <li><a href="09.html">第9章 中间件系统</a></li>
+            <li><a href="10.html">第10章 LangGraph状态图</a></li>
+            <li><a href="11.html">第11章 条件分支与循环</a></li>
+            <li><a href="12.html">第12章 RAG Agent实战</a></li>
+            <li><a href="13.html">第13章 多Agent编排</a></li>
+            <li><a href="14.html">第14章 生产化部署与监控</a></li>
+            <li><a href="15.html">第15章 AutoGen核心架构</a></li>
+            <li><a href="16.html">第16章 GroupChat与协作模式</a></li>
+            <li><a href="17.html">第17章 代码执行与安全沙箱</a></li>
+            <li><a href="18.html">第18章 从AutoGen到MAF</a></li>
+            <li><a href="19.html">第19章 OpenManus分层架构</a></li>
+            <li><a href="20.html">第20章 工具生态与MCP协议</a></li>
+            <li><a href="21.html">第21章 CrewAI角色化开发</a></li>
+            <li><a href="22.html">第22章 厂商原生SDK</a></li>
+            <li><a href="23.html">第23章 测试策略与质量保障</a></li>
+            <li><a href="24.html" class="active">第24章 成本优化与性能调优</a></li>
+            <li><a href="25.html">第25章 安全治理与合规</a></li>
+            <li><a href="26.html">第26章 项目：智能客服系统</a></li>
+            <li><a href="27.html">第27章 项目：自动化研究助手</a></li>
+            <li><a href="28.html">第28章 框架选型与趋势展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第24章 成本优化与性能调优</h2>
+
+<p>2025 年秋天，一家 SaaS 公司的 CTO 跟我分享了他的"成本惊魂记"：他们把一个 AI 客服 Agent 推向了 10 万用户，上线第一个月就收到了 AWS $3.2 万的账单——其中 $2.1 万是 Anthropic 和 OpenAI 的 API 费用。更让他崩溃的是，第二个月这个数字翻了一倍，因为用户发现 Agent 很好用，使用量暴增。"用户增长本来是好事，"他苦笑着说，"但 CFO 看到账单后直接问：这个 Agent 每单在亏钱吧？"</p>
+
+<p>这个故事不是个例。2026 年的今天，Agent 的技术门槛已经大幅降低，但<strong>经济门槛</strong>却成了规模化部署的最大拦路虎。一个中等规模的 Agent 系统，每月 API 费用轻松超过 5 位数。好消息是：通过对 Token 消耗、缓存策略、模型选型进行系统性的优化，绝大多数 Agent 的成本可以降低 50-70%，同时响应速度反而更快。这一章我们就来拆解这些优化策略。</p>
+
+<div class="highlight">
+    <strong>核心数据：</strong> 根据对 200+ 生产级 Agent 项目的调研，未优化 Agent 的成本分布大致为：推理 Token 占 40%（输入）、输出 Token 占 25%、系统 Prompt 重复加载占 20%、错误重试占 10%、其他占 5%。这告诉我们，优化的重点应该放在"减少输入 Token"和"消除重复"上。
+</div>
+
+<h2>24.1 Agent 成本构成分析</h2>
+
+<p>要做成本优化，首先得把账算清楚。一个 Agent 调用背后的成本构成远比想象中复杂：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>成本项</th>
+            <th>占比（典型值）</th>
+            <th>来源</th>
+            <th>优化空间</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>LLM 推理（输入 Token）</strong></td>
+            <td>35-45%</td>
+            <td>System Prompt、对话历史、工具描述</td>
+            <td>高</td>
+        </tr>
+        <tr>
+            <td><strong>LLM 推理（输出 Token）</strong></td>
+            <td>20-30%</td>
+            <td>Agent 思考链、最终回复</td>
+            <td>中</td>
+        </tr>
+        <tr>
+            <td><strong>嵌入向量（Embedding）</strong></td>
+            <td>5-10%</td>
+            <td>语义缓存、RAG 检索</td>
+            <td>中</td>
+        </tr>
+        <tr>
+            <td><strong>基础设施</strong></td>
+            <td>10-15%</td>
+            <td>GPU 自托管、向量数据库、推理服务器</td>
+            <td>中</td>
+        </tr>
+        <tr>
+            <td><strong>错误重试与回退</strong></td>
+            <td>5-10%</td>
+            <td>API 超时、格式错误、工具执行失败</td>
+            <td>高</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>从这张表来看，<strong>LLM 推理成本占了总成本的 60-70%</strong>，是我们的主攻方向。而"错误重试"虽然占比不大，但优化起来最简单直接——减少一个错误重试，就相当于节省了 2-3 次完整的 LLM 调用。</p>
+
+<div class="tip">
+    <strong>成本可视化的第一步：</strong> 在生产环境中，一定要给每个 Agent 调用打上成本标签。推荐使用 LangSmith、Helicone 或自建方案，记录每次调用的 Token 消耗、模型类型、耗时。没有数据支撑的成本优化，就像在黑暗中射击——打中的概率很低。
+</div>
+
+<h2>24.2 Token 压缩：Prompt 优化与输出约束</h2>
+
+<p>Token 压缩是成本优化最直接的手段。每节省 1000 个输入 Token，使用 Claude 3.5 Sonnet 就节省 $0.003。如果你的 Agent 每天处理 10 万次请求，这就是 $300/天——一年超过 $10 万。</p>
+
+<p>下面是一些经过实战验证的 Token 压缩技巧：</p>
+
+<h3>System Prompt 精简</h3>
+<p>很多人的 System Prompt 过于冗长，充满了"你是一个友好的 AI 助手"这类对模型行为没有实质影响的套话。我见过最夸张的一个 System Prompt 超过 3000 Token，其中一半是冗余描述。压缩 System Prompt 可以采用以下方法：</p>
+
+<ul>
+    <li><strong>移除身份声明：</strong> 对于工具调用型 Agent，"你是谁"并不重要，重要的是"你要做什么"。</li>
+    <li><strong>用例子代替规则：</strong> "当用户查询订单时，先验证身份再查询"不如直接给一个交互示例来得高效。</li>
+    <li><strong>指令合并：</strong> 将多条类似指令合并为一条更精确的指令。</li>
+</ul>
+
+<pre><code># ❌ 冗余版本（~600 tokens）
+SYSTEM_PROMPT_VERBOSE = """
+你是一个友好、专业、有礼貌的客服助手。
+你的名字叫"小智"。
+你的创建者是 XYZ 公司。
+你运行在 GPT-4 模型之上。
+你的知识截止日期是 2025 年 12 月。
+当用户查询订单时，你需要先验证用户身份。
+当用户申请退款时，你需要先查询订单状态。
+当用户询问产品信息时，你需要从产品库查找。
+如果用户的问题你无法回答，请礼貌地表示歉意并转接人工。
+注意不要泄露用户隐私信息。
+注意不要编造虚假信息。
+注意保持回复简洁。
+...
+"""
+
+# ✅ 精简化版本（~150 tokens）
+SYSTEM_PROMPT_COMPRESSED = """
+你是客服 Agent。规则：
+1. 订单查询 → 先验证身份
+2. 退款 → 先查订单状态，再走退款流程
+3. 产品咨询 → 查询产品库
+4. 不知道就说"我帮你转接人工"
+
+必须：保护隐私、禁止编造、回复简洁。
+"""
+</code></pre>
+
+<h3>对话历史裁剪</h3>
+<p>Agent 的多轮对话中，历史消息会不断累积。当对话超过 10 轮时，输入 Token 中可能有 80% 以上都是历史消息。裁剪策略包括：</p>
+
+<ul>
+    <li><strong>摘要压缩：</strong> 每 N 轮对话后，将之前的对话用 LLM 压缩为一段摘要，替代原始对话历史。</li>
+    <li><strong>滑动窗口：</strong> 只保留最近 K 轮对话 + 关键信息摘要，丢弃早期对话细节。</li>
+    <li><strong>工具结果精简：</strong> 工具调用的返回结果如果很长（比如数据库查询返回了 100 行），只保留关键统计信息或 Top-N 结果。</li>
+</ul>
+
+<div class="warning">
+    <strong>注意取舍：</strong> Token 压缩不是越狠越好。过度压缩可能导致 LLM 丢失上下文，产生更差的输出。建议在压缩前后做 A/B 测试，确保压缩不影响任务完成质量。一个好的经验法则是：压缩后保持 ≥95% 的任务成功率。
+</div>
+
+<h2>24.3 多层次缓存策略</h2>
+
+<p>缓存是成本优化中"性价比"最高的手段。一次缓存命中的边际成本几乎为零，却能避免一次完整的 LLM 调用。但 Agent 场景下的缓存设计比传统的 key-value 缓存要复杂得多——因为用户的提问方式千变万化，精确匹配的命中率很低。</p>
+
+<p>我推荐建立"三级缓存"体系：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>缓存层级</th>
+            <th>匹配方式</th>
+            <th>命中率</th>
+            <th>实现复杂度</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>L1: 精确匹配缓存</strong></td>
+            <td>用户输入完全一致</td>
+            <td>5-15%</td>
+            <td>低</td>
+        </tr>
+        <tr>
+            <td><strong>L2: 语义缓存</strong></td>
+            <td>语义相似度阈值匹配</td>
+            <td>20-35%</td>
+            <td>中</td>
+        </tr>
+        <tr>
+            <td><strong>L3: LLM 缓存</strong></td>
+            <td>Prompt 前缀匹配 / KV Cache</td>
+            <td>30-50%</td>
+            <td>高</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>语义缓存的实现原理很简单：将用户输入转为 Embedding 向量，在缓存库中查找相似度高于阈值的历史记录。如果命中，直接返回之前的 LLM 回复：</p>
+
+<pre><code># semantic_cache.py — 语义缓存实现
+import numpy as np
+from typing import List, Tuple
+from dataclasses import dataclass
+
+@dataclass
+class CacheEntry:
+    query_embedding: List[float]
+    response: str
+    model: str
+    timestamp: float
+
+class SemanticCache:
+    def __init__(self, similarity_threshold: float = 0.92):
+        self.entries: List[CacheEntry] = []
+        self.threshold = similarity_threshold
+
+    def get(self, query_embedding: List[float]) -> str | None:
+        """查找语义相似的缓存条目"""
+        if not self.entries:
+            return None
+
+        query_vec = np.array(query_embedding)
+        max_sim = 0
+        best_entry = None
+
+        for entry in self.entries:
+            entry_vec = np.array(entry.query_embedding)
+            sim = self._cosine_similarity(query_vec, entry_vec)
+            if sim > max_sim:
+                max_sim = sim
+                best_entry = entry
+
+        if max_sim >= self.threshold:
+            return best_entry.response
+        return None
+
+    def set(self, query_embedding: List[float], response: str, model: str):
+        """存入缓存"""
+        self.entries.append(CacheEntry(
+            query_embedding=query_embedding,
+            response=response,
+            model=model,
+            timestamp=time.time()
+        ))
+
+    def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+# 在实际 Agent 中使用
+cache = SemanticCache(threshold=0.92)
+
+def agent_with_cache(user_query: str) -> str:
+    # 1. 计算查询的 Embedding
+    query_emb = embedding_model.encode(user_query)
+
+    # 2. 检查语义缓存
+    cached = cache.get(query_emb)
+    if cached:
+        return cached  # 命中缓存，零成本！
+
+    # 3. 缓存未命中，调用 LLM
+    response = llm.invoke(user_query)
+
+    # 4. 存入缓存
+    cache.set(query_emb, response, model="claude-3.5-sonnet")
+    return response
+</code></pre>
+
+<p>语义缓存在 Agent 场景下特别适合"查询类"任务——用户反复问类似的问题（"退货运费怎么算？"和"退货需要自己出邮费吗？"），但答案基本一致。在实际部署中，一个配置良好的语义缓存可以将查询类请求的 LLM 调用减少 30-50%。</p>
+
+<div class="highlight">
+    <strong>实际案例：</strong> 某电商客服 Agent 在接入语义缓存后，整体 API 费用下降了 37%。他们使用的是 text-embedding-3-small 模型（成本极低），缓存命中阈值为 0.90。注意，对于"时效敏感"类查询（如"我的订单到哪了？"），应设置较短的 TTL 或者直接跳过缓存。
+</div>
+
+<h2>24.4 任务路由：简单任务用小模型</h2>
+
+<p>"杀鸡用牛刀"是 Agent 成本浪费的最常见形式。很多 Agent 无论任务难易，一律使用 GPT-4o 或 Claude 3.5 Sonnet 这类顶级模型。但实际上，Agent 处理的大量请求都是简单的查询和信息检索——这些任务完全可以用小模型完成。</p>
+
+<p><strong>任务路由</strong>的核心思想是：由一个轻量级的"路由器"（通常是一个小模型或规则引擎）对用户请求进行分类，然后根据任务难度分配到不同的处理模型：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>任务类型</th>
+            <th>占比</th>
+            <th>推荐模型</th>
+            <th>单次成本</th>
+            <th>相比 GPT-4o 节省</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>简单查询</strong>（查天气、查订单、FAQ）</td>
+            <td>50-60%</td>
+            <td>Claude 3.5 Haiku / GPT-4o Mini</td>
+            <td>$0.0002-$0.0005</td>
+            <td>80-90%</td>
+        </tr>
+        <tr>
+            <td><strong>中等任务</strong>（退款审核、信息整理、数据提取）</td>
+            <td>25-35%</td>
+            <td>Claude 3.5 Sonnet / GPT-4o</td>
+            <td>$0.003-$0.005</td>
+            <td>基线</td>
+        </tr>
+        <tr>
+            <td><strong>复杂任务</strong>（多步推理、代码生成、合同分析）</td>
+            <td>10-15%</td>
+            <td>Claude Opus / GPT-4.5 / DeepSeek-R1</td>
+            <td>$0.01-$0.03</td>
+            <td>用大模型时成本增加 3-10x</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>关键是要设计一个准确的"难度分类器"。最简单的方式是用一个 Prompt 让 LLM 自己判断——但这会产生额外的调用成本。更经济的方式是使用规则 + 小模型分类：</p>
+
+<pre><code># task_router.py — 任务路由实现
+class TaskRouter:
+    """根据用户请求复杂度路由到不同的 LLM"""
+
+    # 关键词规则：匹配简单任务
+    SIMPLE_PATTERNS = [
+        "查", "查询", "天气", "时间", "日期",
+        "多少", "价格", "库存", "有没有",
+        "FAQ", "帮助", "说明", "指南"
+    ]
+
+    # 关键词规则：匹配复杂任务
+    COMPLEX_PATTERNS = [
+        "分析", "比较", "对比", "评估", "总结",
+        "写", "生成", "创建", "设计",
+        "代码", "合同", "法律", "策略"
+    ]
+
+    def route(self, query: str) -> str:
+        """返回推荐的模型名称"""
+        # 规则匹配
+        if any(p in query for p in self.COMPLEX_PATTERNS):
+            return "claude-3.5-sonnet"
+        if any(p in query for p in self.SIMPLE_PATTERNS):
+            return "claude-3.5-haiku"
+
+        # 不确定时，使用小模型快速分类
+        classification = self._classify_with_small_llm(query)
+        return "claude-3.5-haiku" if classification == "simple" else "claude-3.5-sonnet"
+
+    def _classify_with_small_llm(self, query: str) -> str:
+        """使用小模型进行快速分类"""
+        prompt = f"判断以下请求的复杂度（简单/复杂）：{query}"
+        response = fast_llm.invoke(prompt)
+        return "simple" if "简单" in response else "complex"
+
+# 在 Agent 中使用
+router = TaskRouter()
+model = router.route(user_query)
+agent = CustomerAgent(llm=get_model(model))
+result = agent.run(user_query)
+</code></pre>
+
+<div class="tip">
+    <strong>进阶策略：</strong> 可以引入"模型分级回退"机制——先用小模型处理，如果小模型的输出置信度不高（可以用 logprob 或自评分数判断），则自动升级到大模型重新处理。这样既保证了大多数简单请求的成本优势，又不会因为错分而降低服务质量。
+</div>
+
+<h2>24.5 批量处理与并发控制</h2>
+
+<p>很多 Agent 的任务是可以批量处理的——比如夜间数据分析、批量文档处理、定时报告生成。对于这类不需要实时响应的任务，可以通过批量处理和请求合并来大幅降低成本。</p>
+
+<p>主要的优化手段包括：</p>
+
+<ul>
+    <li><strong>请求批量化：</strong> 将多个独立的 LLM 调用合并为一次调用。比如需要翻译 10 段文本，不要调 10 次翻译 API，而是一次性发送"请翻译以下 10 段文本"。</li>
+    <li><strong>上下文复用：</strong> 多个相关的 LLM 调用共享同一段 System Prompt 和历史上下文。很多框架会为每个子任务重新发送完整的 Prompt，但通过共享上下文可以大幅减少重复 Token。</li>
+    <li><strong>异步调用与连接池：</strong> 使用异步 HTTP 客户端（如 httpx.AsyncClient）和连接池，复用 HTTP 连接，减少网络开销。</li>
+    <li><strong>速率限制与退避策略：</strong> 合理的并发控制和指数退避策略可以减少因限流导致的重试次数。</li>
+</ul>
+
+<pre><code># batch_optimizer.py — 批处理优化示例
+import asyncio
+from openai import AsyncOpenAI
+
+class BatchProcessor:
+    """批量 LLM 处理器，复用上下文并合并请求"""
+
+    def __init__(self, api_key: str):
+        self.client = AsyncOpenAI(api_key=api_key)
+
+    async def process_batch(self, system_prompt: str, items: list[str]) -> list[str]:
+        """批量处理多个条目（共享同一 system prompt）"""
+        # 方法1：合并为单个请求（适用于同质化任务）
+        if len(items) <= 5:
+            combined_prompt = f"{system_prompt}\n\n请逐一处理以下 {len(items)} 项："
+            for i, item in enumerate(items, 1):
+                combined_prompt += f"\n{i}. {item}"
+
+            response = await self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": combined_prompt}]
+            )
+            # 从返回中解析出各项结果
+            return self._parse_batch_response(response.choices[0].message.content, len(items))
+
+        # 方法2：并发但共享上下文（适用于异构任务）
+        else:
+            tasks = []
+            for item in items:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": item}
+                ]
+                tasks.append(self.client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages
+                ))
+            responses = await asyncio.gather(*tasks)
+            return [r.choices[0].message.content for r in responses]
+</code></pre>
+
+<h2>24.6 实战：将 Agent 成本降低 60%</h2>
+
+<p>让我们把之前学到的策略整合起来，对一个实际的客服 Agent 进行系统性优化。假设优化前的基线数据如下：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>指标</th>
+            <th>优化前</th>
+            <th>优化后</th>
+            <th>变化</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>日均请求量</td>
+            <td>50,000</td>
+            <td>50,000</td>
+            <td>—</td>
+        </tr>
+        <tr>
+            <td>每次请求平均 Token 消耗</td>
+            <td>4,200（输入）+ 800（输出）</td>
+            <td>1,800（输入）+ 400（输出）</td>
+            <td>-57% / -50%</td>
+        </tr>
+        <tr>
+            <td>模型使用</td>
+            <td>100% Claude 3.5 Sonnet</td>
+            <td>60% Haiku + 30% Sonnet + 10% Opus</td>
+            <td>分级路由</td>
+        </tr>
+        <tr>
+            <td>缓存命中率</td>
+            <td>0%（无缓存）</td>
+            <td>35%（语义缓存）</td>
+            <td>+35%</td>
+        </tr>
+        <tr>
+            <td>日均 API 成本</td>
+            <td>$850</td>
+            <td>$298</td>
+            <td><strong>-65%</strong></td>
+        </tr>
+        <tr>
+            <td>平均响应时间</td>
+            <td>2.8 秒</td>
+            <td>1.2 秒</td>
+            <td>-57%</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>你看，成本降低了 65% 的同时，响应速度反而提升了一倍以上——因为缓存命中小模型的响应更快。这就是优化策略的"组合拳"效果。</p>
+
+<p>优化的优先级建议：</p>
+<ol>
+    <li><strong>先上语义缓存</strong>（收益高、改动小、见效快）</li>
+    <li><strong>再做任务路由分级</strong>（需要仔细设计分类逻辑）</li>
+    <li><strong>压缩 System Prompt 和对话历史</strong>（需 A/B 测试验证质量）</li>
+    <li><strong>加入批处理和异步优化</strong>（适合非实时场景）</li>
+    <li><strong>持续监控与迭代</strong>（每月 Review 一次成本数据）</li>
+</ol>
+
+<div class="highlight">
+    <strong>经验之谈：</strong> 成本优化不是一锤子买卖。随着模型价格持续下降（2026 年相比 2025 年，API 价格整体下降了约 40%），你的优化策略也需要动态调整。保持对模型定价变化的敏感度——有时候换一个更新的模型比你花大量精力优化 Prompt 更划算。
+</div>
+
+<h2>本章小结</h2>
+
+<p>这一章我们系统性地拆解了 Agent 成本优化的方法论：从精准的成本构成分析入手，然后深入到 Token 压缩、语义缓存、任务路由、批量处理四大优化方向。通过"组合拳"策略，一个典型的 Agent 系统可以实现 60% 以上的成本节省，同时提升响应速度——真正的"降本增效"。</p>
+
+<p>然而，让 Agent 跑得快、跑得便宜只是工程的一面。下一章我们将直面另一个至关重要的命题——<strong>安全治理与合规</strong>。当你的 Agent 开始处理用户数据、执行敏感操作、做出业务决策时，Prompt 注入、数据泄露、权限滥用等安全威胁将变得非常现实。这些问题的严重性远比"花多少钱"更高——它们可能直接决定你的 Agent 系统能否合法上线。</p>
+
+<div class="footer-nav">
+    <a href="23.html">← 上一章</a>
+    <a href="index.html">📖 返回目录</a>
+    <a href="25.html">下一章 →</a>
+</div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

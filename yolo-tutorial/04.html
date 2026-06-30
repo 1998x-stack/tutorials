@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 YOLOv2/YOLO9000</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 目标检测概述</a></li>
+            <li><a href="02.html">第2章 YOLO设计哲学</a></li>
+            <li><a href="03.html">第3章 YOLOv1详解</a></li>
+            <li><a href="04.html" class="active">第4章 YOLOv2/YOLO9000</a></li>
+            <li><a href="05.html">第5章 YOLOv3核心架构</a></li>
+            <li><a href="06.html">第6章 YOLOv3工程实战</a></li>
+            <li><a href="07.html">第7章 YOLOv4集大成</a></li>
+            <li><a href="08.html">第8章 锚框机制与聚类</a></li>
+            <li><a href="09.html">第9章 损失函数演进</a></li>
+            <li><a href="10.html">第10章 特征金字塔FPN</a></li>
+            <li><a href="11.html">第11章 数据增强策略</a></li>
+            <li><a href="12.html">第12章 骨干网络对比</a></li>
+            <li><a href="13.html">第13章 Neck与Head设计</a></li>
+            <li><a href="14.html">第14章 NMS与后处理</a></li>
+            <li><a href="15.html">第15章 YOLOv5入门</a></li>
+            <li><a href="16.html">第16章 YOLOv8新特性</a></li>
+            <li><a href="17.html">第17章 YOLOv9/v10前沿</a></li>
+            <li><a href="18.html">第18章 YOLO11/v12演进</a></li>
+            <li><a href="19.html">第19章 模型轻量化</a></li>
+            <li><a href="20.html">第20章 小目标检测优化</a></li>
+            <li><a href="21.html">第21章 部署与推理加速</a></li>
+            <li><a href="22.html">第22章 边缘设备部署</a></li>
+            <li><a href="23.html">第23章 数据标注与格式</a></li>
+            <li><a href="24.html">第24章 训练流水线搭建</a></li>
+            <li><a href="25.html">第25章 模型评估与调优</a></li>
+            <li><a href="26.html">第26章 YOLO+多模态</a></li>
+            <li><a href="27.html">第27章 行业实战案例</a></li>
+            <li><a href="28.html">第28章 综合实训项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第4章 YOLOv2/YOLO9000</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们分析了YOLOv1的架构和局限性——小目标检测差、定位精度低、每个网格只能检测一个类别。这些问题的根因在于YOLOv1"太纯净"了——没有锚框先验、网格太粗、骨干网络也简单。Redmon显然意识到了这些问题。2017年CVPR上，YOLOv2带着一系列系统性的改进登场了。</p>
+
+        <p>YOLOv2不仅让检测更准更稳，更通过WordTree实现了让人惊叹的跨数据集联合训练。论文还有一个彩蛋——YOLO9000能够检测超过9000个物体类别。想象一下，当时最主要的目标检测数据集COCO只有80个类别，而PASCAL VOC只有20个类。9000个类是什么概念？它意味着YOLO是第一个真正意义上"开放词汇"级别的实时检测系统。这一章，我们来拆解YOLOv2的所有关键改进。</p>
+
+        <h3>4.1 锚框机制：让模型学会"先验"</h3>
+
+        <p>YOLOv1最大的痛点之一是预测框非常"自由"，没有形状和大小的先验约束。YOLOv2引入锚框（anchor box）来解决这个问题——在特征图的每个位置上预设一组不同尺度和长宽比的"参考框"，模型只需要预测这些参考框的偏移量，而不是凭空预测坐标。</p>
+
+        <p>但YOLOv2的锚框设计有一个关键创新：<strong>锚框的初始尺寸不是人工指定的，而是通过K-means聚类从训练数据中自动学习而来的</strong>。作者在PASCAL VOC和COCO数据集上运行K-means聚类，发现当使用5个锚框时，模型在召回率和复杂度之间取得了最佳平衡。</p>
+
+        <pre><code># 使用 K-means 聚类生成锚框尺寸
+# 距离度量: d(box, centroid) = 1 - IoU(box, centroid)
+# 这种度量方式关注框的形状而非绝对大小
+
+# PASCAL VOC 上聚类得到的 5 个锚框:
+# (0.57, 0.68), (0.88, 1.45), (1.52, 2.18),
+# (2.52, 3.42), (4.12, 6.17)
+# （以上数值相对于特征图尺寸归一化）
+
+# 预测公式:
+# b_x = σ(t_x) + c_x          (中心 x 偏移)
+# b_y = σ(t_y) + c_y          (中心 y 偏移)
+# b_w = p_w * exp(t_w)        (宽度缩放)
+# b_h = p_h * exp(t_h)        (高度缩放)
+# 其中 c_x, c_y 是网格偏移，p_w, p_h 是锚框尺寸</code></pre>
+
+        <p>引入锚框后，YOLOv2的召回率从YOLOv1的81%大幅提升到88%。但代价是mAP略微下降了——从69.5下降到69.2。这是因为锚框增加了每个网格的预测框数量（从2个增加到每个位置多个），带来了更多的候选框，但也增加了假阳性。不过后续的其他改进很快弥补了这个损失。</p>
+
+        <div class="tip">
+            <strong>小贴士：</strong>K-means聚类时使用1-IoU作为距离度量是一个非常精妙的设计。如果使用欧氏距离，大框的误差会主导聚类结果，小框的分布会被忽略。而IoU对框的尺寸不敏感，只关注形状相似度，因此聚类出的锚框能更好地覆盖不同尺度的物体。这个设计思路后来被几乎所有基于锚框的检测器所采纳。
+        </div>
+
+        <h3>4.2 Batch Normalization：稳定训练的基石</h3>
+
+        <p>YOLOv2在所有卷积层后都添加了Batch Normalization（BN）层。这个看似简单的改动带来了多重收益：</p>
+        <ul>
+            <li><strong>更快的收敛</strong>：BN使得每一层的输入分布保持稳定，允许使用更大的学习率，训练速度提升约2倍</li>
+            <li><strong>正则化效果</strong>：BN引入的噪声起到了类似Dropout的正则化作用，YOLOv2完全去掉了Dropout层也没有过拟合</li>
+            <li><strong>mAP提升超过2%</strong>：单是添加BN这一项改动，就在PASCAL VOC上带来了2%以上的mAP提升</li>
+        </ul>
+
+        <h3>4.3 High-Resolution Classifier：从224到448</h3>
+
+        <p>YOLOv1的预训练是在ImageNet上以224×224分辨率进行的，然后在检测阶段直接切换到448×448。问题是——模型在ImageNet上学到的特征提取能力是针对224×224分辨率的，突然跳到448×448后，模型需要花额外的训练时间"适应"高分辨率输入。</p>
+
+        <p>YOLOv2的改进思路非常直接：<strong>先在ImageNet上以224×224进行常规预训练，然后在ImageNet上额外以448×448分辨率微调10个epoch</strong>，让模型的高分辨率特征提取能力先准备好，再进入检测训练阶段。这个策略使得模型的mAP提升了约4%。</p>
+
+        <h3>4.4 Multi-Scale Training：让模型适应各种尺寸</h3>
+
+        <p>YOLOv2引入了一个非常实用的训练技巧——多尺度训练。具体做法是：<strong>每10个batch随机改变一次输入图像的尺寸</strong>，从320×320到608×608，步长为32像素（因为网络的下采样倍数为32）。</p>
+
+        <p>这种做法的好处很明显：</p>
+        <ul>
+            <li><strong>尺度鲁棒性</strong>：模型学会了在不同尺度下检测物体，不会因为输入尺寸变化而性能大幅波动</li>
+            <li><strong>单模型多分辨率推理</strong>：训练好的模型可以在不同分辨率下推理——高分辨率（高精度但慢）或低分辨率（低精度但快），用户可以根据需求自由权衡</li>
+            <li><strong>数据增强</strong>：相当于免费得到了大量不同尺度的训练样本</li>
+        </ul>
+
+        <table>
+            <tr>
+                <th>输入分辨率</th>
+                <th>mAP (VOC 2007)</th>
+                <th>推理速度 (FPS)</th>
+                <th>适用场景</th>
+            </tr>
+            <tr>
+                <td>352×352</td>
+                <td>73.6</td>
+                <td>90</td>
+                <td>移动端/边缘设备</td>
+            </tr>
+            <tr>
+                <td>416×416</td>
+                <td>76.8</td>
+                <td>67</td>
+                <td>通用实时检测</td>
+            </tr>
+            <tr>
+                <td>480×480</td>
+                <td>77.8</td>
+                <td>52</td>
+                <td>平衡模式</td>
+            </tr>
+            <tr>
+                <td>544×544</td>
+                <td>78.2</td>
+                <td>42</td>
+                <td>高精度模式</td>
+            </tr>
+        </table>
+
+        <h3>4.5 Darknet-19：更高效的骨干网络</h3>
+
+        <p>YOLOv2抛弃了YOLOv1的GoogLeNet变体，设计了一个全新的骨干网络——<strong>Darknet-19</strong>。顾名思义，它包含19个卷积层，但参数量更少、计算效率更高、表达能力更强。</p>
+
+        <p>Darknet-19的设计核心理念是<strong>"在压缩中提炼"</strong>：先用1×1卷积压缩通道数，再用3×3卷积提取特征，交替使用。这种设计使得网络在保持表达能力的同时，参数量远低于VGG-16等主流骨干网络。</p>
+
+        <pre><code># Darknet-19 架构概览
+# 输入: 224×224×3
+
+# 特征提取阶段 (用于分类预训练)
+# Conv 3×3 × 32 → MaxPool 2×2
+# Conv 3×3 × 64 → MaxPool 2×2
+# Conv 3×3 × 128 → Conv 1×1 × 64 → Conv 3×3 × 128 → MaxPool 2×2
+# Conv 3×3 × 256 → Conv 1×1 × 128 → Conv 3×3 × 256 → MaxPool 2×2
+# Conv 3×3 × 512 → Conv 1×1 × 256 → Conv 3×3 × 512 → Conv 1×1 × 256 → Conv 3×3 × 512 → MaxPool 2×2
+# Conv 3×3 × 1024 → Conv 1×1 × 512 → Conv 3×3 × 1024 → Conv 1×1 × 512 → Conv 3×3 × 1024
+
+# 分类头 (ImageNet 预训练时用)
+# AvgPool → Softmax 1000
+
+# 检测阶段替换为:
+# 3×3 × 1024 conv → 1×1 × (num_anchors × (5 + num_classes)) conv</code></pre>
+
+        <div class="highlight">
+            <strong>架构对比：</strong>YOLOv1的骨干网络约30M参数，Darknet-19仅约20M参数，但ImageNet Top-5准确率从YOLOv1的88.0%提升到Darknet-19的91.2%。这说明Darknet-19在参数量更少的情况下学到了更好的特征表示——核心原因就是1×1+3×3卷积组合比大尺寸卷积核效率更高。
+        </div>
+
+        <h3>4.6 WordTree：YOLO9000的跨数据集联合训练</h3>
+
+        <p>这一节是YOLOv2论文中最有创意也最容易被低估的贡献。YOLO9000的目标是训练一个能检测超过9000个类别的模型，但当时最大的标注检测数据集（COCO）也只有80个类别。更多的类别虽然有ImageNet等分类数据集，但这些数据没有边界框标注。怎么办？</p>
+
+        <p>Redmon的答案是<strong>WordTree</strong>——一个层次化的类别标签结构。具体来说：</p>
+        <ul>
+            <li>将ImageNet的1万多个类别按照WordNet的语义层级关系组织成一颗树</li>
+            <li>每个节点代表一个类别（如"动物→哺乳动物→犬科→狗→金毛"）</li>
+            <li>在树中，每个类别的概率是<strong>条件概率的乘积</strong>：P(金毛) = P(动物) × P(哺乳动物|动物) × P(犬科|哺乳动物) × P(狗|犬科) × P(金毛|狗)</li>
+            <li>训练时，检测数据（COCO）使用完整的检测损失，分类数据（ImageNet）只更新分类部分的梯度</li>
+        </ul>
+
+        <p>这个设计的精妙之处在于：<strong>检测数据教会模型"物体在哪里"，分类数据教会模型"物体是什么"</strong>，两者通过共享的骨干网络和WordTree结构无缝衔接。最终YOLO9000在ImageNet检测任务上实现了19.7 mAP，能够检测超过9000个未见过的类别的物体。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我曾经尝试复现YOLO9000的WordTree训练，在自定义数据集上做联合训练。最大的坑是<strong>类别树的构建质量直接影响检测效果</strong>。一开始我直接用了WordNet的原始层次结构，但发现有些类别在WordNet中的父节点分类不够合理（比如"无人机"被分在"航空器"下，而"航空器"的父节点是"交通工具"——这对于检测场景来说语义路径太长，导致梯度传播效率低下）。后来我手动调整了类别树的深度和分支，检测效果才有明显改善。WordTree不是"拿来就用"的技术，需要针对你的数据做定制化设计。
+        </div>
+
+        <h3>4.7 YOLOv2性能总结</h3>
+
+        <p>综合上述所有改进，YOLOv2在PASCAL VOC 2007测试集上达到了<strong>76.8 mAP</strong>（输入416×416），同时保持67 FPS的推理速度。相比之下，Faster R-CNN的mAP虽然更高（78.2），但速度只有7 FPS。YOLOv2在几乎所有指标上都大幅超越了YOLOv1，并且速度几乎没有损失。</p>
+
+        <table>
+            <tr>
+                <th>模型</th>
+                <th>mAP (VOC 2007)</th>
+                <th>FPS</th>
+                <th>关键改进</th>
+            </tr>
+            <tr>
+                <td>YOLOv1</td>
+                <td>63.4</td>
+                <td>45</td>
+                <td>—（baseline）</td>
+            </tr>
+            <tr>
+                <td>YOLOv2</td>
+                <td>76.8</td>
+                <td>67</td>
+                <td>锚框+BN+高分辨率+多尺度</td>
+            </tr>
+            <tr>
+                <td>YOLO9000</td>
+                <td>19.7 (ImageNet det)</td>
+                <td>40</td>
+                <td>WordTree跨数据集训练</td>
+            </tr>
+            <tr>
+                <td>Faster R-CNN (VGG-16)</td>
+                <td>78.2</td>
+                <td>7</td>
+                <td>两阶段baseline</td>
+            </tr>
+        </table>
+
+        <p>YOLOv2用锚框、BN、多尺度训练等一系列"局部改进"，把YOLOv1的潜力充分挖掘了出来。更重要的是，Darknet-19为后续的骨干网络演进奠定了基础。但YOLOv2最大的痛点还没有解决——<strong>多尺度检测</strong>。YOLOv2仍然只在单一尺度的特征图上做预测，这意味着它对不同大小物体的检测能力仍然有限。这个核心问题，将由下一章的YOLOv3来彻底解决。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 YOLOv1详解</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 目标检测概述</a></li>
+            <li><a href="02.html">第2章 YOLO设计哲学</a></li>
+            <li><a href="03.html" class="active">第3章 YOLOv1详解</a></li>
+            <li><a href="04.html">第4章 YOLOv2/YOLO9000</a></li>
+            <li><a href="05.html">第5章 YOLOv3核心架构</a></li>
+            <li><a href="06.html">第6章 YOLOv3工程实战</a></li>
+            <li><a href="07.html">第7章 YOLOv4集大成</a></li>
+            <li><a href="08.html">第8章 锚框机制与聚类</a></li>
+            <li><a href="09.html">第9章 损失函数演进</a></li>
+            <li><a href="10.html">第10章 特征金字塔FPN</a></li>
+            <li><a href="11.html">第11章 数据增强策略</a></li>
+            <li><a href="12.html">第12章 骨干网络对比</a></li>
+            <li><a href="13.html">第13章 Neck与Head设计</a></li>
+            <li><a href="14.html">第14章 NMS与后处理</a></li>
+            <li><a href="15.html">第15章 YOLOv5入门</a></li>
+            <li><a href="16.html">第16章 YOLOv8新特性</a></li>
+            <li><a href="17.html">第17章 YOLOv9/v10前沿</a></li>
+            <li><a href="18.html">第18章 YOLO11/v12演进</a></li>
+            <li><a href="19.html">第19章 模型轻量化</a></li>
+            <li><a href="20.html">第20章 小目标检测优化</a></li>
+            <li><a href="21.html">第21章 部署与推理加速</a></li>
+            <li><a href="22.html">第22章 边缘设备部署</a></li>
+            <li><a href="23.html">第23章 数据标注与格式</a></li>
+            <li><a href="24.html">第24章 训练流水线搭建</a></li>
+            <li><a href="25.html">第25章 模型评估与调优</a></li>
+            <li><a href="26.html">第26章 YOLO+多模态</a></li>
+            <li><a href="27.html">第27章 行业实战案例</a></li>
+            <li><a href="28.html">第28章 综合实训项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第3章 YOLOv1详解</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们聊了YOLO的设计哲学，知道了它"一步到位"的核心思想。但哲学再动人，最终还是要落到具体的数学和工程实现上。今天我们就来拆解这个一切的起点——2015年CVPR上发表的YOLOv1。</p>
+
+        <p>2015年的YOLOv1在今天看来或许简陋，但它第一次证明了检测可以像分类一样简单直接。就像莱特兄弟的第一架飞机，虽然只能飞12秒、59米，但它证明了"比空气重的飞行器可以飞"——YOLOv1证明的是"一步到位检测是可行的"。这个信念支撑了后续整个YOLO家族十余年的演进。</p>
+
+        <h3>3.1 核心思想：Grid-Based Detection</h3>
+
+        <p>YOLOv1将输入图像划分为<strong>S×S个网格（grid cell）</strong>，其中S=7。也就是说，一张448×448的图像被均匀地分成7×7=49个网格，每个网格的尺寸是64×64像素。每个网格负责检测<strong>中心点落在该网格内</strong>的物体。</p>
+
+        <p>每个网格预测B个边界框（B=2），每个框包含5个预测值：</p>
+        <ul>
+            <li><strong>x, y</strong> — 边界框中心相对于网格单元格的偏移量（归一化到0~1）</li>
+            <li><strong>w, h</strong> — 边界框的宽和高相对于整张图像的比例（归一化到0~1）</li>
+            <li><strong>confidence</strong> — 置信度，表示该框包含物体的概率乘以IoU</li>
+        </ul>
+
+        <p>同时，每个网格还预测C个类别条件概率（C=20，对应PASCAL VOC数据集），代表<strong>在网格包含物体的条件下</strong>属于各类别的概率。注意一个关键限制：<strong>每个网格只能预测一个类别</strong>，无论它预测了几个边界框。</p>
+
+        <pre><code># YOLOv1 输出张量结构
+# 输入图像: 448 × 448 × 3
+# 网格划分: S × S = 7 × 7
+# 每网格框数: B = 2
+# 类别数: C = 20 (PASCAL VOC)
+
+# 输出: 7 × 7 × 30 张量
+# 每个 cell 的 30 维向量:
+# ┌─────────────────────────────────────────────┐
+# │ box1: [x, y, w, h, conf]  → 5 个值         │
+# │ box2: [x, y, w, h, conf]  → 5 个值         │
+# │ class: [P1, P2, ..., P20] → 20 个值        │
+# └─────────────────────────────────────────────┘
+
+# 推理时解算检测结果:
+# 对于每个网格的每个框:
+#   score_{class} = confidence × P(class|object)
+# 如果 score > 阈值，保留该检测</code></pre>
+
+        <h3>3.2 网络架构：GoogLeNet的变体</h3>
+
+        <p>YOLOv1的骨干网络借鉴了GoogLeNet的设计思路，包含<strong>24个卷积层和2个全连接层</strong>。和GoogLeNet不同的是，YOLOv1没有使用Inception模块，而是简单地使用了1×1卷积结合3×3卷积来降低跨通道维度，减少计算量。</p>
+
+        <p>整个网络结构可以分为三个部分：</p>
+        <ul>
+            <li><strong>特征提取器（前20个卷积层）</strong>：从原始图像中提取高维语义特征，逐步降低空间分辨率、增加通道数。输入448×448×3，经过一系列卷积和最大池化后，特征图尺寸变为7×7×1024。</li>
+            <li><strong>特征增强（4个额外卷积层）</strong>：进一步增加特征的非线性表达能力，输出保持7×7×1024。</li>
+            <li><strong>预测头（2个全连接层）</strong>：将特征图展平后通过全连接层映射到1470维（7×7×30），再reshape为7×7×30的输出张量。</li>
+        </ul>
+
+        <table>
+            <tr>
+                <th>层类型</th>
+                <th>通道数</th>
+                <th>滤波器/核大小</th>
+                <th>输出尺寸</th>
+            </tr>
+            <tr>
+                <td>Conv + MaxPool</td>
+                <td>64</td>
+                <td>7×7 / s=2</td>
+                <td>112×112</td>
+            </tr>
+            <tr>
+                <td>Conv + MaxPool</td>
+                <td>192</td>
+                <td>3×3</td>
+                <td>56×56</td>
+            </tr>
+            <tr>
+                <td>Conv ×4 + MaxPool</td>
+                <td>128→256→512</td>
+                <td>1×1 + 3×3 混合</td>
+                <td>28×28</td>
+            </tr>
+            <tr>
+                <td>Conv ×4 + MaxPool</td>
+                <td>256→512→1024</td>
+                <td>1×1 + 3×3 混合</td>
+                <td>14×14</td>
+            </tr>
+            <tr>
+                <td>Conv ×4</td>
+                <td>512→1024</td>
+                <td>1×1 + 3×3 混合</td>
+                <td>7×7</td>
+            </tr>
+            <tr>
+                <td>FC</td>
+                <td>—</td>
+                <td>4096 单元</td>
+                <td>4096</td>
+            </tr>
+            <tr>
+                <td>FC</td>
+                <td>—</td>
+                <td>1470 单元</td>
+                <td>1470→7×7×30</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <strong>小贴士：</strong>YOLOv1大量使用了1×1卷积来降低通道数再进行3×3卷积，这个设计后来被广泛称为"bottleneck"结构。它既减少了参数量和计算量，又增加了网络的非线性表达能力。你可以把它理解为：先用1×1卷积"压缩"通道信息，再用3×3卷积"提炼"空间特征，效率远高于直接使用3×3卷积。
+        </div>
+
+        <h3>3.3 损失函数：三头并进的联合优化</h3>
+
+        <p>YOLOv1的损失函数由三个部分组成：定位损失、置信度损失和分类损失。设计上最大的特点是<strong>对不同部分的错误赋予了不同的权重</strong>，因为定位偏差和分类偏差对最终检测质量的影响是不同的。</p>
+
+        <pre><code># YOLOv1 损失函数（概念描述）
+# λ_coord = 5    (定位误差权重)
+# λ_noobj = 0.5  (无物体框的置信度误差权重)
+
+# L = λ_coord * L_loc + L_conf + λ_noobj * L_conf_noobj + L_class
+
+# 定位损失 L_loc: 仅对包含物体的网格中负责预测的框计算
+#   - 对 x, y 使用平方误差
+#   - 对 sqrt(w), sqrt(h) 使用平方误差（对大框和小框一视同仁）
+# 置信度损失 L_conf:
+#   - 包含物体的框: (C_pred - C_true)^2, C_true = IoU
+#   - 不包含物体的框: 权重 λ_noobj = 0.5
+# 分类损失 L_class:
+#   - 仅对包含物体的网格计算
+#   - 平方误差: (p_pred - p_true)^2</code></pre>
+
+        <p>损失函数设计中有几个精妙的细节值得注意。第一，对宽高使用<strong>平方根</strong>而非原始值，目的是减小大框和小框之间定位误差的量级差异——同样的像素偏差，对小框的影响远大于对大框的影响。第二，λ_coord=5和λ_noobj=0.5的权重设置反映了作者对"定位准确性比背景分类更重要"的认知。第三，每个网格的两个框中，只有与ground truth IoU最大的那个框"负责"预测该物体，另一个框被视为负样本。</p>
+
+        <h3>3.4 训练细节</h3>
+
+        <p>YOLOv1在PASCAL VOC 2007+2012上训练，使用了以下关键技巧：</p>
+        <ul>
+            <li><strong>预训练</strong>：前20个卷积层先在ImageNet上以224×224分辨率预训练一周，获得良好的特征提取能力</li>
+            <li><strong>分辨率提升</strong>：检测阶段将输入分辨率提高到448×448，并加入后4个卷积层和2个全连接层</li>
+            <li><strong>学习率调度</strong>：初始学习率0.001，逐步降低到0.0001，最后0.00001共训练约135个epoch</li>
+            <li><strong>数据增强</strong>：随机缩放（最大20%）、随机平移（最大2%）、随机调整曝光度和饱和度（HSV空间）</li>
+            <li><strong>Dropout</strong>：第一个全连接层后使用dropout（rate=0.5）防止过拟合</li>
+        </ul>
+
+        <h3>3.5 性能与局限性</h3>
+
+        <p>在PASCAL VOC 2007测试集上，YOLOv1达到了63.4 mAP，远超当时其他实时检测器。更重要的是，它的速度达到了<strong>45 FPS</strong>（Fast YOLO版本更是达到155 FPS），而Faster R-CNN只有7 FPS。这是目标检测历史上第一次真正实现实时检测。</p>
+
+        <p>但YOLOv1的局限性同样明显：</p>
+        <ul>
+            <li><strong>小目标检测极差</strong>：7×7网格意味着每个网格覆盖约64×64像素区域，小目标可能只占几个像素，很难被正确检测。这一点在实际应用中非常致命——比如检测远处的行人或车辆。</li>
+            <li><strong>每个网格只能预测一个类别</strong>：如果一个网格内出现了多个不同类别的物体（例如桌上一只猫和一杯咖啡靠得很近），YOLOv1只能检测出其中一个。</li>
+            <li><strong>定位精度不足</strong>：直接从全连接层输出边界框坐标，没有先验约束，导致框的位置不够精确，尤其表现在边界框与物体轮廓的贴合度上。</li>
+            <li><strong>对密集小物体漏检严重</strong>：由于最多预测49×2=98个框（还需经过NMS过滤），在鸟群、人群等密集场景中漏检率极高。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我第一次用YOLOv1做项目时犯过一个典型错误——在无人机航拍数据集上检测车辆。航拍图像中车辆很小（大约20×30像素），YOLOv1的检测效果惨不忍睹，召回率不到30%。我当时困惑了很久，直到重新读了论文才意识到：7×7网格对大目标效果尚可，但对小目标几乎无能为力。这个教训让我深刻理解了<strong>"了解模型的边界比了解模型的能力更重要"</strong>。
+        </div>
+
+        <div class="highlight">
+            <strong>历史评价：</strong>YOLOv1的63.4 mAP在今天看来不值一提，但它确立的"端到端实时检测"范式是整个目标检测领域的转折点。没有YOLOv1的"莽撞"尝试，就不会有后来YOLOv3的工业普及、YOLOv5的生态繁荣。别忘了，Redmon当时只是一个研究生——有时候，敢于挑战主流范式的勇气比技术本身更可贵。
+        </div>
+
+        <p>YOLOv1证明了"一步到位"是可行的，但它的局限性也指明了改进方向。下一章，我们将看到Redmon如何用YOLOv2/YOLO9000来系统性地解决这些问题——引入锚框机制、多尺度训练，甚至用一个叫WordTree的设计实现跨数据集联合训练，让模型能检测超过9000个类别。</p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 采样方法大对比</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是路径规划</a></li>
+            <li><a href="02.html">第2章 状态空间与构型空间</a></li>
+            <li><a href="03.html">第3章 图论基础</a></li>
+            <li><a href="04.html">第4章 栅格地图与代价地图</a></li>
+            <li><a href="05.html">第5章 启发式搜索入门</a></li>
+            <li><a href="06.html">第6章 Dijkstra算法</a></li>
+            <li><a href="07.html">第7章 A*算法</a></li>
+            <li><a href="08.html">第8章 A*改进与变体</a></li>
+            <li><a href="09.html">第9章 D* Lite增量搜索</a></li>
+            <li><a href="10.html">第10章 JPS跳点搜索</a></li>
+            <li><a href="11.html">第11章 RRT快速随机树</a></li>
+            <li><a href="12.html">第12章 RRT*渐进最优</a></li>
+            <li><a href="13.html">第13章 PRM概率路线图</a></li>
+            <li><a href="14.html" class="active">第14章 采样方法大对比</a></li>
+            <li><a href="15.html">第15章 路径平滑与后处理</a></li>
+            <li><a href="16.html">第16章 动态窗口法DWA</a></li>
+            <li><a href="17.html">第17章 人工势场法</a></li>
+            <li><a href="18.html">第18章 运动学约束与曲线</a></li>
+            <li><a href="19.html">第19章 动态环境重规划</a></li>
+            <li><a href="20.html">第20章 多目标路径规划</a></li>
+            <li><a href="21.html">第21章 多机器人协调</a></li>
+            <li><a href="22.html">第22章 优化模型方法</a></li>
+            <li><a href="23.html">第23章 可视化与调试</a></li>
+            <li><a href="24.html">第24章 算法性能基准测试</a></li>
+            <li><a href="25.html">第25章 仿真到实车部署</a></li>
+            <li><a href="26.html">第26章 学习型路径规划</a></li>
+            <li><a href="27.html">第27章 前沿趋势与未来</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <p>大家好！过去三章我们深入学习了 RRT、RRT* 和 PRM 这三大采样方法。现在是时候把它们——以及它们的变体——放在同一个竞技场上进行公平对决了。这是"核心算法篇"的收官之战，也是本书最重要的方法论总结之一。</p>
+
+        <p>理解采样方法之间的优劣取舍，比死记硬背任何一个算法都更重要。因为在实际工程中，你很少会说"我要跑 PRM"——而是会说"我需要一个能在 2 秒内找到路径、容忍路径不是最优但至少不太离谱、且能处理 6 维 C-space 的方法"——然后你才能推算出该用什么。</p>
+
+        <h2>统一评价框架</h2>
+
+        <p>公平比较的前提是统一标准。在我们的对比实验中，所有算法共享以下设置：</p>
+
+        <ul>
+            <li><strong>相同地图</strong>——三张标准测试地图（窄通道、密集障碍物、开阔空间），每张地图 200x200</li>
+            <li><strong>相同时间预算</strong>——每张地图允许 10 秒规划时间，记录不同时刻的最优路径代价</li>
+            <li><strong>相同指标</strong>——首次找到路径的时间、最终路径代价、50 次运行的成功率、展开节点数</li>
+            <li><strong>相同实现</strong>——所有算法的碰撞检测、最近邻搜索（KDTree）、steer 函数共享同一套底层实现</li>
+        </ul>
+
+        <p>这里要特别强调"相同底层实现"的重要性。很多论文声称"我们的算法比 A* 快 100 倍"——仔细一看，是用 Python 的 A* 和 C++ 的 PRM 做比较。这种不公平的比较在路径规划领域屡见不鲜，我们务必避免。</p>
+
+        <h2>基准测试脚本</h2>
+
+        <pre><code>import time
+import numpy as np
+# 假设上述算法的实现都在各自模块中
+from rrt import RRT
+from rrt_star import RRTStar
+from informed_rrt_star import InformedRRTStar
+from prm import PRM
+from bit_star import BITStar
+
+def benchmark(maps, algorithms, n_runs=10, time_budget=10.0):
+    """对多张地图运行多种算法，收集指标"""
+    results = {}
+
+    for map_name, (obstacle_check, bounds, start, goal) in maps.items():
+        results[map_name] = {}
+        for algo_name, AlgoClass in algorithms.items():
+            run_data = []
+            for _ in range(n_runs):
+                planner = AlgoClass(start, goal, obstacle_check, bounds)
+                start_time = time.time()
+                path = None
+                best_cost = float('inf')
+                # 持续搜索直到时间耗尽或成功
+                while time.time() - start_time &lt; time_budget:
+                    path = planner.plan()
+                    if path is not None:
+                        cost = sum(np.linalg.norm(path[i+1] - path[i])
+                                   for i in range(len(path) - 1))
+                        if cost &lt; best_cost:
+                            best_cost = cost
+                    # 继续改进（对于 RRT* 等 Anytime 方法）
+                    if not hasattr(planner, 'improve'):
+                        break
+
+                elapsed = time.time() - start_time
+                run_data.append({
+                    'success': path is not None,
+                    'cost': best_cost if best_cost != float('inf') else None,
+                    'time': elapsed,
+                    'nodes': len(planner.nodes) if hasattr(planner, 'nodes') else None,
+                })
+            results[map_name][algo_name] = run_data
+
+    # 汇总统计
+    for map_name in results:
+        print(f"\n=== {map_name} ===")
+        for algo_name in results[map_name]:
+            costs = [r['cost'] for r in results[map_name][algo_name] if r['success']]
+            successes = sum(1 for r in results[map_name][algo_name] if r['success'])
+            avg_cost = np.mean(costs) if costs else float('inf')
+            print(f"  {algo_name}: success={successes}/{n_runs}, "
+                  f"avg_cost={avg_cost:.2f}")
+
+if __name__ == '__main__':
+    maps = {
+        'narrow_passage': load_narrow_passage_map(),
+        'cluttered': load_cluttered_map(),
+        'open': load_open_map(),
+    }
+    algorithms = {
+        'RRT': RRT,
+        'RRT*': RRTStar,
+        'InformedRRT*': InformedRRTStar,
+        'PRM': PRM,
+        'BIT*': BITStar,
+    }
+    benchmark(maps, algorithms)</code></pre>
+
+        <h2>综合对比表格</h2>
+
+        <table>
+            <tr>
+                <th>方法</th>
+                <th>分组</th>
+                <th>概率完备</th>
+                <th>渐进最优</th>
+                <th>首次解速度</th>
+                <th>高维（6D+）</th>
+                <th>多次查询</th>
+                <th>实现难度</th>
+            </tr>
+            <tr>
+                <td>RRT</td>
+                <td>单树搜索</td>
+                <td>✓</td>
+                <td>✗</td>
+                <td>★★★★</td>
+                <td>★★★★</td>
+                <td>✗</td>
+                <td>★</td>
+            </tr>
+            <tr>
+                <td>RRT*</td>
+                <td>单树搜索</td>
+                <td>✓</td>
+                <td>✓</td>
+                <td>★★</td>
+                <td>★★★</td>
+                <td>✗</td>
+                <td>★★</td>
+            </tr>
+            <tr>
+                <td>Informed RRT*</td>
+                <td>单树搜索</td>
+                <td>✓</td>
+                <td>✓</td>
+                <td>★★★</td>
+                <td>★★★</td>
+                <td>✗</td>
+                <td>★★★</td>
+            </tr>
+            <tr>
+                <td>RRT-Connect</td>
+                <td>双树搜索</td>
+                <td>✓</td>
+                <td>✗</td>
+                <td>★★★★★</td>
+                <td>★★★★</td>
+                <td>✗</td>
+                <td>★★</td>
+            </tr>
+            <tr>
+                <td>PRM（均匀）</td>
+                <td>路线图</td>
+                <td>✓</td>
+                <td>✓（稠密时）</td>
+                <td>★★（含建图）</td>
+                <td>★★</td>
+                <td>✓</td>
+                <td>★★</td>
+            </tr>
+            <tr>
+                <td>PRM（高斯）</td>
+                <td>路线图</td>
+                <td>✓</td>
+                <td>✓（稠密时）</td>
+                <td>★★★（含建图）</td>
+                <td>★★</td>
+                <td>✓</td>
+                <td>★★</td>
+            </tr>
+            <tr>
+                <td>BIT*</td>
+                <td>批处理</td>
+                <td>✓</td>
+                <td>✓</td>
+                <td>★★★★</td>
+                <td>★★★</td>
+                <td>✓</td>
+                <td>★★★★</td>
+            </tr>
+        </table>
+
+        <p>这张表揭示了一个重要规律：<strong>没有免费午餐</strong>。RRT 最快找到路径但质量最差，RRT* 质量好但收敛慢，PRM 适合多查询但在窄通道和高维中吃力，BIT* 综合性能强但实现复杂。你永远在"速度快"、"质量好"、"实现简单"三者之间做取舍。</p>
+
+        <h2>选型决策树</h2>
+
+        <div class="highlight">
+            <strong>清晰选型决策流程：</strong><br><br>
+            <strong>Step 1：环境是静态还是动态？</strong><br>
+            &nbsp;&nbsp;→ 动态：使用 RRT 或 RRT-Connect（单次查询，不需要构建全局图）<br>
+            &nbsp;&nbsp;→ 静态：进入 Step 2<br><br>
+            <strong>Step 2：需要多次查询还是单次查询？</strong><br>
+            &nbsp;&nbsp;→ 多次查询（如仓库机器人每天规划万次）：使用 PRM<br>
+            &nbsp;&nbsp;→ 单次查询（如机械臂抓取一次）：进入 Step 3<br><br>
+            <strong>Step 3：需要最优路径吗？</strong><br>
+            &nbsp;&nbsp;→ 需要最优（最优性非妥协）：进入 Step 4<br>
+            &nbsp;&nbsp;→ 不需要最优（"能走就行"）：使用 RRT 或 RRT-Connect（最快）<br><br>
+            <strong>Step 4：对收敛速度有要求吗？</strong><br>
+            &nbsp;&nbsp;→ 时间充裕（秒级）：使用 RRT*<br>
+            &nbsp;&nbsp;→ 时间紧张（毫秒级）：使用 Informed RRT*（椭球加速）<br>
+            &nbsp;&nbsp;→ 需要同时保证多次查询最优：使用 BIT*（批处理采样+启发式搜索）<br><br>
+            <strong>终极建议：</strong>如果不确定，先跑 RRT-Connect。它实现简单、速度快、覆盖面广。然后用 Informed RRT* 提升路径质量。只有在你确认 "环境完全静态且查询频繁" 时，才投入 PRM 的建图成本。
+        </div>
+
+        <h2>混合策略——超越单个算法</h2>
+
+        <p>在真实系统中，最好的方法往往不是"选择"一个算法，而是"组合"多个算法。下面是一些经过验证的混合方案：</p>
+
+        <h3>RRT + 轨迹优化</h3>
+        <p>先用 RRT 快速找到一条可行路径（虽然粗糙），然后用轨迹优化方法（如 CHOMP 或梯度下降）对路径进行平滑。这种"粗糙初解 + 数值优化"的组合在机械臂规划中非常流行。RRT 负责提供拓扑正确的路径（穿越正确的障碍物间隙），优化负责在局部修正路径的平滑度。</p>
+
+        <h3>PRM + RRT* 混合</h3>
+        <p>在 PRM 构建的路线图上，每个"边"并不是一个简单连接——而是一个 RRT* 子段。这样路线图既有了 PRM 的多查询能力，又有 RRT* 的路径优化能力。代价是实现复杂度和计算开销都显著增加。</p>
+
+        <h3>基于学习的采样</h3>
+        <p>近年来兴起的方法：用神经网络学习采样分布。传统 RRT 用均匀采样，但实际环境中的自由空间分布远非均匀。通过学习历史成功路径的分布模式，训练一个条件变分自编码器（CVAE）或扩散模型来生成更有"针对性"的采样点。这类方法在特定场景下可以比均匀采样快 5-10 倍，但泛化到新环境仍是挑战。</p>
+
+        <p>至此，"核心算法篇"就全部结束了。在这九章中（第 6-14 章），我们从 Dijkstra 出发，经过 A* 及其变体、D* Lite 增量搜索、JPS 对称剪枝，再到 RRT/RRT*/PRM 等采样方法，覆盖了路径规划领域的全部主流算法。你可能会感到信息量很大——这是正常的。路径规划本身就是数学、计算机科学和工程实践的交汇点。</p>
+
+        <p>从下一章开始，我们将进入"路径质量篇"——学习如何让路径从"能走"变成"走得稳、走得顺"。第一站是<strong>路径平滑与后处理</strong>，我们将掌握曲线插值、路径缩短、拐角圆滑等实用技术，把那些算法找到的锯齿状路径变成优雅流畅的运动轨迹。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

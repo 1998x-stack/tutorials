@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 存储器设计与Block RAM</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 课程导论与FPGA发展史</a></li>
+            <li><a href="02.html">第2章 数字电路基础回顾</a></li>
+            <li><a href="03.html">第3章 Verilog HDL语法精要（上）</a></li>
+            <li><a href="04.html">第4章 Verilog HDL语法精要（下）</a></li>
+            <li><a href="05.html">第5章 组合逻辑设计实战</a></li>
+            <li><a href="06.html">第6章 时序逻辑设计实战</a></li>
+            <li><a href="07.html">第7章 有限状态机（FSM）设计</a></li>
+            <li><a href="08.html">第8章 Testbench编写与仿真验证</a></li>
+            <li><a href="09.html">第9章 常用通信接口实现（一）：UART与SPI</a></li>
+            <li><a href="10.html">第10章 常用通信接口实现（二）：I2C</a></li>
+            <li><a href="11.html" class="active">第11章 存储器设计与Block RAM</a></li>
+            <li><a href="12.html">第12章 流水线设计技术</a></li>
+            <li><a href="13.html">第13章 跨时钟域（CDC）处理</a></li>
+            <li><a href="14.html">第14章 时序约束与分析基础</a></li>
+            <li><a href="15.html">第15章 Vivado工程实战全流程</a></li>
+            <li><a href="16.html">第16章 Quartus Prime与ModelSim</a></li>
+            <li><a href="17.html">第17章 常用IP核集成与应用</a></li>
+            <li><a href="18.html">第18章 工程目录规范与版本管理</a></li>
+            <li><a href="19.html">第19章 AXI4总线协议深度解析</a></li>
+            <li><a href="20.html">第20章 软核处理器集成</a></li>
+            <li><a href="21.html">第21章 RISC-V处理器FPGA实现</a></li>
+            <li><a href="22.html">第22章 高速串行接口设计</a></li>
+            <li><a href="23.html">第23章 硬件调试方法论</a></li>
+            <li><a href="24.html">第24章 开源工具链实战</a></li>
+            <li><a href="25.html">第25章 时序收敛与功耗优化</a></li>
+            <li><a href="26.html">第26章 高层次综合（HLS）入门</a></li>
+            <li><a href="27.html">第27章 AI时代的FPGA开发</a></li>
+            <li><a href="28.html">第28章 综合项目：FPGA图像采集与处理系统</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第11章 存储器设计与Block RAM</h2>
+
+        <p>在 FPGA 中实现任何一个非平凡的设计，都离不开存储器。你至少需要一个 FIFO 做跨时钟域数据缓冲、一个 lookup table 存正弦波系数、一个 RAM 做视频帧缓存、或者一个 register file 实现处理器的通用寄存器组。到目前为止，我们在前几章的代码中主要用了触发器和查找表（LUT）来存储状态——但这对于需要存储大量数据的场景来说，不仅浪费逻辑资源，还会把设计的时序性能拖垮。</p>
+
+        <p>FPGA 提供了两种内置的存储资源：<strong>分布式 RAM（Distributed RAM）</strong>和<strong>Block RAM（BRAM）</strong>。理解它们的差异、优缺点和正确的使用方式，是 FPGA 设计从"能跑"到"优秀"的关键一步。</p>
+
+        <h3>11.1 FPGA 内部存储结构</h3>
+
+        <p><strong>分布式 RAM（Distributed RAM）</strong>其实是用 LUT 的 SRAM 单元来实现存储器。LUT 本质上是一个 6 输入的单端口小存储器（1 个 6 输入 LUT 可以存储 64 bit）。当综合工具检测到你的 Verilog 中声明了一个 <code>reg [7:0] mem [0:15]</code> 这样的小容量数组时，它会自动用 LUT 来实现。分布式 RAM 的优点是没有额外的延迟（读操作与 LUT 的传播延迟相同）、粒度小（可以精确配置为任意深度和宽度）。缺点是容量有限——FPGA 的 LUT 数量虽然多，但每个 LUT 只有几十 bit，大规模存储器会迅速消耗殆尽。</p>
+
+        <p><strong>Block RAM（BRAM）</strong>是 FPGA 芯片中的专用存储硬核。在 Xilinx 7 系列中，每个 BRAM 是 36Kb 的空间，可以配置为两个独立的 18Kb RAM。在 Intel/Altera 的 Cyclone V 中，M10K 块也是 10Kb。BRAM 的优点是容量大、速度快（读取有独立的输出寄存器，可以达到几百 MHz）、功耗相对更低。缺点是粒度大——你深度不想用满 36Kb，但用了 BRAM 就至少占一个物理块，对于超小容量的存储器来说效率低。</p>
+
+        <table>
+            <tr><th>维度</th><th>分布式 RAM</th><th>Block RAM</th></tr>
+            <tr><td><strong>物理实现</strong></td><td>LUT + 多路选择器</td><td>专用 SRAM 硬核</td></tr>
+            <tr><td><strong>典型容量</strong></td><td>≤ 1 Kb（超过后 LUT 消耗剧增）</td><td>单块 18-36 Kb，可拼接至 Mb 级</td></tr>
+            <tr><td><strong>读取延迟</strong></td><td>组合逻辑输出（0 周期）或寄存器输出（1 周期）</td><td>1-2 时钟周期（有输出寄存器）</td></tr>
+            <tr><td><strong>最大频率</strong></td><td>受 LUT 延迟限制，中等</td><td>高（硬核优化，典型值 400-600MHz）</td></tr>
+            <tr><td><strong>功耗（每 bit）</strong></td><td>较高（LUT 通路持续翻转）</td><td>较低（硬核只在外设访问时激活）</td></tr>
+            <tr><td><strong>最佳场景</strong></td><td>小型寄存器文件、地址映射表、FIFO 指针</td><td>帧缓存、大缓冲区、查找表、异步 FIFO</td></tr>
+        </table>
+
+        <div class="highlight">
+            <strong>选型经验：</strong>经验法则是——容量 <strong>≤ 64 字 × 8 bit</strong> 的存储器，用分布式 RAM；更大的存储器显式地用 BRAM。但有些情况下即使容量小也建议用 BRAM：比如这个存储器所在的数据路径需要跑 300MHz 以上，或者 LUT 资源已经非常紧张（LUT 利用率超过 70% 时布局布线压力很大）。始终在综合后在资源报告里检查你的存储器被映射到了什么上。
+        </div>
+
+        <h3>11.2 单端口与双端口 RAM</h3>
+
+        <p>Verilog 中描述 RAM 最直观的方式是用二维寄存器数组。综合工具（Vivado/Quartus/Yosys）会识别这种 pattern 并推断为 BRAM：</p>
+
+        <p><strong>单端口 RAM：</strong>同一时钟域通过同一端口访问，读写共用一个地址总线。不适合同时读写。</p>
+
+        <p><strong>简单双端口 RAM（Simple Dual-Port, SDP）：</strong>一个端口只写、另一个只读。这是最常用的配置——写端口处理输入数据流，读端口处理输出数据流。</p>
+
+        <p><strong>真双端口 RAM（True Dual-Port, TDP）：</strong>两个端口都可以独立读写。适用于两个处理器核共享数据、或者一个端口被主机访问另一个被用户逻辑访问的场景。</p>
+
+        <pre><code>// 推断为真双端口 Block RAM (Read-Before-Write)
+module dpram #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 10  // 1024 深度
+)(
+    input  wire                    clka,
+    input  wire                    clkb,
+    input  wire                    wea,    // port A 写使能
+    input  wire [ADDR_WIDTH-1:0]  addra,
+    input  wire [DATA_WIDTH-1:0]  dina,
+    output reg  [DATA_WIDTH-1:0]  douta,
+    input  wire                    web,    // port B 写使能
+    input  wire [ADDR_WIDTH-1:0]  addrb,
+    input  wire [DATA_WIDTH-1:0]  dinb,
+    output reg  [DATA_WIDTH-1:0]  doutb
+);
+
+    reg [DATA_WIDTH-1:0] ram [0:(1<<ADDR_WIDTH)-1];
+
+    // Port A
+    always @(posedge clka) begin
+        if (wea) begin
+            ram[addra] <= dina;
+            douta <= dina;          // 读-改-写模式
+        end else begin
+            douta <= ram[addra];
+        end
+    end
+
+    // Port B
+    always @(posedge clkb) begin
+        if (web) begin
+            ram[addrb] <= dinb;
+            doutb <= dinb;
+        end else begin
+            doutb <= ram[addrb];
+        end
+    end
+
+endmodule</code></pre>
+
+        <div class="warning">
+            <strong>读写冲突（Read-During-Write）：</strong>当两个端口同时操作同一个地址时，BRAM 的行为取决于器件和配置。Xilinx BRAM 的默认行为是"写优先"（write-first/write-through）——写入的数据同时出现在该时钟周期的读输出上。另一种模式是"读优先"（read-first）——读输出返回旧值，新值从下一个周期开始可见。如果你的设计依赖特定冲突行为（比如双端口用作共享缓存），必须在 IP 核配置中显式指定，或者在 RTL 中通过综合属性声明。不明确的做法会让你在芯片跑到特定工作条件时发现数据不连贯。
+        </div>
+
+        <h3>11.3 ROM 实现</h3>
+
+        <p>ROM（只读存储器）在 FPGA 中有两种实现方式：</p>
+        <p><strong>方法一：case 语句综合为 ROM。</strong>综合工具会将一个大的 case 语句（输入是地址，输出是数据）优化为 LUT ROM 或者 BRAM（取决于大小）。优点是完全可移植（不依赖任何厂商原语），适合中等大小的查找表。</p>
+
+        <p><strong>方法二：用 <code>$readmemh</code> 初始化 BRAM。</strong>这是最推荐的工业做法。将 ROM 数据保存在一个外部文本文件（.mem 或 .hex）中，通过 <code>$readmemh</code> 在仿真和综合时加载到 BRAM 中：</p>
+
+        <pre><code>// 推断为 Block ROM（用 $readmemh 初始化）
+module sin_lut #(
+    parameter ADDR_WIDTH = 10,
+    parameter DATA_WIDTH = 16
+)(
+    input  wire                    clk,
+    input  wire [ADDR_WIDTH-1:0]  addr,
+    output reg  [DATA_WIDTH-1:0]  dout
+);
+
+    reg [DATA_WIDTH-1:0] rom [0:(1<<ADDR_WIDTH)-1];
+
+    initial begin
+        $readmemh("sin_lut.mem", rom);
+    end
+
+    always @(posedge clk) begin
+        dout <= rom[addr];
+    end
+
+endmodule</code></pre>
+
+        <p><code>sin_lut.mem</code> 文件的格式很简单——每行一个十六进制数，对应一个地址的数据：</p>
+        <pre><code>0000
+00C9
+0192
+025B
+...
+FFFF</code></pre>
+
+        <div class="tip">
+            <strong>IP 核 vs RTL 推断：</strong>很多初学者—上来就用 IP 核生成器（Vivado IP Catalog / Quartus Platform Designer）产生 BRAM 或 ROM。这当然可以工作，但我建议你优先尝试在 RTL 中"描述"它，让综合工具去推断。原因有三：(1) RTL 代码可移植（可以在 Vivado、Quartus、Yosys 之间无缝切换）；(2) 代码可读性强，团队 review 更容易；(3) 综合工具对标准 RTL pattern 的 BRAM 推断已经非常成熟（99% 的情况都正确）。只有在需要用到 BRAM 的特殊功能（ECC、字节使能、输出寄存器级数控制）时才应该使用 IP 核。
+        </div>
+
+        <h3>11.4 FIFO 设计</h3>
+
+        <p>FIFO（First-In-First-Out）是 FPGA 设计中使用频率最高的存储器结构——它协调两个速率不同的数据流，或者跨越不同的时钟域。</p>
+
+        <p><strong>同步 FIFO（同一时钟域）：</strong>读写指针在同一时钟域，空满标志的生成比较简单——当读写指针相等时，要么是满（写指针追上了读指针一圈），要么是空（两者指在同一个元素上）。区分的方法是使用<strong>额外的一位指针宽度</strong>来标识是否绕圈。</p>
+
+        <pre><code>// 参数化同步 FIFO
+module sync_fifo #(
+    parameter DATA_WIDTH = 8,
+    parameter ADDR_WIDTH = 8  // 256 深度
+)(
+    input  wire                clk,
+    input  wire                rst_n,
+    input  wire                wr_en,
+    input  wire [DATA_WIDTH-1:0] wr_data,
+    output reg                 full,
+    input  wire                rd_en,
+    output reg  [DATA_WIDTH-1:0] rd_data,
+    output reg                 empty,
+    output reg  [ADDR_WIDTH:0] fifo_count  // 用于水位线判断
+);
+
+    reg [DATA_WIDTH-1:0] mem [0:(1<<ADDR_WIDTH)-1];
+    reg [ADDR_WIDTH:0]   wr_ptr, rd_ptr;  // 多一位用于满/空判断
+
+    wire [ADDR_WIDTH-1:0] wr_addr = wr_ptr[ADDR_WIDTH-1:0];
+    wire [ADDR_WIDTH-1:0] rd_addr = rd_ptr[ADDR_WIDTH-1:0];
+
+    always @(posedge clk) begin
+        if (wr_en && !full)
+            mem[wr_addr] <= wr_data;
+    end
+
+    always @(posedge clk) begin
+        if (rd_en && !empty)
+            rd_data <= mem[rd_addr];
+    end
+
+    // 读写指针管理
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wr_ptr <= 0;
+            rd_ptr <= 0;
+        end else begin
+            if (wr_en && !full) wr_ptr <= wr_ptr + 1;
+            if (rd_en && !empty) rd_ptr <= rd_ptr + 1;
+        end
+    end
+
+    // 空/满标志
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            full  <= 0;
+            empty <= 1;
+        end else begin
+            empty <= (wr_ptr == rd_ptr);
+            full  <= ((wr_ptr[ADDR_WIDTH] != rd_ptr[ADDR_WIDTH]) &&
+                      (wr_ptr[ADDR_WIDTH-1:0] == rd_ptr[ADDR_WIDTH-1:0]));
+        end
+    end
+
+    // FIFO 中的数据计数
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            fifo_count <= 0;
+        else if (wr_en && !full && !(rd_en && !empty))
+            fifo_count <= fifo_count + 1;
+        else if (rd_en && !empty && !(wr_en && !full))
+            fifo_count <= fifo_count - 1;
+    end
+
+endmodule</code></pre>
+
+        <p><strong>异步 FIFO（跨时钟域）：</strong>读写时钟不同，需要解决两个关键问题：(1) 指针在两个时钟域之间传递时避免亚稳态（使用格雷码和两级同步器）；(2) 空满标志的正确生成（写指针同步到读时钟域判断空，读指针同步到写时钟域判断满）。异步 FIFO 是跨时钟域设计中最常见的解决方案，我们将在第 13 章深入展开。</p>
+
+        <h3>11.5 Block RAM 的原语例化 vs 推断</h3>
+
+        <p>当你的需求超出了标准 RTL pattern 的范围，就需要直接例化厂商原语。以 Xilinx 7 系列为例，BRAM 的原语是 <code>RAMB36E1</code>（36Kb）和 <code>RAMB18E1</code>（18Kb）。它们支持的特性包括：</p>
+
+        <ul>
+            <li><strong>字节使能（Byte-Write Enable）</strong>：按字节粒度控制写入，对以太网帧处理等场景至关重要</li>
+            <li><strong>输出寄存器级数（Output Register）</strong>：可选择 1 级或 2 级寄存器输出，影响 peformance vs latency 的权衡</li>
+            <li><strong>ECC（Error Correction Code）</strong>：支持单纠错双检错，用于太空/辐射环境</li>
+            <li><strong>级联（Cascade）</strong>：将多个 BRAM 拼接为更大的存储器</li>
+        </ul>
+
+        <p>在 Intel/Altera 器件中，对应的原语是 <code>altsyncram</code>（通过 Quartus MegaWizard 生成），参数化方式与 Xilinx 不同但功能等效。</p>
+
+        <table>
+            <tr><th>厂商</th><th>BRAM 原语</th><th>容量</th><th>配置选项</th></tr>
+            <tr><td>AMD Xilinx 7-Series</td><td>RAMB36E1 / RAMB18E1</td><td>36Kb / 18Kb</td><td>True dual-port, ECC, Byte-WE, Output reg</td></tr>
+            <tr><td>AMD Xilinx UltraScale+</td><td>RAMB36E2 / RAMB18E2</td><td>36Kb / 18Kb</td><td>同上 + 更深级联支持</td></tr>
+            <tr><td>Intel Cyclone V/10</td><td>M10K</td><td>10Kb</td><td>Simple dual-port, 字节使能</td></tr>
+            <tr><td>Intel Agilex</td><td>M20K</td><td>20Kb</td><td>同上 + ECC</td></tr>
+        </table>
+
+        <div class="highlight">
+            <strong>关于"寄存器推断"的建议：</strong>在对厂商工具链不够熟悉时，写 RTL 让工具推断 BRAM 是最安全的方式。根据 Amd 的白皮书（UG901），Vivado 支持超过 20 种 BRAM 推断 pattern。如果你在 Vivado 综合后的报告中看不到 BRAM（显示 LUTRAM），通常原因有：(1) 复位逻辑不当（BRAM 不支援异步复位读操作）；(2) 读写使能写成了组合逻辑而非时序逻辑；(3) 读取地址在复位时被赋予了非零值。
+        </div>
+
+        <h3>11.6 踩坑：双端口 RAM 读-写碰撞导致视频帧缓存花屏</h3>
+
+        <p>我曾经参与过一个 FPGA 视频处理项目，需要在帧缓存（dual-port BRAM）中同时写入来自 camera 的下一帧数据和读取当前帧送显示。设计很直接——写端口对着 camera 的像素流，读端口对着 HDMI 控制器。仿真完美，读写的地址完全分开（写端口写入 frame N+1，读端口读出 frame N），看起来不会有冲突。</p>
+
+        <p>但实际板子上显示出现了周期性的花屏——每隔几十帧，画面上出现横条纹干扰。花了整整两天才定位到问题：当 camera 的像素时钟和 HDMI 的像素时钟有微小的频率偏差时，两个端口的地址指针会慢慢漂移——直到在某个时刻指向了同一个 BRAM 地址。默认的 BRAM 写优先模式下，写端口在写入新像素的同时，读端口读到了正在被覆盖的中间值——半旧半新的像素数据被送到了 HDMI 显示。</p>
+
+        <p>修复方案不是改 RTL，而是在 BRAM 配置中将模式从"写优先"改为"读优先"——这样在发生碰撞时读端口始终返回旧数据，写端口写入新数据从下一个周期开始可见。虽然碰撞的那一个像素是旧值，但旧版本帧和新版本帧之间的单像素差异人眼完全无法察觉——花屏立刻消失了。</p>
+
+        <p>这个经历告诉我两个道理：一是<strong>永远不要假设两个时钟域的地址不会碰撞</strong>，哪怕逻辑上看起来永远不会；二是<strong>BRAM 的碰撞行为是可以利用的——根据应用场景选择合适的模式</strong>。</p>
+
+        <p>有了存储器的支持，我们的设计工具箱又充实了一块。下一章，我们将用这些存储器来搭建一个 FPGA 设计师最重要的高性能设计技术——流水线（Pipeline）。通过合理插入寄存器来切割组合路径，在不降低吞吐率的前提下大幅提高设计的工作频率。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 常用通信接口实现（一）：UART与SPI</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 课程导论与FPGA发展史</a></li>
+            <li><a href="02.html">第2章 数字电路基础回顾</a></li>
+            <li><a href="03.html">第3章 Verilog HDL语法精要（上）</a></li>
+            <li><a href="04.html">第4章 Verilog HDL语法精要（下）</a></li>
+            <li><a href="05.html">第5章 组合逻辑设计实战</a></li>
+            <li><a href="06.html">第6章 时序逻辑设计实战</a></li>
+            <li><a href="07.html">第7章 有限状态机（FSM）设计</a></li>
+            <li><a href="08.html">第8章 Testbench编写与仿真验证</a></li>
+            <li><a href="09.html" class="active">第9章 常用通信接口实现（一）：UART与SPI</a></li>
+            <li><a href="10.html">第10章 常用通信接口实现（二）：I2C</a></li>
+            <li><a href="11.html">第11章 存储器设计与Block RAM</a></li>
+            <li><a href="12.html">第12章 流水线设计技术</a></li>
+            <li><a href="13.html">第13章 跨时钟域（CDC）处理</a></li>
+            <li><a href="14.html">第14章 时序约束与分析基础</a></li>
+            <li><a href="15.html">第15章 Vivado工程实战全流程</a></li>
+            <li><a href="16.html">第16章 Quartus Prime与ModelSim</a></li>
+            <li><a href="17.html">第17章 常用IP核集成与应用</a></li>
+            <li><a href="18.html">第18章 工程目录规范与版本管理</a></li>
+            <li><a href="19.html">第19章 AXI4总线协议深度解析</a></li>
+            <li><a href="20.html">第20章 软核处理器集成</a></li>
+            <li><a href="21.html">第21章 RISC-V处理器FPGA实现</a></li>
+            <li><a href="22.html">第22章 高速串行接口设计</a></li>
+            <li><a href="23.html">第23章 硬件调试方法论</a></li>
+            <li><a href="24.html">第24章 开源工具链实战</a></li>
+            <li><a href="25.html">第25章 时序收敛与功耗优化</a></li>
+            <li><a href="26.html">第26章 高层次综合（HLS）入门</a></li>
+            <li><a href="27.html">第27章 AI时代的FPGA开发</a></li>
+            <li><a href="28.html">第28章 综合项目：FPGA图像采集与处理系统</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第9章 常用通信接口实现（一）：UART与SPI</h2>
+
+        <p>前面八章，我们从数字电路基础一路学到了 Testbench 仿真。现在终于到了最让人兴奋的部分——用 FPGA 和外部世界对话。无论是 MCU 和 FPGA 之间的板级通信、FPGA 与传感器的数据交换，还是 FPGA 与 PC 的调试通道，都离不开那些经典的串行通信协议。本章先讲两个最基础也最常用的——<strong>UART</strong> 和 <strong>SPI</strong>。</p>
+
+        <p>你可能会问：UART 和 SPI 都这么简单了，还需要专门用一章来讲吗？在 MCU 里确实只要调个库函数就行。但在 FPGA 中，你需要自己实现<strong>发送状态机</strong>、<strong>波特率发生器</strong>、<strong>移位寄存器</strong>和<strong>采样逻辑</strong>——而且所有信号都在同一个时钟域里精确协调。这不仅是在实现一个通信协议，更是在把前几章学的 FSM、计数器、移位寄存器做一次完整的实战训练。</p>
+
+        <h3>9.1 UART 协议精要</h3>
+
+        <p>UART（Universal Asynchronous Receiver/Transmitter）是一种<strong>异步</strong>串行通信协议——收发双方没有共享的时钟线，依靠约定的波特率来同步。一个完整的 UART 帧（frame）结构如下：</p>
+
+        <table>
+            <tr><th>字段</th><th>长度</th><th>电平</th><th>说明</th></tr>
+            <tr><td>空闲（Idle）</td><td>—</td><td>高电平（逻辑1）</td><td>线路空闲时保持高电平</td></tr>
+            <tr><td>起始位（Start Bit）</td><td>1 bit</td><td>低电平（逻辑0）</td><td>检测到下降沿表示传输开始</td></tr>
+            <tr><td>数据位（Data Bits）</td><td>5-8 bit</td><td>LSB First</td><td>最常见的是 8 位数据</td></tr>
+            <tr><td>校验位（Parity Bit）</td><td>0/1 bit</td><td>奇/偶校验</td><td>可选，用于简单检错</td></tr>
+            <tr><td>停止位（Stop Bit）</td><td>1/1.5/2 bit</td><td>高电平（逻辑1）</td><td>确保下一帧起始位的下降沿可被检测</td></tr>
+        </table>
+
+        <p>UART 协议中最核心的一个概念是<strong>16x 过采样</strong>。接收器并不是以波特率的速率进行采样，而是以波特率 16 倍的速率（oversampling clock）采样。为什么是 16 倍？这保证了接收器可以在起始位的下降沿之后，在 bit 周期的 "中间点" 附近采样，避免采样到数据跳变沿附近的信号不稳定区间。</p>
+
+        <div class="highlight">
+            <strong>16x 过采样原理：</strong>接收器持续以 16x 波特率时钟采样 RXD 信号。当检测到 RXD 从高到低（起始位下降沿）后，计数器从 0 开始计数。在计数值到达 8（即半个 bit 周期）时再次采样——如果仍然是低电平，说明确实是起始位而不是干扰毛刺。之后，每 16 个采样时钟周期采样一次，正好对齐每个数据位的中心位置。
+        </div>
+
+        <h3>9.2 UART 发送器实现</h3>
+
+        <p>UART 发送器比接收器简单——你只需要知道什么时候该改变 TXD 的电平。核心组件是两个：<strong>波特率发生器</strong>（一个计数器分频器）和<strong>发送状态机</strong>。</p>
+
+        <p>发送状态机通常这样工作：IDLE 状态下 TXD 一直为高。当收到发送请求（<code>tx_start</code> 拉高）时，进入 START 状态，将 TXD 拉低一个 bit 周期。然后在 DATA 状态下，逐位将寄存器的数据输出到 TXD（LSB first）。如果启用了校验位，进入 PARITY 状态。最后进入 STOP 状态，TXD 拉高一个或多个 bit 周期，然后回到 IDLE。</p>
+
+        <pre><code>module uart_tx #(
+    parameter CLK_FREQ  = 50_000_000,
+    parameter BAUD_RATE = 115_200
+)(
+    input  wire       clk,
+    input  wire       rst_n,
+    input  wire       tx_start,
+    input  wire [7:0] tx_data,
+    output reg        txd,
+    output reg        tx_busy
+);
+
+    localparam BIT_CNT_MAX = CLK_FREQ / BAUD_RATE;
+    localparam IDLE   = 3'd0,
+               START  = 3'd1,
+               DATA   = 3'd2,
+               PARITY = 3'd3,
+               STOP   = 3'd4;
+
+    reg [2:0] state, next_state;
+    reg [15:0] baud_cnt;
+    reg [2:0]  bit_idx;
+    reg [7:0]  data_reg;
+    reg        parity;
+
+    // 波特率计数器
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            baud_cnt <= 0;
+        end else if (state != IDLE && state != STOP) begin
+            if (baud_cnt == BIT_CNT_MAX - 1)
+                baud_cnt <= 0;
+            else
+                baud_cnt <= baud_cnt + 1;
+        end else begin
+            baud_cnt <= 0;
+        end
+    end
+
+    wire baud_tick = (baud_cnt == BIT_CNT_MAX - 1);
+
+    // 状态机和传输逻辑
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state   <= IDLE;
+            txd     <= 1;
+            tx_busy <= 0;
+            bit_idx <= 0;
+            parity  <= 0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    txd <= 1; tx_busy <= 0;
+                    if (tx_start) begin
+                        data_reg <= tx_data;
+                        bit_idx  <= 0;
+                        parity   <= ^tx_data;  // 偶校验
+                        state    <= START;
+                    end
+                end
+                START: begin
+                    txd <= 0; tx_busy <= 1;
+                    if (baud_tick) state <= DATA;
+                end
+                DATA: begin
+                    txd <= data_reg[bit_idx];
+                    if (baud_tick) begin
+                        if (bit_idx == 7) begin
+                            bit_idx <= 0;
+                            state   <= STOP; // 跳过校验位
+                        end else begin
+                            bit_idx <= bit_idx + 1;
+                        end
+                    end
+                end
+                STOP: begin
+                    txd <= 1;
+                    if (baud_tick) state <= IDLE;
+                end
+                default: state <= IDLE;
+            endcase
+        end
+    end
+
+endmodule</code></pre>
+
+        <h3>9.3 UART 接收器实现</h3>
+
+        <p>接收器的难点在于：你不知道数据何时到来。接收器需要一直监视 RXD 线，检测到起始位下降沿后才开始采样。</p>
+
+        <p>标准的 UART 接收器实现包含以下几个关键点：</p>
+
+        <ul>
+            <li><strong>过采样时钟</strong>：用内部时钟产生一个 16x 波特率的使能信号</li>
+            <li><strong>起始位检测</strong>：在空闲时检测 RXD 的下降沿，连续采样三次取多数表决确认</li>
+            <li><strong>中间采样</strong>：确认起始位后，在每 bit 的中点（第 8 个过采样周期）采样 RXD</li>
+            <li><strong>接收状态机</strong>：从 START 到 DATA 到 STOP，与发送器对称但方向相反</li>
+        </ul>
+
+        <pre><code>module uart_rx #(
+    parameter CLK_FREQ  = 50_000_000,
+    parameter BAUD_RATE = 115_200
+)(
+    input  wire       clk,
+    input  wire       rst_n,
+    input  wire       rxd,
+    output reg [7:0] rx_data,
+    output reg       rx_done
+);
+
+    localparam OVERSAMPLE = 16;
+    localparam OVS_CNT_MAX = CLK_FREQ / (BAUD_RATE * OVERSAMPLE);
+
+    localparam IDLE  = 2'd0,
+               START = 2'd1,
+               DATA  = 2'd2,
+               STOP  = 2'd3;
+
+    reg [1:0] state;
+    reg [7:0] rxd_sync, rxd_prev;
+    reg [15:0] ovs_cnt;
+    reg [3:0]  ovs_sample;
+    reg [2:0]  bit_idx;
+    reg [7:0]  shift_reg;
+
+    wire rxd_fall = rxd_sync == 8'h00 && rxd_prev == 8'hFF;
+    wire ovs_tick = (ovs_cnt == OVS_CNT_MAX - 1);
+
+    // 同步和边沿检测
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rxd_sync <= 8'hFF;
+            rxd_prev <= 8'hFF;
+        end else begin
+            rxd_sync <= {rxd_sync[6:0], rxd};
+            rxd_prev <= rxd_sync;
+        end
+    end
+
+    // 过采样计数器和状态机
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state     <= IDLE;
+            ovs_cnt   <= 0;
+            ovs_sample<= 0;
+            bit_idx   <= 0;
+            shift_reg <= 0;
+            rx_data   <= 0;
+            rx_done   <= 0;
+        end else begin
+            rx_done <= 0;
+            case (state)
+                IDLE: begin
+                    ovs_cnt <= 0;
+                    if (rxd_fall) begin
+                        state <= START;
+                        ovs_cnt <= 0;
+                    end
+                end
+                START: begin
+                    if (ovs_tick) begin
+                        if (ovs_sample == 7) begin
+                            // 中途采样，确认起始位仍在低电平
+                            if (!rxd_sync[7])
+                                state <= DATA;
+                            else
+                                state <= IDLE;  // 毛刺，忽略
+                        end
+                        ovs_sample <= ovs_sample + 1;
+                    end
+                end
+                DATA: begin
+                    if (ovs_tick) begin
+                        if (ovs_sample == 7) begin
+                            shift_reg[bit_idx] <= rxd_sync[7];
+                            bit_idx <= bit_idx + 1;
+                            if (bit_idx == 7) begin
+                                state <= STOP;
+                            end
+                        end
+                        ovs_sample <= ovs_sample + 1;
+                    end
+                end
+                STOP: begin
+                    if (ovs_tick && ovs_sample == 7) begin
+                        if (rxd_sync[7]) begin  // 确认停止位为高
+                            rx_data <= shift_reg;
+                            rx_done <= 1;
+                        end
+                        state <= IDLE;
+                    end
+                    if (ovs_tick)
+                        ovs_sample <= ovs_sample + 1;
+                end
+            endcase
+        end
+    end
+
+endmodule</code></pre>
+
+        <h3>9.4 SPI 协议与控制器</h3>
+
+        <p>SPI（Serial Peripheral Interface）是 Motorola 在 1980 年代推出的同步串行总线。与 UART 不同，SPI 有专用的时钟线（SCK），所以不需要约定波特率，可以跑得比 UART 快得多（典型值 10-100MHz，取决于硬件能力）。</p>
+
+        <p>一个标准的 SPI 总线有四根信号线：</p>
+        <ul>
+            <li><strong>SCK</strong>——串行时钟，由主机产生</li>
+            <li><strong>MOSI</strong>——主机输出，从机输入</li>
+            <li><strong>MISO</strong>——主机输入，从机输出</li>
+            <li><strong>CS</strong>（或 SS）——片选信号，低电平有效</li>
+        </ul>
+
+        <p>SPI 的灵活性来自 <strong>CPOL</strong>（Clock Polarity）和 <strong>CPHA</strong>（Clock Phase）两个参数的组合，它们决定了 SCK 空闲电平以及数据在哪个时钟沿被采样：</p>
+
+        <table>
+            <tr><th>模式</th><th>CPOL</th><th>CPHA</th><th>SCK 空闲电平</th><th>数据采样沿</th><th>数据变化沿</th></tr>
+            <tr><td>Mode 0</td><td>0</td><td>0</td><td>低电平</td><td>上升沿</td><td>下降沿</td></tr>
+            <tr><td>Mode 1</td><td>0</td><td>1</td><td>低电平</td><td>下降沿</td><td>上升沿</td></tr>
+            <tr><td>Mode 2</td><td>1</td><td>0</td><td>高电平</td><td>下降沿</td><td>上升沿</td></tr>
+            <tr><td>Mode 3</td><td>1</td><td>1</td><td>高电平</td><td>上升沿</td><td>下降沿</td></tr>
+        </table>
+
+        <p><strong>理解 CPOL 和 CPHA 的物理意义：</strong>CPOL 决定 SCK 空闲时的电平——如果外设的 SCK 在空闲时需要是高电平，你就选 CPOL=1。CPHA 决定第一个数据 bit 在 SCK 第一个沿之前（CPHA=0）还是之后（CPHA=1）被驱动到 MOSI 上。如果你把 CPOL 和 CPHA 搞反了，SPI 通信就会完全错位——这对是新手最容易犯的错误。</p>
+
+        <h3>9.5 SPI 主机控制器实现</h3>
+
+        <p>下面是一个支持四种模式的 SPI 主机控制器。核心思路是用一个计数器产生 SCK 的每个周期，在正确的时钟沿进行数据的移位和采样：</p>
+
+        <pre><code>module spi_master #(
+    parameter CLK_FREQ   = 50_000_000,
+    parameter SPI_FREQ   = 5_000_000,
+    parameter DATA_WIDTH = 8
+)(
+    input  wire                clk,
+    input  wire                rst_n,
+    input  wire                start,
+    input  wire [DATA_WIDTH-1:0] tx_data,
+    output reg  [DATA_WIDTH-1:0] rx_data,
+    output reg                  busy,
+    output reg                  done,
+
+    // SPI 物理接口
+    output reg  sck,
+    output reg  mosi,
+    input  wire miso,
+    output reg  cs_n
+);
+
+    parameter CPOL = 0;
+    parameter CPHA = 0;
+
+    localparam SCK_HALF = CLK_FREQ / (SPI_FREQ * 2);
+    localparam IDLE = 2'd0,
+               PREP = 2'd1,
+               XFER = 2'd2,
+               DONE = 2'd3;
+
+    reg [1:0] state;
+    reg [15:0] cnt;
+    reg [2:0]  bit_idx;
+    reg [DATA_WIDTH-1:0] shift_reg;
+
+    wire sck_idle = CPOL ? 1 : 0;
+    wire sck_enable_edge = (cnt == SCK_HALF - 1);  // SCK 切换点
+    wire sck_sample_edge = CPHA ? (cnt == 0) : (cnt == SCK_HALF - 1);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state    <= IDLE;
+            sck      <= sck_idle;
+            cs_n     <= 1;
+            mosi     <= 0;
+            busy     <= 0;
+            done     <= 0;
+            rx_data  <= 0;
+            cnt      <= 0;
+            bit_idx  <= 0;
+        end else begin
+            done <= 0;
+            case (state)
+                IDLE: begin
+                    sck  <= sck_idle;
+                    cs_n <= 1;
+                    busy <= 0;
+                    if (start) begin
+                        shift_reg <= tx_data;
+                        bit_idx   <= DATA_WIDTH - 1;
+                        cs_n      <= 0;
+                        state     <= CPHA ? XFER : PREP;
+                        cnt       <= 0;
+                        busy      <= 1;
+                        if (CPHA == 0) begin
+                            mosi <= tx_data[DATA_WIDTH - 1];
+                        end
+                    end
+                end
+                PREP: begin
+                    // CPHA=0 时，先输出第一个 bit 再产生 SCK
+                    if (sck_enable_edge) begin
+                        sck   <= ~sck;
+                        state <= XFER;
+                    end
+                    cnt <= cnt + 1;
+                end
+                XFER: begin
+                    if (cnt == SCK_HALF * 2 - 1) begin
+                        cnt <= 0;
+                        sck <= ~sck;
+                        // SCK 周期结束，此时采样 MISO
+                        rx_data[bit_idx] <= miso;
+                        if (bit_idx == 0) begin
+                            state <= DONE;
+                        end else begin
+                            bit_idx <= bit_idx - 1;
+                            mosi <= shift_reg[bit_idx - 1];
+                        end
+                    end else begin
+                        cnt <= cnt + 1;
+                        if (cnt == SCK_HALF - 1) begin
+                            sck <= ~sck;
+                            if (CPHA == 0)
+                                rx_data[bit_idx] <= miso;
+                        end
+                    end
+                end
+                DONE: begin
+                    cs_n  <= 1;
+                    sck   <= sck_idle;
+                    done  <= 1;
+                    busy  <= 0;
+                    state <= IDLE;
+                end
+            endcase
+        end
+    end
+
+endmodule</code></pre>
+
+        <div class="tip">
+            <strong>SPI 调试技巧：</strong>如果你在调试 SPI 通信，最有效的工具不是逻辑分析仪——请把 SCK、MOSI、MISO 和 CS 引到 FPGA 的空闲 I/O 上，用 2 通道以上的示波器同时观察 SCK 和 MOSI/MISO。观察的重点是：(1) CS 拉低之后 SCK 是否立即开始？(2) 数据是在 SCK 的上升沿还是下降沿变化的？(3) 停止位之后 CS 是否及时释放？三个问题排查完，90% 的 SPI 问题都能找到答案。
+        </div>
+
+        <h3>9.6 踩坑：UART 接收器在比特边界采样</h3>
+
+        <p>一个真实的故事。我刚入行时给某个工业设备写 FPGA 固件，用 UART 和主控 MCU 通信。115200 波特率，8N1 标准格式。在实验室测试一切正常，数据传输零错误。但设备部署到现场后，客户报告通信时不时出错，每次出错间隔几小时到几天不等。</p>
+
+        <p>我远程抓取了日志，发现错误呈现出随机性——同一包数据有时能正确接收，有时会错一个 bit。用示波器测量发现，现场的时钟 jitter 比实验室大（工业环境温度变化 + 电源噪声），某些极端情况下波特率发生器累积了足够的相位偏移，导致采样点从数据位的中心偏移到了边界附近。</p>
+
+        <p>回到我的 UART RX 代码，我发现采样逻辑写的是：起始位下降沿后等待 16 个过采样周期（即一个 bit 周期），然后直接采样——这实际上是在 bit 的<strong>起点</strong>而不是<strong>中点</strong>采样。应该等待 8 个过采样周期（半个 bit 周期）再开始第一次采样。修复后，同样的硬件在同样恶劣的环境中稳定运行了三年没有报错。</p>
+
+        <p>教训是：<strong>UART 接收器的采样点一定要取在 bit 的中心</strong>（16x 过采样时，下降沿后第 8 个采样点确认起始位，之后每 16 个采样点取一个数据位），留足左右各半个采样周期的容差空间。</p>
+
+        <p>UART 和 SPI 是嵌入式 FPGA 开发中最常用的两种通信协议，原理清晰、实现相对直接。我们的下一章要讲的是 I2C——它虽然也是一个串行协议，但开漏总线、多主仲裁、时钟拉伸等特性让它成为 FPGA 实现中最容易踩坑的协议之一。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

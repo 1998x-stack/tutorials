@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 常用通信接口实现（二）：I2C</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 课程导论与FPGA发展史</a></li>
+            <li><a href="02.html">第2章 数字电路基础回顾</a></li>
+            <li><a href="03.html">第3章 Verilog HDL语法精要（上）</a></li>
+            <li><a href="04.html">第4章 Verilog HDL语法精要（下）</a></li>
+            <li><a href="05.html">第5章 组合逻辑设计实战</a></li>
+            <li><a href="06.html">第6章 时序逻辑设计实战</a></li>
+            <li><a href="07.html">第7章 有限状态机（FSM）设计</a></li>
+            <li><a href="08.html">第8章 Testbench编写与仿真验证</a></li>
+            <li><a href="09.html">第9章 常用通信接口实现（一）：UART与SPI</a></li>
+            <li><a href="10.html" class="active">第10章 常用通信接口实现（二）：I2C</a></li>
+            <li><a href="11.html">第11章 存储器设计与Block RAM</a></li>
+            <li><a href="12.html">第12章 流水线设计技术</a></li>
+            <li><a href="13.html">第13章 跨时钟域（CDC）处理</a></li>
+            <li><a href="14.html">第14章 时序约束与分析基础</a></li>
+            <li><a href="15.html">第15章 Vivado工程实战全流程</a></li>
+            <li><a href="16.html">第16章 Quartus Prime与ModelSim</a></li>
+            <li><a href="17.html">第17章 常用IP核集成与应用</a></li>
+            <li><a href="18.html">第18章 工程目录规范与版本管理</a></li>
+            <li><a href="19.html">第19章 AXI4总线协议深度解析</a></li>
+            <li><a href="20.html">第20章 软核处理器集成</a></li>
+            <li><a href="21.html">第21章 RISC-V处理器FPGA实现</a></li>
+            <li><a href="22.html">第22章 高速串行接口设计</a></li>
+            <li><a href="23.html">第23章 硬件调试方法论</a></li>
+            <li><a href="24.html">第24章 开源工具链实战</a></li>
+            <li><a href="25.html">第25章 时序收敛与功耗优化</a></li>
+            <li><a href="26.html">第26章 高层次综合（HLS）入门</a></li>
+            <li><a href="27.html">第27章 AI时代的FPGA开发</a></li>
+            <li><a href="28.html">第28章 综合项目：FPGA图像采集与处理系统</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第10章 常用通信接口实现（二）：I2C</h2>
+
+        <p>上一章我们实现了 UART 和 SPI，两种协议有一个共同点：<strong>信号方向是确定的</strong>——主机驱动时钟和数据线，从机响应。I2C 则完全不同——SCL 和 SDA 都是<strong>开漏（open-drain）</strong>加上拉电阻至 VCC，任何设备都可以将总线拉低。这个物理层特性让 I2C 可以支持多主机（multi-master）和仲裁（arbitration），但也带来了 FPGA 实现中最容易出错的挑战。</p>
+
+        <p>如果你只在 MCU 上用库函数操作过 I2C，你可能觉得它很简单——调用 <code>HAL_I2C_Mem_Write()</code> 传几个参数就行了。但在 FPGA 里，你需要自己处理 SDA 在读写方向之间的切换、SCL 的拉伸检测、以及总线状态机的每一个细节。相信我，这是很多 FPGA 工程师"从入门到放弃"的分水岭。</p>
+
+        <h3>10.1 I2C 协议深度解析</h3>
+
+        <p>I2C（Inter-Integrated Circuit）由 Philips 在 1982 年推出，设计初衷是用最少的连线连接板级芯片。今天它仍然是传感器、EEPROM、ADC/DAC、PMIC、温度传感器等外设的标准接口之一。</p>
+
+        <p><strong>物理层：</strong>SCL（时钟线）和 SDA（数据线）都是双向的开漏 I/O，外部各接一个上拉电阻（典型值 4.7kΩ）。空闲时总线为高电平。任意设备都可以将总线拉低——这就是"线与"（wired-AND）逻辑。</p>
+
+        <p><strong>协议层的基本要素：</strong></p>
+        <ul>
+            <li><strong>START 条件</strong>：SCL 为高电平时，SDA 从高到低跳变。表示传输开始。</li>
+            <li><strong>STOP 条件</strong>：SCL 为高电平时，SDA 从低到高跳变。表示传输结束。</li>
+            <li><strong>数据位</strong>：SDA 上的数据在 SCL 为高电平时被采样，在 SCL 为低电平时允许变化（SCL 低电平时 SDA 变化属于下一个 bit 的传输）。</li>
+            <li><strong>ACK/NACK</strong>：每传输 8 位数据（一个字节）后，接收方在第 9 个 SCL 时钟拉低 SDA 表示应答（ACK），或保持高电平表示非应答（NACK）。</li>
+            <li><strong>7 位地址寻址</strong>：完整数据传输以 START 开始，然后是 7 位从机地址 + 1 位读写标志（0=写，1=读），后面跟随数据字节，以 STOP 结束。</li>
+        </ul>
+
+        <p><strong>10 位地址：</strong>当需要连接超过 128 个从机时，使用 10 位地址。前两个字节是：11110xx + R/W 标志 + 从机地址高两位，后面跟剩下 8 位地址。虽然实际使用较少，但 2026 年的 PMBus 电源管理芯片中有不少采用了 10 位地址。</p>
+
+        <table>
+            <tr><th>速度模式</th><th>最大频率</th><th>驱动能力</th><th>典型应用</th></tr>
+            <tr><td>Standard（标准模式）</td><td>100 kHz</td><td>标准驱动</td><td>低速传感器、简单 EEPROM</td></tr>
+            <tr><td>Fast（快速模式）</td><td>400 kHz</td><td>标准驱动</td><td>大多数 I2C 外设</td></tr>
+            <tr><td>Fast+（快速+模式）</td><td>1 MHz</td><td>强驱动（20mA）</td><td>高容量存储、显示面板</td></tr>
+            <tr><td>HS（高速模式）</td><td>3.4 MHz</td><td>特殊电流源</td><td>高速数据采集、多路摄像头</td></tr>
+        </table>
+
+        <div class="highlight">
+            <strong>FPGA 实现 I2C 的核心难点：</strong>不同于 UART 和 SPI 的输出可以推挽驱动（push-pull），I2C 的 SDA 和 SCL 在 FPGA 中必须用 <code>inout</code> 端口加三态门控制。当输出为 1 时，三态门置为高阻（Z），由外部上拉电阻拉高；当输出为 0 时，三态门拉到 GND。这就意味着 SDA 的方向需要在主机输出、主机输入、时钟拉伸检测之间快速切换——状态机的设计比 SPI/UART 复杂一个数量级。
+        </div>
+
+        <h3>10.2 I2C 主机控制器</h3>
+
+        <p>一个完整的 I2C 主机控制器状态机需要处理以下序列：START → 发送从机地址 + R/W → 接收 ACK → 发送/接收数据字节 → 发送/接收 ACK → 重复 START 或 STOP。</p>
+
+        <p>多字节读写的常见模式是：<strong>START + DEV_ADDR[写] + REG_ADDR + REPEATED START + DEV_ADDR[读] + 数据接收 + STOP</strong>。这中间包含一个重复 START 条件（Restart），即在没有先发 STOP 的情况下再次生成 START 条件。MCU 的 I2C 库会自动处理这一步，但在 FPGA 中用状态机实现时需要显式地增加一个 RESTART 状态。</p>
+
+        <pre><code>module i2c_master #(
+    parameter CLK_FREQ = 50_000_000,
+    parameter I2C_FREQ = 400_000
+)(
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        start,
+    input  wire        read_write,   // 0=写, 1=读
+    input  wire [6:0]  dev_addr,
+    input  wire [7:0]  wr_data,
+    output reg  [7:0]  rd_data,
+    output reg         done,
+    output reg         ack_error,
+
+    inout  wire        sda,
+    inout  wire        scl
+);
+
+    localparam DIVIDER = CLK_FREQ / (I2C_FREQ * 4);
+    localparam IDLE       = 4'd0,
+               START1     = 4'd1,
+               START2     = 4'd2,
+               SEND_ADDR  = 4'd3,
+               SEND_ACK   = 4'd4,
+               SEND_DATA  = 4'd5,
+               SEND_ACK2  = 4'd6,
+               RECV_DATA  = 4'd7,
+               RECV_ACK   = 4'd8,
+               STOP1      = 4'd9,
+               STOP2      = 4'd10,
+               STOP3      = 4'd11;
+
+    reg [3:0] state;
+    reg [15:0] clk_cnt;
+    reg [2:0]  bit_cnt;
+    reg [7:0]  data_buf;
+    reg        scl_out, sda_out;
+    reg        scl_oe,  sda_oe;
+    reg        sda_in;
+
+    // I2C 时钟分频（4 倍过采样：每个 SCL 半周期 = DIVIDER 个 clk）
+    wire clk_tick = (clk_cnt == DIVIDER - 1);
+    always @(posedge clk or negedge rst_n)
+        if (!rst_n) clk_cnt <= 0;
+        else if (state == IDLE || clk_tick) clk_cnt <= 0;
+        else clk_cnt <= clk_cnt + 1;
+
+    // SDA 输入同步
+    always @(posedge clk) sda_in <= sda;
+
+    // 三态门控制
+    assign scl = scl_oe ? scl_out : 1'bz;
+    assign sda = sda_oe ? sda_out : 1'bz;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state    <= IDLE;
+            scl_out  <= 1; scl_oe <= 0;
+            sda_out  <= 1; sda_oe <= 0;
+            bit_cnt  <= 0;
+            done     <= 0;
+            ack_error<= 0;
+        end else begin
+            done <= 0;
+            case (state)
+                IDLE: begin
+                    scl_oe <= 0; sda_oe <= 0;
+                    if (start) begin
+                        data_buf <= {dev_addr, read_write};
+                        bit_cnt  <= 7;
+                        state    <= START1;
+                    end
+                end
+                START1: begin
+                    sda_oe <= 1; sda_out <= 0;  // SDA 先拉低
+                    if (clk_tick) state <= START2;
+                end
+                START2: begin
+                    scl_oe <= 1; scl_out <= 0;  // SCL 拉低，START 条件完成
+                    if (clk_tick) state <= SEND_ADDR;
+                end
+                SEND_ADDR: begin
+                    scl_oe <= 1; scl_out <= 0;  // SCL 低电平时 SDA 变化
+                    if (clk_tick) begin
+                        if (clk_cnt == DIVIDER - 2)
+                            scl_out <= 1;       // SCL 拉高，采样
+                        else if (clk_cnt == 0) begin
+                            scl_out <= 0;
+                            // 数据移位输出
+                            sda_out <= data_buf[bit_cnt];
+                            sda_oe  <= 1;
+                            if (bit_cnt == 0)
+                                state <= SEND_ACK;
+                            else
+                                bit_cnt <= bit_cnt - 1;
+                        end
+                    end
+                end
+                SEND_ACK: begin
+                    // 释放 SDA，等待从机 ACK
+                    sda_oe <= 0;
+                    if (clk_tick && clk_cnt == DIVIDER - 2)
+                        scl_out <= 1;
+                    else if (clk_tick && clk_cnt == 0) begin
+                        scl_out <= 0;
+                        ack_error <= sda_in;  // NACK 时 sda 为高
+                        if (read_write)
+                            state <= RECV_DATA;
+                        else
+                            state <= SEND_DATA;
+                        bit_cnt <= 7;
+                    end
+                end
+                SEND_DATA: begin
+                    // 发送数据字节（与 SEND_ADDR 相似）
+                    if (clk_tick && clk_cnt == 0) begin
+                        sda_out <= wr_data[bit_cnt];
+                        sda_oe  <= 1;
+                        if (bit_cnt == 0)
+                            state <= SEND_ACK2;
+                        else
+                            bit_cnt <= bit_cnt - 1;
+                    end
+                end
+                SEND_ACK2: begin
+                    sda_oe <= 0;  // 释放 SDA，等待从机 ACK
+                    if (clk_tick && clk_cnt == 0) begin
+                        ack_error <= sda_in;
+                        state <= STOP1;
+                    end
+                end
+                RECV_DATA: begin
+                    sda_oe <= 0;
+                    if (clk_tick && clk_cnt == DIVIDER - 2)
+                        scl_out <= 1;
+                    else if (clk_tick && clk_cnt == 0) begin
+                        scl_out <= 0;
+                        data_buf[bit_cnt] <= sda_in;
+                        if (bit_cnt == 0)
+                            state <= RECV_ACK;
+                        else
+                            bit_cnt <= bit_cnt - 1;
+                    end
+                end
+                RECV_ACK: begin
+                    sda_oe <= 1; sda_out <= 1;  // 主机 NACK（读结束后终止）
+                    if (clk_tick && clk_cnt == 0) begin
+                        rd_data <= data_buf;
+                        state <= STOP1;
+                    end
+                end
+                STOP1: begin
+                    scl_oe <= 0;                // 释放 SCL
+                    if (clk_tick) state <= STOP2;
+                end
+                STOP2: begin
+                    scl_oe <= 0;
+                    sda_oe <= 1; sda_out <= 0;  // SDA 拉低
+                    if (clk_tick) state <= STOP3;
+                end
+                STOP3: begin
+                    scl_oe <= 0;
+                    sda_oe <= 0;                // 释放 SDA（上拉拉高，形成 STOP）
+                    done   <= 1;
+                    state  <= IDLE;
+                end
+            endcase
+        end
+    end
+
+endmodule</code></pre>
+
+        <div class="tip">
+            <strong>I2C 状态机设计要点：</strong>上述代码使用了一个 4 倍过采样的时钟（每个 SCL 半周期被进一步分为 2 个 tick，一个完整的 SCL 周期需要 4 个 tick）。这种设计的好处是可以在一个 SCL 周期内的精确时间点进行信号的变化和采样，避免了用边沿检测带来的毛刺风险。实际项目中，你也可以用更高倍率的过采样来获得更精细的时序控制。
+        </div>
+
+        <h3>10.3 I2C 从机控制器</h3>
+
+        <p>I2C 从机的实现比主机更微妙——从机不产生时钟，而是被动地监视 SCL 和 SDA 上的信号变化。核心逻辑包括：</p>
+        <ul>
+            <li><strong>地址匹配</strong>：持续监听 START 条件之后的第一个字节，与自己配置的 7 位地址比对</li>
+            <li><strong>寄存器模型</strong>：在收到地址后的数据字节作为寄存器地址，后续字节作为读写数据</li>
+            <li><strong>SDA 方向控制</strong>：从机在 ACK 阶段和读数据阶段需要驱动 SDA，其他时间保持高阻</li>
+        </ul>
+
+        <p>从机实现的关键设计决策是 SDA 的三态控制：主机写数据时，从机不能驱动 SDA（否则总线冲突）；主机读数据时，从机需要拉低或释放 SDA 来输出逻辑 0 或 1。这个方向切换的时机必须精确——在第 9 个 SCL 脉冲的下降沿之后准备下一个 bit 的输出，在第 1-8 个 SCL 脉冲的高电平期间保持数据稳定。</p>
+
+        <h3>10.4 I2C 调试难点</h3>
+
+        <p>I2C 的调试难度在三种协议（UART/SPI/I2C）中是最高的，因为它的开漏架构带来了几个特有的问题：</p>
+
+        <p><strong>总线死锁（Bus Lock）</strong>：最常见的情况是某个从机在传输中途被复位或进入异常状态，导致 SDA 或 SCL 被持续拉低。此时主机即使想发送 STOP 条件也无法将总线拉高——因为 STOP 条件要求 SDA 从低到高跳变，但 SDA 被从机一直拉着。解决方法是在 I2C 主机中实现<strong>总线超时检测</strong>——如果 SCL 或 SDA 被拉低超过一定时间（比如 25ms），主机主动发出一串 SCL 脉冲（最多 9 个），让从机释放总线。</p>
+
+        <p><strong>时钟拉伸（Clock Stretching）</strong>：部分 I2C 从机（特别是较慢的 EEPROM 和 MCU）会在处理内部操作时将 SCL 拉低不放，要求主机等待。如果主机不检测 SCL 的实际电平（以为 SCL 是自己在驱动的），就会在 SCL 还被从机拉着的情况下继续发数据——直接导致数据错位。FPGA 的 I2C 主机实现必须读回 SCL 引脚的输入，在 SCK 低电平释放后等待它变为高再继续。</p>
+
+        <p><strong>SDA Stuck Low 检测</strong>：传输开始前检测 SDA 是否为低。如果 SDA 在上一次传输后没有被释放，直接发 START 条件会失败。在状态机的 IDLE 状态检查 SDA 是否为空闲高电平，如果为低，先发 9 个 SCL 脉冲尝试恢复。</p>
+
+        <table>
+            <tr><th>故障现象</th><th>可能原因</th><th>排查方法</th></tr>
+            <tr><td>总线死锁，SDA 常低</td><td>从机异常、位数计数不对导致 ACK 缺失</td><td>示波器测量 SDA/SCL，检查是否有 9 个 SCL</td></tr>
+            <tr><td>数据错位/丢失</td><td>时钟拉伸未处理、SCL 被从机拉低</td><td>用 ILA 抓取 SCL 输入，确认每 bit 都有翻转</td></tr>
+            <tr><td>NACK 后无法恢复</td><td>未发 STOP 直接退出了状态机</td><td>检查状态机：NACK 后必须发送 STOP</td></tr>
+            <tr><td>重复 START 失败</td><td>Restart 时序不满足 tHD;STA 要求</td><td>检查 START 条件保持时间（最小 4μs@100kHz）</td></tr>
+        </table>
+
+        <h3>10.5 踩坑：时钟拉伸导致 EEPROM 写入后总线挂死</h3>
+
+        <p>有一次我需要用 FPGA 通过 I2C 往一颗 EEPROM（Microchip 24LC256）里写入配置数据。DATASHEET 上写得很清楚："After a write operation, the EEPROM enters an internal write cycle (tWR = 5ms max), during which it ignores all I2C traffic and holds SCL low if you attempt a new START." 我读到了这一行，但是——我没当回事。</p>
+
+        <p>我的 I2C 主机控制器根本没有检测时钟拉伸的功能。写一个字节之后紧接着发下一个 slave address，FPGA 在 SCL 上产生 START 条件——但 SCL 被 EEPROM 拉着，FPGA 根本没注意到 SCL 没有变高，还在继续产生时钟脉冲。因为实际 SCL 一直是低，SDA 上的信号全被错过了。结果总线陷入了一个无法恢复的僵局，我还以为 EEPROM 坏了，换了两颗芯片，还是一样的问题。</p>
+
+        <p>最后用示波器看到 SCL 线上一个锯齿般的波形（FPGA 想拉高但 EEPROM 拉着不放），才恍然大悟。修复方案是在主机状态机的每个 SCL 高电平阶段加入 SCL 输入检测——只有在检测到 SCL 确实变高后才继续下一拍。多花了大概 30 行代码，但从此再也没有遇到过 I2C 总线挂死。</p>
+
+        <p>重要的事情说三遍：<strong>I2C 主机一定要读回 SCL 并等待它释放，I2C 主机一定要读回 SCL 并等待它释放，I2C 主机一定要读回 SCL 并等待它释放。</strong></p>
+
+        <p>I2C 协议的复杂性远超 UART 和 SPI，但掌握了它之后，你已经具备了 FPGA 通信接口设计最核心的能力——处理双向三态信号、应对从机的非标准行为、以及设计鲁棒的状态机。下一章，我们将转向 FPGA 中的另一个核心主题：存储器——从分布式 RAM 到 Block RAM 再到 FIFO，为接下来的流水线和 CDC 设计打下存储基础。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

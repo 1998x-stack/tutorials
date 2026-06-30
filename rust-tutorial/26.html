@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第26章 实战：CLI工具</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦀 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Rust简介与安装</a></li>
+            <li><a href="02.html">第2章 变量与数据类型</a></li>
+            <li><a href="03.html">第3章 函数与控制流</a></li>
+            <li><a href="04.html">第4章 所有权初探</a></li>
+            <li><a href="05.html">第5章 切片与字符串</a></li>
+            <li><a href="06.html">第6章 结构体</a></li>
+            <li><a href="07.html">第7章 枚举与模式匹配</a></li>
+            <li><a href="08.html">第8章 项目管理与模块</a></li>
+            <li><a href="09.html">第9章 集合类型</a></li>
+            <li><a href="10.html">第10章 错误处理</a></li>
+            <li><a href="11.html">第11章 泛型</a></li>
+            <li><a href="12.html">第12章 Trait</a></li>
+            <li><a href="13.html">第13章 生命周期</a></li>
+            <li><a href="14.html">第14章 闭包与迭代器</a></li>
+            <li><a href="15.html">第15章 测试体系</a></li>
+            <li><a href="16.html">第16章 Cargo生态进阶</a></li>
+            <li><a href="17.html">第17章 常见实用Trait</a></li>
+            <li><a href="18.html">第18章 日志与调试</a></li>
+            <li><a href="19.html">第19章 智能指针</a></li>
+            <li><a href="20.html">第20章 并发编程</a></li>
+            <li><a href="21.html">第21章 异步编程</a></li>
+            <li><a href="22.html">第22章 Unsafe Rust</a></li>
+            <li><a href="23.html">第23章 常用库选型</a></li>
+            <li><a href="24.html">第24章 性能分析</a></li>
+            <li><a href="25.html">第25章 宏编程入门</a></li>
+            <li><a href="26.html" class="active">第26章 实战：CLI工具</a></li>
+            <li><a href="27.html">第27章 实战：Web API</a></li>
+            <li><a href="28.html">第28章 2027 Edition展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>从"好用的工具都是别人写的"到自己动手</h2>
+
+        <p>学完前面25章，你掌握了不少Rust的核心概念：所有权、trait、生命周期、闭包、并发、甚至是宏。但学了这么多，你最常被问到的问题可能是——"你学了Rust，到底用它做了什么？"</p>
+
+        <p>我当年学Rust三个月时也有同样的困惑。直到有一天，我需要统计团队Git仓库的提交活跃度，去理解每个开发者的贡献模式。那时我本能地去找现成工具：<code>git shortlog</code>输出太简陋，<code>gitstats</code>又依赖Python。我突然意识到一个绝佳的练习机会——为什么不自己用Rust写一个？</p>
+
+        <p>这章我们要做的是：用Rust构建一个名为<strong>gitstat</strong>的命令行工具，它能分析Git仓库，统计每个作者的提交数量、修改行数，并以漂亮的彩色表格输出。通过这个项目，你将串联起Rust生态中最重要的几块拼图：<code>clap</code>命令行解析、<code>git2</code>仓库分析、<code>anyhow</code>错误处理、<code>colored</code>终端输出，以及<code>cargo publish</code>发布流程。</p>
+
+        <div class="highlight">
+            <strong>真实教训</strong>：我第一次写Rust CLI时犯了一个经典错误——把<code>main.rs</code>变成了一个2000行的"上帝文件"。Rust的模块系统让分离关注点变得简单，千万别浪费它。对于CLI工具的最佳实践是：<code>main.rs</code>只做参数解析和入口调度，核心逻辑放在<code>lib.rs</code>中。这样做的另一个好处是——方便集成测试（你可以直接<code>use gitstat::*</code>测试核心函数）。
+        </div>
+
+        <h2>项目初始化</h2>
+
+        <p>用Cargo创建新项目，这已经是肌肉记忆了：</p>
+
+        <pre><code>cargo new gitstat
+cd gitstat</code></pre>
+
+        <p>我们要用到的核心依赖如下。打开<code>Cargo.toml</code>：</p>
+
+        <pre><code>[package]
+name = "gitstat"
+version = "0.1.0"
+edition = "2024"
+description = "A CLI tool to analyze git repository statistics"
+
+[dependencies]
+# 命令行参数解析
+clap = { version = "4.5", features = ["derive"] }
+# Git仓库操作底层绑定
+git2 = "0.19"
+# 终端彩色输出
+colored = "2.2"
+# 错误处理简化
+anyhow = "1.0"
+# 进度条指示
+indicatif = "0.17"
+# 表格输出
+prettytable-rs = "0.10"</code></pre>
+
+        <p>关于各个crate的选型理由：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Crate</th>
+                    <th>用途</th>
+                    <th>为什么选它</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>clap</code></td>
+                    <td>命令行参数解析</td>
+                    <td>Rust CLI工具事实标准，derive模式零样板代码</td>
+                </tr>
+                <tr>
+                    <td><code>git2</code></td>
+                    <td>Git仓库操作</td>
+                    <td>libgit2的Rust绑定，功能完整且稳定</td>
+                </tr>
+                <tr>
+                    <td><code>colored</code></td>
+                    <td>终端彩色输出</td>
+                    <td>API极简，字符串染色一行搞定</td>
+                </tr>
+                <tr>
+                    <td><code>anyhow</code></td>
+                    <td>错误处理</td>
+                    <td>简化错误传播，适合应用层代码</td>
+                </tr>
+                <tr>
+                    <td><code>indicatif</code></td>
+                    <td>进度条</td>
+                    <td>功能丰富但易用，大型仓库分析时用户体验好</td>
+                </tr>
+                <tr>
+                    <td><code>prettytable-rs</code></td>
+                    <td>表格输出</td>
+                    <td>终端表格渲染，支持格式控制</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>参数解析</h2>
+
+        <p><code>clap</code>的derive模式是Rust生态中"过程宏提升体验"的绝佳范例。我们定义CLI结构：支持<code>gitstat</code>命令默认分析当前目录的仓库，也可以通过子命令<code>gitstat summary</code>只显示摘要，或<code>gitstat authors --sort commits</code>以提交数排序。</p>
+
+        <pre><code>use clap::{Parser, Subcommand};
+
+/// A tool to analyze git repository statistics
+#[derive(Parser)]
+#[command(name = "gitstat")]
+#[command(version = "0.1.0")]
+#[command(about = "Analyze git repository statistics", long_about = None)]
+pub struct Cli {
+    /// Path to the git repository (defaults to current dir)
+    #[arg(default_value = ".")]
+    pub repo_path: String,
+
+    /// Limit to recent N commits
+    #[arg(short = 'n', long = "limit", default_value = "0")]
+    pub commit_limit: usize,
+
+    #[command(subcommand)]
+    pub command: Option&lt;Commands&gt;,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Show summary statistics only
+    Summary,
+    /// List authors with detailed stats, sorted by given column
+    Authors {
+        /// Sort by: commits, insertions, deletions, name
+        #[arg(long = "sort", default_value = "commits")]
+        sort_by: String,
+    },
+}</code></pre>
+
+        <p>让我解释一下<code>clap</code> derive模式下几个核心属性的作用：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>属性</th>
+                    <th>作用</th>
+                    <th>示例</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>#[command(name = "...")]</code></td>
+                    <td>设置命令名称</td>
+                    <td>即<code>--help</code>时显示的名字</td>
+                </tr>
+                <tr>
+                    <td><code>#[arg(short, long)]</code></td>
+                    <td>自动生成短标志和长标志</td>
+                    <td><code>-l</code>和<code>--limit</code></td>
+                </tr>
+                <tr>
+                    <td><code>#[arg(default_value = "...")]</code></td>
+                    <td>参数默认值</td>
+                    <td>仓库路径默认当前目录</td>
+                </tr>
+                <tr>
+                    <td><code>#[command(subcommand)]</code></td>
+                    <td>声明子命令</td>
+                    <td>支持多级命令结构</td>
+                </tr>
+                <tr>
+                    <td><code>#[arg(long = "--sort")]</code></td>
+                    <td>自定义标志名称</td>
+                    <td><code>--sort commits</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>核心逻辑</h2>
+
+        <p>核心功能是打开仓库、遍历提交、按作者聚合统计信息。<code>git2</code> crate提供了与libgit2等价的API。我们来设计一个<code>RepoAnalyzer</code>结构体封装所有逻辑。</p>
+
+        <p>在<code>src/lib.rs</code>中定义数据模型：</p>
+
+        <pre><code>use git2::Repository;
+use std::collections::HashMap;
+
+/// 单个作者的统计信息
+#[derive(Debug, Clone)]
+pub struct AuthorStats {
+    pub name: String,
+    pub commits: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
+/// 仓库分析器
+pub struct RepoAnalyzer {
+    repo: Repository,
+}
+
+impl RepoAnalyzer {
+    pub fn new(path: &amp;str) -&gt; anyhow::Result&lt;Self&gt; {
+        let repo = Repository::open(path)
+            .map_err(|e| anyhow::anyhow!("无法打开仓库 '{}': {}", path, e))?;
+        Ok(Self { repo })
+    }
+
+    /// 收集所有作者的提交统计
+    pub fn collect_stats(&amp;self, limit: usize) -&gt; anyhow::Result&lt;Vec&lt;AuthorStats&gt;&gt; {
+        let mut revwalk = self.repo.revwalk()?;
+        revwalk.push_head()?;
+        revwalk.set_sorting(git2::Sort::TIME)?;
+
+        let mut authors: HashMap&lt;String, AuthorStats&gt; = HashMap::new();
+        let mut count = 0;
+
+        for oid_result in revwalk {
+            let oid = oid_result?;
+            let commit = self.repo.find_commit(oid)?;
+            let author = commit.author();
+            let name = author.name().unwrap_or("Unknown").to_string();
+
+            // 统计本次提交的增删行数
+            let (insertions, deletions) = self.count_diff(&amp;commit)?;
+
+            let entry = authors.entry(name.clone()).or_insert(AuthorStats {
+                name,
+                commits: 0,
+                insertions: 0,
+                deletions: 0,
+            });
+            entry.commits += 1;
+            entry.insertions += insertions;
+            entry.deletions += deletions;
+
+            count += 1;
+            if limit &gt; 0 &amp;&amp; count &gt;= limit {
+                break;
+            }
+        }
+
+        let mut result: Vec&lt;AuthorStats&gt; = authors.into_values().collect();
+        result.sort_by(|a, b| b.commits.cmp(&amp;a.commits));
+        Ok(result)
+    }
+
+    fn count_diff(&amp;self, commit: &amp;git2::Commit) -&gt; anyhow::Result&lt;(usize, usize)&gt; {
+        let tree = commit.tree()?;
+        let parent_tree = if commit.parent_count() &gt; 0 {
+            Some(commit.parent(0)?.tree()?)
+        } else {
+            None
+        };
+        let diff = self.repo.diff_tree_to_tree(
+            parent_tree.as_ref(),
+            Some(&amp;tree),
+            None,
+        )?;
+
+        let stats = diff.stats()?;
+        Ok((stats.insertions(), stats.deletions()))
+    }
+}</code></pre>
+
+        <p>注意这里用<code>anyhow::Error</code>作为错误类型——<code>git2</code>的<code>Error</code>可以通过<code>?</code>运算符自动转换为<code>anyhow::Error</code>，使代码非常干净。</p>
+
+        <div class="tip">
+            <strong>小技巧</strong>：<code>revwalk</code>的排序方式会影响分析结果。使用<code>git2::Sort::TIME</code>按时间排序，确保按提交顺序遍历。如果你只需要分析最近N个提交，利用<code>limit</code>参数提前跳出循环是重要的性能优化——特别是对拥有数万次提交的大型仓库。
+        </div>
+
+        <h2>输出格式化</h2>
+
+        <p>终端工具的用户体验很大程度上取决于输出格式。<code>colored</code> crate让字符串染色变得极其简单：</p>
+
+        <pre><code>use colored::*;
+use prettytable::{Table, Row, Cell, cell};
+use prettytable::format::consts::FORMAT_NO_LINESEP_WITH_TITLE;
+
+pub fn print_author_table(stats: &amp;[AuthorStats]) {
+    let mut table = Table::new();
+    table.set_format(*FORMAT_NO_LINESEP_WITH_TITLE);
+
+    table.set_titles(Row::new(vec![
+        cell!("作者"),
+        cell!("提交数"),
+        cell!("新增行"),
+        cell!("删除行"),
+        cell!("净增行"),
+    ]));
+
+    for s in stats {
+        let net = s.insertions as i64 - s.deletions as i64;
+        let net_str = if net &gt;= 0 {
+            format!("+{}", net).green().to_string()
+        } else {
+            format!("{}", net).red().to_string()
+        };
+
+        table.add_row(Row::new(vec![
+            Cell::new(&amp;s.name).style_spec("Fc"),
+            Cell::new(&amp;s.commits.to_string()).style_spec("Fy"),
+            Cell::new(&amp;s.insertions.to_string()).style_spec("Fg"),
+            Cell::new(&amp;s.deletions.to_string()).style_spec("Fr"),
+            Cell::new(&amp;net_str).style_spec("Fb"),
+        ]));
+    }
+
+    table.printstd();
+}</code></pre>
+
+        <p>配合<code>indicatif</code>进度条，在大仓库分析时给用户一个反馈：</p>
+
+        <pre><code>use indicatif::{ProgressBar, ProgressStyle};
+
+pub fn collect_stats_with_progress(
+    analyzer: &amp;RepoAnalyzer,
+    total: usize,
+) -&gt; anyhow::Result&lt;Vec&lt;AuthorStats&gt;&gt; {
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} commits")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    // ... 在遍历中每处理一个提交就 pb.inc(1)
+    pb.finish_with_message("分析完成");
+    // 返回结果
+}</code></pre>
+
+        <h2>错误处理</h2>
+
+        <p>在CLI工具中，错误处理直接关系到用户体验。我们的策略是：库代码（<code>lib.rs</code>）使用<code>anyhow::Result</code>返回，<code>main.rs</code>中使用<code>anyhow::Context</code>提供上下文信息，最终优雅地退出：</p>
+
+        <pre><code>use anyhow::Context;
+
+fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let cli = gitstat::Cli::parse();
+
+    let analyzer = gitstat::RepoAnalyzer::new(&amp;cli.repo_path)
+        .with_context(|| format!("无法打开仓库: {}", cli.repo_path))?;
+
+    let stats = analyzer.collect_stats(cli.commit_limit)
+        .context("统计提交信息时出错")?;
+
+    gitstat::print_author_table(&amp;stats);
+
+    Ok(())
+}</code></pre>
+
+        <p><code>with_context</code>方法为底层的错误添加上层语义——当用户看到一个"无法打开仓库"的错误消息时，远比看到一个原始的<code>git2::Error</code>好理解。</p>
+
+        <div class="warning">
+            <strong>注意</strong>：不要在<code>main</code>函数中滥用<code>unwrap()</code>。对于一个CLI工具来说，用户执行时看到<code>thread 'main' panicked at ...</code>是非常糟糕的体验。使用<code>anyhow</code>配合<code>#[derive(Debug)]</code>错误类型，输出友好的错误信息，并以非零退出码结束——这才是专业的做法。
+        </div>
+
+        <h2>测试与发布</h2>
+
+        <p>集成测试是CLI工具的"安全带"。在<code>tests/</code>目录下创建<code>integration_test.rs</code>：</p>
+
+        <pre><code>use std::process::Command;
+
+#[test]
+fn test_cli_help() {
+    let output = Command::new("cargo")
+        .args(["run", "--", "--help"])
+        .output()
+        .expect("failed to execute process");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&amp;output.stdout);
+    assert!(stdout.contains("gitstat"));
+}
+
+#[test]
+fn test_cli_version() {
+    let output = Command::new("cargo")
+        .args(["run", "--", "--version"])
+        .output()
+        .expect("failed to execute process");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&amp;output.stdout).contains("0.1.0"));
+}</code></pre>
+
+        <p>部署到crates.io只差一步：</p>
+
+        <pre><code>cargo publish --dry-run  # 先做一次"彩排"
+cargo publish            # 正式发布到 crates.io</code></pre>
+
+        <p>发布前请确保：</p>
+        <ul>
+            <li>在<code>Cargo.toml</code>中填写了<code>description</code>、<code>license</code>、<code>repository</code>字段</li>
+            <li>在crates.io上注册了账号（通过<code>cargo login</code>）</li>
+            <li>版本号符合语义化版本规范</li>
+            <li><code>README.md</code>写好了基本用法说明</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>最佳实践</strong>：二进制crate一定要将核心逻辑放在<code>lib.rs</code>，而非全部塞在<code>main.rs</code>。原因有二：一是<code>lib.rs</code>可以被集成测试直接<code>use</code>；二是如果其他开发者想把你的功能嵌入他们的项目，他们可以直接依赖你的库crate，而<code>main.rs</code>中的代码无法被外部使用。
+        </div>
+
+        <h2>完整Cargo.toml一览</h2>
+
+        <p>这是gitstat最终完整的<code>Cargo.toml</code>：</p>
+
+        <pre><code>[package]
+name = "gitstat"
+version = "0.1.0"
+edition = "2024"
+description = "A CLI tool to analyze git repository statistics"
+license = "MIT"
+repository = "https://github.com/yourname/gitstat"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+git2 = "0.19"
+colored = "2.2"
+anyhow = "1.0"
+indicatif = "0.17"
+prettytable-rs = "0.10"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+
+[[bin]]
+name = "gitstat"
+path = "src/main.rs"</code></pre>
+
+        <div class="tip">
+            <strong>提个醒</strong>：<code>git2</code>依赖libgit2这个C库，首次<code>cargo build</code>时会自动编译它。这个过程在第一次会比较慢（尤其是你在没有cmake的机器上），所以<code>gitstat</code>的第一次构建可能需要几分钟，后面增量编译就快了。
+        </div>
+
+        <h2>项目结构总结</h2>
+
+        <p>最终的项目结构如下：</p>
+
+        <pre><code>gitstat/
+├── Cargo.toml
+├── Cargo.lock
+├── src/
+│   ├── main.rs        # 入口：参数解析 + 调度
+│   └── lib.rs         # 核心逻辑：RepoAnalyzer、格式化输出
+├── tests/
+│   └── integration_test.rs  # CLI集成测试
+└── README.md          # 使用说明</code></pre>
+
+        <p>这一章，我们从头搭建了一个实用的CLI工具，涉及了Rust生态中最核心的几个领域：clap参数解析、git2仓库底层操作、colored与prettytable的输出美化、anyhow的错误处理，以及cargo test和cargo publish的发布流程。工具虽小，但五脏俱全——你看到的这个模式，正是无数生产级Rust CLI工具（如ripgrep、fd、bat）的共同架构。</p>
+
+        <p>下一章，我们将转向网络世界——用Axum框架搭建一个完整的RESTful Web API，把Rust带到服务器端。这是Rust另一个大放异彩的领域。</p>
+
+        <div class="footer-nav">
+            <a href="25.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="27.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

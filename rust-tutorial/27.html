@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第27章 实战：Web API</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦀 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Rust简介与安装</a></li>
+            <li><a href="02.html">第2章 变量与数据类型</a></li>
+            <li><a href="03.html">第3章 函数与控制流</a></li>
+            <li><a href="04.html">第4章 所有权初探</a></li>
+            <li><a href="05.html">第5章 切片与字符串</a></li>
+            <li><a href="06.html">第6章 结构体</a></li>
+            <li><a href="07.html">第7章 枚举与模式匹配</a></li>
+            <li><a href="08.html">第8章 项目管理与模块</a></li>
+            <li><a href="09.html">第9章 集合类型</a></li>
+            <li><a href="10.html">第10章 错误处理</a></li>
+            <li><a href="11.html">第11章 泛型</a></li>
+            <li><a href="12.html">第12章 Trait</a></li>
+            <li><a href="13.html">第13章 生命周期</a></li>
+            <li><a href="14.html">第14章 闭包与迭代器</a></li>
+            <li><a href="15.html">第15章 测试体系</a></li>
+            <li><a href="16.html">第16章 Cargo生态进阶</a></li>
+            <li><a href="17.html">第17章 常见实用Trait</a></li>
+            <li><a href="18.html">第18章 日志与调试</a></li>
+            <li><a href="19.html">第19章 智能指针</a></li>
+            <li><a href="20.html">第20章 并发编程</a></li>
+            <li><a href="21.html">第21章 异步编程</a></li>
+            <li><a href="22.html">第22章 Unsafe Rust</a></li>
+            <li><a href="23.html">第23章 常用库选型</a></li>
+            <li><a href="24.html">第24章 性能分析</a></li>
+            <li><a href="25.html">第25章 宏编程入门</a></li>
+            <li><a href="26.html">第26章 实战：CLI工具</a></li>
+            <li><a href="27.html" class="active">第27章 实战：Web API</a></li>
+            <li><a href="28.html">第28章 2027 Edition展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>从"Rust不适合做Web"到"真香"</h2>
+
+        <p>提起Rust的Web生态，很多人还停留在五年前的印象："Rust做Web？框架不成熟，生态不完善，别折腾了。"如果你也这么想，那2026年的Rust Web生态会让你大吃一惊。</p>
+
+        <p>我印象最深的一个转折点是2023年，我所在的公司要把一个高吞吐的消息推送服务从Go重写到Rust。当时的Go实现已经碰到瓶颈：单个节点的goroutine调度开销虽然低，但在每秒10万级别的消息路由场景下，GC暂停的毛刺（latency spike）已经到了不可接受的程度。我们用<strong>Axum</strong> + <strong>Tokio</strong>重写后，P99延迟从120ms降到了8ms，资源占用减少了40%。从那以后，我开始对Rust做Web这件事彻底改观。</p>
+
+        <p>这一章，我们搭建一个完整的RESTful Todo API。选这个场景是因为它的业务逻辑简单（CRUD），但足以覆盖一个生产级Web后端的所有关键环节：路由、数据库、中间件、错误处理、测试和部署。</p>
+
+        <div class="highlight">
+            <strong>Axum的杀手锏</strong>：Axum是Tokio团队打造的Web框架，从2022年发布以来迅速成为Rust最受欢迎的Web框架。它的核心优势在于——利用Rust的trait系统和<code>tower</code>中间件生态，实现了"类型安全的路由定义"。也就是说，如果路由和处理函数签名不匹配，<strong>编译阶段就报错</strong>——这在Go和Node.js中是不可能做到的。
+        </div>
+
+        <h2>技术选型</h2>
+
+        <p>以下是我们要用到的核心技术栈：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Crate</th>
+                    <th>版本</th>
+                    <th>职责</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>axum</code></td>
+                    <td>0.8</td>
+                    <td>Web框架：路由、请求提取、响应构建</td>
+                </tr>
+                <tr>
+                    <td><code>tokio</code></td>
+                    <td>1.40</td>
+                    <td>异步运行时（带<code>full</code> features）</td>
+                </tr>
+                <tr>
+                    <td><code>sqlx</code></td>
+                    <td>0.8</td>
+                    <td>异步PostgreSQL驱动 + 迁移工具</td>
+                </tr>
+                <tr>
+                    <td><code>serde</code> / <code>serde_json</code></td>
+                    <td>1.0</td>
+                    <td>JSON序列化/反序列化</td>
+                </tr>
+                <tr>
+                    <td><code>tracing</code> / <code>tracing-subscriber</code></td>
+                    <td>0.1</td>
+                    <td>结构化日志和请求追踪</td>
+                </tr>
+                <tr>
+                    <td><code>tower-http</code></td>
+                    <td>0.6</td>
+                    <td>CORS中间件、请求日志</td>
+                </tr>
+                <tr>
+                    <td><code>uuid</code></td>
+                    <td>1.11</td>
+                    <td>生成任务ID</td>
+                </tr>
+                <tr>
+                    <td><code>chrono</code></td>
+                    <td>0.4</td>
+                    <td>时间戳处理</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>对应的<code>Cargo.toml</code>：</p>
+
+        <pre><code>[package]
+name = "todo-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1.40", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "migrate"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4.38", features = ["serde"] }</code></pre>
+
+        <h2>项目结构</h2>
+
+        <p>我们采用分层架构，将路由、处理器、数据模型和数据库操作分开：</p>
+
+        <pre><code>todo-api/
+├── Cargo.toml
+├── migrations/
+│   └── 20240101000001_create_todos.sql
+├── src/
+│   ├── main.rs        # 入口：启动服务器、组装路由
+│   ├── router.rs      # 路由定义
+│   ├── handler/       # HTTP处理器
+│   │   ├── mod.rs
+│   │   └── todo.rs
+│   ├── model/         # 数据模型
+│   │   ├── mod.rs
+│   │   └── todo.rs
+│   └── db/            # 数据库操作
+│       ├── mod.rs
+│       └── todo.rs
+└── Dockerfile</code></pre>
+
+        <p>这种分层的好处是职责清晰：<code>handler</code>处理HTTP请求/响应，<code>model</code>定义数据结构，<code>db</code>封装SQL操作。任何一层的变化都不会"侧漏"到其他层。</p>
+
+        <h2>数据库模型</h2>
+
+        <p>我们先定义SQL迁移文件<code>migrations/20240101000001_create_todos.sql</code>：</p>
+
+        <pre><code>CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE todos (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    title       VARCHAR(255) NOT NULL,
+    completed   BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_todos_created_at ON todos(created_at DESC);</code></pre>
+
+        <p>在<code>src/model/todo.rs</code>中定义Rust数据结构：</p>
+
+        <pre><code>use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+use uuid::Uuid;
+
+/// 数据库行映射（包含所有字段）
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct Todo {
+    pub id: Uuid,
+    pub title: String,
+    pub completed: bool,
+    pub created_at: DateTime&lt;Utc&gt;,
+    pub updated_at: DateTime&lt;Utc&gt;,
+}
+
+/// 创建请求（不含ID和时间戳）
+#[derive(Debug, Deserialize)]
+pub struct CreateTodoRequest {
+    pub title: String,
+}
+
+/// 更新请求（所有字段可选）
+#[derive(Debug, Deserialize)]
+pub struct UpdateTodoRequest {
+    pub title: Option&lt;String&gt;,
+    pub completed: Option&lt;bool&gt;,
+}</code></pre>
+
+        <p>这里<code>sqlx::FromRow</code>自动将查询结果映射为<code>Todo</code>结构体——只要字段名和数据库列名匹配即可，无需手写映射代码。</p>
+
+        <h2>数据库操作层</h2>
+
+        <p><code>src/db/todo.rs</code>封装所有SQL操作，使用<code>sqlx::query_as</code>在编译时检查SQL语法的正确性：</p>
+
+        <pre><code>use sqlx::PgPool;
+use uuid::Uuid;
+use crate::model::todo::{Todo, CreateTodoRequest, UpdateTodoRequest};
+
+pub async fn list_todos(pool: &amp;PgPool) -&gt; anyhow::Result&lt;Vec&lt;Todo&gt;&gt; {
+    let todos = sqlx::query_as::&lt;_, Todo&gt;(
+        "SELECT id, title, completed, created_at, updated_at FROM todos ORDER BY created_at DESC"
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(todos)
+}
+
+pub async fn create_todo(pool: &amp;PgPool, req: &amp;CreateTodoRequest) -&gt; anyhow::Result&lt;Todo&gt; {
+    let todo = sqlx::query_as::&lt;_, Todo&gt;(
+        "INSERT INTO todos (title) VALUES ($1) RETURNING id, title, completed, created_at, updated_at"
+    )
+    .bind(&amp;req.title)
+    .fetch_one(pool)
+    .await?;
+    Ok(todo)
+}
+
+pub async fn update_todo(
+    pool: &amp;PgPool,
+    id: Uuid,
+    req: &amp;UpdateTodoRequest,
+) -&gt; anyhow::Result&lt;Option&lt;Todo&gt;&gt; {
+    let todo = sqlx::query_as::&lt;_, Todo&gt;(
+        "UPDATE todos SET
+            title = COALESCE($1, title),
+            completed = COALESCE($2, completed),
+            updated_at = NOW()
+         WHERE id = $3
+         RETURNING id, title, completed, created_at, updated_at"
+    )
+    .bind(&amp;req.title)
+    .bind(req.completed)
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(todo)
+}
+
+pub async fn delete_todo(pool: &amp;PgPool, id: Uuid) -&gt; anyhow::Result&lt;bool&gt; {
+    let result = sqlx::query("DELETE FROM todos WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() &gt; 0)
+}</code></pre>
+
+        <div class="tip">
+            <strong>连接池大小的考量</strong>：很多人第一次写Rust Web API时直接用<code>PgPoolOptions::new().max_connections(10)</code>硬编码一个值。实际生产中的经验公式是：连接数 ≈ (CPU核心数 × 2) + 有效磁盘数。对于PostgreSQL，过大的连接池反而会降低性能——因为PG为每个连接分配了独立的进程和内存。一般来说，<strong>4-8个连接对大多数Web应用已经足够</strong>。用<code>sqlx::PgPoolOptions::new().max_connections(5)</code>作为起点是合理的。
+        </div>
+
+        <h2>API端点</h2>
+
+        <p>我们在<code>src/handler/todo.rs</code>中定义HTTP处理器：</p>
+
+        <pre><code>use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
+use uuid::Uuid;
+use crate::db;
+use crate::model::todo::{CreateTodoRequest, UpdateTodoRequest, Todo};
+use crate::AppState;
+
+/// GET /todos — 列出所有任务
+pub async fn list_todos(
+    State(state): State&lt;AppState&gt;,
+) -&gt; Result&lt;Json&lt;Vec&lt;Todo&gt;&gt;, (StatusCode, String)&gt; {
+    let todos = db::todo::list_todos(&amp;state.pool).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(todos))
+}
+
+/// POST /todos — 创建新任务
+pub async fn create_todo(
+    State(state): State&lt;AppState&gt;,
+    Json(payload): Json&lt;CreateTodoRequest&gt;,
+) -&gt; Result&lt;(StatusCode, Json&lt;Todo&gt;), (StatusCode, String)&gt; {
+    if payload.title.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "标题不能为空".into()));
+    }
+    let todo = db::todo::create_todo(&amp;state.pool, &amp;payload).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((StatusCode::CREATED, Json(todo)))
+}
+
+/// PUT /todos/:id — 更新任务
+pub async fn update_todo(
+    State(state): State&lt;AppState&gt;,
+    Path(id): Path&lt;Uuid&gt;,
+    Json(payload): Json&lt;UpdateTodoRequest&gt;,
+) -&gt; Result&lt;Json&lt;Todo&gt;, (StatusCode, String)&gt; {
+    let todo = db::todo::update_todo(&amp;state.pool, id, &amp;payload).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    todo.ok_or((StatusCode::NOT_FOUND, format!("任务 {} 不存在", id)))
+}
+
+/// DELETE /todos/:id — 删除任务
+pub async fn delete_todo(
+    State(state): State&lt;AppState&gt;,
+    Path(id): Path&lt;Uuid&gt;,
+) -&gt; Result&lt;StatusCode, (StatusCode, String)&gt; {
+    let deleted = db::todo::delete_todo(&amp;state.pool, id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("任务 {} 不存在", id)))
+    }
+}</code></pre>
+
+        <p>然后，在<code>src/router.rs</code>中组装路由：</p>
+
+        <pre><code>use axum::{
+    routing::{delete, get, post, put},
+    Router,
+};
+use crate::handler;
+use crate::AppState;
+
+pub fn build() -&gt; Router&lt;AppState&gt; {
+    Router::new()
+        .route("/todos", get(handler::todo::list_todos))
+        .route("/todos", post(handler::todo::create_todo))
+        .route("/todos/{id}", put(handler::todo::update_todo))
+        .route("/todos/{id}", delete(handler::todo::delete_todo))
+}</code></pre>
+
+        <div class="highlight">
+            <strong>Axum Router的亮点</strong>：注意这里的<code>Router&lt;AppState&gt;</code>泛型参数。Axum让你将<strong>共享状态作为类型参数传递给Router</strong>——这意味着你的handler必须使用和Router同一类型的<code>State</code>提取器才能编译通过。这种"类型级的路由约束"杜绝了你在运行时忘记传递共享状态的可能。对比一下Express.js的<code>req.app.get(...)</code>或者Go中的<code>context.WithValue</code>——同样的需求在动态语言中只能在运行时才能发现bug。
+        </div>
+
+        <h2>组装入口</h2>
+
+        <p><code>main.rs</code>把一切串联起来：</p>
+
+        <pre><code>use axum::http::Method;
+use sqlx::postgres::PgPoolOptions;
+use std::net::SocketAddr;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
+use tracing_subscriber::EnvFilter;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: sqlx::PgPool,
+}
+
+#[tokio::main]
+async fn main() -&gt; anyhow::Result&lt;()&gt; {
+    // 初始化日志
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "todo_api=debug,tower_http=debug".into()))
+        .init();
+
+    // 数据库连接池
+    let database_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL 环境变量未设置");
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&amp;database_url)
+        .await?;
+
+    // 运行数据库迁移
+    sqlx::migrate!().run(&amp;pool).await?;
+
+    // 构建应用
+    let state = AppState { pool };
+    let app = crate::router::build()
+        .with_state(state)
+        .layer(TraceLayer::new_for_http())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+                .allow_headers(Any),
+        );
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    tracing::info!("服务启动于 {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}</code></pre>
+
+        <h2>中间件</h2>
+
+        <p>Axum的中间件基于<code>tower</code>的<code>Layer</code> trait。我们在上面已经添加了三个中间件：</p>
+        <ul>
+            <li><strong>TraceLayer</strong>：自动记录每个请求的方法、路径、状态码和耗时，对调试和监控非常重要</li>
+            <li><strong>CorsLayer</strong>：允许跨域请求——在生产环境中你应当限制<code>allow_origin</code>为特定域名</li>
+            <li><strong>错误处理</strong>：handler返回<code>Result&lt;T, (StatusCode, String)&gt;</code>时，Axum会自动将错误转化为JSON响应</li>
+        </ul>
+
+        <p>如果需要自定义错误响应格式，可以实现自己的<code>IntoResponse</code>：</p>
+
+        <pre><code>use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::json;
+
+pub struct ApiError {
+    pub status: StatusCode,
+    pub message: String,
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -&gt; Response {
+        let body = Json(json!({
+            "error": self.message,
+            "status": self.status.as_u16(),
+        }));
+        (self.status, body).into_response()
+    }
+}</code></pre>
+
+        <h2>测试与部署</h2>
+
+        <h3>HTTP测试</h3>
+
+        <p>Axum提供了<code>axum::test</code>辅助进行HTTP集成测试，无需启动真正的HTTP服务器：</p>
+
+        <pre><code>#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    use crate::router;
+    use crate::AppState;
+    use sqlx::PgPool;
+
+    #[sqlx::test]
+    async fn test_list_todos(pool: PgPool) {
+        let state = AppState { pool };
+        let app = router::build().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/todos")
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}</code></pre>
+
+        <h3>Docker多阶段构建</h3>
+
+        <p>将Rust Web API容器化是常见的部署方式。多阶段构建能显著减小镜像体积：</p>
+
+        <pre><code># 构建阶段
+FROM rust:1.96-slim-bookworm AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+# 运行阶段 — 仅包含二进制文件
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/todo-api /usr/local/bin/todo-api
+ENV DATABASE_URL=postgres://user:pass@host:5432/todos
+EXPOSE 3000
+CMD ["todo-api"]</code></pre>
+
+        <p>最终镜像大小通常只有30-50MB——远小于一个包含Node.js + npm依赖的镜像（通常在200MB以上）。</p>
+
+        <div class="warning">
+            <strong>一个常见的陷阱</strong>：我在第一次用Axum写CRUD时，忽略了对<code>PATCH</code>和<code>PUT</code>请求的请求体大小限制。在<code>tower-http</code>中，<code>RequestBodyLimit</code>中间件可以防止恶意的大请求体攻击。虽然对Todo API来说不是致命问题，但生产级服务一定要加上<code>.layer(RequestBodyLimitLayer::new(1024 * 1024 /* 1MB */))</code>。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>这一章我们从零搭建了一个完整的RESTful API服务，涉及了Rust Web开发的整个生命周期：技术选型、项目结构设计、SQLx数据库迁移与CRUD操作、Axum的类型安全路由、中间件配置、HTTP集成测试，以及Docker多阶段构建部署。你可以把这个Todo API作为一个"脚手架"，在其上扩展更多功能：用户认证、分页、搜索、WebSocket通知——Rust的异步生态已经完全能胜任这些需求。</p>
+
+        <p>从下一章开始，我们将把目光从代码转向未来——Rust 2027 Edition有什么新特性？Rust的生态和就业市场走向何方？下一章是这门课程的收官篇，我们聊聊Rust的未来和你的成长之路。</p>
+
+        <div class="footer-nav">
+            <a href="26.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="28.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

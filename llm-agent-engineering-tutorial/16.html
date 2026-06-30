@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 GroupChat与协作模式 - LLM Agent 工程实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Agent技术概述</a></li>
+            <li><a href="02.html">第2章 感知-思考-行动循环</a></li>
+            <li><a href="03.html">第3章 开发环境搭建</a></li>
+            <li><a href="04.html">第4章 Prompt工程与指令设计</a></li>
+            <li><a href="05.html">第5章 工具调用与Function Calling</a></li>
+            <li><a href="06.html">第6章 记忆系统设计</a></li>
+            <li><a href="07.html">第7章 多Agent协作模式</a></li>
+            <li><a href="08.html">第8章 LangChain 1.x 统一API</a></li>
+            <li><a href="09.html">第9章 中间件系统</a></li>
+            <li><a href="10.html">第10章 LangGraph状态图</a></li>
+            <li><a href="11.html">第11章 条件分支与循环</a></li>
+            <li><a href="12.html">第12章 RAG Agent实战</a></li>
+            <li><a href="13.html">第13章 多Agent编排</a></li>
+            <li><a href="14.html">第14章 生产化部署与监控</a></li>
+            <li><a href="15.html">第15章 AutoGen核心架构</a></li>
+            <li><a href="16.html" class="active">第16章 GroupChat与协作模式</a></li>
+            <li><a href="17.html">第17章 代码执行与安全沙箱</a></li>
+            <li><a href="18.html">第18章 从AutoGen到MAF</a></li>
+            <li><a href="19.html">第19章 OpenManus分层架构</a></li>
+            <li><a href="20.html">第20章 工具生态与MCP协议</a></li>
+            <li><a href="21.html">第21章 CrewAI角色化开发</a></li>
+            <li><a href="22.html">第22章 厂商原生SDK</a></li>
+            <li><a href="23.html">第23章 测试策略与质量保障</a></li>
+            <li><a href="24.html">第24章 成本优化与性能调优</a></li>
+            <li><a href="25.html">第25章 安全治理与合规</a></li>
+            <li><a href="26.html">第26章 项目：智能客服系统</a></li>
+            <li><a href="27.html">第27章 项目：自动化研究助手</a></li>
+            <li><a href="28.html">第28章 框架选型与趋势展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第16章 GroupChat 与协作模式</h2>
+
+<p>上一章我们学习了 AutoGen 的双 Agent 对话——两个 Agent 一对一交流，像是一场深度对谈。但现实中的问题解决往往需要更多人参与：产品经理提需求、架构师画设计、工程师写代码、测试人员验证——每个角色各司其职，通过群组讨论达成共识。AutoGen 的 <strong>GroupChat</strong> 正是为这种多角色协作场景而设计的。</p>
+
+<p>我第一次用 GroupChat 搭建三 Agent 系统时，印象最深的就是"辩论"的效果。让两个观点对立的 Agent（一个激进派一个保守派）就一个投资决策进行辩论，第三个 Agent 做裁判——几轮下来，输出的分析报告比单 Agent 的思考要全面深入得多。这让我意识到：Agent 之间的"头脑碰撞"不仅是噱头，确实能产生更好的结果。</p>
+
+<div class="highlight">
+    <strong>核心洞察：</strong> GroupChat 最强大的地方不在于"多个 Agent 一起说话"，而在于它创造了一个<strong>结构化的协作空间</strong>——每个 Agent 有明确角色、发言受规则约束、决策由管理机制统筹。这远比"一群 Agent 自由聊天"要高效和可控。
+</div>
+
+<h2>16.1 GroupChat 核心概念</h2>
+
+<p>GroupChat 的本质是一个<strong>多 Agent 对话管理器</strong>。它维护了以下几个核心要素：</p>
+
+<ul>
+    <li><strong>参与者列表（agents）：</strong> 所有参与群聊的 Agent，每个 Agent 需要有一个唯一的 <code>name</code>。</li>
+    <li><strong>消息队列（messages）：</strong> 按时间顺序存储的所有群聊消息，每条消息记录了发送者、内容、接收方。</li>
+    <li><strong>轮次管理（max_round）：</strong> 整个群聊的最大消息轮次，防止无限讨论下去。</li>
+    <li><strong>发言者选择（speaker_selection_method）：</strong> 决定下一轮谁发言的策略——可以是自动选择、轮询、或者随机。</li>
+</ul>
+
+<pre><code>from autogen import AssistantAgent, GroupChat, GroupChatManager
+
+# 定义三个 Agent，分别扮演不同角色
+pm = AssistantAgent(
+    name="ProductManager",
+    system_message="你是一位资深产品经理，负责定义需求。"
+                   "描述要清晰、优先级要明确。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+architect = AssistantAgent(
+    name="Architect",
+    system_message="你是一位系统架构师，负责技术方案设计。"
+                   "考虑扩展性、性能和安全性。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+engineer = AssistantAgent(
+    name="Engineer",
+    system_message="你是一位全栈工程师，负责代码实现。"
+                   "提供技术落地细节和代码示例。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+# 创建群组
+group_chat = GroupChat(
+    agents=[pm, architect, engineer],
+    messages=[],
+    max_round=12,         # 最多 12 轮讨论
+    speaker_selection_method="auto",  # 自动选择发言者
+)
+
+# 群聊管理器
+manager = GroupChatManager(
+    groupchat=group_chat,
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)</code></pre>
+
+<div class="tip">
+    <strong>概念辨析：</strong> GroupChat 是"数据容器"，管理消息和参与者；GroupChatManager 是"控制逻辑"，决定谁发言、何时结束。两者各司其职，类似于 MVC 架构中的 Model 和 Controller。
+</div>
+
+<h2>16.2 GroupChatManager 轮询策略</h2>
+
+<p>GroupChatManager 的核心职责是<strong>决定下一个发言者</strong>。不同的应用场景需要不同的选择策略，AutoGen 提供了多种内置策略：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>策略</th>
+            <th>配置值</th>
+            <th>工作方式</th>
+            <th>适用场景</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>自动选择</strong></td>
+            <td><code>"auto"</code></td>
+            <td>LLM 根据对话上下文判断谁最适合发言</td>
+            <td>通用场景，灵活性最高</td>
+        </tr>
+        <tr>
+            <td><strong>轮询</strong></td>
+            <td><code>"round_robin"</code></td>
+            <td>按参与者列表顺序轮流发言</td>
+            <td>需要确保每个 Agent 都有发言机会</td>
+        </tr>
+        <tr>
+            <td><strong>随机</strong></td>
+            <td><code>"random"</code></td>
+            <td>从参与者中随机选择</td>
+            <td>实验场景，测试无偏见的讨论</td>
+        </tr>
+        <tr>
+            <td><strong>手动</strong></td>
+            <td><code>"manual"</code></td>
+            <td>每次由人类指定下一个发言者</td>
+            <td>教学演示，调试阶段</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>自动选择策略的工作原理</h3>
+<p>"自动"策略是 GroupChatManager 最具特色的功能。当需要选择下一个发言者时，Manager 会将群聊历史注入 LLM，并附上所有 Agent 的角色描述，让 LLM 判断：根据当前讨论进展，<strong>哪个 Agent 最应该发言</strong>。这就像是会议中一个有经验的主持人，能根据讨论走向自然地引导话题。</p>
+
+<pre><code># 创建带特定配置的 Manager
+manager = GroupChatManager(
+    groupchat=group_chat,
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+    system_message="作为讨论主持人，你的职责是确保讨论高效、有序。"
+                   "选择最适合当前讨论阶段的参与者发言。"
+                   "如果某个议题已经充分讨论，引导进入下一议题。",
+)</code></pre>
+
+<div class="warning">
+    <strong>性能注意：</strong> "auto" 模式每次选择发言者都需要一次 LLM 调用。如果你的群聊有 20 个 Agent、50 轮讨论，那就额外增加了 50 次 LLM 调用。这在 Token 成本和延迟上都需要考虑。对于简单场景，"round_robin" 模式通常更经济。
+</div>
+
+<h2>16.3 Speaker 选择算法</h2>
+
+<p>在 "auto" 模式下，Manager 的选择逻辑其实包含了一套精妙的算法。理解这个算法有助于你更好地控制群聊行为：</p>
+
+<h3>选择流程</h3>
+<ol>
+    <li><strong>排除不可发言者：</strong> 排除刚刚发言的 Agent（避免同一人连续说两轮），排除消息中指定了不参与的 Agent。</li>
+    <li><strong>构建上下文：</strong> 将最近 N 条消息 + 每个 Agent 的角色描述拼接成提示词。</li>
+    <li><strong>LLM 推理：</strong> 让 LLM 根据当前讨论状态选择最合适的下一发言者。</li>
+    <li><strong>后处理：</strong> 验证选出的 Agent 是否在参与列表中，如有必要要求 LLM 重选。</li>
+</ol>
+
+<h3>自定义发言选择</h3>
+<p>如果你需要完全控制发言顺序，可以自定义选择函数：</p>
+
+<pre><code>def custom_speaker_selector(last_speaker, group_chat):
+    """自定义发言选择逻辑"""
+    if last_speaker.name == "ProductManager":
+        # PM 发言后，让架构师回应
+        return group_chat.agent_by_name("Architect")
+    elif last_speaker.name == "Architect":
+        # 架构师发言后，让工程师评估可行性
+        return group_chat.agent_by_name("Engineer")
+    else:
+        # 工程师发言后，回到 PM 确认
+        return group_chat.agent_by_name("ProductManager")
+
+# 使用自定义选择器
+group_chat = GroupChat(
+    agents=[pm, architect, engineer],
+    messages=[],
+    max_round=12,
+    speaker_selection_method=custom_speaker_selector,  # 传入函数
+)</code></pre>
+
+<div class="tip">
+    <strong>经验分享：</strong> 在我的项目中，对于有清晰流程的场景（如代码审查、文档审批），我通常用自定义选择器固定发言顺序；对于需要头脑风暴的场景（如产品方案讨论），则使用 "auto" 模式让 LLM 自由调度。没有一种策略适合所有场景，灵活切换才是关键。
+</div>
+
+<h2>16.4 辩论式推理：多角色头脑风暴</h2>
+
+<p>GroupChat 最具价值的应用场景之一是<strong>辩论式推理</strong>——让多个持有不同观点的 Agent 就一个问题进行辩论，从而得出更全面、更可靠的结论。这种方法受到"对抗性协作"理论的启发：不同视角的碰撞能暴露单一视角的盲区。</p>
+
+<h3>辩论 Agent 设计模式</h3>
+<p>一个典型的辩论式 GroupChat 包含以下角色：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>角色</th>
+            <th>立场</th>
+            <th>系统提示关键词</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>倡导者</strong></td>
+            <td>正面分析，查找支持证据</td>
+            <td>"积极寻找该方案的优点和可行性"</td>
+        </tr>
+        <tr>
+            <td><strong>质疑者</strong></td>
+            <td>负面分析，查找潜在风险</td>
+            <td>"严格审查方案的漏洞和不足"</td>
+        </tr>
+        <tr>
+            <td><strong>分析师</strong></td>
+            <td>中立，数据驱动</td>
+            <td>"用数据和逻辑客观评估"</td>
+        </tr>
+        <tr>
+            <td><strong>决策者</strong></td>
+            <td>综合各方意见做结论</td>
+            <td>"总结各方的核心观点，做出平衡决策"</td>
+        </tr>
+    </tbody>
+</table>
+
+<pre><code># 辩论式群聊配置
+advocate = AssistantAgent(
+    name="Advocate",
+    system_message="你是一位乐观的创新倡导者。对于每个建议，"
+                   "你都要积极寻找其可行性和潜在收益。"
+                   "用具体数据和案例支持你的观点。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+critic = AssistantAgent(
+    name="Critic",
+    system_message="你是一位谨慎的风险分析师。对于每个方案，"
+                   "你都要严格审查其漏洞、风险和隐藏成本。"
+                   "指出被忽略的边界情况和失败模式。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+analyst = AssistantAgent(
+    name="Analyst",
+    system_message="你是一位客观的数据分析师。当 Advocate 和 Critic "
+                   "辩论时，你要引入数据指标来量化评估。"
+                   "用数字说话，不做主观判断。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+decider = AssistantAgent(
+    name="Decider",
+    system_message="你是一位经验丰富的技术总监。听取 Advocate、Critic "
+                   "和 Analyst 的意见后，做出最终决策。"
+                   "你的结论必须权衡收益、风险和成本。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+debate_group = GroupChat(
+    agents=[advocate, critic, analyst, decider],
+    messages=[],
+    max_round=15,
+    speaker_selection_method="auto",
+)
+
+manager = GroupChatManager(
+    groupchat=debate_group,
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)</code></pre>
+
+<div class="highlight">
+    <strong>实证数据：</strong> 根据 2025 年的一篇研究论文，使用辩论式推理（3 个不同立场的 Agent）的决策准确率比单 Agent 决策高出约 18%。如果辩论 Agent 数量增加到 5 个，提升效果趋于饱和。实践中我推荐 3-4 个辩论角色——太少缺乏多样性，太多则会让讨论变得冗长。
+</div>
+
+<h2>16.5 GroupChat 与 Tool 集成</h2>
+
+<p>GroupChat 中的 Agent 同样可以注册工具。这意味着在群聊过程中，Agent 不仅能通过讨论来推理，还能实际调用工具获取数据或执行操作。这是让群聊从"纸上谈兵"走向"实战"的关键一步。</p>
+
+<pre><code>from typing import Annotated
+
+# 定义一些工具
+def search_code_repo(
+    query: Annotated[str, "搜索关键词"]
+) -> str:
+    """搜索代码仓库"""
+    # 模拟代码搜索
+    results = {
+        "user_auth": "src/auth/login.py - JWT 认证实现",
+        "payment_gateway": "src/payment/stripe.py - Stripe 集成",
+        "rate_limiter": "src/middleware/ratelimit.py - 速率限制中间件",
+    }
+    return results.get(query, "未找到相关代码")
+
+def check_code_quality(
+    filepath: Annotated[str, "文件路径"]
+) -> str:
+    """检查代码质量"""
+    return f"扫描结果：{filepath} - 3 个代码异味, 1 个安全警告, 覆盖率 78%"
+
+# 给工程师注册工具
+engineer.register_for_llm(
+    name="search_code_repo",
+    description="搜索代码仓库"
+)(search_code_repo)
+
+engineer.register_for_llm(
+    name="check_code_quality",
+    description="检查代码质量"
+)(check_code_quality)
+
+# 启动群聊
+pm.initiate_chat(
+    manager,
+    message="我们团队需要开发一个 API 速率限制功能，"
+            "请讨论技术方案并评估现有代码库的复用可能性。"
+)</code></pre>
+
+<p>在这个例子中，Engineer Agent 可以在讨论过程中搜索现有代码库、检查代码质量、分析技术可行性。它不再是"空谈"，而是用真实的数据支撑自己的观点。这大大提升了群聊的输出质量。</p>
+
+<div class="warning">
+    <strong>实用建议：</strong> 在 GroupChat 中，建议只给"执行型"Agent 注册工具。"管理型"Agent（如 PM）注册工具可能会造成混乱——它可能在不适当的时机调用工具，打乱讨论节奏。一个经验法则是：<strong>只有需要"动手"的 Agent 才配工具，需要"动脑"的 Agent 只用语言</strong>。
+</div>
+
+<h2>16.6 实战：三 Agent 代码审查团队</h2>
+
+<p>让我们搭建一个 GroupChat 的经典实战案例——代码审查团队。这个系统包含三个 Agent：架构审查员、安全审查员和代码质量审查员。它们会对提交的代码进行多维度审查，并给出综合报告。</p>
+
+<pre><code># 代码审查三 Agent 系统
+
+# 1. 架构审查员 - 关注设计模式、扩展性
+arch_reviewer = AssistantAgent(
+    name="ArchReviewer",
+    system_message="你是一位资深架构师，负责代码架构审查。"
+                   "关注：设计模式合理性、模块耦合度、扩展性、"
+                   "是否遵循 SOLID 原则。发现问题时指出具体行号和原因。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+# 2. 安全审查员 - 关注安全漏洞
+sec_reviewer = AssistantAgent(
+    name="SecReviewer",
+    system_message="你是一位安全工程师，负责代码安全审查。"
+                   "关注：SQL 注入、XSS、CSRF、认证绕过、"
+                   "敏感信息泄露、依赖漏洞。按 OWASP Top 10 标准评估。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+# 3. 质量审查员 - 关注代码风格、测试覆盖
+qa_reviewer = AssistantAgent(
+    name="QAReviewer",
+    system_message="你是一位 QA 工程师，负责代码质量审查。"
+                   "关注：代码可读性、命名规范、测试覆盖率、"
+                   "异常处理、边界条件。给出具体的改进建议。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+# 4. 汇总员 - 综合各方意见输出最终报告
+summary_agent = AssistantAgent(
+    name="SummaryAgent",
+    system_message="你是一位技术负责人。汇总架构、安全、质量"
+                   "三方面的审查意见，按严重程度排序输出最终报告。"
+                   "每个问题标注：[严重]、[中等]、[建议]。",
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+# 创建群组
+code_review_group = GroupChat(
+    agents=[arch_reviewer, sec_reviewer, qa_reviewer, summary_agent],
+    messages=[],
+    max_round=8,
+    speaker_selection_method="round_robin",  # 轮询，确保每个审查员都发言
+)
+
+manager = GroupChatManager(
+    groupchat=code_review_group,
+    llm_config={"config_list": [{"model": "gpt-4o", "api_key": "..."}]},
+)
+
+# 启动代码审查
+sec_reviewer.initiate_chat(
+    manager,
+    message="请审查以下 Python 代码并给出改进建议：\n\n"
+            "```python\n"
+            "def login(request):\n"
+            "    username = request.POST['username']\n"
+            "    password = request.POST['password']\n"
+            "    query = f\"SELECT * FROM users WHERE username='{username}'\"\n"
+            "    user = db.execute(query)\n"
+            "    if user.password == password:\n"
+            "        session['user'] = username\n"
+            "        return redirect('/dashboard')\n"
+            "    return HttpResponse('登录失败')\n"
+            "```"
+)</code></pre>
+
+<p>审查流程如下：ArchReviewer 先发言，指出架构层面的问题（如密码明文存储、缺少 ORM 使用）；SecReviewer 接着指出安全漏洞（SQL 注入风险、明文密码、会话固定问题）；QAReviewer 补充质量建议（缺少异常处理、输入验证、日志记录）；最后 SummaryAgent 汇总所有意见，输出结构化审查报告。</p>
+
+<div class="tip">
+    <strong>生产级建议：</strong> 在真实的 CI/CD 流程中，你可以将这个代码审查 Agent 接入 GitHub PR 的 Webhook。当开发者提交 PR 时，自动触发 GroupChat 审查，审查结果直接作为 PR Comment 发布。这就是"AI 驱动的 CI 流水线"的一个具体实现。
+</div>
+
+<h2>本章小结</h2>
+
+<p>本章我们深入探索了 AutoGen 的 GroupChat 机制——从群聊的核心概念到 GroupChatManager 的多种轮询策略，从 Speaker 选择算法到辩论式推理的设计模式，最后通过一个三 Agent 代码审查团队的实战案例，展示了多 Agent 群聊的强大能力。</p>
+
+<p>GroupChat 让多 Agent 协作从"两人对话"扩展到了"群组讨论"，开辟了更丰富的应用场景。不过，随着 Agent 数量的增加，管理复杂性也急剧上升——如何确保安全执行？如何防止恶意代码的破坏？这些正是下一章要回答的问题。</p>
+
+<p>第 17 章我们将聚焦 <strong>代码执行与安全沙箱</strong>——当 Agent 开始执行我们生成的代码时，如何保证系统的安全和稳定？这是把 Agent 从"实验玩具"变成"生产工具"必须跨越的一道门槛。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 ASCII协议：proto_text详解</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html" class="active">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第19章 ASCII协议：proto_text详解</h1>
+
+        <p>大家好，我是你们的讲师。这一章我们进入一个"看得见摸得着"的模块——ASCII 文本协议。如果你用 telnet 连过 Memcached，那你一定敲过这样的命令：<code>set mykey 0 3600 5</code>，然后回车输入 <code>hello</code>，再回车。这个看似简单的交互背后，是 proto_text.c 中约 2000 行代码在支撑着整个协议解析与分发的全过程。</p>
+
+        <p>从某种意义上说，ASCII 协议是 Memcached 最古老也最有魅力的接口。它不像二进制协议那样紧凑，但它的可读性极强——任何人都可以用 telnet/nc 直接与 Memcached 对话，不需要任何客户端库。正是这种"零依赖"的亲和力，让 Memcached 在早期迅速流行。不过，简单不等于简陋。ASCII 协议的状态机设计、tokenize 分发机制、以及 noreply 优化，都是值得仔细品读的经典代码。</p>
+
+        <h2>ASCII 协议文本格式</h2>
+
+        <p>我们先统一看一下 ASCII 协议的基本命令格式。每一行都遵循严格的文本结构，服务器按行读取并解析：</p>
+
+        <pre><code>存储命令（SET/ADD/REPLACE）:
+  &lt;command&gt; &lt;key&gt; &lt;flags&gt; &lt;exptime&gt; &lt;bytes&gt; [noreply]\r\n
+  &lt;data block&gt;\r\n
+
+  示例: set username 0 3600 5\r\nhello\r\n
+
+读取命令（GET/GETS）:
+  get &lt;key&gt;\r\n
+  gets &lt;key&gt;\r\n
+
+删除命令（DELETE）:
+  delete &lt;key&gt; [noreply]\r\n
+
+算术命令（INCR/DECR）:
+  incr &lt;key&gt; &lt;value&gt; [noreply]\r\n
+  decr &lt;key&gt; &lt;value&gt; [noreply]\r\n</code></pre>
+
+        <p>注意每个字段的含义：<code>flags</code>是客户端传入的 32 位无符号整数（服务器不解析，直接存储原样返回）；<code>exptime</code>是过期时间，为 0 表示永不过期，小于 30 天视为相对秒数，否则视为绝对 Unix 时间戳；<code>bytes</code>是 data block 的字节数（不包含最后的 <code>\r\n</code>）。</p>
+
+        <div class="tip">
+            <strong>一个容易忽略的细节：</strong><code>bytes</code>后面必须紧跟着 <code>[noreply]</code>（如果有的话），中间不能有多余的空格。Memcached 使用 <code>strtok_r</code> 进行 tokenize，多余的空格会导致 token 数量不正确，从而被判定为命令格式错误。
+        </div>
+
+        <h2>process_command()：命令分发的入口</h2>
+
+        <p>所有 ASCII 命令的解析起点是 <code>process_command()</code> 函数。它的工作流程非常清晰：</p>
+
+        <ol>
+            <li><strong>Tokenize：</strong>将输入缓冲区的一行文本按空格拆分成 token 数组</li>
+            <li><strong>查命令表：</strong>遍历命令映射表 <code>command_table[]</code>，通过 <code>strncmp</code> 匹配命令名称</li>
+            <li><strong>执行：</strong>调用对应的处理函数</li>
+        </ol>
+
+        <p>我们来看命令映射表的数据结构——它本质上是一个朴素的线性查找表：</p>
+
+        <pre><code>static void process_command(conn *c, char *command) {
+    token_t tokens[MAX_TOKENS];
+    int ntokens;
+    int comm;
+
+    // Step 1: tokenize
+    ntokens = tokenize_command(command, tokens, MAX_TOKENS);
+    if (ntokens &lt;= 0) {
+        out_string(c, "CLIENT_ERROR bad command line format");
+        return;
+    }
+
+    // Step 2: 查表匹配命令
+    for (comm = 0; comm &lt; NUM_COMMANDS; comm++) {
+        if (!strncmp(tokens[COMMAND_TOKEN].value,
+                     command_table[comm].name,
+                     strlen(command_table[comm].name))) {
+            break;
+        }
+    }
+    if (comm == NUM_COMMANDS) {
+        out_string(c, "ERROR");
+        return;
+    }
+
+    // Step 3: 根据命令类型分流
+    switch ((enum commands) comm) {
+        case GET:
+        case GETS:
+            process_get_command(c, tokens, ntokens);
+            break;
+        case SET:
+        case ADD:
+        case REPLACE:
+            process_update_command(c, tokens, ntokens, comm, false);
+            break;
+        case DELETE:
+            process_delete_command(c, tokens, ntokens);
+            break;
+        // ... 其他命令
+    }
+}</code></pre>
+
+        <div class="highlight">
+            <strong>值得留意的设计：</strong>命令匹配用的是朴素的线性查找——对于只有十几个命令的表来说，这比哈希表更简洁，而且 CPU cache 更友好。不要在任何地方都用"高级"算法，简单就是美。
+        </div>
+
+        <h2>GET 命令处理</h2>
+
+        <p>GET 是最简单的命令，也是理解 Memcached 读写路径最好的起点。<code>process_get_command()</code> 的工作流程如下：</p>
+
+        <ol>
+            <li>遍历命令行中所有的 key（支持多 key GET，一次 <code>get key1 key2 key3</code>）</li>
+            <li>对每个 key 调用 <code>item_get()</code>——这个函数会在哈希表中查找，同时更新 LRU</li>
+            <li>如果找到，调用 <code>out_string()</code> 或 <code>add_iov()</code> 发送 VALUE 行和数据</li>
+            <li>最后发送 <code>END\r\n</code> 标记结束</li>
+        </ol>
+
+        <p><code>item_get()</code> 最终调用 <code>assoc_find()</code> 在哈希表中定位 item。这里有个关键细节：GET 操作会通过 <code>do_item_update()</code> 将 item 移到 LRU 的 HOT 队列头部——表示这个 item 刚刚被访问过，不要急着淘汰它。当然，这一步是否执行取决于 <code>settings.lru_maintainer_thread</code> 配置。</p>
+
+        <div class="tip">
+            <strong>性能细节：</strong>多 key GET 并不是在协议层面做了"批量操作"优化，它只是依次处理每个 key。真正的性能提升来自于减少了网络往返——客户端只需一次请求就能获取多个 key 的值。如果你需要原子性的批量操作，应该使用后面章节介绍的 Meta Protocol。
+        </div>
+
+        <h2>SET/ADD/REPLACE 命令处理</h2>
+
+        <p>存储类命令的处理流程比 GET 复杂得多。<code>process_update_command()</code> 是核心函数，它的执行路径分为两个阶段：</p>
+
+        <h3>第一阶段：命令解析与 item 预分配</h3>
+
+        <p>在 <code>process_update_command()</code> 中，解析出 key、flags、exptime、bytes 等参数后，立即调用 <code>item_alloc()</code> 分配一个 item 结构体。注意此时 <strong>data block 还没有读上来</strong>——因为 TCP 是流式传输，value 数据可能还在路上。</p>
+
+        <h3>第二阶段：分段读取 value 数据</h3>
+
+        <p>Memcached 用了一个很有意思的技巧：当检测到命令需要读取 data block 时，它设置 <code>c->noreply</code>、<code>c->item</code> 和 <code>c->ritem</code>，然后把连接的状态切换为 <code>conn_nread</code>：</p>
+
+        <pre><code>static void process_update_command(conn *c, token_t *tokens,
+                                    const int ntokens, const int comm,
+                                    bool meta) {
+    // ... 参数解析 ...
+
+    it = item_alloc(key, nkey, flags, realtime(exptime),
+                    vlen, meta ? 2 : 0);
+    // 切换到 nread 状态，等待 data block
+    c->item = it;
+    c->ritem = ITEM_data(it);
+    c->rlbytes = it->nbytes;
+    c->cmd = comm;
+    c->substate = META_NREAD;  // 对于 ASCII: conn_nread
+    conn_set_state(c, conn_nread);
+}</code></pre>
+
+        <p>当连接状态切换到 <code>conn_nread</code> 后，<code>drive_machine()</code> 会持续调用 <code>read()</code> 读取剩余字节，直到 <code>c->rlbytes</code> 归零。这时，数据已经完整地写入到了 item 的 data 区域中。然后调用 <code>complete_nread()</code> 完成最终的处理：存储 item、发送响应。</p>
+
+        <div class="warning">
+            <strong>踩坑：大 value 的 SET 导致连接阻塞。</strong>有一次线上问题，业务方把一个 10MB 的图片 base64 编码后直接塞进 Memcached。结果这个 SET 请求将 worker 线程完全"焊死"在 conn_nread 状态上——因为这个线程在持续读取这个巨型 value 的过程中，无法处理其他连接。解决方案有两个：要么在应用层限制 value 大小（推荐 1MB 以内），要么配置 <code>-I</code> 参数（默认 1MB）显式拒绝超大 item。记住：<strong>Memcached 不是对象存储，它是缓存。</strong>
+        </div>
+
+        <h2>INCR/DECR 命令处理</h2>
+
+        <p>INCR 和 DECR 是 ASCII 协议中唯一涉及"运算"的命令。它的实现非常巧妙：</p>
+
+        <ol>
+            <li>调用 <code>item_get()</code> 找到对应的 item</li>
+            <li>将 item 的 data 部分解析为 64 位无符号整数（使用 <code>strtoull</code>）</li>
+            <li>执行加减操作（注意处理溢出：INCR 溢出则环绕，DECR 到 0 则不再减少）</li>
+            <li>将结果写回 item 的 data 区域（更新为 ASCII 字符串形式）</li>
+            <li>使用 <code>do_item_update()</code> 更新 LRU 位置</li>
+            <li>返回新的数值</li>
+        </ol>
+
+        <p>这里有一个有趣的实现细节：Memcached 没有使用任何原子操作原语（如 <code>__sync_fetch_and_add</code>）来实现 INCR，因为它全程持有 item 的锁（通过 <code>item_lock()</code>）。这个锁保护的是哈希表中的那个 item 结构体本身——有了这把锁，对 item data 的读写自然就是串行化的。</p>
+
+        <div class="highlight">
+            <strong>数值解析的陷阱：</strong>Memcached 的 INCR/DECR 要求值必须是一个十进制的数字字符串，不能有前导空格或非数字字符。如果你传入 <code>incr mykey 0x10</code>，<code>strtoull</code> 不会解析十六进制——它只会返回 0。这在调试时常常让人困惑，以为 INCR 没有生效。
+        </div>
+
+        <h2>noreply 优化</h2>
+
+        <p>这是 ASCII 协议中一个非常重要的优化特性。当客户端在命令末尾添加 <code>noreply</code> 关键字时，服务端处理完命令后<strong>不会发送任何响应</strong>。对于 SET、DELETE、INCR 等命令来说，这意味着节省了一次网络传输。</p>
+
+        <p>在源码中，noreply 的处理逻辑在 <code>add_iov()</code> 之前就判断了：</p>
+
+        <pre><code>// 在 complete_nread 或 process_command 中:
+if (c->noreply) {
+    // 不调用 out_string()，直接返回
+    conn_set_state(c, conn_new_cmd);
+    return;
+}
+out_string(c, "STORED\r\n");  // 只有 noreply=false 时才发送</code></pre>
+
+        <p>noreply 的应用场景非常明确：<strong>写操作不需要确认</strong>。比如日志处理场景中，每条日志写入 Memcached 后不需要关心是否写成功（丢了也没关系），这时用 noreply 可以减少约 30% 的网络开销。但注意：<strong>读操作不能用 noreply</strong>——你读数据就是想等结果，这是语义上矛盾的事情。</p>
+
+        <h2>CAS 命令的协议实现</h2>
+
+        <p>CAS（Compare-And-Swap）是 Memcached 实现乐观并发控制的核心机制。它由两个命令配合使用：</p>
+
+        <ul>
+            <li><code>gets</code>：和 <code>get</code> 类似，但会额外返回一个 CAS token（64 位无符号整数）</li>
+            <li><code>cas</code>：替代 <code>set</code>，但需要携带 CAS token，只有 token 匹配时才执行更新</li>
+        </ul>
+
+        <p>CAS token 本质上就是 item 的 <code>cas_id</code> 字段，每次 item 被修改时都会递增。源码中的实现路径非常直接：</p>
+
+        <pre><code>// gets 命令发送 CAS token:
+out_string(c, "VALUE %s %d %d %llu\r\n",
+           ITEM_key(it), it->flags, it->nbytes - 2,
+           (unsigned long long) ITEM_get_cas(it));
+
+// cas 命令执行时比对:
+if (ITEM_get_cas(it) == req_cas_id) {
+    // 匹配——更新
+    do_item_replace(it, new_it, c->hlen);
+    out_string(c, "STORED\r\n");
+} else {
+    // 不匹配——说明被其他客户端改过了
+    out_string(c, "EXISTS\r\n");
+}</code></pre>
+
+        <p>CAS 最常见的应用场景是"读取-修改-写回"模式。比如一个计数器的值需要先读取当前值，加 1，再写回。如果不加 CAS，两个并发客户端可能互相覆盖。有了 CAS，第二个写回的请求会因为 token 不匹配而被拒绝，客户端可以重新读取再尝试。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>命令</th>
+                    <th>功能</th>
+                    <th>支持 noreply</th>
+                    <th>响应格式</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>GET</td>
+                    <td>读取 key 的值</td>
+                    <td>否</td>
+                    <td>VALUE &lt;key&gt; &lt;flags&gt; &lt;bytes&gt;\r\n&lt;data&gt;\r\nEND</td>
+                </tr>
+                <tr>
+                    <td>GETS</td>
+                    <td>读取 + 获取 CAS token</td>
+                    <td>否</td>
+                    <td>VALUE &lt;key&gt; &lt;flags&gt; &lt;bytes&gt; &lt;cas&gt;\r\n&lt;data&gt;\r\nEND</td>
+                </tr>
+                <tr>
+                    <td>SET</td>
+                    <td>存储（存在则覆盖）</td>
+                    <td>是</td>
+                    <td>STORED / NOT_STORED</td>
+                </tr>
+                <tr>
+                    <td>ADD</td>
+                    <td>存储（仅当 key 不存在）</td>
+                    <td>是</td>
+                    <td>STORED / NOT_STORED</td>
+                </tr>
+                <tr>
+                    <td>REPLACE</td>
+                    <td>存储（仅当 key 已存在）</td>
+                    <td>是</td>
+                    <td>STORED / NOT_STORED</td>
+                </tr>
+                <tr>
+                    <td>DELETE</td>
+                    <td>删除 key</td>
+                    <td>是</td>
+                    <td>DELETED / NOT_FOUND</td>
+                </tr>
+                <tr>
+                    <td>INCR</td>
+                    <td>原子自增</td>
+                    <td>是</td>
+                    <td>&lt;new value&gt; / NOT_FOUND</td>
+                </tr>
+                <tr>
+                    <td>DECR</td>
+                    <td>原子自减</td>
+                    <td>是</td>
+                    <td>&lt;new value&gt; / NOT_FOUND</td>
+                </tr>
+                <tr>
+                    <td>CAS</td>
+                    <td>条件更新（需 CAS token）</td>
+                    <td>是</td>
+                    <td>STORED / EXISTS / NOT_FOUND</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>process_get_command / process_update_command 等函数分析</h2>
+
+        <p>我们快速过一遍 ASCII 协议部分的主要函数，方便你对照源码阅读：</p>
+
+        <h3>process_get_command()</h3>
+        <p>位于 proto_text.c 中，负责处理 <code>get</code> 和 <code>gets</code> 命令。它遍历所有的 key token，逐个调用 <code>item_get()</code>，然后通过 <code>add_iov()</code> 将结果写入连接输出缓冲区。注意它使用了 <code>conn_set_state(c, conn_mwrite)</code> 将连接状态切换到"多写"模式——这是为了处理多 key GET 的批量响应。</p>
+
+        <p>这个函数有个性能考量：如果 GET 的 key 列表很长（比如一次 GET 100 个 key），它会针对每个 key 调用 <code>add_iov()</code> 将响应追加到 <code>msglist</code> 中，最后统一通过 <code>transmit()</code> 发送。这样可以一次系统调用发送完整响应。</p>
+
+        <h3>process_update_command()</h3>
+        <p>处理 SET/ADD/REPLACE 等更新命令。核心逻辑包括：</p>
+        <ul>
+            <li>采用 <code>tokenize</code> 验证参数数量</li>
+            <li>检查 key 长度（<code>settings.max_nkey</code>）和 value 大小（<code>settings.max_item_size</code>）</li>
+            <li>创建临时 item（<code>item_alloc</code>），设定连接状态为 <code>conn_nread</code></li>
+            <li>等待数据读满后，在 <code>complete_nread_ascii()</code> 中完成最终的存储</li>
+        </ul>
+
+        <h3>process_delete_command()</h3>
+        <p>处理 DELETE 命令，逻辑较简单：调用 <code>item_delete()</code>，如果 noreply 未设置则返回 DELETED 或 NOT_FOUND。</p>
+
+        <h3>process_arithmetic_command()</h3>
+        <p>处理 INCR/DECR 命令，核心是调用 <code>do_add_delta()</code> 函数进行数值运算。这个函数直接操作 item 的 data 区域，如果 data 不是合法的数字字符串，则返回 <code>CLIENT_ERROR cannot increment or decrement non-numeric value</code>。</p>
+
+        <div class="warning">
+            <strong>踩坑续谈：大 value 阻塞的另一个视角。</strong>除了前面提到的 conn_nread 阻塞，大 value 还会引起另一个问题——输出缓冲区爆炸。当 GET 一个超大的 item 时，响应数据也会很大。如果客户端读取缓慢（TCP 窗口变小），服务端的输出缓冲区会持续堆积，最终触发 <code>conn_closing</code> 状态，服务端主动断开连接。这看起来就像"无故断连"。解决方案始终是那一条：控制 value 的大小，把 Memcached 当作纯缓存，不要当作对象存储。
+        </div>
+
+        <h2>从 ASCII 到二进制——协议的演进之路</h2>
+
+        <p>ASCII 协议虽然简洁直观，但随着 Memcached 在生产环境中的大规模使用，它的局限性也逐渐暴露出来：</p>
+
+        <ul>
+            <li><strong>解析效率低：</strong>每一行都要做 <code>strtok</code>、<code>strncmp</code>、<code>atoi</code> 等字符串操作，即使是简单的 GET 命令也需要遍历命令表</li>
+            <li><strong>带宽浪费：</strong>"VALUE"、"STORED"、"END"这些文本关键字每次都在网络上传输，累积起来是相当可观的字节开销</li>
+            <li><strong>类型信息丢失：</strong>所有的 flags、exptime 都以 ASCII 字符串方式传输，解析后还得转成整数</li>
+        </ul>
+
+        <p>正是这些瓶颈催生了二进制协议（Binary Protocol）的出现。二进制协议用固定长度的 header 代替了文本行解析，用 opcode 代替了字符串命令名，用 struct 代替了 tokenize。下一章我们会深入分析 binary 协议的细节。</p>
+
+        <p>不过我想强调一点：ASCII 协议并没有被废弃。即使在最新的 Memcached 1.6.x 中，ASCII 协议仍然被广泛支持和使用。很多 telnet 调试场景、简单的 get/set 操作、以及一些轻量级的客户端库仍然首选 ASCII 协议。它的生命力来自它的<strong>简单</strong>——你甚至可以用 <code>echo "get mykey" | nc memcache-host 11211</code> 来测试缓存内容。</p>
+
+        <div class="highlight">
+            <strong>章节小结：</strong>这一章我们深入了 proto_text.c 的核心代码。从 process_command() 的命令表分发，到 GET 的哈希查找+LRU 更新，再到 SET 的两阶段读取，再到 INCR 的原子运算和 CAS 的乐观锁——ASCII 协议虽然"简单"，但它覆盖了 Memcached 全部数据操作的基础路径。下一章我们将切换到二进制协议的世界，看看 24 字节的 Binary Header 是如何把性能再提升一个台阶的。
+        </div>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

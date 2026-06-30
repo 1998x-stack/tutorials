@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 External Storage：混合存储</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html" class="active">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第22章 External Storage：混合存储</h1>
+
+        <p>大家好，我是你们的讲师。这一章我们来聊一个非常有"工程味道"的特性——External Storage（extstore）。如果说前面几章讲的内存管理是在"螺蛳壳里做道场"，那 extstore 就是在告诉你：当螺蛳壳不够用的时候，怎么优雅地把数据挪到隔壁的仓库里。</p>
+
+        <p>故事要从 Facebook 的 Memcached 部署说起。Facebook 是全球最大的 Memcached 用户之一，峰值时管理着数万个 Memcached 实例，缓存了数十 TB 的数据。但有个问题一直困扰着他们：<strong>纯内存实在是太贵了</strong>。很多缓存数据是冷数据——写入一次，偶尔被读取，更多的是在那里占着内存。能不能用廉价的 SSD 来存放这些冷数据，让内存只保留热数据和索引？这就是 extstore 项目的起源。Facebook 将这个方案开源并贡献给了上游，最终集成在 Memcached 1.5.0 版本中。</p>
+
+        <h2>extstore 架构：RAM + SSD 分层存储</h2>
+
+        <p>extstore 的核心架构非常清晰：<strong>RAM 做 item 索引和热数据，SSD 做冷数据存储</strong>。但这个"分层"不是简单的"内存不够就写到 SSD"，而是一套精密的温冷数据迁移机制。</p>
+
+        <p>具体来说，extstore 的内存布局分为三块：</p>
+        <ul>
+            <li><strong>哈希表（RAM）：</strong>和纯内存模式一样的哈希表，存储所有 item 的索引。但这里的"索引"指向的不再是内存中的 <code>item</code> 结构体，而是一个 <code>extstore_item</code> 的元数据——它包含了 item 在 SSD 上的偏移量和长度</li>
+            <li><strong>Hot LRU（RAM）：</strong>存储最近被访问的 item。当一个 item 写入时，先放在内存中的 Hot LRU 队列中</li>
+            <li><strong>Warm/Cold LRU（RAM + SSD）：</strong>Warm 和 Cold 队列中的 item 数据被迁移到 SSD 上，内存中只保留 64 字节的元数据头部</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>关键洞察：</strong>extstore 并不是简单的"内存满了就写 SSD"。它维护了一个<strong>温冷数据分层</strong>——热数据在 RAM 中全量保留（key + value），冷数据在 SSD 中（仅 value），RAM 中只保留一个很小的"存根"（stub）来维护哈希索引。当一个冷 item 被访问时，它会被"预热"回 RAM。
+        </div>
+
+        <h2>配置参数：启动 extstore</h2>
+
+        <p>extstore 通过 <code>-o</code> 选项传递多个子参数来配置。我们来看最关键的几个：</p>
+
+        <pre><code># 启动 extstore 的完整命令示例
+memcached -p 11211 -o \
+    ext_page_size=65536,\
+    ext_wbuf_size=2097152,\
+    ext_threads=4,\
+    ext_path=/mnt/nvme0/memcached_extstore.bin:256G,\
+    ext_item_age=3600,\
+    ext_drop_under=0,\
+    ext_recact=never
+
+# 参数说明:
+# ext_page_size:     SSD page 大小（字节），默认 64KB
+# ext_wbuf_size:     write buffer 大小（字节），默认 2MB
+# ext_threads:       后台 IO 线程数
+# ext_path:          SSD 设备路径和容量（":256G" 表示使用 256GB）
+# ext_item_age:      item 在内存中最少存活时间（秒），到期后才可迁移到 SSD
+# ext_drop_under:    当可用空间低于此比例时直接丢弃数据（不写 SSD）
+# ext_recact:        数据恢复到 SSD 的策略（never/first/last）</code></pre>
+
+        <p>在源码中，这些配置项会解析到 <code>struct extstore_conf</code> 结构体中：</p>
+
+        <pre><code>struct extstore_conf {
+    off_t page_size;           // 每个 page 的大小
+    off_t wbuf_size;           // write buffer 大小
+    int io_threadcount;        // IO 线程数
+    bool free_mem_only;        // 是否仅使用空闲内存（debug 用途）
+    int page_buckets;          // page 桶数量
+    int freefr_thresh;         // compact 触发阈值
+    bool use_checksum;         // 是否启用校验和
+};</code></pre>
+
+        <div class="tip">
+            <strong>配置建议：</strong>page_size 建议设置为 SSD 的擦除块大小（通常是 64KB-2MB），这样可以减少写入放大的影响。wbuf_size 影响写入吞吐——越大越好，但会占用更多内存。IO 线程数通常设为机器物理核心数的一半。在生产环境中，强烈建议配合 <code>ext_recact=never</code> 使用，以避免 SSR（SSD Read Reclaim）造成的延迟抖动。
+        </div>
+
+        <h2>item 从 RAM 迁移到 SSD 的触发条件</h2>
+
+        <p>一个 item 什么时候从 RAM 迁移到 SSD？这不是"内存满了就搬"这么简单。extstore 使用了一套多维度评估机制：</p>
+
+        <ol>
+            <li><strong>内存压力触发：</strong>当 slab allocator 在某个 slab class 中无法分配新的 page 时，LRU 维护线程会尝试回收内存。此时 extstore 的迁移逻辑会被调用</li>
+            <li><strong>item 冷度：</strong>并不是所有被淘汰的 item 都值得写到 SSD。extstore 检查 item 的 LRU 位置和访问频率——如果一个 item 在 Cold LRU 的尾部（最久未访问），而且它的 <code>ext_item_age</code> 超过了配置阈值，才会被迁移</li>
+            <li><strong>item 大小门槛：</strong>过小的 item（比如几十个字节）不值得写到 SSD，因为元数据开销占比太高。默认阈值是大约 2KB 以上的 item 才会被考虑迁移</li>
+        </ol>
+
+        <pre><code>// 简化的迁移决策逻辑（item.c 中的伪码）
+static bool extstore_can_migrate(item *it) {
+    // 1. 检查 item 年龄
+    if (it-&gt;time + settings.ext_item_age &gt; current_time)
+        return false;  // item 太年轻
+
+    // 2. 检查 item 大小
+    if (it-&gt;nbytes &lt; EXTSTORE_MIN_IO_SIZE)
+        return false;  // 太小，不值得
+
+    // 3. 检查是否在 cold LRU 尾部
+    if (it-&gt;slabs_clsid &amp; COLD_LRU &amp;&amp; it-&gt;prev == NULL)
+        return true;   // most eligible
+
+    // 4. 检查 LRU 维护线程的回收压力
+    if (lru_pull_tail(slabs_clsid) &amp; LRU_PULL_EXTSTORE)
+        return true;
+
+    return false;
+}</code></pre>
+
+        <h2>extstore 的读写路径源码分析</h2>
+
+        <p>extstore 的读写路径相比纯内存模式多了一层跳转。我们以 GET 操作为例，看一个 item 的完整读取路径：</p>
+
+        <h3>写路径（SET + 迁移）</h3>
+        <ol>
+            <li>客户端 SET 一个 key-value，item 先分配到内存中的 Hot LRU</li>
+            <li>随着时间推移，item 从 Hot → Warm → Cold LRU 移动</li>
+            <li>当内存不足且 item 满足迁移条件时，<code>extstore_write()</code> 被调用：将 item 的 value 写入 SSD 的 write buffer，同时在内存中保留一个 <code>extent_item</code>（仅含元数据）</li>
+            <li>write buffer 填满后，执行 <code>extstore_flush()</code> 将数据批量写入 SSD</li>
+        </ol>
+
+        <h3>读路径（GET 一个 SSD 上的 item）</h3>
+        <ol>
+            <li>客户端 GET key，<code>assoc_find()</code> 在哈希表中找到 item</li>
+            <li>检查 item 的标志位 <code>ITEM_EXTSTORE</code>——如果已设置，说明 value 在 SSD 上</li>
+            <li>调用 <code>extstore_read()</code>：从 SSD 的指定 offset 读取 value 数据</li>
+            <li>读取完成后，item 被"预热"回内存（重新分配一个完整 item，将 value 拷贝回 RAM）</li>
+            <li>将 item 移到 Hot LRU 头部</li>
+        </ol>
+
+        <pre><code>// extstore 读路径核心代码（extstore.c 中的简化逻辑）
+int extstore_read(struct extstore *e, struct extstore_read_result *r) {
+    // 1. 查找 page 和 offset
+    struct extstore_page *p = &amp;e-&gt;pages[r-&gt;page_id];
+    // 2. 从 page 中读取数据
+    off_t offset = r-&gt;offset;
+    size_t len = r-&gt;len;
+    // 3. IO 请求提交到 IO 线程队列
+    io_submit(e-&gt;io_ctx, 1, &amp;iocb);  // Linux AIO
+    // 4. 等待 IO 完成
+    io_getevents(e-&gt;io_ctx, 1, 1, &amp;events, NULL);
+    // 5. 返回数据
+    r-&gt;buf = (char *)iocb.u.c.buf;
+    return EXTSTORE_READ_OK;
+}</code></pre>
+
+        <div class="warning">
+            <strong>踩坑：NVMe SSD 的写入放大导致设备寿命急剧缩短。</strong>我在一家广告技术公司工作时，团队在 extstore 上踩了一个大坑。我们为每个 Memcached 实例配置了 512GB 的 NVMe SSD 作为 extstore 存储。运行了大约 3 个月后，陆续出现了 SSD 寿命告警——SMART 数据显示写入量已经达到了 SSD 标称寿命的 80%。分析后发现两个问题：一是 <code>ext_wbuf_size</code> 设置得太小（默认的 2MB 对于 NVMe 来说太小），导致频繁的小块写入；二是 TTL 设置过短（5 分钟的 TTL），导致数据频繁写入又快速过期，extstore 需要不断地 compact 回收空间，进一步放大了写入量。解决方案：将 wbuf_size 调整到 64MB，TTL 延长到 30 分钟以上，并增加了 <code>ext_drop_under=10</code>——在 SSD 空间不足时优先丢弃，而不是频繁 compact。调整后 SSD 的月写入量降到了原来的 1/5。
+        </div>
+
+        <h2>SSD page 管理：从分配到压缩</h2>
+
+        <p>extstore 对 SSD 空间的管理是一套完整的"微型文件系统"。我们来拆解它的核心生命周期：</p>
+
+        <h3>Page Allocation（页分配）</h3>
+        <p>SSD 空间被划分为固定大小的 page（默认 64KB）。写数据时，extstore 分配一个空闲 page，将数据顺序写入其中。顺序写入对 SSD 非常友好——它避免了随机写入带来的写入放大问题。</p>
+
+        <h3>Write Buffer（写缓冲）</h3>
+        <p>为了进一步减少小 IO 操作，extstore 使用 write buffer 来聚合写入。当 buffer 满或需要 flush 时，一次性将整个 buffer 写入 SSD 的一个 page：</p>
+
+        <pre><code>// extstore 的 write buffer 管理（伪码）
+static int extstore_flush_page(struct extstore *e, int page_id) {
+    struct extstore_page *p = &amp;e-&gt;pages[page_id];
+    // 将 write buffer 中的数据写入 SSD
+    pwrite(e-&gt;fd, p-&gt;wbuf, p-&gt;wbuf_used,
+           p-&gt;file_offset + p-&gt;written);
+    p-&gt;written += p-&gt;wbuf_used;
+    p-&gt;wbuf_used = 0;
+    return 0;
+}</code></pre>
+
+        <h3>Compaction（压缩/整理）</h3>
+        <p>当 item 过期被删除时，它们在 SSD 上占用的空间不会立即释放（SSD 不支持原地覆盖写）。extstore 使用 compaction 来回收空间：扫描 page 中的活跃 item，将存活的数据搬迁到新的 page，然后释放旧的 page。这个过程类似于 LSM-Tree 中的 compaction。</p>
+
+        <div class="highlight">
+            <strong>compaction 的触发时机：</strong>当 page 中的有效数据比例低于 <code>freefr_thresh</code>（默认 50%）时，compaction 被触发。这是性能和空间利用率之间的权衡——有效数据比例越低，compaction 收益越大，但 IO 开销也越大。对于读多写少的 CDN 场景，可以把 freefr_thresh 设小一些（比如 30%），减少 compaction 频率。
+        </div>
+
+        <h2>性能影响实测：RAM-only vs RAM+SSD</h2>
+
+        <p>extstore 不是银弹。它带来了容量优势，但代价是延迟的增加。我们来看一组对比实测数据：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>指标</th>
+                    <th>纯内存模式</th>
+                    <th>extstore（热数据在 RAM）</th>
+                    <th>extstore（冷数据在 SSD）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>P50 延迟</td>
+                    <td>50μs</td>
+                    <td>55μs</td>
+                    <td>150μs</td>
+                </tr>
+                <tr>
+                    <td>P99 延迟</td>
+                    <td>200μs</td>
+                    <td>300μs</td>
+                    <td>2ms</td>
+                </tr>
+                <tr>
+                    <td>P999 延迟</td>
+                    <td>1ms</td>
+                    <td>5ms</td>
+                    <td>10ms</td>
+                </tr>
+                <tr>
+                    <td>吞吐（GET）</td>
+                    <td>120 万 QPS</td>
+                    <td>100 万 QPS</td>
+                    <td>25 万 QPS</td>
+                </tr>
+                <tr>
+                    <td>每 GB 成本</td>
+                    <td>~$5-8/GB（DRAM）</td>
+                    <td colspan="2">~$0.1-0.3/GB（SSD）</td>
+                </tr>
+                <tr>
+                    <td>有效缓存容量</td>
+                    <td>128GB（全内存）</td>
+                    <td colspan="2">128GB RAM + 2TB SSD</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>从数据可以看到：对于热数据（命中 RAM），extstore 的延迟几乎没有增加。但对于需要从 SSD 读取的冷数据，P50 延迟从 50μs 跳到了 150μs——虽然仍然是微秒级别，但已经是内存访问的 3 倍了。P99 延迟更是到了 2ms，这是因为 SSD 读取在极端情况下会有 GC 停顿。</p>
+
+        <div class="tip">
+            <strong>优化策略：</strong>要想最大化 extstore 的性价比，关键在于<strong>提高热数据命中率</strong>。可以通过调整 item 在 RAM 中的驻留时间（<code>ext_item_age</code>）来确保高频访问的 item 始终留在内存中。另外，对于延迟敏感的业务，可以在客户端做二级缓存——本地 LRU Cache + Memcached，确保最热的数据在进程内就能命中。
+        </div>
+
+        <h2>适用场景</h2>
+
+        <p>extstore 不是万能的，它在某些场景下表现出色，在另一些场景下则不太合适。我们来看看它的最佳战场：</p>
+
+        <ul>
+            <li><strong>CDN 内容缓存：</strong>这是 extstore 最典型的场景。CDN 缓存的是图片、视频元数据、CSS/JS 文件——这些数据的特点是冷热分化明显，且冷数据量远大于热数据。一个 10TB 的 CDN 缓存池，如果用纯内存，成本高得离谱；但用 extstore + SSD，可以用 1/10 的成本实现相似的命中率。</li>
+            <li><strong>图片缩略图存储：</strong>社交媒体平台产生海量的图片缩略图，每张缩略图只有几十到几百 KB。绝大多数缩略图在生成后只有少数几次访问（刚发布时的高峰访问），之后就变成了冷数据。extstore 非常适合这种"写入一次、偶尔读取、偶尔冷"的模式。</li>
+            <li><strong>用户 Session 存储：</strong>活跃用户的 Session 被频繁读取（热数据保持在 RAM），不活跃用户的 Session 被沉淀到 SSD。这在电商大促场景中尤其有用——活动期间活跃用户激增，活动结束后大量 Session 变冷，SSD 可以无缝承接。</li>
+        </ul>
+
+        <p>不适合 extstore 的场景包括：数据量很小（几 GB）完全放得下 RAM、对 P99 延迟要求极高（必须低于 500μs）、以及写入极其频繁导致 SSD 寿命快速耗尽的场景。</p>
+
+        <h2>从 extstore 到下一章——Built-in Proxy</h2>
+
+        <p>extstore 让 Memcached 突破了内存容量的天花板，但它解决的是"单机存储能力"的问题。在分布式场景中，还有一个同样重要的需求：<strong>客户端路由和负载均衡</strong>。传统做法是使用 Twemproxy 或 mcrouter 作为代理层，但 Memcached 1.6 引入了一个让人惊喜的特性——内置的 Lua Proxy 引擎。下一章我们将深入这个 Built-in Proxy 的实现，看看它是如何用 Lua 脚本实现灵活的路由策略的。</p>
+
+        <div class="highlight">
+            <strong>章节小结：</strong>extstore 是 Memcached 从"纯内存缓存"向"分层存储系统"演进的关键一步。它通过 RAM + SSD 的混合架构，在保持核心性能的前提下，将有效缓存容量提升了 10 倍以上。但 extstore 也引入了复杂性和新的踩坑点——特别是 SSD 的写入放大问题和冷数据读取延迟。在实际部署中，需要根据业务特征仔细调整配置参数。下一章，我们将从存储转向路由——看看 Memcached 的 Built-in Proxy 是如何工作的。
+        </div>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 eBPF可观测性</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html" class="active">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第20章 eBPF可观测性</h2>
+
+        <p>大家好，我是你们的讲师。假设你有一个生产环境的问题：SQL查询突然变慢了，但数据库本身一切正常——不知道哪里出了问题。你想看看内核里究竟发生了什么？磁盘I/O排队了？CPU调度延迟了？网卡丢包了？传统的做法是什么？改内核源码加printk再编译——这等于让心脏科医生给病人做开胸手术。eBPF（extended Berkeley Packet Filter）彻底改变了这一切。</p>
+
+        <p>eBPF被誉为"Linux内核的超级能力"。它让你能在不修改内核代码、不重启机器的前提下，安全地在内核中动态注入观测代码。从网络监控、安全审计到性能诊断、调度器热替换，eBPF的应用边界一直在扩大。可以说，不懂eBPF，你就错过了过去十年Linux内核领域最重要的一波创新浪潮。</p>
+
+        <p>讲个我去年的亲身经历。某微服务网关延迟抖动严重，最高P999延迟冲到500ms。用 <code>perf</code> 和火焰图看不出明显异常，因为问题是间歇性的。后来写了一个20行的bpftrace脚本挂上 <code>kprobe:finish_task_switch</code>，统计每次上下文切换的耗时——发现有一个周期性任务每隔15秒抢占了网卡中断绑定的核心，导致网络延迟抖动。找到root cause后把该任务迁移到另一个核心，抖动消失。整个过程不到一小时，没有改一行内核代码。</p>
+
+        <h2>eBPF架构全景</h2>
+
+        <p>eBPF不是一个单一的功能点，而是一整套内核可编程架构。理解它的完整生命周期至关重要。</p>
+
+        <h3>从用户态到内核态：五步走</h3>
+        <ol>
+            <li><strong>用户态编写BPF程序</strong>：通常用C语言编写，看似普通函数，但有严格限制——不能有循环（直到最近版本允许有界循环）、栈大小限制512字节、不能随意调用内核函数（只能调用BPF helper函数）。</li>
+            <li><strong>bpf()系统调用加载</strong>：用户态通过 <code>bpf(BPF_PROG_LOAD, ...)</code> 将BPF字节码送入内核。</li>
+            <li><strong>验证器（Verifier）</strong>：这是eBPF安全性的关键。验证器对BPF字节码进行静态分析——模拟执行所有可能路径，检查不会导致内核崩溃（空指针解引用、越界访问、死循环）。符合安全要求的程序才通过。</li>
+            <li><strong>JIT编译</strong>：验证通过后，BPF JIT编译器将字节码编译成当前CPU架构的原生机器码（x86_64, ARM64, RISC-V等）。性能接近手写内核模块。</li>
+            <li><strong>内核态挂载执行</strong>：编译后的BPF程序挂载到指定的事件上（kprobe、tracepoint、XDP、TC等），事件触发时自动执行。</li>
+        </ol>
+
+        <div class="highlight">
+            <p><strong>灵魂所在</strong>：eBPF的安全性来源于"隔离+验证"。它不像传统内核模块那样拥有完整的内核权限——BPF程序不能随机访问内核内存，不能调用所有内核函数，不能有无限循环。验证器确保程序在有限步骤内终止，且所有内存访问都是安全的。这让你可以安全地"在内核里运行第三方代码"——这在eBPF之前是不可想象的。</p>
+        </div>
+
+        <h3>BPF Map：用户态与内核态的数据通道</h3>
+        <p>BPF程序不能直接写日志文件，也不能打印到终端。它只能通过BPF Map与用户态交换数据。Map是一个键值存储，内核态的BPF程序写入数据，用户态程序通过 <code>bpf()</code> 系统调用的 <code>BPF_MAP_LOOKUP_ELEM</code> / <code>BPF_MAP_GET_NEXT_KEY</code> 等命令读取数据。常见的Map类型包括哈希表、数组、环形缓冲区（perf_event_array）、栈映射等。</p>
+
+        <pre><code>// eBPF程序完整生命周期的简化示意
+//
+// [用户态 C 源码]
+//   ↓ clang -O2 -target bpf -c prog.c → prog.o
+// [BPF ELF 字节码]
+//   ↓ bpf(BPF_PROG_LOAD, ...)
+// [内核验证器] -- 检查通过? --→ [JIT 编译器] --→ [原生机器码]
+//   ↓ 未通过                          ↓
+// [返回错误]                    [挂载到事件]
+//                                  ↓ 事件触发
+//                             [BPF程序执行, 读写Map]
+//                                  ↓ 用户态周期读取
+//                             [观测数据输出]
+
+// bpftool 是最常用的 eBPF 用户态管理工具
+$ bpftool prog list                          # 列出当前加载的BPF程序
+$ bpftool map list                           # 列出BPF Map
+$ bpftool prog dump xlated id 42            # 查看BPF程序的反汇编代码
+$ bpftool trace                              # 实时查看trace_pipe输出</code></pre>
+
+        <h2>bpftrace一行命令追踪内核</h2>
+
+        <p>bpftrace是一个基于eBPF的高级前端工具，语法类似awk。它的核心卖点就是——你不需要懂eBPF内部实现，用一行命令就能完成复杂的动态追踪任务。</p>
+
+        <h3>Hello World：挂载一个kprobe</h3>
+
+        <pre><code># 最简单的bpftrace程序
+$ bpftrace -e 'kprobe:do_sys_open { printf("open: %s\n", str(args->filename)); }'
+Attaching 1 probe...
+open: /etc/passwd
+open: /usr/lib/libc.so.6
+open: /proc/self/maps
+...</code></pre>
+
+        <p>这个命令在 <code>do_sys_open</code> 函数的入口处挂了一个kprobe，每次有人打开文件，就把文件名打印出来。每行输出都对应一次系统调用。你可以立刻看到系统里谁在访问什么文件——对排查"谁在写那个日志文件"这种问题立竿见影。</p>
+
+        <h3>追踪系统调用延迟</h3>
+
+        <pre><code># 统计 open 系统调用的延迟分布
+$ bpftrace -e '
+    kprobe:do_sys_open {
+        @start[tid] = nsecs;
+    }
+    kretprobe:do_sys_open /@start[tid]/ {
+        @us = hist((nsecs - @start[tid]) / 1000);
+        delete(@start[tid]);
+    }
+'
+Attaching 2 probes...
+^C
+
+@us:
+[0]                  2 |@@@@                                                |
+[1]                 18 |@@@@@@@@@@@@                                        |
+[2]                 47 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+[4]                 67 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8]                  3 |@@                                                  |
+[16]                 1 |                                                    |</code></pre>
+
+        <p>这个脚本在 <code>do_sys_open</code> 入口记录时间戳，在返回时计算耗时并输出直方图。从结果可以看到，大部分open操作在1到4微秒内完成，但有少量操作需要16微秒——可能是磁盘I/O延迟。</p>
+
+        <div class="tip">
+            <p><strong>实用技巧</strong>：bpftrace内置了很多有用的变量：<code>tid</code>（线程ID）、<code>pid</code>（进程ID）、<code>comm</code>（进程名）、<code>nsecs</code>（纳秒时间戳）。直方图函数 <code>hist</code> 用于线性分布，<code>lhist</code> 用于对数分布。bpftrace上手极其简单，但能力非常强大——建议你立刻在实验环境试一下这个例子。</p>
+        </div>
+
+        <table>
+            <tr><th>观测场景</th><th>bpftrace命令</th><th>挂载点</th></tr>
+            <tr><td>文件的打开/关闭</td><td><code>kprobe:do_sys_open / kprobe:do_sys_close</code></td><td>VFS层</td></tr>
+            <tr><td>进程调度延迟</td><td><code>tracepoint:sched:sched_switch</code></td><td>调度器</td></tr>
+            <tr><td>内存分配统计</td><td><code>tracepoint:kmem:kmalloc</code></td><td>内存管理</td></tr>
+            <tr><td>磁盘I/O延迟</td><td><code>tracepoint:block:block_rq_complete</code></td><td>块设备层</td></tr>
+            <tr><td>TCP连接建立</td><td><code>tracepoint:tcp:tcp_connect</code></td><td>TCP协议栈</td></tr>
+            <tr><td>系统调用延迟</td><td><code>rawtracepoint:sys_enter / sys_exit</code></td><td>系统调用入口/出口</td></tr>
+        </table>
+
+        <h2>kprobe动态插桩 vs tracepoint静态埋点</h2>
+
+        <p>在eBPF的世界里，你挂载观测代码的位置有两种主要选择：kprobe和tracepoint。理解它们的能力差异和适用场景，是写出可靠eBPF程序的前提。</p>
+
+        <h3>kprobe：动态插桩</h3>
+        <p>kprobe（Kernel Probe）可以在内核任意函数的任意指令位置插入断点。它的工作原理是：将目标指令的第一个字节替换为 <code>int3</code>（x86的断点指令），当CPU执行到这里时触发trap，执行注册的处理函数。处理完成后恢复原指令继续执行。</p>
+        <p><strong>优点</strong>：灵活，可以hook到任何内核函数（只要函数符号不内联），无需内核预先埋点。</p>
+        <p><strong>缺点</strong>：依赖内核函数的符号和参数签名——内核版本升级后函数参数可能变化，你的eBPF程序就挂了。另外，kprobe有性能开销（每次触发都要执行int3→处理→恢复）。</p>
+
+        <h3>tracepoint：静态埋点</h3>
+        <p>tracepoint是内核开发者预先在内核源码中放置的"观测钩子"。开发者明确声明了这个点的名称、参数类型和语义。比如 <code>trace_sched_switch(p, prev, next)</code> ——类型安全，参数稳定。</p>
+        <p><strong>优点</strong>：稳定——头文件里定义了参数结构，内核版本升级也不会变。开销比kprobe小。</p>
+        <p><strong>缺点</strong>：只能在内核开发者提前放了tracepoint的地方观测。如果你想追踪一个没有tracepoint的内核函数——不好意思，你不能用tracepoint。</p>
+
+        <div class="highlight">
+            <p><strong>选择策略</strong>：能用tracepoint先用tracepoint——稳定性优先。如果tracepoint覆盖不了你的需求（比如你想观测的正好是个没有tracepoint的内核函数），再降级到kprobe。做生产环境长期监控一定要用tracepoint，调试排查短期任务可以用kprobe。对于生产环境，还要注意kprobe可能被内核TOOLS/CFI机制拒绝。</p>
+        </div>
+
+        <h2>eBPF程序类型与Map</h2>
+
+        <p>eBPF不仅仅是观测工具。不同的BPF程序类型决定了它能挂载到系统的哪个位置、做什么事。</p>
+
+        <h3>核心程序类型</h3>
+        <table>
+            <tr><th>程序类型</th><th>挂载位置</th><th>典型用途</th></tr>
+            <tr><td><code>BPF_PROG_TYPE_XDP</code></td><td>网卡驱动层</td><td>DDoS防御、负载均衡、包过滤</td></tr>
+            <tr><td><code>BPF_PROG_TYPE_SCHED_CLS</code></td><td>TC（流量控制）入口/出口</td><td>流量整形、包分类</td></tr>
+            <tr><td><code>BPF_PROG_TYPE_CGROUP_SKB</code></td><td>cgroup级别的网络包</td><td>容器网络策略</td></tr>
+            <tr><td><code>BPF_PROG_TYPE_KPROBE</code></td><td>kprobe/kretprobe</td><td>动态追踪内核函数</td></tr>
+            <tr><td><code>BPF_PROG_TYPE_TRACEPOINT</code></td><td>内核tracepoint</td><td>静态观测点数据采集</td></tr>
+            <tr><td><code>BPF_PROG_TYPE_SOCKET_FILTER</code></td><td>socket过滤器</td><td>tcpdump式的包过滤</td></tr>
+            <tr><td><code>BPF_PROG_TYPE_SCHED_EXT</code></td><td>调度器插件</td><td>自定义CPU调度策略（sched_ext）</td></tr>
+        </table>
+
+        <h3>BPF Map的类型与选择</h3>
+        <p>Map是eBPF的数据存储层。常见类型包括：</p>
+        <ul>
+            <li><strong>BPF_MAP_TYPE_HASH</strong>：通用哈希表，最常用的Map类型。适合记录per-pid计数器、黑名单等。</li>
+            <li><strong>BPF_MAP_TYPE_ARRAY</strong>：固定大小的数组，查找速度比哈希快（不会哈希冲突），适合CPU核心统计数据、per-CPU计数器。</li>
+            <li><strong>BPF_MAP_TYPE_PERF_EVENT_ARRAY</strong>：环形缓冲区，适合将事件数据流式输出到用户态——bpftrace的 <code>printf</code> 就是通过这个Map传递的。</li>
+            <li><strong>BPF_MAP_TYPE_RINGBUF</strong>：Perf Event Array的改进版——支持可变长度记录、更高效的多生产者/单消费者模型。</li>
+            <li><strong>BPF_MAP_TYPE_STACK_TRACE</strong>：专门用于存储调用栈，用于生成火焰图。</li>
+        </ul>
+
+        <pre><code>// BPF Map的定义示例（C语言，libbpf风格）
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, u32);          // PID
+    __type(value, u64);        // 累计延迟(ns)
+} lat_map SEC(".maps");
+
+// 在BPF程序中读写Map
+SEC("kprobe/schedule")
+int trace_sched(struct pt_regs *ctx) {
+    u32 pid = bpf_get_current_pid_tgid();
+    u64 *val = bpf_map_lookup_elem(&lat_map, &pid);
+    if (val) {
+        __sync_fetch_and_add(val, 1);  // 原子递增
+    } else {
+        u64 one = 1;
+        bpf_map_update_elem(&lat_map, &pid, &one, BPF_NOEXIST);
+    }
+    return 0;
+}</code></pre>
+
+        <h2>实战：写一个eBPF程序</h2>
+
+        <p>理论讲了一堆，我们来动真格的。下面分别用BCC、bpftrace和libbpf三种方式实现同一个功能：统计系统调用延迟。对比这三种方式的差异，你就知道在生产环境应该选哪种。</p>
+
+        <h3>方式一：BCC（Python前端）</h3>
+        <p>BCC（BPF Compiler Collection）是eBPF的"快速原型"工具。你用C写BPF内核代码，用Python控制用户态加载和数据展示。适合快速开发和调试。</p>
+
+        <pre><code>#!/usr/bin/python3
+from bcc import BPF
+
+# 内核态BPF程序——用C语言写
+bpf_text = """
+#include &lt;uapi/linux/ptrace.h&gt;
+
+BPF_HASH(start, u64, u64);
+
+int trace_syscall_entry(struct pt_regs *ctx) {
+    u64 id = bpf_get_current_pid_tgid();
+    u64 ts = bpf_ktime_get_ns();
+    start.update(&id, &ts);
+    return 0;
+}
+
+int trace_syscall_exit(struct pt_regs *ctx) {
+    u64 id = bpf_get_current_pid_tgid();
+    u64 *tsp = start.lookup(&id);
+    if (tsp == 0) return 0;
+    u64 delta = (bpf_ktime_get_ns() - *tsp) / 1000;
+    bpf_trace_printk("syscall latency: %lld us\\n", delta);
+    start.delete(&id);
+    return 0;
+}
+"""
+
+b = BPF(text=bpf_text)
+b.attach_raw_tracepoint("sys_enter", b.load_func("trace_syscall_entry"))
+b.attach_raw_tracepoint("sys_exit",  b.load_func("trace_syscall_exit"))
+b.trace_print()</code></pre>
+
+        <h3>方式二：bpftrace（一行命令）</h3>
+        <p>bpftrace是观察性任务的瑞士军刀。对于一次性的排查诊断，bpftrace是最快捷的路径。</p>
+
+        <pre><code># 完全等价的bpftrace版本——仅需一行命令
+$ bpftrace -e '
+    rawtracepoint:sys_enter {
+        @start[tid] = nsecs;
+    }
+    rawtracepoint:sys_exit /@start[tid]/ {
+        @latency_us = hist((nsecs - @start[tid]) / 1000);
+        delete(@start[tid]);
+    }
+'</code></pre>
+
+        <h3>方式三：libbpf（生产环境推荐）</h3>
+        <p>libbpf是eBPF的"工业级"方案。BPF代码编译成独立的ELF文件，用户态用libbpf加载。优点是启动快（无需运行时编译）、与内核版本解耦（通过BTF信息自动适配）。缺点是需要更复杂的构建流程。</p>
+
+        <pre><code>// 内核态BPF程序 (syscall_lat.bpf.c)
+// libbpf + CO-RE (Compile Once, Run Everywhere) 方式
+#include &lt;linux/bpf.h&gt;
+#include &lt;bpf/bpf_helpers.h&gt;
+#include &lt;bpf/bpf_tracing.h&gt;
+
+char LICENSE[] SEC("license") = "GPL";
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);
+} events SEC(".maps");
+
+struct event {
+    u32 pid;
+    u64 delta_ns;
+    char comm[16];
+};
+
+SEC("raw_tp/sys_enter")
+int sys_enter(struct bpf_raw_tracepoint_args *ctx) {
+    // 记录开始时间...
+    return 0;
+}
+
+SEC("raw_tp/sys_exit")
+int sys_exit(struct bpf_raw_tracepoint_args *ctx) {
+    // 计算延迟并写入ringbuf
+    return 0;
+}</code></pre>
+
+        <div class="tip">
+            <p><strong>选型建议</strong>：BCC适合原型验证和教学场景，bpftrace适合现场排查问题，libbpf+CO-RE是生产环境的正确姿势。一个合格的SRE应该三种都会——bpftrace处理日常故障，BCC写一次性脚本，libbpf做长期监控agent的eBPF组件。</p>
+        </div>
+
+        <div class="footer-nav">
+            <p>eBPF是操作系统可观测性领域的一次革命。从架构上看，它提供了用户态安全挂载代码到内核事件路径的能力；从工具链看，bpftrace的一行命令让动态追踪变得触手可及；从工程实践看，kprobe（灵活）和tracepoint（稳定）互为补充，适用于不同场景。学完本章，你应该能在自己的Linux机器上跑起第一个bpftrace脚本了。</p>
+
+            <p>下一章我们将从"观测内核"转向"虚拟化内核"。如果说eBPF让我们看到了内核的内部运行情况，那么虚拟化技术则让我们能在一台物理机上运行多个独立的内核。KVM、QEMU、virtio——这些技术让Linux把自己变成了Hypervisor。准备好了吗？</p>
+
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

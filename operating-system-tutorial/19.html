@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 网络协议栈</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html" class="active">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第19章 网络协议栈</h2>
+
+        <p>大家好，我是你们的讲师。你有没有想过，当你在浏览器里输入 <code>https://www.google.com</code> 并按回车，到页面出现在屏幕上，这中间到底发生了什么？DNS查询、TCP三次握手、TLS协商、HTTP请求、路由转发、ARP解析……这一连串看似复杂的步骤，在你按下的那一瞬间就全部完成了。而承载这一切的，正是操作系统的网络协议栈（Network Stack）。</p>
+
+        <p>网络协议栈是操作系统里"存在感最强"的子系统之一。你几乎感觉不到它的存在——直到某个深夜，你发现服务器上 <code>ss -tuln</code> 显示几十万个 <code>TIME_WAIT</code> 连接，或者生产环境突然出现诡异的"Connection refused"。这时候你就知道，不懂网络协议栈是要吃大亏的。本章我们沿着数据包穿越内核的完整路径，把网络协议栈的各个关键环节一一拆解。</p>
+
+        <p>先分享一个真实的踩坑经历。有次线上告警：某台Nginx反向代理服务器的响应延迟从2ms飙到了2秒。分析后发现这台机器的 <code>/proc/net/netstat</code> 中 <code>ListenOverflows</code> 计数器在疯狂增长——Accept队列满了，新连接被内核直接丢弃。调整 <code>net.core.somaxconn</code> 和 <code>tcp_abort_on_overflow</code> 后立即恢复。如果不懂内核TCP连接建立的内部机制，面对这种问题你就是两眼一抹黑。</p>
+
+        <h2>从socket()到网卡：数据包的完整旅程</h2>
+
+        <p>一条数据从用户态应用出发，到最终从网线（或无线）上飞出去，要穿越七个主要关卡。我们从自上而下的视角来梳理：</p>
+
+        <h3>第一关：应用层</h3>
+        <p>用户程序调用 <code>send(sockfd, buf, len, flags)</code>。这个调用看起来人畜无害，实际上它从用户态陷入内核态。应用层不关心底层是TCP还是UDP——它已经把数据交给socket抽象了。</p>
+
+        <h3>第二关：Socket层</h3>
+        <p>内核的socket通用层（<code>net/socket.c</code>）根据socket的协议族和类型，找到对应的协议操作函数表。这里用到了面向对象的设计思想——<code>struct proto_ops</code> 中挂着 <code>sendmsg</code>、<code>recvmsg</code> 等操作指针。对于TCP socket，它会调用 <code>tcp_sendmsg</code>。</p>
+
+        <h3>第三关：传输层</h3>
+        <p>TCP协议栈在这里做分段（MSS拆分）、添加TCP头部（源端口、目的端口、seq序号、确认号、窗口大小、校验和）。然后把生成的sk_buff塞入发送队列。TCP拥塞控制算法（CUBIC / BBR）也会在这一层做出速率决策——要不要降速、要不要快重传。</p>
+
+        <h3>第四关：网络层</h3>
+        <p><code>ip_output</code> 为每个数据包添加IP头部，然后查路由表（FIB）决定数据包从哪个网卡出去。如果需要NAT，Netfilter钩子也会在这里介入改写地址。如果数据包太大超过MTU，IP层还会做分片（不过现代网络通常靠PMTUD避免分片）。</p>
+
+        <h3>第五关：链路层</h3>
+        <p><code>dev_queue_xmit</code> 将数据包交给链路层。这里要查ARP缓存来填充目标MAC地址。同时处理VLAN标签（802.1Q）、QoS优先级映射。然后数据包被放入网卡的发送环（Tx Ring）。</p>
+
+        <h3>第六关：驱动层</h3>
+        <p>网卡驱动程序从Tx Ring取走描述符，通过DMA将数据从主存传输到网卡内部的FIFO缓冲区。然后网卡自动将数字信号调制成模拟信号从网线发出去。这个过程对CPU几乎透明——一次DMA可以传输数千个数据包而CPU完全不用参与。</p>
+
+        <div class="tip">
+            <p><strong>关键数据结构</strong>：内核网络协议栈的核心数据结构是 <code>struct sk_buff</code>（socket buffer）。它贯穿整个协议栈的每一层，头部预留了足够的空间（<code>head</code> 到 <code>data</code> 之间），每经过一层只需调整指针位置，避免了内存拷贝。这正是内核网络子系统的性能秘诀之一。</p>
+        </div>
+
+        <pre><code>// 数据包在协议栈各层的封装示意
+//
+// 应用层: [HTTP header][payload]
+// 传输层: [TCP header][HTTP header][payload]
+// 网络层: [IP header][TCP header][HTTP header][payload]
+// 链路层: [Ethernet header][IP header][TCP header][HTTP header][payload][FCS]
+// 网卡:   前导码 + MAC目标地址 + MAC源地址 + EtherType + payload + FCS
+
+// sk_buff 在每一层只需移动 data 指针
+// 发送流程(tcp_v4为例):
+// tcp_sendmsg → tcp_push → __tcp_transmit_skb
+//   → ip_queue_xmit → ip_local_out → nf_hook
+//     → ip_output → dev_queue_xmit → nf_hook
+//       → netdev_start_xmit → 网卡驱动 → 网卡</code></pre>
+
+        <h2>三次握手的内核实现</h2>
+
+        <p>TCP三次握手是我们面试中被问烂的话题，但面试很少问你：这个握手在内核里究竟是怎么实现的？理解这一点，你才能解释为什么高并发场景下会出现连接失败、SYN Flood如何防御、以及各种TCP内核参数的真正含义。</p>
+
+        <h3>两个队列：SYN队列与Accept队列</h3>
+
+        <p>服务端在调用 <code>listen()</code> 后，内核为这个监听socket创建两个队列：</p>
+        <ul>
+            <li><strong>SYN队列（半连接队列）</strong>：收到SYN包后，连接进入 <code>SYN_RECV</code> 状态，挂在这个队列上。队列大小由 <code>net.ipv4.tcp_max_syn_backlog</code> 控制。</li>
+            <li><strong>Accept队列（全连接队列）</strong>：三次握手完成后（收到ACK），连接进入 <code>ESTABLISHED</code> 状态，转移到此队列。应用调用 <code>accept()</code> 从此取走连接。队列最大长度由 <code>listen(fd, backlog)</code> 的backlog参数和 <code>net.core.somaxconn</code> 中较小的值决定。</li>
+        </ul>
+
+        <table>
+            <tr><th>队列</th><th>状态</th><th>参数控制</th><th>满了会怎样</th></tr>
+            <tr><td>SYN队列（半连接）</td><td>SYN_RECV</td><td><code>tcp_max_syn_backlog</code></td><td>丢SYN包（可启用syncookies）</td></tr>
+            <tr><td>Accept队列（全连接）</td><td>ESTABLISHED</td><td><code>backlog</code> / <code>somaxconn</code></td><td>发送RST或自动丢弃ACK（看 <code>tcp_abort_on_overflow</code>）</td></tr>
+        </table>
+
+        <div class="warning">
+            <p><strong>踩坑实录</strong>：很多应用（如Redis、Nginx）内部有自己的事件循环，<code>listen()</code> 的backlog设得很大（比如512或者1024），但很多人忘了检查 <code>net.core.somaxconn</code> 的默认值（噫吁嚱，大多数Linux发行版默认是128！）。结果就是backlog写了1024，实际生效只有128。高并发下Accept队列很快爆满，新连接直接RST断开——上层应用看到的错误就是"Connection refused"。</p>
+        </div>
+
+        <h3>SYN Cookie防御SYN Flood</h3>
+
+        <p>SYN Flood攻击的思路极其简单：攻击者伪造源IP发送大量SYN包，服务端回复SYN+ACK后等待客户端应答——但攻击者永远不回ACK。于是SYN队列被占满，正常用户的连接请求被丢弃。</p>
+
+        <p>内核的防御武器是SYN Cookie。开启 <code>net.ipv4.tcp_syncookies = 1</code> 后（多数发行版默认开启），内核在SYN队列满时不真正分配连接资源，而是将连接信息（MSS等）编码成一个cookie作为初始seq number发回去。等客户端的ACK回来时，内核从ACK中的seq-1解码出cookie，验证合法性后直接创建连接。这样一来，即使SYN Flood攻击再猛烈，服务端也无需为每个伪造SYN维护状态。</p>
+
+        <pre><code># 查看当前连接队列状态
+$ ss -tnlp | head -20
+
+# 查看SYN队列溢出统计
+$ nstat -az | grep -E "Syncookies|ListenOverflows|ListenDrops"
+
+# 内核参数调优
+# 增大Accept队列上限
+$ sysctl -w net.core.somaxconn=1024
+
+# 启用SYN Cookie（数据完整性有轻微代价）
+$ sysctl -w net.ipv4.tcp_syncookies=1
+
+# 加快TIME_WAIT回收（谨慎使用）
+$ sysctl -w net.ipv4.tcp_tw_reuse=1</code></pre>
+
+        <h2>Netfilter五链四表</h2>
+
+        <p>Netfilter是Linux内核内置的数据包过滤和修改框架。你在用户态用 <code>iptables</code> 或 <code>nftables</code> 配置的规则，最终都会编译为内核Netfilter模块的hook处理函数。</p>
+
+        <h3>五个钩子点（五链）</h3>
+        <p>数据包在内核协议栈的不同阶段会触发不同的Netfilter钩子：</p>
+        <ul>
+            <li><strong>NF_INET_PRE_ROUTING</strong>（PREROUTING）：数据包进入网络层后、路由决策之前。适合做DNAT（目的地址转换）。</li>
+            <li><strong>NF_INET_LOCAL_IN</strong>（INPUT）：目的地址为本机的数据包，在路由决策之后触发。</li>
+            <li><strong>NF_INET_FORWARD</strong>（FORWARD）：非本机目的的数据包（路由器场景），在路由决策之后触发。</li>
+            <li><strong>NF_INET_LOCAL_OUT</strong>（OUTPUT）：本机发出的数据包，在其路由之前触发。</li>
+            <li><strong>NF_INET_POST_ROUTING</strong>（POSTROUTING）：所有即将发出的数据包，在路由之后、交给链路层之前触发。适合做SNAT（源地址转换）。</li>
+        </ul>
+
+        <h3>四张规则表</h3>
+        <p>用户可以通过iptables/nftables将规则注册到不同的表中，每个表关注不同维度的处理：</p>
+        <ul>
+            <li><strong>raw表</strong>：优先级最高，用于关闭连接跟踪（<code>NOTRACK</code>），如高速DNS服务器无需走conntrack。</li>
+            <li><strong>mangle表</strong>：修改IP包的特定字段（TOS/DSCP/TTL），用于QoS标记等场景。</li>
+            <li><strong>nat表</strong>：地址转换——DNAT（端口映射）和SNAT（上网代理）。</li>
+            <li><strong>filter表</strong>：最常见的表，防火墙规则（ACCEPT/DROP/REJECT）都在这里。</li>
+        </ul>
+
+        <div class="highlight">
+            <p><strong>关键认知</strong>：Netfilter的架构是一张"钩子×表"的二维矩阵。每个钩子点可以挂载多个表，表之间有优先级排序。理解这个矩阵结构，你就明白了为什么 <code>iptables -t nat -A PREROUTING</code> 能实现端口转发，而 <code>-A FORWARD</code> 则不能。也明白了为什么nftables最终取代iptables——前者统一了用户态语法，内核机制并无本质变化。</p>
+        </div>
+
+        <pre><code># 数据包在Netfilter中的路径示意图
+#
+#          [网卡]
+#            |
+#          PREROUTING (raw → mangle → nat)
+#            |
+#         [路由决策]
+#          /        \
+#     目的为本机    目的为转发
+#        |             |
+#      INPUT        FORWARD
+#   (mangle→filter)  (mangle→filter)
+#        |             |
+#     [本地进程]     POSTROUTING
+#                      (mangle→nat)
+#                        |
+#                     [网卡发送]</code></pre>
+
+        <h2>XDP：网卡驱动层的可编程数据路径</h2>
+
+        <p>传统的iptables/nftables处理数据包需要包经过整个协议栈——从网卡→驱动→链路层→网络层→Netfilter钩子。这意味着大量的CPU时间花在了协议栈处理上，对于DDoS防御、负载均衡这种需要超高吞吐的场景，太慢了。</p>
+
+        <p>XDP（eXpress Data Path）的思路截然不同：它抢在网卡驱动把数据包送入协议栈之前——实际上是网卡驱动刚刚从DMA缓冲区拿到sk_buff之后、还没有提交给协议栈之前——就让eBPF程序直接处理这个数据包。处理结果可以是 <code>XDP_DROP</code>（丢弃）、<code>XDP_PASS</code>（放行入协议栈）、<code>XDP_TX</code>（从同一网卡原路发回）、或者 <code>XDP_REDIRECT</code>（转发到另一个网卡或用户态）。</p>
+
+        <p>这意味着：对于DDoS防御，你可以在驱动层面直接丢弃攻击流量，CPU几乎零开销。Cloudflare的L4 DDoS防御就是基于XDP实现的——每台服务器可以线速处理数百万PPS的攻击数据包，CPU占用率仅个位数。</p>
+
+        <div class="tip">
+            <p><strong>性能对比</strong>：用iptables DROP一条规则，数据包要经过完整协议栈处理，包长路径约2000条指令。而XDP_DROP在驱动层就拦截了，只需不到100条指令，性能提升10到20倍。XDP要求网卡驱动支持（主流网卡如Mellanox、Intel i40e/ice、Broadcom BNXT都已支持），且需要eBPF JIT编译器的支持。</p>
+        </div>
+
+        <pre><code>// XDP程序的极简示例（用C语言编写）
+#include &lt;linux/bpf.h&gt;
+#include &lt;bpf/bpf_helpers.h&gt;
+
+SEC("xdp")
+int drop_all_packets(struct xdp_md *ctx) {
+    // 拒绝所有数据包——极简DDoS防御
+    return XDP_DROP;
+}
+
+// 实际场景：只丢弃特定源IP的攻击包
+SEC("xdp")
+int block_bad_ip(struct xdp_md *ctx) {
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end) return XDP_PASS;
+
+    // 解析IP头并查找黑名单...
+    // 若命中则 return XDP_DROP;
+    // 否则 return XDP_PASS;
+}</code></pre>
+
+        <h2>内核旁路与DPDK</h2>
+
+        <p>XDP是在"不绕过内核"的前提下极致优化。但有些人说：我追求极致性能，内核本身就是一个瓶颈——中断处理、系统调用、上下文切换、锁竞争，所有这些内核开销我都不要。这就是内核旁路（Kernel Bypass）的出发点。</p>
+
+        <h3>为什么需要绕过内核？</h3>
+        <p>标准内核协议栈的痛点非常明确：每个数据包可能触发一次中断（NAPI虽然合并中断，但开销仍在）、每次收发包都要系统调用、锁竞争在多核场景下严重、协议栈处理路径太长。结果就是：10Gbps网卡很容易被内核协议栈吃满CPU，而真正处理业务逻辑的时间所剩无几。</p>
+
+        <h3>DPDK：用户态网络栈</h3>
+        <p>DPDK（Data Plane Development Kit）的核心思想是：用 <code>UIO</code>（Userspace I/O）或 <code>VFIO</code> 框架把网卡的控制权交给用户态。用户态程序直接轮询（Polling）网卡的接收和发送队列，没有任何中断和系统调用开销。数据包从网卡DMA到用户态预先分配的巨页（Hugepage）内存上，应用直接用DPDK的API解析数据包。</p>
+
+        <p>代价呢？应用层需要自己实现TCP/IP协议栈——DPDK本身只提供数据面转发能力，不提供完整的TCP协议栈。要么用第三方库如mTCP、F-Stack、Seastar，要么干脆不用TCP只做UDP转发。DPDK也意味着独占一个或多个CPU核心（轮询不断），这对通用场景不友好。</p>
+
+        <h3>io_uring zcrx：折中方案</h3>
+        <p>DPKD太极端了——它把内核完全跳过了。有没有一种折中方案？io_uring + ZC_RX（Zero Copy Receive）提供了一个有趣的第三条道路。io_uring的 <code>IORING_OP_PROVIDE_BUFFERS</code> 让应用预注册缓冲区，网卡DMA直接将数据包写入预注册的缓冲区——省去了一次内存拷贝。用户态通过io_uring的completion queue拿到数据包引用，不用经过系统调用。这本质上是"hybrid bypass"：数据仍然经过内核协议栈，但消除了大部分的数据拷贝和系统调用开销。</p>
+
+        <div class="highlight">
+            <p><strong>路线对比</strong>：传统内核协议栈 = 灵活通用 + 性能一般。XDP = 内核框架内加速，不改协议栈体系。DPDK = 彻底绕过内核，性能极致但代价大。io_uring zcrx = 在现有框架内"取巧"，适合不想搞DPDK那么重、但又不满意原生TCP性能的场景。技术选型没有银弹，根据吞吐量需求和开发成本做权衡。</p>
+        </div>
+
+        <pre><code># DPDK的典型架构（用户态驱动）
+# $ dpdk-devbind --status  # 查看网卡绑定状态
+# $ dpdk-testpmd           # DPDK自带的测试工具
+
+# io_uring zcrx 相关内核参数
+# 需内核 6.0+ 且网卡驱动支持
+$ ethtool -K eth0 rx-udp-gro-forwarding on  # 启用UDP GRO</code></pre>
+
+        <div class="footer-nav">
+            <p>网络协议栈是操作系统中最复杂、最优雅的子系统之一。从应用层的socket抽象到硬件层的DMA传输，每一层都体现了分层抽象的设计哲学。这一章我们走完了数据包的完整旅程，理解了三次握手的内核实现、Netfilter的钩子框架、XDP的可编程数据路径、以及DPDK和io_uring zcrx两种绕过内核的加速方案。</p>
+
+            <p>下一章，我们将走进操作系统可观测性（Observability）的核心——eBPF。如果说网络协议栈关注的是"数据怎么走"，那么eBPF关心的就是"系统在干什么"。有了eBPF，我们不需要修改内核代码，不需要重启机器，就能在内核的任意位置注入观测代码。这将是你掌握操作系统调试与性能分析的又一大利器。</p>
+
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

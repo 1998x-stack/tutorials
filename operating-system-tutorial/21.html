@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 虚拟化技术</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html" class="active">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第21章 虚拟化技术</h2>
+
+        <p>大家好，我是你们的讲师。打开你云服务商的控制台，点击"创建一台云服务器"，选择镜像、规格、网络——不到一分钟，一台崭新的"服务器"就出现在你面前。这背后是虚拟化技术。而这一切，本质上是你的操作系统在"骗"客户操作系统——"你以为你独占了一台物理机？其实你只是一个进程。"</p>
+
+        <p>虚拟化（Virtualization）是云计算的基础设施。从AWS EC2到阿里云ECS，从VMware vSphere到KVM，从x86到ARM，几乎所有现代数据中心都在跑虚拟化。理解虚拟化，不仅仅是理解一个技术特征——它是理解现代数据中心、资源隔离、以及我们如何在一台物理机上高效运行多个操作系统的核心。</p>
+
+        <p>先讲一个经典的生产故事。某公司的数据库服务器虚拟化后，偶尔出现莫名其妙的高延迟，应用日志没有任何异常。排查发现宿主机上还跑着另外几台虚拟机，其中一台正在做全量磁盘备份。备份虚拟机的I/O风暴导致宿主机存储队列拥堵，影响到数据库虚拟机的磁盘延迟。这就是典型的"吵闹邻居"（Noisy Neighbor）问题。解决思路包括使用CPU亲和性绑定、配置I/O上限、以及使用分槽资源池。这些问题的理解都需要回到虚拟化的本质——vCPU就是宿主机上的一个线程。</p>
+
+        <h2>虚拟化三条路线</h2>
+
+        <p>虚拟化不是凭空产生的，它是为了在x86架构上运行多个操作系统而"打补丁"打出来的技术。三条路线代表了不同的设计哲学。</p>
+
+        <h3>Popek-Goldberg定理：虚拟化的理论基础</h3>
+        <p>1974年，Gerald Popek和Robert Goldberg提出了虚拟机形式化的理论基础。一条指令被划分为三类：特权指令（只能在ring 0执行）、敏感指令（涉及硬件状态）、普通指令（不影响虚拟化）。虚拟化的核心挑战是：让Guest OS执行特权/敏感指令时，由VMM（虚拟机监控器）截获并模拟。x86架构的问题在于——有一些敏感指令不是特权指令（比如 <code>SIDT</code>、<code>SGDT</code> 读取IDT/GDT寄存器），它们在用户态执行时不会触发trap，导致Guest OS认为自己在ring 0，但实际不是。这被称为"可虚拟化漏洞"——x86严格来说不符合Popek-Goldberg定理。</p>
+
+        <h3>第一条路：全虚拟化（软件模拟）</h3>
+        <p>早期的VMware Workstation采用"二进制翻译"（Binary Translation）技术。VMM在运行时扫描Guest OS的指令序列，把敏感的非特权指令动态替换为模拟实现。Guest OS完全不知道自己被虚拟化了——它以为自己在物理机上。代价是二进制翻译的开销很大，尤其是上下文敏感指令频繁执行时。</p>
+
+        <h3>第二条路：半虚拟化（Para-virtualization）</h3>
+        <p>Xen采用的策略更直接：既然x86不可虚拟化，那就改Guest OS。Guest OS的内核经过修改，把原来执行敏感指令的地方显式调用"hypercall"（超级调用）——就像系统调用一样切换到VMM去处理。优点是性能好（没有二进制翻译的额外开销），缺点是需要修改Guest OS——Windows不能跑在Xen上（直到微软主动适配）。</p>
+
+        <h3>第三条路：硬件辅助虚拟化</h3>
+        <p>Intel VT-x和AMD-V在CPU层面直接解决了这个问题。CPU增加了新的运行模式：VMX root mode（VMM运行在此模式）和VMX non-root mode（Guest OS运行在此模式）。敏感指令在non-root mode下执行时自动触发VM-Exit陷入VMM。从此不再需要二进制翻译，也不再需要修改Guest OS。从Intel Nehalem架构（2008年）开始，主流x86 CPU都支持硬件辅助虚拟化。</p>
+
+        <table>
+            <tr><th>维度</th><th>全虚拟化</th><th>半虚拟化</th><th>硬件辅助虚拟化</th></tr>
+            <tr><td>是否需要改Guest OS</td><td>不需要</td><td>需要</td><td>不需要</td></tr>
+            <tr><td>性能开销</td><td>中（二进制翻译）</td><td>低</td><td>低（VM-Exit有固定开销）</td></tr>
+            <tr><td>代表产品</td><td>VMware Workstation</td><td>Xen</td><td>KVM / Hyper-V / VMware ESXi</td></tr>
+            <tr><td>CPU模式</td><td>Ring 0/1/2/3模拟</td><td>Hypercall + Ring 0/3</td><td>VMX root / non-root</td></tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>历史视角</strong>：三路路线不是"谁取代谁"的线性关系，而是相互影响、最终融合。硬件辅助虚拟化普及后，全虚拟化和半虚拟化各自的核心技术也被吸收——KVM虽然使用VT-x/AMD-V做CPU虚拟化，但I/O虚拟化仍借鉴了半虚拟化的virtio设计。理解历史路线是为了知道"为什么今天长这样"。</p>
+        </div>
+
+        <h2>KVM：Linux变身Hypervisor</h2>
+
+        <p>2007年，KVM（Kernel-based Virtual Machine）被合入Linux主线内核。它让Linux内核本身变成了一个Type-2 Hypervisor。这个设计的精妙之处在于：不需要一个单独的VMM软件层，而是把虚拟化功能直接嵌入内核。</p>
+
+        <h3>/dev/kvm：一个设备文件开启虚拟化</h3>
+        <p>KVM对外暴露的是一个简单的字符设备——<code>/dev/kvm</code>。用户态通过 <code>open("/dev/kvm")</code> 获得一个文件描述符，然后通过 <code>ioctl</code> 来管理虚拟机：</p>
+
+        <ul>
+            <li><code>KVM_CREATE_VM</code>：创建一个虚拟机实例，返回VM文件描述符。</li>
+            <li><code>KVM_CREATE_VCPU</code>：在VM中创建一个vCPU（本质上是宿主机上的一个线程）。</li>
+            <li><code>KVM_SET_USER_MEMORY_REGION</code>：为虚拟机分配物理内存（背后是宿主机的匿名内存页）。</li>
+            <li><code>KVM_RUN</code>：让vCPU开始执行Guest OS代码。这个ioctl会触发VM-Entry进入VMX non-root mode，运行Guest指令，直到发生VM-Exit（如中断、I/O操作、访问MMIO）才返回用户态。</li>
+        </ul>
+
+        <h3>QEMU：用户态设备模拟器</h3>
+        <p>KVM只管CPU和内存的虚拟化。那网卡、磁盘、USB这些设备怎么办？答案是QEMU。QEMU作为用户态进程，为虚拟化提供设备模拟层。当Guest OS执行端口I/O操作访问模拟网卡时，触发VM-Exit退出到QEMU，QEMU模拟网卡行为后将结果返回Guest。</p>
+
+        <pre><code># 查看当前系统是否支持KVM
+$ ls -l /dev/kvm
+crw-rw---- 1 root kvm 10, 232 Jun 30 09:00 /dev/kvm
+
+# 查看KVM内核模块
+$ lsmod | grep kvm
+kvm_intel             135168  0
+kvm                  1183744  1 kvm_intel
+
+# 用virsh查看宿主机上的虚拟机
+$ virsh list --all
+ Id   名称           状态
+------------------------------------
+ 2    ubuntu-vm       running
+ 5    centos-vm      running
+
+# KVM ioctl调用过程（简化）
+# open("/dev/kvm") → ioctl(KVM_CREATE_VM)
+#   → ioctl(KVM_CREATE_VCPU) → ioctl(KVM_SET_USER_MEMORY_REGION)
+#     → ioctl(KVM_RUN) → [VM-Entry] → 跑Guest代码 → [VM-Exit] → 处理</code></pre>
+
+        <div class="tip">
+            <p><strong>理解关键</strong>：对于宿主机来说，每个虚拟机就是一个普通的QEMU进程。<code>ps aux | grep qemu</code> 就能看到每个虚拟机的内存占用和CPU占用。之所以叫"虚拟化"而不是"模拟"，是因为大多数指令直接在CPU上执行（VT-x的non-root mode），只有敏感指令才经过VM-Exit陷入宿主机处理。所以虚拟机性能非常接近物理机——通常开销在2%-10%之间。</p>
+        </div>
+
+        <h2>vCPU调度与CPU窃取</h2>
+
+        <p>vCPU是虚拟化中最容易误解的概念之一。初学者以为vCPU是CPU——错。vCPU是宿主机上的一个线程（确切地说，是QEMU进程中的一组线程）。</p>
+
+        <h3>vCPU = 线程</h3>
+        <p>当你创建一个4 vCPU的虚拟机时，QEMU会创建4个线程（通常命名为 <code>CPU 0/KVM</code>、<code>CPU 1/KVM</code> 等）。这些线程由宿主机的CFS（完全公平调度器）调度——和其他所有普通线程一样，参与时间片分配。</p>
+
+        <p>这意味着：如果宿主机有16个物理核心，上面跑了4台4 vCPU的虚拟机（共16个vCPU），但宿主机自己还要跑监控、存储、网络服务——线程总数远大于物理核心数。宿主机的CFS将物理CPU时间片在所有这些线程中分配。</p>
+
+        <h3>Steal Time（CPU窃取）</h3>
+        <p>这就是"CPU窃取"的由来。当虚拟机内的时钟中断触发时，如果宿主机调度器没有把物理核心分配给该vCPU线程（因为它正在运行其他vCPU或其他进程），虚拟机内的时钟中断就延迟了。虚拟机内部感知到的问题是：我明明应该已经跑了100ms，但实际上只跑了60ms——另外40ms等于是被宿主机"偷走"了。</p>
+
+        <p>Guest OS可以读取 <code>steal</code> 计时器（通过PV时钟接口）来获知自己被窃取了多少CPU时间。在虚拟机里执行 <code>top</code> 命令，你会看到 <code>%st</code>（steal）字段——如果这个值持续很高，说明宿主机超卖严重，你的虚拟机在和其他人抢CPU。</p>
+
+        <div class="warning">
+            <p><strong>槽点</strong>：我用过一个很坑的云服务商，购买的4 vCPU云服务器，业务高峰期 <code>/proc/stat</code> 里的 <code>steal</code> 值占了60%以上。意思是花了4个vCPU的钱，实际只能用到1.6个。用 <code>stress</code> 跑压测，<code>%st</code> 直接飙到80%。这就是云厂商超卖太狠的后果。所以采购云服务器时，如果应用是CPU密集型的，一定要提前用 <code>vmstat 1</code> 或 <code>mpstat -P ALL 1</code> 监控steal值。</p>
+        </div>
+
+        <pre><code># 在虚拟机内部查看 CPU Steal Time
+$ top
+top - 10:15:30 up 30 days,  2:15,  1 user,  load average: 4.50, 4.20, 3.80
+%Cpu(s): 20.0 us,  5.0 sy,  0.0 ni, 10.0 id,  5.0 wa,  0.0 hi,  0.0 si, 60.0 st
+                                                                    ^^^^
+                                                                    steal 60%!
+
+# 同样也可以用 mpstat
+$ mpstat -P ALL 1
+02:15:30 PM  CPU   %usr   %sys   %idle   %steal
+02:15:31 PM  all  20.00   5.00   15.00   60.00
+
+# 宿主机上可以看到vCPU线程
+$ ps -eo pid,comm,thcount | grep qemu
+12345 qemu-system-x86      4   # 4个vCPU对应4个线程</code></pre>
+
+        <h2>virtio半虚拟化协议</h2>
+
+        <p>虚拟化I/O一直性能瓶颈。全模拟设备（如e1000网卡模拟）性能极差——每个I/O操作要触发VM-Exit，再由QEMU模拟硬件寄存器。半虚拟化则通过Guest和VMM之间的一份协议来大幅提升I/O性能。这个协议就是virtio。</p>
+
+        <h3>virtqueue：共享环形队列</h3>
+        <p>virtio的核心思想是在Guest和VMM之间共享一块内存区域——virtqueue（虚拟队列）。Guest将要发送的数据包描述符写入virtqueue，然后通过写一个特殊的I/O端口（或通过MMIO）通知VMM。VMM从virtqueue中取出描述符，执行实际的I/O操作，完成后将结果写回virtqueue的另一端。这个过程中，双方共享相同的内存页，因此数据传输几乎零拷贝。</p>
+
+        <h3>virtio-net / virtio-blk / virtio-scsi</h3>
+        <p>virtio定义了多种设备类型，每种遵循相同的队列协议但语义不同：</p>
+        <ul>
+            <li><strong>virtio-net</strong>：使用两个virtqueue（发送和接收）。Guest将网络数据包放入发送队列，QEMU从队列中取出后通过宿主机的网络栈发出。接收同理。现代实现使用多队列（multi-queue）来提升多核性能。</li>
+            <li><strong>virtio-blk</strong>：用于块设备I/O。每个request对应一个描述符链，包含命令（read/write）、数据缓冲区和完成状态。同样支持多队列。</li>
+            <li><strong>virtio-scsi</strong>：比virtio-blk更灵活，支持SCSI命令集、磁盘热插拔和更丰富的错误处理。在需要连接SAN存储的场景中优势明显。</li>
+        </ul>
+
+        <h3>vhost：绕过QEMU的数据路径加速</h3>
+        <p>标准virtio路径中，数据从Guest→QEMU用户态→宿主机内核，要经过两次上下文切换和一次数据拷贝。vhost的优化是：在宿主机内核中创建一个vhost驱动，直接在内核空间处理virtqueue。数据路径变成 Guest→vhost内核驱动→宿主机内核网络/存储栈，绕过了QEMU用户态。这大大降低了延迟和CPU开销。</p>
+
+        <div class="highlight">
+            <p><strong>性能提升</strong>：全模拟的e1000网卡在10Gbps下CPU占用轻松吃掉2-3个核心。virtio-net开启vhost后，同样带宽下CPU占用不到0.5核。这就是为什么所有主流云厂商的虚拟机都使用virtio——不是他们不想用全模拟，是性能差距实在太大。在AWS上，ENA（Elastic Network Adapter）就是一种增强版virtio实现。</p>
+        </div>
+
+        <pre><code># 查看虚拟机使用的虚拟设备
+# 在虚拟机内执行
+$ lspci | grep -i virtio
+00:03.0 Ethernet controller: Red Hat, Inc. Virtio network device
+00:04.0 SCSI storage controller: Red Hat, Inc. Virtio block device
+
+# 宿主机上查看vhost
+$ lsmod | grep vhost
+vhost_net              32768  8
+vhost                  40960  1 vhost_net
+vhost_iotlb            20480  1 vhost
+
+# 查看virtio设备信息
+$ cat /sys/module/virtio/parameters/
+use_guest_polling  # 是否启用Guest轮询模式</code></pre>
+
+        <div class="footer-nav">
+            <p>虚拟化技术是云计算大厦的基石。从x86不可虚拟化的历史困境，到KVM将Linux转化为Hypervisor的精巧设计，再到vCPU的调度陷阱和virtio的I/O加速方案——掌握这些知识，你不仅理解了云服务器是怎么工作的，也懂得了如何诊断云上性能问题，比如steal time过高应该怎么办。</p>
+
+            <p>下一章我们将从"虚拟机"转向"容器"。如果说虚拟机是在硬件级别做隔离，那么容器就是在操作系统级别做隔离。容器不是轻量级虚拟机——这两者有本质区别。Namespace、Cgroup、OverlayFS，这些正是Linux内核构建容器沙箱的三大支柱。</p>
+
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

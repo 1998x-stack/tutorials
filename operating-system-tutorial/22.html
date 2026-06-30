@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 容器与命名空间</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html" class="active">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第22章 容器与命名空间</h2>
+
+        <p>大家好，我是你们的讲师。现代软件开发中，几乎没有人不在用容器。你的CI/CD流水线在容器里构建，你的微服务在容器里运行，你的数据库也在容器里跑。但大多数人只把容器当成了"一种轻量级虚拟机"来使用——这个理解其实大错特错。</p>
+
+        <p>容器不是虚拟化。容器和虚拟机共享同一个内核，而每个虚拟机都有自己的独立内核。这个区别决定了容器的性能优势（接近原生）、启动速度（毫秒级 vs 分钟级），也决定了容器的安全边界（同一个内核，攻击面更大）。理解容器必须理解Linux内核的三个核心机制：Namespace（命名空间）、Cgroup（控制组）和OverlayFS（联合文件系统）。本章将逐一深入。</p>
+
+        <p>分享一个真实的调试故事。同事反馈说容器内运行的一个Web应用频繁报"Address already in use"，但用 <code>netstat -tulpn</code> 没看到端口被占用。排查发现是宿主机的另一个进程占了端口——虽然是容器的网络工作正常（因为用了bridge模式做了端口映射），但进程因为某种原因用host network模式启动了一次。这个问题的根源在于：容器网络隔离只是"看到"的网络设备不同，但宿主机层面的端口空间仍然是全局的。不理解Network Namespace的隔离边界，这种问题会非常费解。</p>
+
+        <h2>容器不是轻量级虚拟机</h2>
+
+        <p>很多初学者的第一个误区就是"容器就是轻量级虚拟机"。这两个东西的架构有本质区别：</p>
+
+        <table>
+            <tr><th>维度</th><th>虚拟机</th><th>容器</th></tr>
+            <tr><td>内核</td><td>每个VM有自己独立的OS内核</td><td>所有容器共享宿主OS内核</td></tr>
+            <tr><td>隔离级别</td><td>硬件级（CPU特权级、EPT页表）</td><td>操作系统级（Namespace + Cgroup）</td></tr>
+            <tr><td>启动时间</td><td>分钟级（需启动Guest OS）</td><td>毫秒级（直接运行进程）</td></tr>
+            <tr><td>镜像大小</td><td>GB级别（含完整OS）</td><td>MB级别（含应用+依赖库）</td></tr>
+            <tr><td>性能开销</td><td>2-10%（VM-Exit、设备模拟）</td><td>接近零（直接调用宿主内核syscall）</td></tr>
+            <tr><td>安全边界</td><td>强（完全隔离内核）</td><td>弱（共享内核，逃逸攻击风险）</td></tr>
+        </table>
+
+        <p>容器的本质是：通过Namespace"欺骗"进程看到不同的系统视图，通过Cgroup限制它能使用的资源，通过UnionFS提供独立的文件系统视图。这三者加起来，就是一个"看起来像独立OS"的进程沙箱——但它确实只是一个进程，和宿主机共享同一个内核。</p>
+
+        <div class="highlight">
+            <p><strong>核心区别一句话总结</strong>：虚拟机是硬件层的多副本，每个副本有自己的内核；容器是内核层的多视图，所有容器共享同一个内核但各有各的"滤镜"看世界。所以容器逃逸的本质就是打破了这个滤镜——突破Namespace隔离，访问到了宿主机或其他容器的资源。</p>
+        </div>
+
+        <h2>六种Namespace深度解析</h2>
+
+        <p>Namespace（命名空间）是Linux内核提供的一种资源隔离机制。它将全局系统资源包装在一层抽象中，让进程只能看到自己的那份"副本"。Linux目前支持8种Namespace，其中有6种是最核心、最常用的。</p>
+
+        <h3>1. UTS Namespace（主机名隔离）</h3>
+        <p>隔离 <code>hostname</code> 和 <code>domainname</code>。容器内的 <code>hostname</code> 可以不同于宿主机。最轻量的Namespace——不涉及任何资源分配，只是字符串隔离。</p>
+
+        <h3>2. PID Namespace（进程树隔离）</h3>
+        <p>进程在容器内的PID是从1开始的，和宿主机上的PID完全不同。容器内的"init进程"（PID 1）承担了特殊的职责——当子进程变成孤儿时被其收养，且容器退出时由PID 1负责回收所有子进程。如果容器内的PID 1没有正确处理SIGTERM信号，容器会无法正常终止，需要等超时强制kill。</p>
+
+        <h3>3. NET Namespace（网络栈隔离）</h3>
+        <p>每个NET Namespace有自己的网络设备、IP地址、路由表、iptables规则、socket端口空间。Docker创建容器时，会创建一个veth pair（虚拟以太网对），一端在宿主机的bridge（docker0）上，另一端放入容器的NET Namespace中。</p>
+
+        <h3>4. MNT Namespace（挂载点隔离）</h3>
+        <p>每个MNT Namespace维护自己的挂载树。容器内的 <code>/</code> 根文件系统来自OverlayFS的合并层，容器内的 <code>/proc</code> 挂载的是该PID Namespace对应的procfs。用 <code>mount --bind</code> 可以在不同Namespace之间共享目录。</p>
+
+        <h3>5. USER Namespace（用户/权限隔离）</h3>
+        <p>最强大的Namespace之一。容器内的root（UID 0）可以映射为宿主机的普通用户（UID 1000）。这意味着即使容器内进程被攻破获得root权限，它在宿主机上也没有任何特权。这是安全性最高的Namespace。可惜的是，很多容器运行时默认不开启USER Namespace（因为需要额外的配置和权限映射）。</p>
+
+        <h3>6. IPC Namespace（信号量/消息队列隔离）</h3>
+        <p>隔离System V IPC和POSIX消息队列。容器之间无法通过共享内存、信号量等IPC机制通信（除非显式使用宿主机IPC Namespace）。对于大多数Web应用来说这不是关键限制，但对于需要进程间共享内存的高性能应用需要注意。</p>
+
+        <pre><code># 创建新Namespace的几种方式
+
+# 1. 用 unshare 命令（手动体验）
+$ unshare --fork --pid --mount-proc /bin/bash
+# 现在你已经在一个新的PID+Mount Namespace中了
+$ ps aux
+    PID TTY          TIME CMD
+      1 pts/1    00:00:00 bash
+      2 pts/1    00:00:00 ps
+
+# 2. 用 nsenter 进入已有容器的Namespace
+$ docker run -d --name mynginx nginx
+$ PID=$(docker inspect --format '{{.State.Pid}}' mynginx)
+$ nsenter --target $PID --mount --uts --ipc --net --pid /bin/bash
+
+# 3. 查看进程所属的Namespace（每个namespace有独立的inode编号）
+$ ls -la /proc/$$/ns/
+total 0
+dr-x--x--x 2 root root 0 Jun 30 09:00 .
+dr-xr-xr-x 8 root root 0 Jun 30 09:00 ..
+lrwxrwxrwx 1 root root 0 Jun 30 09:00 cgroup -> 'cgroup:[4026531835]'
+lrwxrwxrwx 1 root root 0 Jun 30 09:00 ipc   -> 'ipc:[4026531839]'
+lrwxrwxrwx 1 root root 0 Jun 30 09:00 mnt   -> 'mnt:[4026531840]'
+lrwxrwxrwx 1 root root 0 Jun 30 09:00 net   -> 'net:[4026531993]'
+lrwxrwxrwx 1 root root 0 Jun 30 09:00 pid   -> 'pid:[4026531836]'
+lrwxrwxrwx 1 root root 0 Jun 30 09:00 user  -> 'user:[4026531837]'
+lrwxrwxrwx 1 root root 0 Jun 30 09:00 uts   -> 'uts:[4026531838]'</code></pre>
+
+        <div class="tip">
+            <p><strong>动手实践</strong>：在你的Linux机器上执行 <code>ls -la /proc/$$/ns/</code>，你会看到当前进程的8个Namespace inode编号。然后 <code>sudo docker run -d nginx</code> 启动一个容器，获取其PID后比较 <code>/proc/$PID/ns/</code> 下的编号。你会发现所有Namespace编号都不同——说明容器看到的系统和你的终端看到的"不是同一个系统"。</p>
+        </div>
+
+        <h2>cgroup v2层级结构</h2>
+
+        <p>Namespace让进程"看到"一个隔离的世界，但如果你不限制资源，一个容器可以把宿主机的CPU和内存全部吃光。Cgroup（Control Group）就是干这个的——它对进程组进行资源限制、优先级控制和统计。</p>
+
+        <h3>v1 vs v2：从分散到统一</h3>
+        <p>Cgroup v1（2008年合入内核）有多个层级树（hierarchy），每个子系统（cpu、memory、blkio）挂载在不同的目录上。这种设计的后果是：一个进程不能同时属于两个不同层级下的cgroup，导致资源控制之间相互冲突。Cgroup v2（2016年引入，2019年起被大多数发行版默认）采用单一层级树——所有控制器统一挂载在 <code>/sys/fs/cgroup</code> 下，彻底解决了冲突问题。</p>
+
+        <h3>核心控制器</h3>
+        <ul>
+            <li><strong>cpu</strong>：限制CPU使用量。通过 <code>cpu.max</code> 设置上限（如 <code>50000 100000</code> 表示最多使用0.5核），<code>cpu.weight</code> 控制权重分配。</li>
+            <li><strong>memory</strong>：限制内存使用。三个关键参数：<code>memory.low</code>（软保障——竞争时优先保留这么多内存）、<code>memory.high</code>（软限制——超过后开始回收/限速）、<code>memory.max</code>（硬限制——超过后OOM kill）。</li>
+            <li><strong>io</strong>：限制磁盘I/O。通过 <code>io.max</code> 设置读写带宽和IOPS上限，<code>io.weight</code> 控制I/O优先级。</li>
+            <li><strong>pids</strong>：限制进程数量。防止容器无限制fork导致宿主机进程表溢出。</li>
+        </ul>
+
+        <div class="highlight">
+            <p><strong>关键设计区别</strong>：memory.high 和 memory.max 的区别非常微妙。memory.high是软限制——超过后内核开始异步回收内存和限速（throttling），但不一定会kill。memory.max是硬限制——一旦超过，直接OOM kill。对于Web服务来说，使用memory.high能让服务在内存压力下变慢但不崩溃，比直接到memory.max被kill要优雅得多。这个设计是v2相对v1的重要改进。</p>
+        </div>
+
+        <pre><code># cgroup v2 的统一层级结构
+$ tree /sys/fs/cgroup/ -L 1
+/sys/fs/cgroup/
+├── cgroup.controllers        # 可用控制器列表
+├── cgroup.subtree_control    # 子cgroup可用的控制器
+├── cpu.stat
+├── memory.stat
+├── io.stat
+├── system.slice/             # 系统服务的cgroup
+│   ├── docker-xxxx.scope/    # Docker容器的cgroup
+│   │   ├── cpu.max           # CPU上限 (如 "50000 100000")
+│   │   ├── memory.max        # 内存硬限制
+│   │   └── pids.max          # 最大进程数
+│   └── sshd.service/
+└── user.slice/               # 用户登录session的cgroup
+
+# 查看容器cgroup限制
+$ cat /sys/fs/cgroup/system.slice/docker-xxx.scope/cpu.max
+50000 100000   # 最多使用0.5核
+
+$ cat /sys/fs/cgroup/system.slice/docker-xxx.scope/memory.max
+536870912      # 512MB内存硬限制</code></pre>
+
+        <h2>OverlayFS与容器镜像</h2>
+
+        <p>容器的文件系统隔离是通过UnionFS实现的，OverlayFS是Linux内核内置的UnionFS实现（从内核3.18开始合入）。Docker的镜像分层（Layer）和容器写时复制（Copy-on-Write）都是基于OverlayFS。</p>
+
+        <h3>lowerdir + upperdir = merged</h3>
+        <p>OverlayFS将一个或多个只读层（lowerdir）和一个可写层（upperdir）合并为一个统一的视图（merged）。容器的场景下：</p>
+        <ul>
+            <li><strong>lowerdir</strong>：镜像层，只读。一个镜像由多个只读层叠加而成（如 ubuntu:22.04 的base层 + apt安装软件包层 + 应用层）。所有容器共享相同的镜像层——节省磁盘空间。</li>
+            <li><strong>upperdir</strong>：容器层，可读写。容器运行时的所有文件修改（创建、删除、修改）都发生在这一层。容器重启后这一层被丢弃，容器回到镜像的初始状态。</li>
+            <li><strong>merged</strong>：最终呈现给容器的文件系统视图。</li>
+        </ul>
+
+        <h3>写时复制（Copy-on-Write）</h3>
+        <p>当容器要修改lowerdir中的文件时，OverlayFS的CoW机制将文件从lowerdir拷贝到upperdir，然后在upperdir上修改。对lowerdir中的原始文件没有任何影响。这就是"容器镜像层是不可变的，修改只在容器层发生"的底层原理。</p>
+
+        <div class="warning">
+            <p><strong>踩坑提示</strong>：CoW带来的一个性能陷阱是——如果你的应用频繁修改大文件（比如数据库的WAL日志、大量小文件的日志写入），这些写操作实际上在upperdir上。upperdir满了（每个容器都有 <code>storageOpt.size</code> 限制）会导致写失败。更隐蔽的问题是：overlayfs的删除标记（whiteout）会在上层创建一个字符设备节点来标记"lowerdir中的这个文件已被删除"，大量小文件删除会导致upperdir膨胀。建议将数据库、日志等频繁写的路径用volume挂载（通过bind mount绕开overlayfs的CoW开销）。</p>
+        </div>
+
+        <pre><code># OverlayFS的挂载结构示意
+# Docker容器的OverlayFS挂载
+$ mount | grep overlay
+overlay on /var/lib/docker/overlay2/xxx/merged type overlay
+  (rw,relatime,
+   lowerdir=/var/lib/docker/overlay2/l/ABC:/var/lib/docker/overlay2/l/DEF,
+   upperdir=/var/lib/docker/overlay2/xxx/diff,
+   workdir=/var/lib/docker/overlay2/xxx/work)
+
+# 镜像分层的可视化
+$ docker history nginx:latest
+IMAGE          CREATED       CREATED BY                  SIZE
+a8754710c111   2 weeks ago   CMD ["nginx" "-g" "daemon…  0B
+b7c6fe2e49f5   2 weeks ago   STOPSIGNAL SIGQUIT           0B
+<missing>      2 weeks ago   RUN apt-get update ...      58MB
+<missing>      2 weeks ago   ADD nginx.list ...           64B
+<missing>      2 weeks ago   FROM ubuntu:22.04           77MB</code></pre>
+
+        <h2>从chroot到Docker的演进</h2>
+
+        <p>容器技术不是2013年凭空出现的。它的根基深植于Unix/Linux四十多年的发展历程。理解这条时间线，你就能明白为什么容器长成了今天这样。</p>
+
+        <h3>1979年：chroot</h3>
+        <p>Unix V7引入的 <code>chroot</code> 系统调用改变了进程看到的根目录。这是最早的文件系统隔离——虽然chroot的隔离非常弱（root用户可以轻易逃脱）。</p>
+
+        <h3>2001年：Linux-VServer</h3>
+        <p>基于chroot的增强版，通过修改内核为进程提供更完善的隔离（包括网络和文件系统）。但需要大量内核patch，无法合入主线。</p>
+
+        <h3>2008年：LXC（Linux Containers）</h3>
+        <p>Cgroup（2007年合入）和Namespace（2002-2007年陆续合入）两大机制在内核中成熟后，LXC将它们组合起来，提供了第一个"完整的容器运行时"。不需要内核patch，只需用户态工具就能创建和管理容器。</p>
+
+        <h3>2013年：Docker</h3>
+        <p>Docker不是LXC的简单封装。Docker的三大创新在于：镜像分层（基于UnionFS）、镜像仓库（Docker Hub）、和开发者体验（Dockerfile + docker CLI）。这些创新让容器从系统管理员的工具变成了每个开发者的日常工具。</p>
+
+        <h3>2014年至今：Kubernetes</h3>
+        <p>Google开源了Borg系统的后继者——Kubernetes。它提供了跨主机的容器编排、服务发现、负载均衡、自动伸缩、滚动更新等集群管理能力。容器不再是"单机玩具"——它成了分布式系统的标准部署单元。OCI（Open Container Initiative）和CRI（Container Runtime Interface）等标准进一步规范了容器生态。</p>
+
+        <table>
+            <tr><th>年份</th><th>技术</th><th>核心贡献</th></tr>
+            <tr><td>1979</td><td>chroot</td><td>文件系统根目录隔离</td></tr>
+            <tr><td>2001</td><td>Linux-VServer</td><td>多维度资源隔离</td></tr>
+            <tr><td>2007-2008</td><td>Cgroup + LXC</td><td>资源限制 + 完整容器运行时</td></tr>
+            <tr><td>2013</td><td>Docker</td><td>镜像分层、镜像仓库、开发者体验</td></tr>
+            <tr><td>2014</td><td>Kubernetes</td><td>跨主机容器编排与集群管理</td></tr>
+            <tr><td>2017+</td><td>OCI / CRI标准</td><td>容器运行时标准化</td></tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>思考题</strong>：看完这条时间线，你会发现每个阶段都是在解决上一阶段的问题。chroot只能隔离文件系统，Linux-VServer增加了网络隔离，Cgroup增加了资源限制，Docker增加了镜像管理（解决分发问题），Kubernetes增加了集群编排（解决管理问题）。这个演进模式告诉你——技术永远是为了解决真实痛点，而不是为了炫技。当你设计一个系统时，问自己：下一个痛点在哪里？</p>
+        </div>
+
+        <pre><code># 用 unshare 手动模拟容器
+# （理解容器本质的最好方法——亲手用系统调用创建Namespace）
+
+# 1. 创建新的UTS+Mount+PID Namespace
+$ sudo unshare --fork --pid --mount --uts --mount-proc /bin/bash
+
+# 2. 在新的Namespace中设置主机名
+# hostname mycontainer
+
+# 3. 查看PID——你会看到自己是PID 1
+# ps aux
+#     PID TTY          TIME CMD
+#       1 pts/0    00:00:00 bash
+#       2 pts/0    00:00:00 ps
+
+# 4. 退出后就回到了宿主机的Namespace
+# exit</code></pre>
+
+        <div class="footer-nav">
+            <p>容器技术是现代云原生计算的基石。通过本章的学习，你应该建立了一个清晰的认知框架：Namespace提供隔离（"看到什么"），Cgroup提供限制（"能用多少"），OverlayFS提供文件系统视图（"文件从哪来"）。三者的组合就是容器的本质——一个被精心隔离和限制的进程。理解了这一点，无论后端的技术栈如何演进（Docker、containerd、Podman、Kata Containers），你都能抓住不变的底层原理。</p>
+
+            <p>下一章我们将从"运行容器"转向"调试内核"。当你的内核行为异常时——死锁、内存泄漏、内核崩溃——你该如何入手诊断？我们将探索kdump、crash工具、ftrace、以及各种内核调试技术。这些技能是区分"会用Linux"和"懂Linux"的关键分水岭。</p>
+
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

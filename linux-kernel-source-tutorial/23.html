@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第23章 内核调试技术</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html" class="active">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。欢迎来到Part 5的第一堂课。前面22章我们一行一行地读完了Linux 0.11的几乎所有核心代码。从引导启动到文件系统，从进程调度到设备驱动——你已经积累了大量的源代码知识。</p>
+
+        <p>但有一个残酷的事实是：<strong>读代码和写代码是两回事</strong>。当你真正开始修改内核、增加功能、或者从零搭建一个实验环境时，你一定会遇到Bug。不是普通的段错误（Segmentation Fault），而是那种连操作系统一起崩溃的、连错误消息都没有的、直接黑屏重启的Bug。</p>
+
+        <p>有一个广为流传的说法：<strong>"写内核代码三小时，调试三天。"</strong> 内核调试的难度至少是用户态调试的十倍——因为没有方便的断点、没有Core Dump、程序崩溃就是系统崩溃。但是别担心，这一章和下一章将会给你一套完整的调试武器库。</p>
+
+        <h2>引言——内核调试的特殊性</h2>
+
+        <p>在用户态写程序，遇到段错误时，你会得到一条清晰的错误消息（"Segmentation fault (core dumped)"），然后可以用GDB重放来分析。但在内核态，Bug通常表现为：</p>
+
+        <ul>
+            <li><strong>系统直接死机</strong>——屏幕定格，键盘无响应，没有日志，没有错误消息</li>
+            <li><strong>异常重启</strong>——你甚至不知道发生了什么，机器就重启了（因为触发了看门狗或Triple Fault）</li>
+            <li><strong>诡异的副作用</strong>——比如文件写进去读出来是乱码、某个进程莫名其妙被杀了、中断响应延时异常</li>
+            <li><strong>时间相关的Bug</strong>——相同的代码跑十次，只有一次出错，且出错时间毫无规律</li>
+        </ul>
+
+        <p>为什么会这么难？根本原因在于：<strong>在操作系统里，没有"操作系统"来帮你调试</strong>。用户态程序崩溃时，内核会帮你保存现场、打印错误信息、清理资源。但内核自己崩溃时，没有人收拾残局——你就是那个"操作系统"。</p>
+
+        <p>好消息是，Linux 0.11的代码量很小，Bug也相对简单。而且我们有Bochs这个神器——它内置了一个完整的调试器，可以看到物理内存、页表、寄存器、甚至模拟磁盘I/O。对于0.11的学习者来说，这比在现代内核上调试要友好得多。</p>
+
+        <h2>printk()——最朴素的武器</h2>
+
+        <p>如果只能学一种内核调试方法，那一定是<strong>printk</strong>。它是内核版的printf()。看似简单，但在合适的位置插入printk，能解决90%的内核Bug。</p>
+
+        <p>Linux 0.11的printk实现非常简陋，位于<code>kernel/printk.c</code>。它的核心逻辑很简单：</p>
+
+        <pre><code>// Linux 0.11 kernel/printk.c 中的核心代码（简化）
+asmlinkage int printk(const char *fmt, ...)
+{
+    va_list args;
+    int i;
+
+    va_start(args, fmt);
+    i = vsprintf(buf, fmt, args);  // 格式化字符串
+    va_end(args);
+
+    // 直接写入显存（0xB8000 是VGA文本模式显存基地址）
+    __asm__("cld\n\t"
+            "repne\n\t"
+            "outsb"
+            ::"c"(i), "d"(0), "S"(buf));  // i=长度, dx=0(显示端口)
+
+    return i;
+}</code></pre>
+
+        <p>注意看这行代码——它在0.11中直接通过<strong>端口0x3D0写显存</strong>的方式输出。这意味着即使中断系统瘫痪、调度器挂了、甚至页表坏了，printk仍然可能正常工作（只要段描述符和栈没有完全损毁）。这就是为什么printk是"最朴素也最可靠"的调试武器。</p>
+
+        <p>printk有一个重要的机制：<strong>日志级别</strong>。在现代内核中，每条printk消息都有一个优先级（从KERN_EMERG到KERN_DEBUG），决定消息是否被输出到控制台。0.11中虽然有类似的宏定义，但实现还没有完全区分控制台日志级别——所有消息直接写显存。这也是0.11与现代内核的一个明显差距。</p>
+
+        <table>
+            <thead>
+                <tr><th>宏名称</th><th>数值</th><th>含义</th><th>典型场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>KERN_EMERG</td><td>0</td><td>紧急消息，系统即将崩溃</td><td>内核恐慌（panic）</td></tr>
+                <tr><td>KERN_ALERT</td><td>1</td><td>需要立即处理</td><td>严重硬件故障</td></tr>
+                <tr><td>KERN_CRIT</td><td>2</td><td>严重错误</td><td>中断处理失败</td></tr>
+                <tr><td>KERN_ERR</td><td>3</td><td>错误</td><td>设备I/O错误</td></tr>
+                <tr><td>KERN_WARNING</td><td>4</td><td>警告</td><td>资源不足</td></tr>
+                <tr><td>KERN_NOTICE</td><td>5</td><td>正常但重要</td><td>文件系统挂载</td></tr>
+                <tr><td>KERN_INFO</td><td>6</td><td>信息</td><td>驱动初始化信息</td></tr>
+                <tr><td>KERN_DEBUG</td><td>7</td><td>调试信息</td><td>开发阶段的详细日志</td></tr>
+            </tbody>
+        </table>
+
+        <p>在0.11中，你可以随便在代码的任何位置插入printk来观察变量。比如你想看schedule()到底选中了哪个进程：</p>
+
+        <pre><code>void schedule(void)
+{
+    int i, next;
+    struct task_struct **p;
+
+    /* ...省略前面代码... */
+
+    /* 在切换前打印当前和下一个进程的PID */
+    printk("schedule: switching from PID %d to candidate ", current->pid);
+
+    while (1) {
+        c = -1;
+        next = 0;
+        i = NR_TASKS;
+        p = &task[NR_TASKS];
+        while (--i) {
+            if (!*--p) continue;
+            if ((*p)->state == TASK_RUNNING && (*p)->counter > c)
+                c = (*p)->counter, next = i;
+        }
+        /* ... */
+    }
+
+    /* 打印选中的PID */
+    printk("-> PID %d\n", task[next]->pid);
+
+    switch_to(next);
+}</code></pre>
+
+        <div class="tip">
+            <strong>printk调试心法</strong>：不要到处撒网。先猜Bug的大致范围，在关键路径上插入2-3个printk，观察哪个路径被执行了、参数对不对。一次加太多printk反而会把有用信息淹没在输出海洋中。
+        </div>
+
+        <h2>日志输出策略——从显存到串口</h2>
+
+        <p>printk把文字写到显存里，这是0.11最简单直接的输出方式。但面对不同的调试场景，我们需要不同的输出策略：</p>
+
+        <h3>1. 显存直接输出（早期阶段）</h3>
+
+        <p>在引导初期（head.s执行完毕之前），没有中断、没有设备驱动、连C运行时环境都还没建立。这时调试信息只能通过<strong>直接写VGA显存</strong>来输出。0.11的<code>boot/setup.s</code>和<code>boot/head.s</code>中都能看到这种操作：</p>
+
+        <pre><code>! bootsect.s 中的字符输出
+    mov ah, #0x03    ! 页号
+    xor bh, bh
+    int 0x10         ! 调用BIOS中断0x10，在屏幕上显示字符</code></pre>
+
+        <p>这种方式的缺点是：它只能在屏幕上看，无法保存到文件，也无法远程查看。</p>
+
+        <h3>2. 串口输出（kgdb的前身）</h3>
+
+        <p>如果你有两台机器（或者一台物理机和一台虚拟机），可以通过串口（RS-232）让内核把调试信息发送到另一台机器上。这是现代内核调试工具<strong>kgdb</strong>的前身。0.11没有内置完整的kgdb支持，但你可以通过修改串口驱动（<code>kernel/serial.c</code>）来自己实现串口输出。在Bochs模拟器中，串口输出可以被重定向到宿主机的终端或文件。</p>
+
+        <h3>3. 内存环形缓冲区（log_buf）</h3>
+
+        <p>现代内核使用一个<strong>环形缓冲区</strong>（ring buffer）来存储日志消息，这个缓冲区始终保持在内核内存中。无论控制台是否显示，所有printk消息都会被写入这个缓冲区。即使用户登录后已经清屏，你也可以通过<code>dmesg</code>命令回看内核日志。0.11没有实现环形缓冲区，但理解它的设计对于阅读现代内核代码很有帮助。</p>
+
+        <div class="highlight">
+            <strong>0.11与现代内核的差距</strong>：现代Linux的printk已经发展成一个庞大的基础设施，支持动态日志级别控制（pr_debug/pr_info）、动态调试（dynamic debug）、结构化日志、以及通过/dev/kmsg从用户态读日志。而0.11的printk只有几十行代码——这是它的弱点，也是学习的优势：几十分钟就能理解全部实现。
+        </div>
+
+        <h2>Bochs内置调试器</h2>
+
+        <p>如果只用printk调试内核，就像用记事本写代码——可以工作，但太原始了。Bochs模拟器内置了一个功能完整的调试器，可以让你像调试普通程序一样调试内核。</p>
+
+        <p>要在Bochs中启用调试器，启动时加上<code>-d</code>标志：</p>
+
+        <pre><code>$ bochs -q -f bochs.bxrc -d
+
+                       Bochs x86 Emulator 2.7
+             Built with debugging enabled (enable-x86-debugger)
+&lt;bochs:1&gt; _</code></pre>
+
+        <p>Bochs调试器的核心命令非常强大。掌握下面这些，你就能应对大部分调试场景：</p>
+
+        <table>
+            <thead>
+                <tr><th>命令</th><th>含义</th><th>示例</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>pb 地址</code></td><td>设置物理断点（Linear Address Breakpoint）</td><td><code>pb 0x7C00</code></td></tr>
+                <tr><td><code>vb 段:偏移</code></td><td>设置虚拟断点（Virtual Address Breakpoint）</td><td><code>vb 0x8:0xC0000000</code></td></tr>
+                <tr><td><code>c</code></td><td>Continue，继续执行</td><td><code>c</code></td></tr>
+                <tr><td><code>s [N]</code></td><td>单步执行N条指令</td><td><code>s 10</code></td></tr>
+                <tr><td><code>r / info cpu</code></td><td>查看CPU寄存器</td><td><code>info cpu</code></td></tr>
+                <tr><td><code>xp /Nuf 地址</code></td><td>查看物理内存</td><td><code>xp /10xw 0xB8000</code></td></tr>
+                <tr><td><code>x /Nuf 地址</code></td><td>查看线性地址内存</td><td><code>x /10xw 0xC0000000</code></td></tr>
+                <tr><td><code>info tab</code></td><td>查看页表信息</td><td><code>info tab</code></td></tr>
+                <tr><td><code>info gdt</code></td><td>查看GDT（全局描述符表）</td><td><code>info gdt</code></td></tr>
+                <tr><td><code>info idt</code></td><td>查看IDT（中断描述符表）</td><td><code>info idt</code></td></tr>
+                <tr><td><code>info tss</code></td><td>查看TSS（任务状态段）</td><td><code>info tss</code></td></tr>
+                <tr><td><code>set $reg=值</code></td><td>修改寄存器值</td><td><code>set $eax=0x1234</code></td></tr>
+                <tr><td><code>blist</code></td><td>列出所有断点</td><td><code>blist</code></td></tr>
+                <tr><td><code>bpd N</code></td><td>删除第N号断点</td><td><code>bpd 1</code></td></tr>
+            </tbody>
+        </table>
+
+        <p>一个典型的Bochs调试会话流程如下：</p>
+
+        <pre><code>&lt;bochs:1&gt; pb 0x7C00          ! 在引导扇区入口设置断点
+&lt;bochs:2&gt; c                   ! 运行到断点
+(0) Breakpoint 1, 0x7c00 in far32[]
+&lt;bochs:3&gt; info cpu            ! 查看CPU状态
+&lt;bochs:4&gt; s                   ! 单步执行一条指令
+&lt;bochs:5&gt; xp /5xw 0x7C00     ! 查看引导扇区的前20个字节
+&lt;bochs:6&gt; info tab            ! 查看当前页表
+&lt;bochs:7&gt; blist              ! 列出所有断点
+&lt;bochs:8&gt; bpd 1              ! 删除断点1
+&lt;bochs:9&gt; c                   ! 继续运行</code></pre>
+
+        <div class="tip">
+            <strong>Bochs vs QEMU</strong>：QEMU也支持调试（通过-gdb参数转发GDB），但Bochs的调试器是<strong>内置在模拟器本身</strong>的，可以看到物理内存、模拟外设状态、甚至可以查看磁盘扇区内容。对0.11这种不需要硬件虚拟化加速的简单系统，Bochs的调试能力是最完整的。
+        </div>
+
+        <p>值得一提的是<code>info tab</code>命令——它会列出当前所有线性地址到物理地址的映射关系。当你怀疑页表有问题时，这个命令就是你的火眼金睛。</p>
+
+        <h2>Magic SysRq键</h2>
+
+        <p>现代Linux内核有一个"神奇"的调试组合键：<strong>Alt+SysRq+命令键</strong>（通常需要在编译内核时开启CONFIG_MAGIC_SYSRQ）。当系统冻结但键盘还能响应时，这个组合键可以触发内核执行紧急操作，比如立即显示所有任务状态（<code>Alt+SysRq+T</code>）、紧急同步文件系统（<code>Alt+SysRq+S</code>）、或者强制重启（<code>Alt+SysRq+B</code>）。</p>
+
+        <p>Linux 0.11还没有SysRq机制，但它有类似的思路——<strong>Ctrl+Alt+Del</strong>组合键的处理。在<code>kernel/sys.c</code>的sys_ktime()函数附近，你可以看到相关处理逻辑：</p>
+
+        <pre><code>// Linux 0.11 kernel/sys.c
+// Ctrl+Alt+Del 的处理
+void ctrl_alt_del(void)
+{
+    // 直接跳到重启
+    while (1) {
+        __asm__("int 0x19");   // 调用int 0x19重启
+    }
+}
+
+// 你也可以改成显示所有任务状态（类似SysRq T）
+void show_tasks(void)
+{
+    int i;
+    for (i = 0; i &lt; NR_TASKS; i++) {
+        if (task[i]) {
+            printk("PID: %d, state: %d, counter: %d, priority: %d\n",
+                   task[i]->pid, task[i]->state,
+                   task[i]->counter, task[i]->priority);
+        }
+    }
+}</code></pre>
+
+        <p>这个<code>show_tasks()</code>函数并非0.11的原始代码，但它展示了Magic SysRq的核心思想：即使系统的用户态已经烂成一锅粥，内核仍然可以通过一个特殊的中断或按键来执行紧急诊断代码。你可以自己把这个函数hook到键盘驱动中，实现0.11版的"Magic SysRq T"。</p>
+
+        <div class="highlight">
+            <strong>自行扩展建议</strong>：在0.11中实现一个简单的SysRq功能并不难——修改键盘驱动（<code>kernel/kbd.s</code>或<code>keyboard.S</code>），当检测到特殊的扫描码组合时，调用内核的诊断函数。这是一个很好的综合练习。
+        </div>
+
+        <h2>常见内核Bug分类</h2>
+
+        <p>内核Bug千奇百怪，但常见的就那么几类。识别Bug的<strong>类型</strong>可以大大缩小排查范围。下面这张表总结了你在0.11开发和实验中最可能遇到的Bug类型：</p>
+
+        <table>
+            <thead>
+                <tr><th>Bug类型</th><th>典型症状</th><th>定位思路</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>空指针解引用</strong><br>(NULL pointer dereference)</td><td>GPF（General Protection Fault）异常，或系统无响应后重启</td><td>检查代码中哪些指针可能为NULL。在0.11中，task[n]未初始化、inode指针为NULL是最常见的来源。在解引用前加空指针检查</td></tr>
+                <tr><td><strong>死锁</strong><br>(Deadlock)</td><td>系统无响应，但屏幕显示正常，键盘无反应</td><td>检查锁的获取顺序是否一致。0.11没有复杂的锁机制（单核），但中断上下文的cli/sti配对错误会导致"假死锁"——关闭中断后忘了打开</td></tr>
+                <tr><td><strong>栈溢出</strong><br>(Stack overflow)</td><td>函数返回后执行了奇怪的代码（返回地址被覆盖），变量值莫名被修改</td><td>在内核栈底部填充一个特殊标记（如0xDEAD），定时检查是否被覆盖。减少局部变量或加大栈空间</td></tr>
+                <tr><td><strong>竞争条件</strong><br>(Race condition)</td><td>Bug时有时无，跟执行的"运气"有关。多跑几次结果不同</td><td>在0.11中，竞争条件主要出现在中断处理与内核代码共享数据时。用cli/sti保护临界区。如果Bug在关中断后消失，基本可以确定是竞争条件</td></tr>
+                <tr><td><strong>缓冲区溢出</strong><br>(Buffer overflow)</td><td>内存中不相关的数据结构被破坏，行为诡异</td><td>检查copy_from_user等函数的长度参数是否正确。在0.11的sys_write、sys_read等系统调用实现中，长度参数没有严格检查是常见Bug来源</td></tr>
+            </tbody>
+        </table>
+
+        <p>在内核调试中，还有一个实用的原则叫做<strong>"隔离法"</strong>——逐步禁用不确定的功能模块，看Bug是否消失。比如你怀疑调度器有问题，就先临时让内核只跑一个任务；怀疑中断处理有问题，就把所有中断处理函数临时置空。虽然粗暴，但非常有效。</p>
+
+        <h2>踩坑故事——一个GPF的72小时</h2>
+
+        <p>让我分享一个真实的调试故事。这不是我编的——类似的场景在早期内核开发中屡见不鲜。</p>
+
+        <p>有一次我在0.11上添加了一个新的系统调用，实现一个简单的内核缓冲区共享功能。代码写完之后，编译通过（这是第一个陷阱——编译通过不代表没有问题），启动Bochs，结果内核刚初始化到一半，屏幕上出现了熟悉的Bochs调试器中断：</p>
+
+        <pre><code>GPF: General Protection Fault
+        cs: 0x10, ip: 0x00001234
+        error code: 0x0000</code></pre>
+
+        <p><strong>GPF</strong>（General Protection Fault）是x86保护模式下最常见的保护异常，也是内核开发者最常遇到的Bug形式。它的触发原因是：CPU检测到当前特权级代码执行了非法操作，比如试图访问不属于自己的内存段、或者执行了特权指令。</p>
+
+        <p>当时我面临的问题：GPF发生了，错误码是0x0000（表示不是由段描述符引起的），CS=0x10（内核代码段），IP停在0x1234。但0x1234是什么地址？是我新加的系统调用地址吗？还是某个我完全没有改动过的函数？</p>
+
+        <p>第一步，查一下这个IP在哪个函数里。在Bochs调试器中：</p>
+
+        <pre><code>&lt;bochs:1&gt; x /10i 0x1234       ! 反汇编IP附近的代码
+00001234: (                    ): mov eax, dword ptr ss:[ebp-8]  ; 读取局部变量
+00001238: (                    ): mov edx, dword ptr ss:[eax]    ; 从这里崩溃！
+0000123A: (                    ): add eax, 4</code></pre>
+
+        <p>看到了吗？<code>mov edx, dword ptr ss:[eax]</code>——这条指令试图从eax指向的内存地址读取数据。而<code>eax = [ebp-8]</code>正好是一个局部变量，它的值被当作指针使用了。换句话说：<strong>这个局部变量没有初始化</strong>，它的值是一个随机垃圾地址，CPU试图从那个地址读数据时触发了GPF。</p>
+
+        <p>于是我在源码中找到了对应位置，发现确实是一个新定义的结构体中，有一个指针字段没有初始化就传给了另一个函数。根本原因并不是指针本身为空，而是一个更大的问题——<strong>栈上分配的局部结构体没有清零</strong>。GCC不会自动为局部变量赋零值，它们在栈上残留着之前函数调用留下的数据。</p>
+
+        <p>修复就一行代码：</p>
+
+        <pre><code>struct my_buffer buf;
+memset(&buf, 0, sizeof(buf));  // 加上这一行</code></pre>
+
+        <p>但找到这行代码花了整整一个下午。这就是内核调试最残酷的真相：<strong>Bug可能只有一行，但找到它需要一整天</strong>。</p>
+
+        <p>更令人崩溃的是，修复了这个Bug之后，系统能启动了，但运行测试程序时发生了另一个Bug——这次是一个更隐蔽的<strong>栈溢出</strong>。原来我的内核函数里定义了一个1KB的局部数组，而0.11的内核栈总共只有4KB（一页），加上函数调用链路上的栈帧消耗，1KB的数组直接溢出了栈空间，覆盖了task_struct数据结构中的字段。这就解释了为什么有时候crash，有时候不crash——取决于当前的栈占用情况。</p>
+
+        <p>最终解决方案是把那个1KB的数组改成从堆上动态分配（使用<code>kmalloc</code>）。</p>
+
+        <div class="warning">
+            <strong>常见误区</strong>：很多刚接触内核开发的同学会误以为"在内核里所有内存都是无限的"。恰恰相反——内核栈极其珍贵（0.11中每个进程的内核栈只有4KB！）。在函数中定义大的局部变量，或者递归调用太深，都会导致栈溢出。内核栈溢出和用户态栈溢出的最大区别是：后者只会crash你的程序，前者会crash整个操作系统。
+        </div>
+
+        <p>这个经历让我养成了一个习惯：<strong>每当在内核中写一个函数，第一件事就是估算栈用量</strong>。如果局部变量总和超过512字节，就要考虑改用堆分配。这种习惯在高版本内核中同样重要——现代Linux虽然加大了栈（16KB），但内核开发者仍然把栈空间视为最宝贵的资源之一。</p>
+
+        <p>下一章，我们将升级调试工具——从Bochs内置调试器切换到<strong>GDB + QEMU</strong>的组合。你将学会如何像调试普通程序一样，单步跟踪Linux内核的执行流程，在system_call处设断点，观察每一次系统调用的完整路径。这才是真正的"调试自由"。</p>
+
+        <div class="footer-nav">
+            <a href="22.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="24.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

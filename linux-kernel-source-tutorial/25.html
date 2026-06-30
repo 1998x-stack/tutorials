@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第25章 动手写系统调用</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html" class="active">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。这一刻终于来了——在你读完了22章源代码、学会了两种调试方法之后，现在我们要做一件激动人心的事情：<strong>自己动手，给Linux 0.11添加一个全新的系统调用</strong>。</p>
+
+        <p>这不是在Linux 6.x上写一个内核模块。我们是在1991年的内核上，从零添加系统调用——修改include头文件、定义调用号、实现内核函数、修改系统调用表、重新编译内核、编写测试程序、然后运行验证。整个过程，你将亲手完成"读内核 → 改内核 → 测内核"的完整闭环。</p>
+
+        <p>这个经历的价值怎么强调都不过分：<strong>当你完成这个实验后，Linux内核对你来说就不再是"别人的代码"，而是"你可以修改的东西"。</strong>这种心态的转变，是操作系统高手和普通用户之间最根本的区别。</p>
+
+        <h2>引言——为什么还写系统调用？</h2>
+
+        <p>你可能觉得系统调用这个话题在第九章已经讲过了。没错，那时候我们分析了0.11系统调用的完整实现机制——从int 0x80到sys_call_table，从参数传送到ret_from_sys_call。但那都是"读代码"，是旁观者的视角。</p>
+
+        <p>这一章不一样。我们要<strong>自己创建一个系统调用</strong>，这意味着你必须深刻理解系统调用的每一个环节：</p>
+
+        <ul>
+            <li>系统调用号是如何分配的？（<code>include/unistd.h</code>中的__NR_xxx宏定义）</li>
+            <li>系统调用表是如何组织的？（<code>kernel/system_call.s</code>中的sys_call_table）</li>
+            <li>内核函数的参数如何从用户态安全拷贝？（<code>copy_from_user</code>的实现和使用）</li>
+            <li>Makefile的依赖关系如何处理？（<code>make dep</code>的重要性）</li>
+            <li>如何将测试程序放入磁盘映像并运行？</li>
+        </ul>
+
+        <p>你只有自己动手写过一次，才能真正把这些知识点串起来。</p>
+
+        <h2>实验目标——sys_hello</h2>
+
+        <p>我们这次要添加的系统调用叫做<code>sys_hello</code>。它要做什么？</p>
+
+        <ul>
+            <li>接收一个<strong>用户态字符串</strong>作为参数</li>
+            <li>内核在控制台上打印：<code>Hello from kernel: [字符串]</code></li>
+            <li>返回字符串的长度给用户程序</li>
+        </ul>
+
+        <p>听起来很简单对吧？但就是这样一个简单的系统调用，涉及到用户态到内核态的数据传递、内存安全检查、系统调用注册等完整流程。以下是详细的实现步骤。</p>
+
+        <div class="tip">
+            <strong>为什么是sys_hello？</strong>把我们的第一个系统调用命名为hello，是因为它足够简单——不涉及复杂的参数结构体、不需要复杂的权限检查、没有副作用。在操作系统开发中，第一个实验越简单越好，先把流程跑通再说。
+        </div>
+
+        <h2>步骤一：编写内核函数</h2>
+
+        <p>首先，在<code>kernel/sys.c</code>文件中添加<code>sys_hello</code>函数的实现。<code>sys.c</code>是内核中系统调用实现的主要文件，已经包含了<code>sys_setup</code>、<code>sys_ftime</code>、<code>sys_break</code>等函数的实现。</p>
+
+        <pre><code>/* kernel/sys.c — 添加在文件末尾 */
+
+asmlinkage int sys_hello(const char *buf)
+{
+    char kbuf[256];
+    int len;
+    int i;
+
+    /* 1. 参数检查：指针不能为NULL */
+    if (!buf)
+        return -EINVAL;
+
+    /* 2. 从用户态安全拷贝字符串到内核空间 */
+    len = strlen_user(buf);
+    if (len == 0 || len > 255)
+        return -EINVAL;
+
+    /* 3. 使用copy_from_user将用户态数据拷贝到内核缓冲区 */
+    copy_from_user(kbuf, buf, len);
+    kbuf[len] = '\0';  /* 确保字符串以null结尾 */
+
+    /* 4. 在内核中打印消息 */
+    printk("Hello from kernel: %s\n", kbuf);
+
+    /* 5. 返回字符串长度 */
+    return len;
+}</code></pre>
+
+        <p>这段代码中有几个非常重要的点需要解释：</p>
+
+        <p><strong>asmlinkage</strong>：这是一个宏，告诉编译器函数参数要从栈上传递（而不是通过寄存器）。这是系统调用的调用约定——所有系统调用参数的传递都通过栈完成，因为int 0x80中断处理程序已经将用户态寄存器压栈了。</p>
+
+        <p><strong>copy_from_user</strong>：这是最关键的安全函数。你绝对不能直接解引用用户态传过来的指针——用户可能会传一个非法地址（比如内核空间地址或未映射的地址）。copy_from_user使用了一种特殊的技巧：它把拷贝过程放在一个可以捕获页错误的代码段中。如果拷贝过程中发生异常（用户地址无效），它会优雅地处理异常并返回错误。</p>
+
+        <pre><code>/* kernel/sys.c 中的 copy_from_user 实现 */
+static inline int copy_from_user(void *to, const void *from, int n)
+{
+    char tmp;
+    __asm__("cld\n"
+            "1:\trepne\n\t"
+            "movsb\n"
+            "2:\n"
+            ".section .fixup,\"ax\"\n"   /* 异常修复段 */
+            "3:\tlea 0(%0),%0\n\t"
+            "jmp 2b\n"
+            ".previous\n"
+            ".section __ex_table,\"a\"\n" /* 异常表 */
+            ".align 2\n"
+            ".long 1b,3b\n"
+            ".previous"
+            :"=&c"(n), "=&D"(to), "=&S"(from)
+            :"0"(n), "1"(to), "2"(from)
+            :"memory");
+    return n;
+}</code></pre>
+
+        <p>注意那个<code>.section .fixup</code>——这是0.11中处理用户态地址越界的机制。如果"1:\trepne\n\tmovsb"这条指令执行时触发了页错误，CPU会在<code>__ex_table</code>中查找出错的地址（1b），找到对应的修复地址（3b），然后跳转到那里执行。在修复代码中，我们将剩余未拷贝的字节数（目前还在ecx中）设置为实际的返回值，上层函数就知道拷贝没有完全成功。</p>
+
+        <div class="warning">
+            <strong>安全铁律</strong>：永远不要在内核中直接解引用用户态指针。用户可能传任何地址进来——包括内核空间地址、未映射地址、或者另一个进程的地址空间。必须使用copy_from_user/copy_to_user进行安全拷贝。这是内核开发中最基本的安全原则，违反这条原则的Bug在CVE漏洞库中占了相当大的比例。
+        </div>
+
+        <h2>步骤二：注册系统调用</h2>
+
+        <p>函数写好了，但要让内核"知道"这个函数是一个系统调用，需要完成三件事。</p>
+
+        <h3>2.1 在include/unistd.h中添加调用号</h3>
+
+        <pre><code>/* include/unistd.h — 在系统调用号列表末尾添加 */
+
+/* 原有的系统调用号（最后几个） */
+#define __NR_mkdir    83
+#define __NR_rmdir    84
+#define __NR_mknod    85
+#define __NR_chmod    86
+#define __NR_chown    87
+
+/* 添加我们的新系统调用号（必须是连续的下一个） */
+#define __NR_hello    88
+
+/* 更新系统调用总数 */
+#define NR_syscalls   89</code></pre>
+
+        <p>系统调用号是从0开始连续编号的。<code>__NR_hello = 88</code>意味着它是第89个系统调用（从0开始数），所以<code>NR_syscalls</code>必须从原来的值更新为89。</p>
+
+        <h3>2.2 在sys_call_table中添加函数指针</h3>
+
+        <p>系统调用表位于<code>kernel/system_call.s</code>中，是一个函数指针数组：</p>
+
+        <pre><code>! kernel/system_call.s — 在sys_call_table末尾添加
+
+sys_call_table:
+    .long sys_setup           ! 0
+    .long sys_exit            ! 1
+    .long sys_fork            ! 2
+    .long sys_read            ! 3
+    .long sys_write           ! 4
+    /* ... 中间省略 ... */
+    .long sys_chmod           ! 86
+    .long sys_chown           ! 87
+    .long sys_hello           ! 88  ← 新添加的条目</code></pre>
+
+        <p>每一个<code>.long</code>是一个4字节的函数指针，对应一个系统调用号。当用户程序调用int 0x80时，中断处理程序会从<code>eax</code>取出系统调用号，用它作为索引在sys_call_table中查找对应的处理函数。</p>
+
+        <p>因为这是一个汇编文件，你不需要像C语言那样声明<code>sys_hello</code>函数——汇编器会在链接阶段根据符号名<code>sys_hello</code>找到kernel/sys.o中定义的函数地址。</p>
+
+        <h3>2.3 添加函数声明</h3>
+
+        <pre><code>/* include/sys.h — 在头文件中添加函数声明 */
+
+extern int sys_hello(const char *buf);</code></pre>
+
+        <p>这一步是让其他引用系统调用的地方（比如未来了诊断代码）可以调用它。虽然对于这次实验来说不是严格必需的（因为sys_call_table是通过符号名链接的），但保持头文件更新是一个好习惯。</p>
+
+        <h2>步骤三：编译新内核</h2>
+
+        <p>系统调用注册完成后，接下来要重新编译内核。但在编译之前，有一个关键步骤：<strong>更新Makefile的依赖关系</strong>。</p>
+
+        <p>如果你直接运行<code>make</code>，新添加的<code>sys_hello</code>函数通常能被正常编译——因为Add了代码的文件（kernel/sys.c）已经在Makefile的编译列表中。但为了保险，建议先执行：</p>
+
+        <pre><code>$ make clean          # 清理之前的编译结果
+$ make dep            # 更新依赖关系（至关重要！）
+$ make                # 重新编译内核</code></pre>
+
+        <div class="highlight">
+            <strong>make dep的作用</strong>：<code>make dep</code>会分析所有.c文件中通过<code>#include</code>包含的头文件依赖关系，生成一个.depend文件。如果你修改了头文件（比如我们修改了include/unistd.h和include/sys.h），但忘了执行make dep，那么make可能不会重新编译依赖这些头文件的源文件——导致你的修改"看起来没生效"。这是一个极其常见的陷阱。
+        </div>
+
+        <p>编译成功后，会生成新的内核映像文件（通常叫<code>Image</code>或<code>system.img</code>）：</p>
+
+        <pre><code>$ ls -l Image
+-rw-r--r--  1 user user 70624 Jun 30 15:30 Image   ← 新内核约70KB</code></pre>
+
+        <h2>步骤四：编写测试程序</h2>
+
+        <p>现在内核认识<code>sys_hello</code>了，但我们需要一个用户态程序来调用它。这个程序需要<strong>静态链接</strong>（因为0.11的文件系统里没有动态链接器）：</p>
+
+        <pre><code>/* hello_test.c — 用户态测试程序 */
+
+/* 系统调用号必须与内核中的定义一致 */
+#define __NR_hello    88
+
+/* 系统调用的通用封装 */
+_syscall1(int, hello, const char *, buf)
+
+int main(int argc, char *argv[])
+{
+    int ret;
+
+    /* 调用我们新添加的系统调用 */
+    ret = hello("Hello, Linux 0.11 World!");
+
+    /* 打印返回值（字符串长度） */
+    printf("sys_hello returned: %d\n", ret);
+
+    return 0;
+}</code></pre>
+
+        <p>注意<code>_syscall1</code>宏——它是0.11中提供的系统调用封装宏。定义在<code>include/unistd.h</code>中，用来生成带有int 0x80指令的汇编代码：</p>
+
+        <pre><code>/* include/unistd.h — _syscall1 宏定义 */
+#define _syscall1(type, name, atype, a) \
+type name(atype a) \
+{ \
+    long __res; \
+    __asm__ volatile ("int $0x80" \
+        : "=a" (__res) \
+        : "0" (__NR_##name), "b" ((long)(a))); \
+    if (__res >= 0) return (type)__res; \
+    errno = -__res; \
+    return -1; \
+}</code></pre>
+
+        <p>这个宏展开后生成一个名为<code>hello</code>的C函数，它把<code>__NR_hello</code>（88）放入eax、把<code>buf</code>指针放入ebx、然后执行<code>int $0x80</code>进入内核。这就是用户态发出系统调用的完整过程。</p>
+
+        <p>编译测试程序（静态链接，因为0.11没有动态链接器）：</p>
+
+        <pre><code>$ gcc -march=i386 -static -o hello_test hello_test.c -I include</code></pre>
+
+        <p>编译成功后，把测试程序放入0.11的磁盘映像中。如果你使用hdc-0.11.img（硬盘映像），可以挂载它然后复制文件：</p>
+
+        <pre><code>$ mount -o loop hdc-0.11.img /mnt
+$ cp hello_test /mnt/usr/hello_test
+$ umount /mnt</code></pre>
+
+        <p>如果你想放入软盘映像，则需要用一个专门的工具先把文件写入软盘映像中。不管哪种方式，关键是测试程序必须能在一个已经能启动的0.11文件系统中被访问到。</p>
+
+        <table>
+            <thead>
+                <tr><th>工具/环境</th><th>用途</th><th>关键命令</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>GCC (i386交叉编译)</td><td>编译测试程序</td><td><code>gcc -march=i386 -static -o test test.c</code></td></tr>
+                <tr><td>mount + loopback</td><td>挂载磁盘映像</td><td><code>mount -o loop hdc-0.11.img /mnt</code></td></tr>
+                <tr><td>dd</td><td>写入软盘映像</td><td><code>dd if=test of=floppy.img bs=512 seek=N</code></td></tr>
+                <tr><td>Bochs/QEMU</td><td>启动内核测试</td><td><code>bochs -q -f bochs.bxrc</code></td></tr>
+            </tbody>
+        </table>
+
+        <h2>步骤五：运行验证</h2>
+
+        <p>所有准备工作就绪，最后一步——验证。启动Bochs，加载新的内核映像和修改后的磁盘映像：</p>
+
+        <pre><code>$ bochs -q -f bochs.bxrc</code></pre>
+
+        <p>Bochs启动后，内核正常引导。登录（通常是root用户，没有密码），然后运行测试程序：</p>
+
+        <pre><code>Welcome to Linux 0.11
+
+login: root
+# cd /usr
+# ./hello_test</code></pre>
+
+        <p>如果一切正常，你会看到屏幕上输出：</p>
+
+        <pre><code>Hello from kernel: Hello, Linux 0.11 World!
+sys_hello returned: 29</code></pre>
+
+        <p>看到这个消息了吗？<strong>你亲手创建的系统调用，从一个44年前的初学者那里发出的"Hello from kernel"消息，完整地走通了用户态到内核态再回到用户态的全流程。</strong></p>
+
+        <p>整个过程虽然没有现代Linux内核模块开发的便利性（modprobe、insmod、动态加载），但也正因为要手动完成每一个步骤，你才对系统调用的完整生命周期——从用户态发出请求、到内核态处理、再到返回到用户态——有了无可替代的深入理解。</p>
+
+        <div class="tip">
+            <strong>扩展实验</strong>：sys_hello只是起点。你可以试着给系统调用加第二个参数（比如fd，让消息可以选择输出到哪个文件描述符），或者添加一个sys_reverse系统调用，接受一个字符串并在内核中反转它。每增加一个参数，你都要重新理解_syscall1到_syscall3的使用、以及参数在ebx/ecx/edx中的传递方式。
+        </div>
+
+        <h2>踩坑故事——Makefile依赖陷阱</h2>
+
+        <p>在我第一次做这个实验时，遇到了一个让人抓狂的问题：我按照上述所有步骤做了修改，编译内核报错？不——最糟糕的是，<strong>编译通过了</strong>。内核启动了。测试程序也跑起来了。但<code>sys_hello</code>返回了<code>-1</code>（错误）。</p>
+
+        <p>为什么编译通过了但系统调用返回错误？我排查了半天，最后发现了问题：</p>
+
+        <p>当我在<code>kernel/sys.c</code>中添加了<code>sys_hello</code>函数之后，我确实重新运行了<code>make</code>。Make检测到<code>sys.c</code>文件被修改了，重新编译了它——生成了新的<code>sys.o</code>。但问题在于：<strong>我修改了include/unistd.h增加了__NR_hello宏，却没有重新编译那些依赖unistd.h的源文件</strong>！</p>
+
+        <p>为什么？因为我忘了执行<code>make dep</code>。Makefile中记录的旧依赖关系里，<code>kernel/system_call.s</code>并不依赖<code>include/unistd.h</code>——但实际上system_call.s中引用了<code>NR_syscalls</code>常量，而这个常量定义在unistd.h中。由于依赖关系没更新，make就没有重新编译system_call.s中的sys_call_table。</p>
+
+        <p>结果就是：<code>sys_call_table</code>里第89项（原来是第88项，__NR_hello的位置）指向的是旧的函数指针——可能是一个随机的地址、或者是原来NR_syscalls范围之外的未初始化数据。所以当用户程序调用<code>int 0x80</code>且<code>eax = 88</code>时，内核从sys_call_table中取出了一个错误的函数地址并跳转执行——幸运的话会返回一个错误码，不幸的话直接死机。</p>
+
+        <p>修复方式很简单：</p>
+
+        <pre><code>$ make clean        # 清理所有中间文件
+$ make dep          # 更新所有依赖关系
+$ make              # 重新编译</code></pre>
+
+        <p>一个命令顺序的问题，浪费了我整整一个下午的时间。从那以后，<strong>修改系统调用相关的文件时，我一定先执行<code>make dep</code>再执行<code>make</code></strong>。这个习惯我一直保持到今天。</p>
+
+        <div class="highlight">
+            <strong>关键教训</strong>：在内核开发中，"编译通过"不等于"修改生效"。Makefile的依赖关系系统非常精妙但也非常脆弱。当你修改了头文件（.h）时，一定要确保所有依赖该头文件的.c或.s文件都被重新编译。最稳妥的方式是：<code>make clean && make dep && make</code>。
+        </div>
+
+        <p>这个实验虽然简单，但它象征着一个重要的里程碑：从消费者变成创造者。你不再只是读Linus的代码，而是开始在上面添加自己的代码。在下一章中，我们将把目光从0.11移开，看看从0.11到Linux 1.0的演进过程中，哪些关键特性被添加进来、以及为什么这些变化决定了Linux后来的命运。</p>
+
+        <div class="footer-nav">
+            <a href="24.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="26.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

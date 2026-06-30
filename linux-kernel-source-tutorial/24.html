@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第24章 GDB单步跟踪</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html" class="active">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们聊了printk和Bochs调试器——这些方法虽然有效，但效率不太高：加printk需要重新编译、重新启动，看输出就像在黑暗中摸索。Bochs的调试器虽然能设断点、看内存，但它的交互方式比较原始，没有源代码级别的单步跟踪。</p>
+
+        <p>这一章，我们要升级到一套更强大的武器——<strong>GDB + QEMU</strong>远程调试组合。你可以像调试普通用户态程序一样，在源代码级别单步跟踪Linux内核的执行。想象一下：你在<code>schedule()</code>函数里设一个断点，当QEMU中的Linux运行到这个函数时，GDB就会停下来，让你观察变量、单步执行、甚至修改内存——然后继续执行。就像你在IDE里调试一个普通的C程序，只不过这个"程序"是整个操作系统。</p>
+
+        <p>套用一句夸张但真实的话：<strong>"用GDB单步跟踪内核，就像在Linus Torvalds的大脑里散步。"</strong></p>
+
+        <h2>引言——GDB远程调试的原理</h2>
+
+        <p>GDB远程调试的基本原理很简单：</p>
+
+        <ul>
+            <li><strong>QEMU运行目标系统</strong>（在这里是Linux 0.11），它模拟了一个完整的x86机器</li>
+            <li><strong>GDB运行在宿主机</strong>上，通过TCP连接到QEMU</li>
+            <li>QEMU暴露一个<strong>GDB服务器</strong>端口（默认是1234），等待GDB连接</li>
+            <li>GDB发送"读/写内存"、"暂停/继续执行"、"设置断点"等命令，QEMU执行后返回结果</li>
+        </ul>
+
+        <p>关键点是：<strong>内核本身不需要任何修改</strong>。QEMU在模拟硬件层面提供了调试接口，内核感知不到自己被调试。这意味着0.11不需要像现代内核那样编译时打开kgdb选项——任何能在QEMU上跑的操作系统都可以用GDB远程调试。</p>
+
+        <div class="tip">
+            <strong>调试的是"机器"而不是"操作系统"</strong>：QEMU的GDB服务器工作在硬件模拟层面。你设的断点是硬件断点（利用x86的调试寄存器DR0-DR7），而不是软件断点（int3指令）。所以即使内核完全没有"调试支持"，硬断点也一定有效。
+        </div>
+
+        <h2>QEMU+GDB调试环境搭建</h2>
+
+        <p>要在0.11上使用GDB远程调试，你需要做两件事：编译带调试符号的内核，以及用正确的参数启动QEMU。</p>
+
+        <h3>1. 编译带调试符号的内核</h3>
+
+        <p>你需要在编译内核时加上<code>-g</code>标志，让GCC生成调试信息。在0.11的顶层Makefile中修改：</p>
+
+        <pre><code># 在 Makefile 中添加调试符号支持
+CFLAGS = -Wall -O0 -g -fstrength-reduce -fomit-frame-pointer \
+         -fcombine-regs -mstring-insns \
+         -nostdinc -Iinclude
+
+# -O0:  关闭优化，让变量值和代码行号一一对应
+# -g:   生成完整的DWARF调试信息</code></pre>
+
+        <p>注意这里把<code>-O</code>改成了<code>-O0</code>和<code>-g</code>。在调试模式下，我们宁愿内核运行慢一点，也要保证调试信息的准确性。优化后的代码（-O2或-O3）会做内联、重排指令、消除临时变量，导致你在GDB中看到的"当前行"与实际执行的指令对不上。</p>
+
+        <p>很多0.11实验环境都提供了一个<code>make debug</code>的快捷目标，它会自动使用调试选项重新编译内核：</p>
+
+        <pre><code>$ make debug    # 使用-O0 -g重新编译
+$ ls -l system.img   # 确认调试符号包含在内核中</code></pre>
+
+        <h3>2. 启动QEMU</h3>
+
+        <p>QEMU的<code>-s</code>和<code>-S</code>参数是调试的关键：</p>
+
+        <pre><code>$ qemu-system-i386 -m 16 -boot a -fda Image \
+    -hda hdc-0.11.img \
+    -s -S
+
+# -s:   shorthand for "-gdb tcp::1234"，在端口1234开放GDB服务器
+# -S:   在启动时暂停CPU，等待GDB连接</code></pre>
+
+        <p>加了<code>-S</code>后，QEMU窗口不会立即启动内核——它会停在第一条指令之前（即BIOS的第一条指令），等待你从GDB发出"继续执行"的命令。</p>
+
+        <h3>3. 连接GDB</h3>
+
+        <p>在另一个终端中启动GDB：</p>
+
+        <pre><code>$ gdb system.img   # 加载内核的调试符号
+(gdb) target remote :1234   # 连接到QEMU的GDB服务器
+Remote debugging using :1234
+0x0000fff0 in ?? ()
+(gdb) </code></pre>
+
+        <p>GDB连接成功后，你会看到CPU当前停在<code>0x0000fff0</code>——这是x86 CPU复位后的第一条指令地址（BIOS入口）。从这里开始，你就可以设置断点、单步跟踪整个启动流程了。</p>
+
+        <div class="warning">
+            <strong>权限问题</strong>：如果你在Linux上用源码编译的GDB，连接本地端口一般没有问题。如果遇到"Connection refused"，检查QEMU是否真的在运行、端口1234是否被占用，或者试试用<code>qemu-system-i386 -gdb tcp::1234 -S</code>替代<code>-s</code>。
+        </div>
+
+        <h2>关键断点设置——战略要点</h2>
+
+        <p>连接上GDB后，你可以设置多个"战略要点"来观察内核启动和执行的关键阶段。以下是我推荐的几个断点位置：</p>
+
+        <table>
+            <thead>
+                <tr><th>断点位置</th><th>对应源文件</th><th>观察目标</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>0x7C00</code></td><td><code>boot/bootsect.s</code></td><td>BIOS将引导扇区加载到0x7C00后的第一条指令</td></tr>
+                <tr><td><code>start_kernel</code></td><td><code>init/main.c</code></td><td>C语言入口，内核初始化的起点</td></tr>
+                <tr><td><code>schedule</code></td><td><code>kernel/sched.c</code></td><td>进程调度函数的入口</td></tr>
+                <tr><td><code>system_call</code></td><td><code>kernel/system_call.s</code></td><td>所有系统调用的统一入口</td></tr>
+                <tr><td><code>do_fork</code></td><td><code>kernel/fork.c</code></td><td>进程创建的完整流程</td></tr>
+                <tr><td><code>sys_write</code></td><td><code>fs/read_write.c</code></td><td>文件写入系统调用的实现</td></tr>
+                <tr><td><code>do_signal</code></td><td><code>kernel/signal.c</code></td><td>信号处理的入口</td></tr>
+                <tr><td><code>timer_interrupt</code></td><td><code>kernel/system_call.s</code></td><td>时钟中断处理函数</td></tr>
+            </tbody>
+        </table>
+
+        <p>在GDB中设置这些断点：</p>
+
+        <pre><code>(gdb) b *0x7C00          # 在物理地址设断点（硬件断点）
+(gdb) b start_kernel     # 使用符号名设断点
+(gdb) b schedule
+(gdb) b system_call
+(gdb) b do_fork
+(gdb) b sys_write</code></pre>
+
+        <p>设好断点后，发出<code>c</code>（continue）命令让QEMU开始执行：</p>
+
+        <pre><code>(gdb) c
+Continuing.
+
+Breakpoint 1, 0x7c00 in bootsect ()
+(gdb) info registers
+eax            0xaa55     0xaa55      ← 引导扇区的魔数
+ecx            0x0        0x0
+edx            0x80       0x80       ← 启动盘号（0x80=第一块硬盘）
+ebx            0x0        0x0
+esp            0x6ef4     0x6ef4
+eip            0x7c00     0x7c00
+cs             0xf000     0xf000     ← 实模式下的段值
+ss             0x0        0x0
+eflags         0x2        [ ]</code></pre>
+
+        <p>看到<code>eax = 0xaa55</code>了吗？这是引导扇区的魔数，BIOS用它来验证引导扇区的有效性。在0x7C00这个断点上，你可以观察实模式下的寄存器状态、以及引导扇区刚刚被加载时的"原始面貌"。</p>
+
+        <h2>跟踪系统调用——以write()为例</h2>
+
+        <p>系统调用是用户态进入内核态的唯一途径，也是理解内核工作原理的最佳观测点。让我们以<code>write()</code>系统调用为例，跟踪一次完整的系统调用流程。</p>
+
+        <p>首先，让我们在关键点设好断点：</p>
+
+        <pre><code>(gdb) b system_call        # 系统调用统一入口
+(gdb) b sys_write          # write系统调用的C函数
+(gdb) b tty_write          # tty设备写入函数</code></pre>
+
+        <p>然后继续执行，直到某个用户程序调用write()（比如shell要输出一个提示符）：</p>
+
+        <pre><code>(gdb) c
+Continuing.
+
+Breakpoint 2, system_call ()
+(gdb) info registers eax ecx edx ebx
+eax            0x4        0x4          ← 系统调用号（4 = __NR_write）
+ebx            0x1        0x1          ← 第一个参数（fd = 1 = stdout）
+ecx            0x...                  ← 第二个参数（缓冲区地址）
+edx            0x...                  ← 第三个参数（缓冲区长度）</code></pre>
+
+        <p>注意<code>eax = 4</code>，这符合我们在第9章学到的事实：Linux 0.11中<code>__NR_write = 4</code>。接下来，单步进入sys_write：</p>
+
+        <pre><code>(gdb) si                    # 单步执行一条指令
+0x0000xxxx in sys_write ()
+(gdb) si                    # 继续单步...
+0x0000xxxx in sys_write ()
+(gdb) l                     # 列出当前源代码
+(gdb) p fd                  # 打印fd变量的值
+$1 = 1                      # 文件描述符1 = stdout
+(gdb) p count               # 打印要写入的字节数
+$2 = 23</code></pre>
+
+        <p>继续单步，你会看到sys_write调用了<code>tty_write</code>。在tty_write中，内核把要输出的字符放入写队列，然后调用<code>con_write</code>将字符写入VGA显存（0xB8000）：</p>
+
+        <pre><code>(gdb) b con_write          # 在console写入函数设断点
+(gdb) c
+Continuing.
+
+Breakpoint 5, con_write ()
+(gdb) x /20xw 0xB8000      # 查看VGA显存的内容
+0xb8000:    0x7207    0x7200    0x7200    0x7200
+# 前几个字符的ASCII值已经写入显存...</code></pre>
+
+        <p>执行<code>c</code>继续后，你会在QEMU窗口中看到shell提示符出现了。整个过程你亲眼目睹了：一个字符从用户程序的write()开始，经过<strong>系统调用入口 → sys_write → tty_write → con_write → VGA显存</strong>——完成了从用户态到内核态、再到硬件的完整旅程。</p>
+
+        <div class="highlight">
+            <strong>哲学一刻</strong>：刚才你看到的这短短几行代码执行路径，正是操作系统"一切皆文件"和"用户态/内核态隔离"这两个核心设计思想的具象体现。抽象概念在单步跟踪中变得无比真实。
+        </div>
+
+        <h2>观察进程切换——追踪调度器</h2>
+
+        <p>进程切换是操作系统最核心的机制，也是最"神奇"的部分——毕竟一条指令执行完，CPU还在运行，但当前"进程"已经变了。用GDB可以把这个"魔法"拆解成一个个可以观察的步骤。</p>
+
+        <p>在进程调度相关的函数上设断点：</p>
+
+        <pre><code>(gdb) b schedule           # 调度函数入口
+(gdb) b switch_to          # 实际切换的任务切换宏
+(gdb) b timer_interrupt    # 时钟中断（schedule通常由时钟中断触发）</code></pre>
+
+        <p>继续执行，当内核初始化完成后，schedule()会被调用：</p>
+
+        <pre><code>(gdb) c
+Continuing.
+
+Breakpoint 3, schedule () at kernel/sched.c:127
+(gdb) p current->pid       # 当前正在运行的进程
+$3 = 1                     # 进程1（init进程）
+(gdb) p current->counter   # 剩余时间片
+$4 = 3                     # 还剩3个tick
+(gdb) n                    # next line...
+(gdb) p next               # 调度器选中的下一个进程
+$5 = 0                     # task[0] = idle进程</code></pre>
+
+        <p>然后执行到<code>switch_to</code>：</p>
+
+        <pre><code>(gdb) c
+Continuing.
+
+Breakpoint 4, switch_to ()
+(gdb) info registers       # 观察切换前的寄存器状态
+(gdb) n                    # 执行switch_to（注意看current！）
+(gdb) p current->pid       # 切换后current变了！
+$6 = 0                     # 现在是PID=0的idle进程</code></pre>
+
+        <p>这里有一个GDB的小窍门：你可以定义一个<strong>hook-stop</strong>，让GDB在每次停下来时自动打印关键信息：</p>
+
+        <pre><code>(gdb) define hook-stop
+&gt; print "--- Stop ---"
+&gt; print current->pid
+&gt; print current->state
+&gt; print current->counter
+&gt; info registers eip esp
+&gt; end
+
+(gdb) c
+--- Stop ---
+$7 = 0
+$8 = 0
+$9 = 0
+eip            0x1234
+esp            0x....</code></pre>
+
+        <p>有了hook-stop，你在单步跟踪时就不用手动每次敲命令了——所有关键信息自动打印出来。这就是"GDB脚本化调试"的雏形。</p>
+
+        <div class="tip">
+            <strong>GDB脚本自动化</strong>：把define hook-stop和常用断点放在一个.gdbinit文件中，每次启动GDB时自动加载。还可以用<code>gdb -x script.gdb</code>来执行更复杂的自动化调试脚本，比如"在system_call处暂停10次后，打印一次寄存器，然后继续"——这种批量调试对复现竞争条件的Bug特别有用。
+        </div>
+
+        <h2>内存检查技巧</h2>
+
+        <p>GDB的<code>x</code>（examine）命令是检查内存最强大的工具。它接受三个参数：数量(N)、格式(u)、大小(f)，语法为<code>x /Nuf 地址</code>。</p>
+
+        <p>以下是我最常用的几个检查技巧：</p>
+
+        <pre><code># 查看栈内容（栈顶在esp指向的位置）
+(gdb) x /10xw $esp         # 显示从esp开始的10个字（word，4字节）
+
+# 反汇编当前指令附近的代码
+(gdb) x /10i $eip          # 从eip开始反汇编10条指令
+
+# 查看task_struct结构体的特定字段
+(gdb) p *(struct task_struct *)current
+(gdb) p current->pid
+(gdb) p current->sigaction
+
+# 查看页目录和页表
+(gdb) p swapper_pg_dir     # 0.11中页目录的基地址
+
+# 查看系统调用表
+(gdb) p sys_call_table     # 打印系统调用表
+
+# 以字符串形式打印内存
+(gdb) x /s 0xB8000         # 查看VGA显存中的字符
+
+# 查看某个特定task
+(gdb) p *task[1]           # 打印task[1]（PID=1的进程控制块）</code></pre>
+
+        <p>其中<code>p *(struct task_struct *)current</code>会输出task_struct的所有字段——让你直观地看到进程的完整控制块布局。这比任何文档都有说服力。</p>
+
+        <table>
+            <thead>
+                <tr><th>GDB命令</th><th>含义</th><th>调试场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>x/10xw 0x...</code></td><td>以16进制显示10个字</td><td>查看栈、堆中的原始数据</td></tr>
+                <tr><td><code>x/10i 0x...</code></td><td>反汇编10条指令</td><td>检查编译后代码是否正确</td></tr>
+                <tr><td><code>x/s 0x...</code></td><td>以字符串形式显示</td><td>查看内核字符串缓冲区</td></tr>
+                <tr><td><code>info registers</code></td><td>显示所有寄存器</td><td>断点命中时的CPU状态快照</td></tr>
+                <tr><td><code>bt</code></td><td>显示调用栈回溯</td><td>查看函数调用链</td></tr>
+                <tr><td><code>p 结构体指针</code></td><td>打印结构体所有字段</td><td>检查task_struct、inode等内核对象</td></tr>
+                <tr><td><code>list / l</code></td><td>显示当前源代码</td><td>查看断点附近的代码上下文</td></tr>
+            </tbody>
+        </table>
+
+        <h2>踩坑故事——GDB与内核的地址空间不一致</h2>
+
+        <p>GDB远程调试虽然强大，但不是万能的。有一个陷阱让我浪费了整整两天时间。</p>
+
+        <p>事情是这样的：我在内核的某个函数里发现了一个Bug，需要在一个特定的物理地址上设置断点。当时我直接输入：</p>
+
+        <pre><code>(gdb) b *0x10000          # 在物理地址0x10000设断点</code></pre>
+
+        <p>然后继续执行。内核启动了，引导扇区执行了，setup.s执行了，head.s执行了——但断点<strong>从未被触发</strong>。我检查了反汇编，确认那个地址是有代码的。为什么断点没命中？</p>
+
+        <p>排查了半天，终于明白了原因：<strong>GDB使用的是线性地址（线性地址），而我在0x10000设置的断点是物理地址</strong>。当时内核已经开启了分页机制，CPU访问0xC0000000+offset的线性地址时，通过页表映射到物理地址0x00000000+offset。GDB发送给QEMU的断点请求使用的是线性地址，而物理地址0x10000对应的线性地址是0xC0010000！</p>
+
+        <p>正确的做法是：</p>
+
+        <pre><code># 错误的示范
+(gdb) b *0x10000          # 物理地址，GDB当作线性地址处理，断点永远不会命中
+
+# 正确的示范
+(gdb) b *0xC0010000       # 线性地址，因为内核映射了0xC0000000 + 物理偏移
+# 或者直接使用函数名
+(gdb) b start_kernel      # 使用符号名，GDB会自动解析为正确的线性地址</code></pre>
+
+        <p>这个问题在Bochs调试器中不会出现——因为Bochs的<code>pb</code>命令明确指定了物理地址。但GDB的<code>b</code>命令始终使用"当前地址空间"。在分页开启前，你的<code>b *0x7C00</code>能工作，因为此时物理地址==线性地址。分页开启后，二者不再相同。</p>
+
+        <div class="warning">
+            <strong>地址空间规则</strong>：在GDB中设置符号断点（如<code>b schedule</code>）永远是最安全的——GDB会根据符号表自动解析为正确的地址。如果需要手动指定地址，记住0.11内核在分页开启后运行在高地址（0xC0000000+）的线性空间。不确定地址的时候，先用<code>info proc mappings</code>或<code>info files</code>查看内存布局。
+        </div>
+
+        <p>这个故事也告诉我们一个重要的道理：<strong>理解内核地址空间布局是调试的前提</strong>。如果你不清楚当前处于实模式还是保护模式、分页是否开启、内核映射到了什么地址——你会被GDB的输出搞得晕头转向。</p>
+
+        <p>下一章我们将进入最实战的部分——<strong>动手写一个自己的系统调用</strong>。你将亲手添加一个sys_hello系统调用，完成从源码修改到编译测试的完整闭环。如果说前面23章是"读代码"，那下一章就是真正的"写代码"了。准备好了吗？</p>
+
+        <div class="footer-nav">
+            <a href="23.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="25.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

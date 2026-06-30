@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 流式处理与大数据策略</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI数据集全景图</a></li>
+            <li><a href="02.html">第2章 datasets库快速上手</a></li>
+            <li><a href="03.html">第3章 数据集元信息与特征系统</a></li>
+            <li><a href="04.html">第4章 Arrow：高性能数据后端</a></li>
+            <li><a href="05.html">第5章 数据类型与格式转换</a></li>
+            <li><a href="06.html">第6章 数据集的下载与缓存机制</a></li>
+            <li><a href="07.html">第7章 Split切分与采样策略</a></li>
+            <li><a href="08.html">第8章 map() 数据处理核心</a></li>
+            <li><a href="09.html">第9章 filter() 与数据筛选</a></li>
+            <li><a href="10.html">第10章 文本数据预处理实战</a></li>
+            <li><a href="11.html">第11章 图像与音频数据预处理</a></li>
+            <li><a href="12.html" class="active">第12章 流式处理与大数据策略</a></li>
+            <li><a href="13.html">第13章 数据分片与分布式训练</a></li>
+            <li><a href="14.html">第14章 数据版本管理与可复现性</a></li>
+            <li><a href="15.html">第15章 数据管线性能优化</a></li>
+            <li><a href="16.html">第16章 常见踩坑与故障排查</a></li>
+            <li><a href="17.html">第17章 数据质量评估与清洗</a></li>
+            <li><a href="18.html">第18章 数据集合规与许可证</a></li>
+            <li><a href="19.html">第19章 NLP经典数据集</a></li>
+            <li><a href="20.html">第20章 计算机视觉经典数据集</a></li>
+            <li><a href="21.html">第21章 语音与多模态数据集</a></li>
+            <li><a href="22.html">第22章 GNN与RL专项数据集</a></li>
+            <li><a href="23.html">第23章 数据EDA与可视化工具</a></li>
+            <li><a href="24.html">第24章 自定义数据集构建</a></li>
+            <li><a href="25.html">第25章 数据管线自动化</a></li>
+            <li><a href="26.html">第26章 2026最新特性与趋势</a></li>
+            <li><a href="27.html">第27章 前沿基准数据集巡览</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第12章：流式处理与大数据策略</h2>
+
+        <p>2024-2026 年间，AI 模型的参数量从千亿级跃升至万亿级，而训练数据量从 TB 级跃升至 PB 级。LAION-5B 有 58 亿图文对，FineWeb 有 15 万亿 token，RedPajama-V2 有 30 万亿 token——这些数字意味着什么？意味着没有任何一台机器的内存能装下它们。你必须学会在"不看全量数据"的情况下完成训练。</p>
+
+        <p>这就是流式处理的用武之地。<code>streaming=True</code> 是 datasets 库中最重要的一个参数——它可能也是整个 Hugging Face 生态中最被低估的参数。有了它，你可以在 8GB 内存的笔记本上处理 TB 级的数据集；没有它，你可能连一个 50GB 的数据集都加载不了。</p>
+
+        <div class="highlight">
+            <strong>核心认知：</strong>流式处理不是"优化"，它是大数据场景下的<strong>硬性需求</strong>。如果你的数据集超过机器内存的 1/4，就必须用流式。这不再是"选配"，而是"必配"。
+        </div>
+
+        <h2>流式模式原理</h2>
+
+        <p>流式模式和非流式模式（常规模式）的本质区别可以用一句话概括：<strong>常规模式是"先下载再访问"，流式模式是"边下载边访问"</strong>。</p>
+
+        <pre><code>from datasets import load_dataset
+
+# 常规模式：数据全部下载到本地，加载到内存
+dataset_full = load_dataset("c4", "en", split="train")
+print(type(dataset_full))  # <class 'datasets.arrow_dataset.Dataset'>
+# 此时数据集已全部下载到 ~/.cache/huggingface/datasets/
+
+# 流式模式：数据按需下载，不存本地
+dataset_stream = load_dataset("c4", "en", split="train", streaming=True)
+print(type(dataset_stream))  # <class 'datasets.iterable_dataset.IterableDataset'>
+# 此时没有任何数据被下载
+
+# 流式访问：只下载需要的部分
+for i, example in enumerate(dataset_stream):
+    if i >= 5:
+        break
+    print(example["text"][:50])  # 只下载前 5 条</code></pre>
+
+        <p>流式模式返回的不是 Dataset，而是 <strong>IterableDataset</strong>。两者最大的区别在于：Dataset 支持随机访问（你可以问 "第 1000 条是什么？"），但 IterableDataset 不支持——它像 Python 的 generator，只能顺序迭代。你不能对它做 <code>dataset[1000]</code>，只能 <code>for example in dataset</code>。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th>Dataset（常规）</th>
+                    <th>IterableDataset（流式）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>数据存储</td>
+                    <td>全部下载到本地缓存</td>
+                    <td>迭代时按需下载</td>
+                </tr>
+                <tr>
+                    <td>内存使用</td>
+                    <td>加载整个数据集</td>
+                    <td>只加载当前 batch</td>
+                </tr>
+                <tr>
+                    <td>随机访问</td>
+                    <td>支持（通过索引）</td>
+                    <td>不支持（只能顺序迭代）</td>
+                </tr>
+                <tr>
+                    <td>可重复迭代</td>
+                    <td>支持</td>
+                    <td>支持（每次重新下载）</td>
+                </tr>
+                <tr>
+                    <td>洗牌 (shuffle)</td>
+                    <td>全局洗牌</td>
+                    <td>缓冲区内洗牌</td>
+                </tr>
+                <tr>
+                    <td>map/filter</td>
+                    <td>全部执行后返回新 Dataset</td>
+                    <td>惰性执行，按需处理</td>
+                </tr>
+                <tr>
+                    <td>适用场景</td>
+                    <td>小数据（< 内存），需要随机访问</td>
+                    <td>大数据（> 内存），顺序训练</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>某团队接到了一个"多模态大模型训练"任务，核心训练数据是 LAION-5B——58 亿图文对，磁盘占用约 12TB。团队的实习生负责数据准备，他二话不说写了 <code>load_dataset("laion/laion5b")</code>（没加 streaming=True）。几个小时后，服务器磁盘满了，训练脚本报错。实习生以为是磁盘不够大，申请了更大的云盘——然后又爆了。最后一位资深工程师过来看了一眼，加了个 <code>streaming=True</code>，问题瞬间解决。那 12TB 数据根本不需要全部下载下来再训练——数据可以从 S3 上直接流式读取，每个 batch 用完即弃。多加了一个参数，省了 12TB 的磁盘和几个小时的无用等待。
+        </div>
+
+        <h2>2026 年流式改进</h2>
+
+        <p>datasets v5.0.0（2026 年初发布）对流式处理做了多项重大改进。如果你还在用 v4.x，现在就应该升级。</p>
+
+        <h3>Xet 后端：100 倍加速</h3>
+
+        <p>v5.0.0 引入了全新的 <strong>Xet</strong> 后端，这是 Hugging Face 自研的分布式数据存储引擎。相比传统的 Git LFS 后端，Xet 在流式场景下的数据读取速度提升了 100 倍。启用方式很简单：</p>
+
+        <pre><code># datasets >= 5.0.0 默认启用 Xet 后端
+# 你也可以手动指定
+from datasets import load_dataset
+
+# 使用 Xet 后端流式加载
+dataset = load_dataset(
+    "bigcode/the-stack-v2",
+    split="train",
+    streaming=True,
+    # Xet 自动启用，不需要额外参数
+)
+
+# Xet 的核心优势：
+# 1. 分块压缩：只传输需要的块，不传输整个文件
+# 2. 智能缓存：热点数据在本地缓存
+# 3. 并行传输：多线程并行下载 shard
+# 4. 断点续传：中断后只重传未完成的块</code></pre>
+
+        <h3>洗牌算法重写</h3>
+
+        <p>v5.0.0 之前，流式数据集的洗牌一直是个难题——你不能像常规数据集那样做全局洗牌。旧版本的做法是在一个小缓冲区（默认 1000 条）内随机排列，洗牌效果非常受限。v5.0.0 引入了新的洗牌算法，通过 <code>max_buffer_input_shards</code> 参数来控制：</p>
+
+        <pre><code># v5.0.0 的增强洗牌
+dataset = load_dataset("c4", "en", split="train", streaming=True)
+
+# 旧版洗牌（缓冲区大小 = 1000 条）
+dataset_shuffled = dataset.shuffle(seed=42)
+
+# 新版洗牌：多 shard 缓冲
+dataset_shuffled_enhanced = dataset.shuffle(
+    seed=42,
+    buffer_size=10000,             # 缓冲区大小（条数）
+    max_buffer_input_shards=4,     # 同时缓冲的 shard 数量
+)
+
+# 原理：同时打开 4 个 shard，各读取一部分到缓冲区，
+# 在缓冲区内随机排列输出。这比单 shard 的洗牌效果好得多。</code></pre>
+
+        <div class="tip">
+            <strong>小技巧：</strong>如果你训练的 epoch 数 > 1，流式模式每次迭代都会重新下载数据——这看起来很低效，但实际上因为数据量太大，重新下载比缓存到本地再读取常常更快（磁盘 I/O 可能成为瓶颈）。你可以通过 <code>load_dataset(..., streaming=True).take(1000)</code> 来快速测试数据加载流程。
+        </div>
+
+        <h2>流式数据的处理模式</h2>
+
+        <p>流式数据上的 map 和 filter 行为与常规模式有显著差异，理解这些差异对避免 bug 至关重要：</p>
+
+        <pre><code>from datasets import load_dataset
+
+dataset = load_dataset("c4", "en", split="train", streaming=True)
+
+# 流式 map：惰性执行
+# 注意：流式 map 不支持 num_proc 参数！
+def clean(example):
+    example["text"] = example["text"].strip()
+    return example
+
+dataset_cleaned = dataset.map(clean)
+# 此时没有实际执行任何计算！
+# 只有当你迭代 dataset_cleaned 时，clean 函数才被调用
+
+# 流式 filter：也是惰性执行
+def is_long_enough(example):
+    return len(example["text"]) > 100
+
+dataset_filtered = dataset_cleaned.filter(is_long_enough)
+
+# 实际迭代
+count = 0
+for example in dataset_filtered:
+    print(example["text"][:50])
+    count += 1
+    if count >= 3:
+        break
+
+# 流式支持的操作有限
+# ✅ 支持的：map, filter, take, skip, shuffle, interleave, flatten
+# ❌ 不支持的：select, sort, train_test_split, class_encode_column</code></pre>
+
+        <div class="warning">
+            <strong>关键限制：</strong>流式模式下，map 不支持 <code>num_proc</code> 参数！流式数据从设计上就是单进程的迭代器，多进程的语义在这里没有意义（每个进程会重新拉取数据流）。如果你需要对流式数据做多进程加速，正确的做法是先 <code>dataset.to_iterable_dataset()</code> 看看是否支持多进程，或者改用常规模式做预处理后再流式读取。
+        </div>
+
+        <h3>interleave / skip / take</h3>
+
+        <p>除了基础的 map 和 filter，IterableDataset 还提供了几个流式场景专用的操作：</p>
+
+        <pre><code># take: 只取前 N 条
+c4_sample = load_dataset("c4", "en", split="train", streaming=True)
+few_samples = c4_sample.take(10)  # 迭代器，只产生 10 条
+
+# skip: 跳过前 N 条
+after_100 = c4_sample.skip(100)   # 跳过前 100 条
+
+# interleave: 交错多个数据集
+dataset1 = load_dataset("c4", "en", split="train", streaming=True)
+dataset2 = load_dataset("fineweb", "en", split="train", streaming=True)
+
+# 从两个数据集中交替取数据
+from datasets import interleave_datasets
+mixed = interleave_datasets(
+    [dataset1, dataset2],
+    probabilities=[0.7, 0.3],  # 70% C4, 30% FineWeb
+    seed=42,
+)</code></pre>
+
+        <h2>内存优化策略</h2>
+
+        <p>即使使用了 streaming=True，不加控制的内存使用也可能导致 OOM。以下是几个重要的内存控制策略：</p>
+
+        <pre><code>from datasets import load_dataset
+
+# 1. 控制 batch_size
+dataset = load_dataset("c4", "en", split="train", streaming=True)
+
+# 不要一次性取太多数据
+# ❌ 错误：把所有数据转换为 list
+# all_data = list(dataset)
+
+# ✅ 正确：按 batch 迭代
+batch = []
+for i, example in enumerate(dataset):
+    batch.append(example)
+    if len(batch) == 32:  # 每 32 条处理一次
+        # 处理 batch
+        batch = []
+
+# 2. 利用 prefetch 机制
+# datasets 内部使用多线程 prefetch 来隐藏 I/O 延迟
+# 你可以通过环境变量调整 prefetch 大小
+# export HF_DATASETS_STREAMING_PREFETCH_SIZE=1000
+
+# 3. 100GB 数据 → 10GB 内存的实战配置
+def create_memory_efficient_pipeline():
+    """创建一个在 10GB 内存上处理 100GB 数据的管线"""
+    dataset = load_dataset(
+        "c4", "en",
+        split="train",
+        streaming=True,
+    )
+
+    # 预处理尽可能早地压缩数据
+    def compress(example):
+        # 丢弃原始文本中的冗余空格
+        example["text"] = " ".join(example["text"].split())
+        return example
+
+    dataset = dataset.map(compress)
+
+    # 过滤掉空文本
+    dataset = dataset.filter(lambda x: len(x["text"]) > 0)
+
+    return dataset
+
+# 使用 yield 返回迭代器，避免构建中间列表
+def batch_iterator(dataset, batch_size=8):
+    batch = []
+    for example in dataset:
+        batch.append(example)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch</code></pre>
+
+        <h2>流式训练完整示例</h2>
+
+        <p>让我们把所有知识整合成一个完整的流式训练示例——从流式加载到训练循环：</p>
+
+        <pre><code>from datasets import load_dataset
+from transformers import AutoTokenizer
+
+# 1. 流式加载
+dataset = load_dataset(
+    "c4", "en",
+    split="train",
+    streaming=True,
+)
+
+# 2. 流式预处理（惰性）
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+def preprocess(example):
+    encoded = tokenizer(
+        example["text"],
+        truncation=True,
+        max_length=512,
+        padding=False,
+    )
+    return {
+        "input_ids": encoded["input_ids"],
+        "attention_mask": encoded["attention_mask"],
+    }
+
+dataset = dataset.map(preprocess, batched=True, batch_size=1000)
+
+# 3. 洗牌
+dataset = dataset.shuffle(seed=42, buffer_size=10000)
+
+# 4. 训练循环（伪代码）
+def train_on_stream(dataset, num_steps=1000, batch_size=16):
+    optimizer = ...  # 你的优化器
+    model = ...      # 你的模型
+
+    batch = []
+    for step, example in enumerate(dataset):
+        if step >= num_steps * batch_size:
+            break
+
+        batch.append(example)
+        if len(batch) == batch_size:
+            # 将 batch 转换为张量
+            inputs = {
+                "input_ids": torch.tensor([b["input_ids"] for b in batch]),
+                "attention_mask": torch.tensor([b["attention_mask"] for b in batch]),
+            }
+            # 前向 + 反向
+            outputs = model(**inputs)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            batch = []
+
+            if step % (100 * batch_size) == 0:
+                print(f"Step {step // batch_size}, Loss: {loss.item():.4f}")
+
+# 性能基准：流式 vs 非流式
+</code></pre>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>对比场景</th>
+                    <th>非流式</th>
+                    <th>流式</th>
+                    <th>备注</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>数据集大小</td>
+                    <td>5GB</td>
+                    <td>5GB</td>
+                    <td>两者都能处理</td>
+                </tr>
+                <tr>
+                    <td>内存峰值</td>
+                    <td>8.5 GB</td>
+                    <td>1.2 GB</td>
+                    <td>流式占优</td>
+                </tr>
+                <tr>
+                    <td>首次迭代延迟</td>
+                    <td>120 秒（下载+加载）</td>
+                    <td>0.5 秒</td>
+                    <td>流式秒开</td>
+                </tr>
+                <tr>
+                    <td>步进速度（step/s）</td>
+                    <td>12.3</td>
+                    <td>11.8</td>
+                    <td>差距极小</td>
+                </tr>
+                <tr>
+                    <td>数据集大小</td>
+                    <td>500GB</td>
+                    <td>500GB</td>
+                    <td>非流式不可用</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>结论：</strong>当数据集可以放入内存时，流式和常规模式在训练速度上几乎没有差别。但当数据集超出内存时，流式模式是唯一的选择。与其等数据全量下载完再训练，不如在数据流到达的第一时间就开始训练。这个思路转换会让你在处理大数据集时的效率提升一个数量级。
+        </div>
+
+        <p>流式处理让你能处理"一台机器放不下"的数据集。但当我们进入分布式训练场景时，你还需要额外解决"多个 GPU 怎么分数据"的问题——每个 GPU 都要看到不同的数据，但都不能加载全部数据。下一章的数据分片和分布式训练正好解决这个问题。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

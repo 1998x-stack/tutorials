@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 filter() 与数据筛选</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI数据集全景图</a></li>
+            <li><a href="02.html">第2章 datasets库快速上手</a></li>
+            <li><a href="03.html">第3章 数据集元信息与特征系统</a></li>
+            <li><a href="04.html">第4章 Arrow：高性能数据后端</a></li>
+            <li><a href="05.html">第5章 数据类型与格式转换</a></li>
+            <li><a href="06.html">第6章 数据集的下载与缓存机制</a></li>
+            <li><a href="07.html">第7章 Split切分与采样策略</a></li>
+            <li><a href="08.html">第8章 map() 数据处理核心</a></li>
+            <li><a href="09.html" class="active">第9章 filter() 与数据筛选</a></li>
+            <li><a href="10.html">第10章 文本数据预处理实战</a></li>
+            <li><a href="11.html">第11章 图像与音频数据预处理</a></li>
+            <li><a href="12.html">第12章 流式处理与大数据策略</a></li>
+            <li><a href="13.html">第13章 数据分片与分布式训练</a></li>
+            <li><a href="14.html">第14章 数据版本管理与可复现性</a></li>
+            <li><a href="15.html">第15章 数据管线性能优化</a></li>
+            <li><a href="16.html">第16章 常见踩坑与故障排查</a></li>
+            <li><a href="17.html">第17章 数据质量评估与清洗</a></li>
+            <li><a href="18.html">第18章 数据集合规与许可证</a></li>
+            <li><a href="19.html">第19章 NLP经典数据集</a></li>
+            <li><a href="20.html">第20章 计算机视觉经典数据集</a></li>
+            <li><a href="21.html">第21章 语音与多模态数据集</a></li>
+            <li><a href="22.html">第22章 GNN与RL专项数据集</a></li>
+            <li><a href="23.html">第23章 数据EDA与可视化工具</a></li>
+            <li><a href="24.html">第24章 自定义数据集构建</a></li>
+            <li><a href="25.html">第25章 数据管线自动化</a></li>
+            <li><a href="26.html">第26章 2026最新特性与趋势</a></li>
+            <li><a href="27.html">第27章 前沿基准数据集巡览</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第9章：filter() 与数据筛选</h2>
+
+        <p>做数据和淘金很像：你挖到的矿石（原始数据）通常含金量很低，需要用水流冲洗掉大量泥沙，才能得到闪闪发光的金粒。<code>filter()</code> 就是你的淘金筛子——它让你保留想要的，剔除不想要的。</p>
+
+        <p>在 datasets 库中，filter 是 map 的亲密搭档。map 负责"变换"，filter 负责"筛选"。两者组合起来，你可以构建出任意复杂度的数据清洗管线。但 filter 比 map 更危险——因为错误的筛选可能会在你不经意间破坏数据分布，而分布偏移的代价往往要到模型训练结束后才会暴露。这一章我们既要学会怎么用 filter，更要学会"谨慎地"用 filter。</p>
+
+        <div class="highlight">
+            <strong>核心认知：</strong>filter 不只是"扔掉坏数据"，它本质上是在重新定义你的数据分布。每次调用 filter，你都应该问自己：被扔掉的那部分数据和保留的部分，在分布上有什么系统性的差异？这个差异会不会影响模型的泛化能力？
+        </div>
+
+        <h2>filter() 方法基础</h2>
+
+        <p>filter 的函数签名非常简洁——比 map 简单得多：</p>
+
+        <pre><code>from datasets import Dataset
+
+def filter(
+    self,
+    function,              # 返回 bool 值的函数
+    with_indices=False,    # 是否传入索引
+    input_schema=None,     # 输入格式约束
+    keep_in_memory=False,  # 结果保留在内存
+    load_from_cache_file=True,  # 是否使用缓存
+    cache_file_name=None,  # 自定义缓存文件
+    num_proc=None,         # 多进程数量
+    fn_kwargs=None,        # 额外参数
+    desc=None,             # 进度条描述
+):</code></pre>
+
+        <p>核心逻辑极其直观：对每个样本执行 <code>function(example)</code>，如果返回 <code>True</code> 则保留该样本，返回 <code>False</code> 则丢弃。</p>
+
+        <pre><code>from datasets import load_dataset
+
+dataset = load_dataset("imdb", split="train")
+print(f"原始样本数: {len(dataset)}")  # 25000
+
+# 最简单的 filter：保留 label=1（正面评价）
+positive = dataset.filter(lambda x: x["label"] == 1)
+print(f"正面评价数: {len(positive)}")  # 12500（正好一半）
+
+# filter 也支持 num_proc 加速
+long_reviews = dataset.filter(
+    lambda x: len(x["text"]) > 500,
+    num_proc=4
+)
+print(f"长评论数: {len(long_reviews)}")</code></pre>
+
+        <p>filter 和 map 一样，支持 <code>with_indices=True</code>，此时函数接收两个参数：样本和索引。这在基于位置筛选场景中很实用：</p>
+
+        <pre><code># 保留索引为偶数的样本（模拟降采样）
+even_samples = dataset.filter(
+    lambda example, idx: idx % 2 == 0,
+    with_indices=True
+)</code></pre>
+
+        <h3>批量 filter 模式</h3>
+
+        <p>与 map 不同，filter 的 <code>batched</code> 参数不是直接支持的。但你可以通过 map 结合条件筛选来实现类似的效果：先用 map 生成一个布尔列，再用 filter 保留对应样本：</p>
+
+        <pre><code># 两步法实现"批量 filter"
+def compute_keep_flag(batch):
+    # 批处理计算是否保留
+    batch["_keep"] = [
+        len(text) > 100 and "spoiler" not in text.lower()
+        for text in batch["text"]
+    ]
+    return batch
+
+# 第一步：map 生成保留标记
+dataset = dataset.map(compute_keep_flag, batched=True)
+# 第二步：filter 按标记筛选
+dataset = dataset.filter(lambda x: x["_keep"])
+# 第三步：清理标记列
+dataset = dataset.remove_columns(["_keep"])</code></pre>
+
+        <div class="tip">
+            <strong>小技巧：</strong>两步法虽然看起来繁琐，但最大的好处是你可以先跑 map 生成标记列，检查标记的正确性（比如统计分布），确认无误后再执行 filter。这比在 filter 函数里直接写复杂逻辑更容易调试。
+        </div>
+
+        <h2>多条件组合筛选</h2>
+
+        <p>实际项目中的筛选条件很少只有一个。你需要同时满足多个条件，或者满足任意一个条件即可。Python 的逻辑运算符就是你的组合工具：</p>
+
+        <pre><code>from datasets import load_dataset
+
+dataset = load_dataset("imdb", split="train")
+
+# AND 条件：长文本 + 正面评价
+def is_quality_review(example):
+    return (
+        len(example["text"]) >= 200          # 有足够内容量
+        and example["label"] == 1             # 正面评价
+        and "spoiler" not in example["text"].lower()  # 无剧透
+    )
+
+quality = dataset.filter(is_quality_review)
+print(f"质量评价数: {len(quality)} / {len(dataset)}")
+
+# OR 条件：要么很短要么很长
+def is_extreme_length(example):
+    return len(example["text"]) < 100 or len(example["text"]) > 2000
+
+extreme = dataset.filter(is_extreme_length)</code></pre>
+
+        <p>链式 filter 也是常用的写法——每个 filter 只负责一个条件，代码更清晰：</p>
+
+        <pre><code># 链式 filter：每个条件独立
+pipeline = (
+    dataset
+    .filter(lambda x: len(x["text"]) >= 200)      # 长度下限
+    .filter(lambda x: x["label"] == 1)             # 正面
+    .filter(lambda x: "movie" in x["text"].lower()) # 包含特定词
+)</code></pre>
+
+        <h3>按列值范围过滤</h3>
+
+        <p>对于数值型的特征列，你可以构建区间过滤器。这在处理表格类数据集时尤其常见：</p>
+
+        <pre><code># 假设有一个包含评分的数据集
+# dataset = load_dataset("your_dataset")
+# 保留评分在 3.5 到 5.0 之间的样本
+# filtered = dataset.filter(
+#     lambda x: 3.5 <= x["rating"] <= 5.0
+# )</code></pre>
+
+        <div class="highlight">
+            <strong>实战：清洗 IMDB 里少于 50 字的评价</strong>
+            <p>IMDB 数据集中的一些评论只有一句话甚至几个词，比如 "Great movie!" 或 "Terrible."。这些样本携带的信息量极少，对训练分类器几乎没有帮助，反而会增加噪声。</p>
+        </div>
+
+        <pre><code>from datasets import load_dataset
+import re
+
+dataset = load_dataset("imdb", split="train")
+
+def has_meaningful_content(example):
+    text = example["text"]
+    # 去掉 HTML 标签后计算实际字数
+    clean = re.sub(r'<[^>]+>', '', text)
+    words = clean.split()
+    # 保留至少 50 个单词的评论
+    return len(words) >= 50
+
+# 看看过滤掉了多少
+original_count = len(dataset)
+filtered = dataset.filter(has_meaningful_content)
+removed = original_count - len(filtered)
+print(f"原始: {original_count}, 过滤后: {len(filtered)}, 移除: {removed} ({removed/original_count*100:.1f}%)")</code></pre>
+
+        <h2>索引级操作：select / take</h2>
+
+        <p>filter 是按"条件"选择数据，而 <code>select</code> 和 <code>take</code> 是按"位置"选择数据。它们是 filter 的有效补充，在某些场景下更直接：</p>
+
+        <pre><code>from datasets import load_dataset
+
+dataset = load_dataset("imdb", split="train")
+
+# select：按索引列表选择
+subset = dataset.select([0, 5, 10, 100, 1000])
+print(subset[0])  # 第 0 条
+print(len(subset))  # 5
+
+# take：取前 N 条
+first_10 = dataset.take(10)
+
+# 随机采样（不重复）
+import random
+random.seed(42)
+rand_indices = random.sample(range(len(dataset)), 1000)
+random_subset = dataset.select(rand_indices)</code></pre>
+
+        <p>select 还有一个隐藏技能——它可以用来做"反向筛选"：先选出不要的索引，然后取差集：</p>
+
+        <pre><code># 假设我们要去掉前 1000 条
+total = len(dataset)
+keep_indices = list(range(1000, total))
+subset = dataset.select(keep_indices)
+print(f"去掉前1000条后: {len(subset)}")</code></pre>
+
+        <div class="warning">
+            <strong>性能提示：</strong>select 和 take 不会触发 map 式的缓存。它们直接操作 Arrow 索引，本质上只是"视图"，不复制数据。因此无论选择多少条，select 都是 O(1) 时间——这只是指针操作。但需要注意，select 返回的 Dataset 对象上的 filter 操作仍然会重新扫描整个数据集（取决于实现细节）。
+        </div>
+
+        <h3>select 与 filter 的互补关系</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>操作</th>
+                    <th>选择依据</th>
+                    <th>返回类型</th>
+                    <th>典型场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>filter()</code></td>
+                    <td>条件函数（True/False）</td>
+                    <td>Dataset（行过滤）</td>
+                    <td>质量过滤、标签筛选、长度控制</td>
+                </tr>
+                <tr>
+                    <td><code>select()</code></td>
+                    <td>显式索引列表</td>
+                    <td>Dataset（视图）</td>
+                    <td>按需取子集、随机采样、反向排除</td>
+                </tr>
+                <tr>
+                    <td><code>take()</code></td>
+                    <td>前 N 条</td>
+                    <td>Dataset（视图）</td>
+                    <td>快速查看样本、小批量调试</td>
+                </tr>
+                <tr>
+                    <td><code>shuffle()</code> + <code>select()</code></td>
+                    <td>随机化后取前 N</td>
+                    <td>Dataset</td>
+                    <td>随机采样固定大小子集</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>数据标注质量筛选</h2>
+
+        <p>在监督学习中，标注错误是灾难性的。单个错误标注可能会影响模型对整类样本的决策边界。filter 可以用来做标注质量的初步筛查：</p>
+
+        <pre><code># 假设你的数据集有多个标注者的标注结果
+# 结构：{"text": "...", "label_a": 1, "label_b": 2, "label_c": 1}
+# 你需要排除那些标注者之间不一致的样本
+
+def check_annotator_agreement(example):
+    labels = [example["label_a"], example["label_b"], example["label_c"]]
+    # 至少有 2/3 一致
+    from collections import Counter
+    most_common = Counter(labels).most_common(1)[0]
+    # 最共同的标注至少要占 2/3
+    return most_common[1] >= 2
+
+# high_confidence = dataset.filter(check_annotator_agreement)</code></pre>
+
+        <p>更专业的做法是计算标注者间的<strong>Kappa 系数</strong>，用来衡量标注一致性是否高于随机水平：</p>
+
+        <pre><code>def fleiss_kappa(annotations_matrix):
+    """
+    annotations_matrix: list of list, 每行是一个样本在各位标注者上的标注
+    返回 Fleiss' Kappa 系数
+    """
+    n_samples = len(annotations_matrix)
+    n_annotators = len(annotations_matrix[0])
+    # 这里简化处理，实际实现需要按类别统计
+    # 高于 0.6 算中等一致性，高于 0.8 算高度一致
+    pass</code></pre>
+
+        <div class="tip">
+            <strong>实践建议：</strong>在正式训练之前，先跑一个"数据质量审计"管线。统计每个样本对应的各个标注者的一致性，保留一致性高的样本作为训练集，一致性低的样本送去复审。这个简单的 filter 操作往往能带来 5-10% 的效果提升。
+        </div>
+
+        <h2>筛选策略与数据偏倚</h2>
+
+        <p>现在要讲 filter 最危险的一面。<strong>过度筛选举手之间就会破坏你的数据分布。</strong>来看一个真实的教训。</p>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>某 NLP 团队在做文本分类任务时，为了控制输入长度，filter 掉了所有超过 512 token 的文本。逻辑看起来无懈可击——模型最长上下文就是 512，超长的文本反正也要被截断。但他们没注意到的是：长文本和短文本在语义分布上是有偏的。技术文档、学术论文、法律合同普遍较长（>512 token），而社交媒体帖子、产品评论普遍较短。过滤掉长文本后，训练集里几乎没有了"正式文体"的样本。结果模型在评测集上表现不错，但上线后面对企业用户的正式文档时完全无法工作——模型从来没在训练中见过这种长度的文本。团队花了三周才定位到问题：不是模型架构的问题，是数据筛选把长文本分布整个砍掉了。
+        </div>
+
+        <h3>筛选前后分布对比</h3>
+
+        <p>每次执行 filter 后，都应该检查筛选前后的分布变化：</p>
+
+        <pre><code>from datasets import load_dataset
+import numpy as np
+
+dataset = load_dataset("imdb", split="train")
+
+# 筛选前：计算文本长度分布
+lengths_before = np.array([len(x["text"]) for x in dataset])
+print(f"筛选前: 均值={lengths_before.mean():.0f}, 中位数={np.median(lengths_before):.0f}, "
+      f"标准差={lengths_before.std():.0f}")
+
+# 做筛选：长度在 200-2000 之间
+filtered = dataset.filter(
+    lambda x: 200 <= len(x["text"]) <= 2000
+)
+
+# 筛选后：再次检查分布
+lengths_after = np.array([len(x["text"]) for x in filtered])
+print(f"筛选后: 均值={lengths_after.mean():.0f}, 中位数={np.median(lengths_after):.0f}, "
+      f"标准差={lengths_after.std():.0f}")
+
+print(f"移除了 {(1 - len(filtered)/len(dataset))*100:.1f}% 的数据")</code></pre>
+
+        <h3>保留筛选日志</h3>
+
+        <p>任何生产级的 filter 操作都应该记录日志：谁在什么时候执行了什么条件，过滤掉了多少样本，分布发生了什么变化。这在排查模型效果回退时至关重要：</p>
+
+        <pre><code>import json
+import datetime
+
+class FilterLogger:
+    def __init__(self):
+        self.logs = []
+
+    def apply_filter(self, dataset, filter_fn, name, **kwargs):
+        before = len(dataset)
+        result = dataset.filter(filter_fn, **kwargs)
+        after = len(result)
+        entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "name": name,
+            "before": before,
+            "after": after,
+            "removed": before - after,
+            "removed_pct": round((before - after) / before * 100, 2),
+        }
+        self.logs.append(entry)
+        print(f"[{name}] 移除 {entry['removed']} 条 ({entry['removed_pct']}%)")
+        return result
+
+    def save(self, path="filter_log.json"):
+        with open(path, "w") as f:
+            json.dump(self.logs, f, indent=2, ensure_ascii=False)</code></pre>
+
+        <div class="highlight">
+            <strong>最佳实践：</strong>构建数据管线时，把每条 filter 操作当作一个"设计决策"来对待——记录它、度量它、审计它。一个好的数据团队和一般的团队之间的区别，往往就在于是否系统性地追踪了数据的每一次"删减"。
+        </div>
+
+        <p>掌握了 filter 之后，下一章我们要进入真正的预处理实战——文本数据。你将看到 map 和 filter 如何协同工作，构建端到端的文本预处理管线，包括中文分词、tokenization 和模板构建。所有这些操作的核心思想，都是我们在这两章中建立起来的。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

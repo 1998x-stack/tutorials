@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 图像与音频数据预处理</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI数据集全景图</a></li>
+            <li><a href="02.html">第2章 datasets库快速上手</a></li>
+            <li><a href="03.html">第3章 数据集元信息与特征系统</a></li>
+            <li><a href="04.html">第4章 Arrow：高性能数据后端</a></li>
+            <li><a href="05.html">第5章 数据类型与格式转换</a></li>
+            <li><a href="06.html">第6章 数据集的下载与缓存机制</a></li>
+            <li><a href="07.html">第7章 Split切分与采样策略</a></li>
+            <li><a href="08.html">第8章 map() 数据处理核心</a></li>
+            <li><a href="09.html">第9章 filter() 与数据筛选</a></li>
+            <li><a href="10.html">第10章 文本数据预处理实战</a></li>
+            <li><a href="11.html" class="active">第11章 图像与音频数据预处理</a></li>
+            <li><a href="12.html">第12章 流式处理与大数据策略</a></li>
+            <li><a href="13.html">第13章 数据分片与分布式训练</a></li>
+            <li><a href="14.html">第14章 数据版本管理与可复现性</a></li>
+            <li><a href="15.html">第15章 数据管线性能优化</a></li>
+            <li><a href="16.html">第16章 常见踩坑与故障排查</a></li>
+            <li><a href="17.html">第17章 数据质量评估与清洗</a></li>
+            <li><a href="18.html">第18章 数据集合规与许可证</a></li>
+            <li><a href="19.html">第19章 NLP经典数据集</a></li>
+            <li><a href="20.html">第20章 计算机视觉经典数据集</a></li>
+            <li><a href="21.html">第21章 语音与多模态数据集</a></li>
+            <li><a href="22.html">第22章 GNN与RL专项数据集</a></li>
+            <li><a href="23.html">第23章 数据EDA与可视化工具</a></li>
+            <li><a href="24.html">第24章 自定义数据集构建</a></li>
+            <li><a href="25.html">第25章 数据管线自动化</a></li>
+            <li><a href="26.html">第26章 2026最新特性与趋势</a></li>
+            <li><a href="27.html">第27章 前沿基准数据集巡览</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第11章：图像与音频数据预处理</h2>
+
+        <p>如果说文本数据是"一维的字符序列"，那么图像和音频数据就进入了完全不同的游戏——它们是多维的、连续的、高度依赖物理采样过程的信号。一张 JPEG 图片不只是"像素值的二维排列"——它可能带有 EXIF 方向信息、色彩空间配置、不同的位深度。一段 WAV 录音也不只是"采样点的数组"——它有采样率、声道数、编码格式这些直接影响模型理解的元信息。</p>
+
+        <p>这一章我们将覆盖图像和音频两大模态的预处理实战。如果你既不做 CV 也不做语音，完全可以跳过部分内容。但如果你在做多模态模型——那这两块内容你都必须掌握，因为多模态模型训练中最大的坑往往来自"模态之间的预处理不一致"。</p>
+
+        <div class="highlight">
+            <strong>核心认知：</strong>图像和音频预处理的核心矛盾是"标准化需求 vs 格式多样性"。模型期望的输入是标准化张量（如 3x224x224、80xTime 的 mel spectrogram），但原始数据的格式千奇百怪。预处理管线的核心任务就是搭好这座桥。
+        </div>
+
+        <h2>图像预处理管线</h2>
+
+        <p>datasets 库处理图像的方式很巧妙——它不做自动解码。当你加载一个包含图像列的数据集时，图像以原始二进制 bytes 存储，只有在你真正访问时才会被解码为 PIL Image。这种"惰性解码"策略节省了大量内存和 I/O。</p>
+
+        <pre><code>from datasets import load_dataset
+from PIL import Image
+import torchvision.transforms as T
+
+# 加载 CIFAR-10 数据集
+dataset = load_dataset("cifar10", split="train")
+print(dataset[0]["img"])
+# <PIL.Image.Image image mode=RGB size=32x32 at 0x...>
+# 图像已经自动解码为 PIL Image
+
+# 定义 torchvision 变换
+transform = T.Compose([
+    T.Resize((224, 224)),            # 统一尺寸
+    T.ToTensor(),                     # PIL → Tensor (C×H×W, [0,1])
+    T.Normalize(                      # 标准化到 ImageNet 统计量
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    ),
+])
+
+# 在 map 中应用变换
+def apply_transform(batch):
+    batch["pixel_values"] = [
+        transform(img) for img in batch["img"]
+    ]
+    return batch
+
+dataset_transformed = dataset.map(
+    apply_transform,
+    batched=True,
+    remove_columns=["img"],  # 原始 PIL Image 不再需要
+)
+print(dataset_transformed[0]["pixel_values"].shape)
+# torch.Size([3, 224, 224])</code></pre>
+
+        <div class="tip">
+            <strong>小技巧：</strong>如果你的数据集有 "image" 或 "img" 列，datasets 会自动识别为 Image 类型。你也可以用 <code>dataset.cast_column("image", Image())</code> 手动指定图像列。<code>Image()</code> 是 datasets 库中的图像特征类型，它会自动处理解码和格式转换。
+        </div>
+
+        <h2>数据增强策略</h2>
+
+        <p>数据增强是图像领域中最有效的"免费"性能提升手段之一。合适的增强策略可以让模型泛化能力显著提升，但过度或不当的增强反而会伤害性能。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>增强操作</th>
+                    <th>参数</th>
+                    <th>适用场景</th>
+                    <th>注意事项</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>RandomHorizontalFlip</td>
+                    <td>p=0.5</td>
+                    <td>通用分类、检测</td>
+                    <td>文字识别禁用（文字翻转不可读）</td>
+                </tr>
+                <tr>
+                    <td>RandomRotation</td>
+                    <td>±10° ~ ±30°</td>
+                    <td>通用分类</td>
+                    <td>过大旋转会导致信息损失</td>
+                </tr>
+                <tr>
+                    <td>ColorJitter</td>
+                    <td>brightness=0.2, contrast=0.2</td>
+                    <td>通用分类</td>
+                    <td>颜色敏感任务慎用</td>
+                </tr>
+                <tr>
+                    <td>RandomResizedCrop</td>
+                    <td>scale=(0.08, 1.0)</td>
+                    <td>分类（Inception 风格）</td>
+                    <td>目标检测需要匹配 bbox</td>
+                </tr>
+                <tr>
+                    <td>GaussianBlur</td>
+                    <td>kernel_size=3</td>
+                    <td>自监督学习（SimCLR 风格）</td>
+                    <td>分类任务谨慎</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>在线增强 vs 离线增强的选择也是一个重要的决策点：</p>
+
+        <pre><code># 在线增强（推荐）：在 map 中做基础标准化 + 训练时用 transforms
+# 这里在 map 中只做 resize 和 tensor 转换
+def preprocess_images(batch):
+    resize = T.Resize((256, 256))
+    to_tensor = T.ToTensor()
+    batch["pixel_values"] = [
+        to_tensor(resize(img)) for img in batch["img"]
+    ]
+    return batch
+
+dataset_processed = dataset.map(preprocess_images, batched=True)
+
+# 训练时：DataLoader 中应用随机增强
+train_transform = T.Compose([
+    T.RandomCrop((224, 224)),
+    T.RandomHorizontalFlip(),
+    T.ColorJitter(0.2, 0.2),
+    T.Normalize(mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]),
+])</code></pre>
+
+        <div class="highlight">
+            <strong>性能建议：</strong>数据增强操作应该放在训练循环中（在线增强），而不是在 map 预处理中完成。原因有两个：第一，增强需要随机性，每个 epoch 应该看到不同的增强版本，如果在 map 中固定了增强结果，模型每个 epoch 看到的是同一份数据；第二，GPU 可以加速部分增强操作，比如在 torchvision 中 ToTensor 和 Normalize 都是 GPU 友好的。
+        </div>
+
+        <h3>albumentations vs torchvision</h3>
+
+        <p>两个主流增强库各有优劣：torchvision 集成方便、不引入额外依赖，适合标准增强；albumentations 增强种类更多、性能略优，且支持检测/分割任务的 bbox 和 mask 同步变换。</p>
+
+        <h2>不同格式的图像加载</h2>
+
+        <p>图像格式的多样性是预处理管线中最容易被低估的复杂性来源。</p>
+
+        <pre><code># 检查图像格式和元信息
+def inspect_image(example):
+    img = example["img"]  # PIL Image
+    print(f"格式: {img.format}")     # JPEG, PNG, TIFF, ...
+    print(f"模式: {img.mode}")       # RGB, L(灰度), RGBA, ...
+    print(f"尺寸: {img.size}")       # (width, height)
+    print(f"位深度: {img.bits}")     # 仅部分格式支持
+
+# 处理不同通道顺序
+def convert_to_rgb(img):
+    """统一转为 RGB 格式"""
+    if img.mode == "RGBA":
+        return img.convert("RGB")
+    elif img.mode == "L":
+        return img.convert("RGB")  # 灰度图转 3 通道
+    elif img.mode == "CMYK":
+        return img.convert("RGB")
+    return img  # 已经是 RGB</code></pre>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>某医疗 AI 团队接手了一个肺部 CT 结节检测项目。数据集来自多家医院，以标准 DICOM 格式提供。团队很有经验，直接套用了之前在自然图像项目上的预处理管线——用 PIL 打开、resize、归一化、训练。第一次训练结束，验证准确率只有 52%。排查了两周，最后发现问题出在数据处理环节：DICOM 是 16 位灰度深度（0-65535），但团队的预处理脚本用了 Image.open()，而 PIL 默认把 16 位图像当作 8 位处理，导致像素值被截断到 0-255。CT 图像中关键的肺结节——那些低对比度的毛玻璃结节——在 8 位量化后几乎完全消失。团队用 8 位的数据训练了一个"瞎子"模型。<br><br>
+            正确做法：医学影像必须使用专门的库（如 pydicom）加载，保持原始位深度，在归一化时才做线性映射到 0-255 或 0-1。
+        </div>
+
+        <h2>音频数据预处理</h2>
+
+        <p>音频数据预处理的出发点与图像类似——原始音频文件的格式、采样率、声道数各异，需要统一为标准格式。常用的音频处理库有 <code>librosa</code>（最全面）和 <code>torchaudio</code>（PyTorch 原生）。</p>
+
+        <pre><code>import torchaudio
+import torchaudio.transforms as AT
+import torch
+
+# 加载音频文件的基本信息
+def inspect_audio(example):
+    waveform, sample_rate = example["audio"]
+    # waveform: [channels, samples]
+    # sample_rate: 采样率（Hz）
+    print(f"波形形状: {waveform.shape}")
+    print(f"采样率: {sample_rate} Hz")
+    print(f"时长: {waveform.shape[1] / sample_rate:.2f} 秒")
+    print(f"声道数: {waveform.shape[0]}")
+
+# 核心操作：重采样到目标采样率
+def resample_audio(waveform, orig_sr, target_sr=16000):
+    """将音频重采样到目标采样率（通常 ASR 用 16kHz）"""
+    resampler = torchaudio.transforms.Resample(
+        orig_freq=orig_sr,
+        new_freq=target_sr,
+    )
+    return resampler(waveform), target_sr
+
+# 提取 Mel Spectrogram
+def extract_mel_spec(waveform, sample_rate):
+    mel_transform = AT.MelSpectrogram(
+        sample_rate=sample_rate,
+        n_fft=400,
+        hop_length=160,
+        n_mels=80,  # 常用设置
+    )
+    mel_spec = mel_transform(waveform)
+
+    # 转换为对数刻度（dB）
+    mel_spec_db = AT.AmplitudeToDB()(mel_spec)
+    return mel_spec_db  # [channels, n_mels, time]
+
+# MFCC 特征提取
+def extract_mfcc(waveform, sample_rate):
+    mfcc_transform = AT.MFCC(
+        sample_rate=sample_rate,
+        n_mfcc=13,
+        melkwargs={"n_fft": 400, "hop_length": 160, "n_mels": 80},
+    )
+    return mfcc_transform(waveform)</code></pre>
+
+        <h2>批处理中的多模态对齐</h2>
+
+        <p>当你的数据集同时包含图像和音频时（比如视频理解、图文匹配），预处理需要确保不同模态的数据在 batch 维度和样本维度上对齐。这是多模态数据预处理最脆弱的一环。</p>
+
+        <pre><code>from datasets import load_dataset
+import torch
+import torchvision.transforms as T
+import torchaudio.transforms as AT
+
+def align_multimodal_batch(batch):
+    """对齐图像和音频到统一的 batch 格式"""
+
+    # 1. 图像处理：统一尺寸
+    img_transform = T.Compose([
+        T.Resize((224, 224)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]),
+    ])
+    batch["pixel_values"] = [
+        img_transform(img) for img in batch["image"]
+    ]
+
+    # 2. 音频处理：统一采样率 + Mel 特征
+    audio_arrays = []
+    for waveform, sample_rate in batch["audio"]:
+        # 重采样到 16kHz
+        if sample_rate != 16000:
+            resampler = AT.Resample(sample_rate, 16000)
+            waveform = resampler(waveform)
+        # 转换为 Mel 频谱
+        mel = AT.MelSpectrogram(
+            sample_rate=16000, n_mels=80
+        )(waveform)
+        audio_arrays.append(mel)
+
+    # 3. Padding/Truncation 到固定长度
+    max_time_steps = 300  # 假设最长 300 帧
+    padded_audios = []
+    for mel in audio_arrays:
+        if mel.shape[-1] >= max_time_steps:
+            padded_audios.append(mel[:, :, :max_time_steps])
+        else:
+            pad = max_time_steps - mel.shape[-1]
+            padded_audios.append(
+                torch.nn.functional.pad(mel, (0, pad))
+            )
+    batch["audio_features"] = padded_audios
+
+    # 4. 数据校验
+    n = len(batch["pixel_values"])
+    assert len(batch["audio_features"]) == n, \
+        f"图像和音频数量不匹配: {len(batch['pixel_values'])} vs {len(batch['audio_features'])}"
+
+    return batch
+
+# 在 map 中执行多模态对齐
+# dataset_aligned = dataset.map(
+#     align_multimodal_batch,
+#     batched=True,
+#     remove_columns=["image", "audio"],
+# )</code></pre>
+
+        <div class="highlight">
+            <strong>检查清单：</strong>在多模态对齐后，务必检查以下内容：<br>
+            1. 图像 pixel_values 的 shape 是否统一为 [3, H, W]？<br>
+            2. 音频特征的 time 维度是否在同一个时间尺度？<br>
+            3. 图像通道顺序是 RGB 还是 BGR？模型预期哪种？<br>
+            4. 音频采样率是否完全一致（16kHz vs 8kHz 差别巨大）？<br>
+            5. 有没有样本在某个模态上缺失（缺少图像或音频文件）？用 filter 排除。
+        </div>
+
+        <div class="tip">
+            <strong>实践建议：</strong>处理多模态数据时，先用一个很小的子集（比如 100 条）做完整的管线验证。检查每条样本的所有模态是否都存在、shape 是否正确、数值范围是否合理。这一步最多花 10 分钟，但可以避免在几十 TB 数据上跑完预处理后才发现 bug 的灾难。
+        </div>
+
+        <p>图像和音频预处理的核心是"理解你的数据的真实物理含义"。16 位的 CT 图像不是 8 位的 JPG，48kHz 的录音不能直接送进 16kHz 的语音模型。每一行预处理代码背后，都应该是对数据物理含义的尊重。下一章我们将把视角从"小数据"转向"大数据"——当你的数据集超过内存、超过磁盘、甚至超过单台机器的存储时，流式处理就成了你的救命稻草。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

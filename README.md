@@ -50,13 +50,14 @@ A collection of 42 free, comprehensive technical tutorials in Chinese — from f
 | 🔧 | 集成电路设计 · 从入门到精通 | 28 | [integrated-circuit-design-tutorial](https://1998x-stack.github.io/integrated-circuit-design-tutorial/) |
 | 🔧 | FPGA/Verilog 嵌入式开发 · 从入门到精通 | 28 | [fpga-verilog-tutorial](https://1998x-stack.github.io/fpga-verilog-tutorial/) |
 
-### 网络 / 通信 (4 courses)
+### 网络 / 通信 (5 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
 | 🌐 | HTTP协议 · 从入门到精通 | 28 | [HTTP-protocol-tutorial](https://1998x-stack.github.io/HTTP-protocol-tutorial/) |
 | 🚌 | CAN总线 · 从入门到精通 | 30 | [CAN-bus-tutorial](https://1998x-stack.github.io/CAN-bus-tutorial/) |
 | 🌐 | 以太网通信 | 28 | [ethernet-tutorial](https://1998x-stack.github.io/ethernet-tutorial/) |
+| 📡 | 电波传播与天线 · 从入门到精通 | 28 | [antenna-propagation-tutorial](https://1998x-stack.github.io/antenna-propagation-tutorial/) |
 | 📡 | 传感网技术 · 从入门到精通 | 28 | [sensor-network-tutorial](https://1998x-stack.github.io/sensor-network-tutorial/) |
 
 ### 经济 / 金融 (6 courses)

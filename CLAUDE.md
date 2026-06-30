@@ -51,12 +51,13 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `integrated-circuit-design-tutorial/` | 集成电路设计 | 28 | `https://1998x-stack.github.io/integrated-circuit-design-tutorial/` |
 | `fpga-verilog-tutorial/` | FPGA/Verilog 嵌入式开发 | 28 | `https://1998x-stack.github.io/fpga-verilog-tutorial/` |
 
-### 网络 / 通信 (4)
+### 网络 / 通信 (5)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `HTTP-protocol-tutorial/` | HTTP协议 | 28 | `https://1998x-stack.github.io/HTTP-protocol-tutorial/` |
 | `CAN-bus-tutorial/` | CAN总线通信 | 30 | `https://1998x-stack.github.io/CAN-bus-tutorial/` |
 | `ethernet-tutorial/` | 以太网通信 | 28 | `https://1998x-stack.github.io/ethernet-tutorial/` |
+| `antenna-propagation-tutorial/` | 电波传播与天线 | 28 | `https://1998x-stack.github.io/antenna-propagation-tutorial/` |
 | `sensor-network-tutorial/` | 传感网技术 | 28 | `https://1998x-stack.github.io/sensor-network-tutorial/` |
 
 ### 经济 / 金融 (6)

@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 模型合并与知识蒸馏</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html" class="active">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第22章 模型合并与知识蒸馏</h2>
+
+        <p>大家好，我是你们的讲师。想象一下这个场景：你花了几万美元用LoRA做了一个法律领域的微调模型，效果不错。你的同事做了一个代码能力特化的模型，也很强。你们能不能把两个模型合成一个——既懂法律又会写代码？或者另一个场景：你的70B模型精度非常好但推理太慢，能不能把它压缩成一个7B的版本，保留大部分能力？</p>
+
+        <p>这两个问题的答案分别是<strong>模型合并（Model Merging）</strong>和<strong>知识蒸馏（Knowledge Distillation）</strong>。它们都是在"不大规模重新训练"的前提下，对已有模型进行能力组合或压缩的核心技术。如果说前面几章讲的是"怎么训练一个好模型"，那么这一章讲的是"怎么利用已有的好模型创造更好的模型"。在实际工程中，这两项技术往往是性价比最高的效率杠杆——用最少的计算成本换取最大的能力提升。</p>
+
+        <h3>22.1 Model Merging方法论</h3>
+
+        <p>Model Merging的核心思想很直接：<strong>如果你有多个在同一个基座模型上微调得到的模型，它们的权重可以以某种方式"平均"在一起，得到一个同时具备所有能力的合并模型</strong>。这听起来像"把两张照片叠在一起"，但实际操作远没有那么简单——简单地对权重取平均通常会毁掉两个模型（这叫weight interference），因为不同微调任务学到的是不同方向上的参数偏移，直接平均会把两个方向都拉回原点。</p>
+
+        <p>真正有效的合并方法都围绕一个关键洞察：<strong>选择性地合并参数</strong>，而不是全盘平均。下面我们来对比几种主流方法。</p>
+
+        <p><strong>Linear Merging（线性合并）</strong>是最基础的baseline方法。公式很简单：<code>W_merged = (1-t) * W_A + t * W_B</code>，其中t是合并比例。当t=0.5时就是简单平均。Linear Merging在任务差异较小时（比如两个SFT数据质量差异很小的模型）还行，但任务差异大时效果很差。它的最大价值是作为"对照实验"——如果你用更高级的方法比Linear差，那说明你的高级方法有问题。</p>
+
+        <p><strong>TIES Merging（Trim Elect Sign Merge）</strong>是2023年提出的方法，也是目前最主流的方法之一。它分三步走：第一步<strong>trim</strong>——只保留每个模型中变化最显著的那部分参数（去掉噪声级的小变化）；第二步<strong>elect sign</strong>——对每个参数位置，投票选择合并方向（正或负）；第三步<strong>merge</strong>——对达成一致的参数做平均，对分歧的参数做重置（改成基座模型的原始值）。TIES的核心洞察是：<strong>合并冲突（parameter disagreement）是影响合并效果的主要因素</strong>，与其在两个冲突方向之间取一个折中值（这通常啥也不管用），不如不合并这个位置的参数。</p>
+
+        <p><strong>DARE Merging</strong>是2024年提出的改进方案，它在TIES的基础上增加了一个关键操作：<strong>random drop</strong>。DARE的核心发现是：微调产生的参数变化向量是高度冗余的——随机丢掉90-99%的变化量（drop rate 0.9-0.99），剩下的1-10%经过rescale后就能代表几乎全部微调效果。所以DARE的做法是：先对每个模型的delta参数做随机drop + rescale，然后用TIES的sign voting合并。这个方法的好处是进一步减少了参数冲突，在多个模型的合并中效果尤其突出。</p>
+
+        <p><strong>SLERP（Spherical Linear Interpolation）</strong>是另一种思路。它不在参数空间中做线性插值，而是在<strong>球面空间</strong>中做插值。你可以这样理解：线性插值是走直线从A到B，球面插值是沿着球面走最短弧线。SLERP的优势是能更好地保持参数向量的方向信息（方向往往比长度更代表"学到的东西"），特别适合合并两个差异很大的模型。缺点是计算量大，而且一次只能合并两个模型。</p>
+
+        <table>
+            <tr>
+                <th>方法</th>
+                <th>核心机制</th>
+                <th>合并数量</th>
+                <th>效果</th>
+                <th>计算复杂度</th>
+            </tr>
+            <tr>
+                <td>Linear</td>
+                <td>加权平均</td>
+                <td>任意</td>
+                <td>低（baseline）</td>
+                <td>O(1)</td>
+            </tr>
+            <tr>
+                <td>TIES</td>
+                <td>Trim + Sign Voting + Merge</td>
+                <td>任意</td>
+                <td>中-高</td>
+                <td>O(N)</td>
+            </tr>
+            <tr>
+                <td>DARE</td>
+                <td>Random Drop + Rescale + TIES</td>
+                <td>任意</td>
+                <td>高</td>
+                <td>O(N)</td>
+            </tr>
+            <tr>
+                <td>SLERP</td>
+                <td>球面插值</td>
+                <td>2个</td>
+                <td>高（差异大时）</td>
+                <td>较高</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>重要发现</strong>：模型合并有一个"甜蜜区间"——被合并的模型最好是<strong>同一个基座模型</strong>的微调变体。如果基座模型不同（比如把LLaMA-3微调版和Mistral微调版合并），由于参数空间的对齐性完全不同，几乎所有合并方法都会失败。有一个团队曾经尝试把Qwen-7B-Chat和LLaMA-2-7B-Chat合并，结果模型完全"疯"了——输出的语言混杂、语法破碎。这就像把两把不同钥匙的齿纹叠在一起，得到的不是一把万能钥匙，而是一块废铁。</p>
+        </div>
+
+        <h3>22.2 知识蒸馏原理</h3>
+
+        <p>如果说模型合并是把多个模型的能力"组合"到一起，那知识蒸馏就是把一个大模型（teacher）的能力"压缩"到一个小模型（student）中。蒸馏的核心洞察是：<strong>teacher模型在输出正确答案的同时，输出的概率分布本身就包含了丰富的"暗知识"</strong>——它在各个候选答案上的概率分布不仅告诉你"答案是什么"，还告诉你"哪些答案比较接近"。</p>
+
+        <p><strong>Logit-level蒸馏</strong>是最经典的方法。student模型的学习目标不仅是"预测正确答案"，还要"匹配teacher模型的输出概率分布"。匹配概率分布用KL散度（Kullback-Leibler Divergence）来衡量。关键的超参数是<strong>温度（Temperature，通常用T表示）</strong>——高温下概率分布被"平滑"了（概率差异变小），student能学到更多teacher的"排序偏好"；低温下概率分布更尖锐，student更专注于学习正确答案。训练时通常先用高温做蒸馏（学teacher的soft target），然后逐渐降低温度做fine-tune（学hard target）。</p>
+
+        <p><strong>Feature-level蒸馏</strong>更深入。Student不仅要匹配teacher的输出分布，还要匹配teacher<strong>中间层</strong>的特征表示。做法是在student和teacher的对应层之间加一个"特征对齐loss"（通常用MSE或cosine similarity），迫使student的中间表示也向teacher靠拢。Feature-level蒸馏的效果一般比纯logit-level好，但代价是：(1)需要设计层间对齐策略（哪一层和哪一层对齐）；(2)需要在训练过程中额外计算teacher的中间特征，显存和计算量翻倍。</p>
+
+        <p><strong>Token-level蒸馏</strong>是近一年发展起来的新方法。它关注的不再是单个token的概率分布，而是<strong>token序列层面的生成质量</strong>。具体做法是让teacher和student同时生成一段文本，然后用一个判别器（discriminator）来判断哪段是teacher生成的、哪段是student生成的。Student的目标是"骗过判别器"。这种方法在开放式文本生成任务（创意写作、对话生成）上效果特别好，因为这类任务中单个token的概率匹配意义不大——重要的是整体的风格和质量。</p>
+
+        <pre><code># Logit-level蒸馏loss（简化）
+import torch.nn.functional as F
+
+def distillation_loss(student_logits, teacher_logits, labels, T=4.0, alpha=0.5):
+    """
+    student_logits: student模型的logits输出
+    teacher_logits: teacher模型的logits输出（已经stop_gradient）
+    labels: hard targets（真实label）
+    T: 温度参数
+    alpha: soft target loss的权重
+    """
+    # soft target loss (KL散度，高温)
+    soft_student = F.log_softmax(student_logits / T, dim=-1)
+    soft_teacher = F.softmax(teacher_logits / T, dim=-1)
+    kl_loss = F.kl_div(soft_student, soft_teacher, reduction="batchmean") * (T ** 2)
+
+    # hard target loss (cross-entropy)
+    ce_loss = F.cross_entropy(student_logits, labels)
+
+    # 组合loss
+    return alpha * kl_loss + (1 - alpha) * ce_loss</code></pre>
+
+        <h3>22.3 渐进式蒸馏</h3>
+
+        <p>如果teacher和student的规模差距很大（比如70B蒸馏到1.5B），一次性蒸馏的效果通常很差——student根本"消化不了"teacher那么多的知识。渐进式蒸馏（Progressive Distillation）就是为了解决这个问题而设计的。</p>
+
+        <p>核心思路是：<strong>在teacher和student之间插入若干中间尺寸的"teacher assistant"模型</strong>。比如从70B到7B到1.5B，分两步蒸馏。每一步的teacher-student差距在3-10倍之间，这样student更容易学习。中间teacher的价值在于：它已经把teacher的知识"消化"了一遍，做了<strong>知识提炼和降噪</strong>——teacher模型的某些知识可能过于精细或带有噪声，中间teacher的抽象层自然地过滤了这些噪声，让最终student学到的是"精华版"知识。</p>
+
+        <p>渐进式蒸馏的另一个实践要点是<strong>数据策略的递进</strong>。第一阶段（大→中），蒸馏数据可以选择覆盖更广、多样性更高的数据集，让中间模型学到teacher的知识覆盖范围。第二阶段（中→小），蒸馏数据应该更聚焦于核心任务，因为小模型的容量有限，不可能学下teacher的全部知识——你要有选择地"灌输"最重要的部分。比如对于客服场景，第二阶段可以只保留用户问题多样性高、回答质量高的蒸馏数据，过滤掉那些边缘场景。</p>
+
+        <p>一个相关的概念是<strong>online distillation（在线蒸馏）</strong>。传统蒸馏是"训完teacher再训student"（offline），teacher是固定的。在线蒸馏中，teacher和student<strong>同时训练</strong>——student不断追赶teacher，teacher也在训练中持续变强。这种做法的好处是teacher始终比student强一点点（但不会强太多），形成一种"亦师亦友"的共同进化关系。缺点是训练成本更高、实现更复杂。Google的PaLM 2和Gemini的训练中据说大量使用了在线蒸馏技术。</p>
+
+        <div class="tip">
+            <p><strong>实践建议</strong>：渐进式蒸馏的每一步之间要留出"评估-反馈"环节。不是每一步蒸馏完就自动进入下一步。正确的流程是：(1)完成Step1蒸馏；(2)在核心评测集上评估；(3)分析student的能力短板是什么；(4)针对性地调整Step2的数据配比。我见过一个团队自动跑完三步蒸馏，最后发现第二步蒸馏时数据配比出错——把推理类数据占比搞得太低了，导致最终的1.5B模型在推理任务上完全失能。如果他们在每步之间做了评估检查，这个问题在第二步就会被发现。</p>
+        </div>
+
+        <h3>22.4 合并与蒸馏的实战对比</h3>
+
+        <p>模型合并和知识蒸馏虽然都能"提升模型能力"，但适用的场景完全不同。选错了方法，要么效果不达预期，要么白白浪费计算资源。</p>
+
+        <p><strong>什么时候用模型合并？</strong>当你需要<strong>快速组合多个模型的已有能力</strong>时，合并是你的首选。典型场景：(1)你有一个数学专家模型和一个代码专家模型，想把它们合并成一个"数学+代码"模型；(2)你的团队在同一个基座上做了多个LoRA，想一次性融合所有LoRA的效果；(3)你想快速验证"把多个SFT模型的能力组合起来是否能超越每个单独模型"。合并的核心优势是<strong>速度快</strong>——不需要训练数据，几分钟到几小时就能完成。但劣势也很明显：合并不能创造出"新的能力"——它只能组合模型已有的能力，而且如果模型之间的参数冲突严重，合并效果可能还不如单独用某个模型。</p>
+
+        <p><strong>什么时候用知识蒸馏？</strong>当你需要<strong>精确地压缩模型</strong>或<strong>把能力从大模型迁移到小模型</strong>时，蒸馏是正确选择。典型场景：(1)你想把70B模型压缩到7B，部署到端侧；(2)你想把GPT-4级别的能力迁移到你自己的小模型上；(3)你的模型需要在特定任务上达到极高的精度，不能用合并的"近似组合"来冒险。蒸馏的优势是<strong>可控性强</strong>——你可以精确地选择哪些知识要迁移、迁移到什么程度。但劣势是需要大量高质量训练数据和可观的计算资源——一次好的蒸馏可能需要数百万条数据和数千GPU小时。</p>
+
+        <table>
+            <tr>
+                <th>维度</th>
+                <th>模型合并</th>
+                <th>知识蒸馏</th>
+            </tr>
+            <tr>
+                <td>目标</td>
+                <td>组合多个模型的能力</td>
+                <td>将大模型能力压缩到小模型</td>
+            </tr>
+            <tr>
+                <td>需要训练数据</td>
+                <td>否</td>
+                <td>是（通常需要大量数据）</td>
+            </tr>
+            <tr>
+                <td>需要训练计算</td>
+                <td>几乎为零</td>
+                <td>大（GPU-hours）</td>
+            </tr>
+            <tr>
+                <td>能力可控性</td>
+                <td>低（依赖参数兼容性）</td>
+                <td>高（精确选择知识迁移目标）</td>
+            </tr>
+            <tr>
+                <td>模型尺寸要求</td>
+                <td>被合并模型尺寸接近</td>
+                <td>teacher可以远大于student</td>
+            </tr>
+            <tr>
+                <td>典型效果</td>
+                <td>能力组合，但可能有退化</td>
+                <td>压缩效果好，精度损失可控</td>
+            </tr>
+        </table>
+
+        <div class="warning">
+            <p><strong>踩坑案例</strong>：一个做AI助手的团队希望兼顾"代码能力"和"对话体验"。他们先训练了两个模型——Code-SFT模型（代码能力强但对话僵硬）和Chat-SFT模型（对话流畅但代码弱）。他们选择用DARE合并两个模型，合并后代码能力确实保留了80%，但对话上出现了一个诡异的现象：模型在闲聊时会突然蹦出代码片段。比如用户说"今天天气真好"，模型答"是的，天气很好，让我们用Python写一个天气API调用的示例代码：import requests..."。原因是合并时参数的sign voting在涉及"对话风格"的维度上发生了奇怪的重叠——"愉快的对话"和"积极提供代码"两个模式在参数空间中被合并到了一起。最后他们不得不转用蒸馏方案：用Chat模型做teacher，用Code模型的输出做辅助数据，重新训练了一个代码能力增强但保持对话风格的新模型。</p>
+        </div>
+
+        <h3>22.5 开源社区的合并实践</h3>
+
+        <p>模型合并有一个天然适合开源社区的生态——因为Hugging Face上已有成千上万个基于同一基座的微调模型，合并可以让社区"集合众智"创造更强的模型。我们来聊聊最活跃的几个项目和工具。</p>
+
+        <p><strong>LLaMA-Merged系列</strong>是开源社区中模型合并最活跃的实验场。基于LLaMA-2/3和Llama系列的开源模型（比如Nous-Hermes、CodeLlama、WizardMath、OpenOrca等），社区使用TIES、DARE、SLERP等方法不断尝试合并组合。其中最著名的成果之一是<strong>SauerkrautLM</strong>系列——通过合并多个德语增强的微调模型，创造出了当时最强的德语LLM。另一个是<strong>Beagle</strong>系列——合并了代码、数学、推理三个方向的SFT模型，在多个benchmark上超过了任何一个独立微调模型。</p>
+
+        <p><strong>MergeKit</strong>是社区中最流行的模型合并工具，由MergeKit团队开源（现在是Hugging Face的官方推荐工具）。它支持TIES、DARE、SLERP、Linear等多种合并方法，以及<strong>分层合并</strong>（对不同层用不同合并策略）。MergeKit最强大的特性是<strong>YAML配置驱动</strong>——你只需要写一个配置文件描述要合并哪些模型、用什么方法、比例多少，MergeKit自动执行剩下的操作。</p>
+
+        <pre><code># MergeKit YAML配置示例：合并3个模型
+slices:
+  - sources:
+      - model: NousResearch/Nous-Hermes-2-Yi-34B
+        layer_range: [0, 60]
+      - model: WizardLM/WizardMath-7B
+        layer_range: [0, 60]  # 注意：基座模型必须相同！
+      - model: codellama/CodeLlama-7b-Python-hf
+        layer_range: [0, 60]
+merge_method: dare_ties
+base_model: meta-llama/Llama-2-7b-hf  # 共同的基座模型
+parameters:
+  int8_mask: true
+  normalize: true
+dtype: bfloat16
+tokenizer_source: model: NousResearch/Nous-Hermes-2-Yi-34B
+# 用一条命令触发合并：
+# mergekit-yaml config.yml merged_model/ --copy-tokenizer</code></pre>
+
+        <p>社区合并实践的重要经验：<strong>不是所有模型都适合合并</strong>。成功的合并案例有两条共性：一是所有模型在同基座上微调（同一基座是前提条件）；二是微调任务之间有"互补关系"而不是"竞争关系"（比如代码+数学互补，但"严格对齐"和"创意写作"可能冲突）。如果你的两个模型在某个能力维度上是冲突的（一个要求严格保守、一个鼓励创造性），合并时大概率会互相拖后腿。</p>
+
+        <table>
+            <tr>
+                <th>合并项目</th>
+                <th>基座模型</th>
+                <th>合并方法</th>
+                <th>特色</th>
+            </tr>
+            <tr>
+                <td>SauerkrautLM</td>
+                <td>LLaMA-2/3</td>
+                <td>TIES, DARE</td>
+                <td>德语+英语双语能力</td>
+            </tr>
+            <tr>
+                <td>Beagle</td>
+                <td>LLaMA-2</td>
+                <td>SLERP, TIES</td>
+                <td>代码+数学+推理三合一</td>
+            </tr>
+            <tr>
+                <td>Nebula</td>
+                <td>Qwen-1.5</td>
+                <td>DARE</td>
+                <td>中文+英文代码能力</td>
+            </tr>
+            <tr>
+                <td>Instruct-tune混合系列</td>
+                <td>Mistral-7B</td>
+                <td>Linear, TIES</td>
+                <td>大量LoRA合并实验</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>社区趋势</strong>：2025-2026年合并社区的注意力正在从"多任务合并"转向"跨语言合并"和"跨能力桥接"。一个有趣的方向是<strong>cross-lingual model merging</strong>——把中文增强版和英文增强版合并，得到一个双语模型，效果往往比单独做多语言SFT还好。另一个值得关注的方向是<strong>merging + distillation联合使用</strong>：先用合并快速组合多个SFT模型的能力，然后把合并后的模型作为teacher做蒸馏。这种"先组合再压缩"的流程在实际工程中效果非常出色。</p>
+        </div>
+
+        <p>模型合并和知识蒸馏是模型训练的"倍率器"——它们让你不用每次都从零训练就能获得能力更强或体积更小的模型。模型合并适合快速组合已有能力（免费午餐），知识蒸馏适合精确压缩（付出训练成本换效果）。在实际工程中，两者经常配合使用：先用合并做能力组合快速验证方向，再用蒸馏做生产级的模型压缩。下一章我们将进入课程第六部分——部署与工程实践。<strong>第23章「模型量化技术深度」</strong>，从"瘦身"开始——让你理解怎么把模型从FP16压缩到INT4甚至INT2，同时把精度损失控制在最小。咱们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

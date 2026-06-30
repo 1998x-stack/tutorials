@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 多模态模型训练</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html" class="active">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第21章 多模态模型训练</h2>
+
+        <p>大家好，我是你们的讲师。前面二十章我们讲的所有内容——预训练、SFT、RLHF、RLVR、Agent——都被一个默认假设框住了：<strong>模型只处理文本</strong>。但现实世界的信息远不止文字：产品图片、医学影像、视频监控、语音指令、表格图表……如果模型只能"读字"不能"看图"，它的能力天花板就太低了。</p>
+
+        <p>多模态大模型（Multi-modal LLM，简称MLLM）就是来打破这个天花板的。GPT-4V/4o、Claude 3.5 Vision、Gemini Pro Vision、Qwen-VL、DeepSeek-VL2——2025-2026年的主流模型几乎全部支持了图像理解和多模态对话。但"支持多模态"说起来简单，训练起来却是一套全新的技术栈：视觉编码器选什么？怎么让图像特征和文本特征对齐？训练分几个阶段？数据怎么构建？这一章我们就来逐一拆解。</p>
+
+        <h3>21.1 多模态LLM的架构范式</h3>
+
+        <p>多模态大模型的架构设计可以归结为三个流派，各有各的设计哲学和适用场景。</p>
+
+        <p><strong>流派一：CLIP-style对比学习</strong>。这是最早期的多模态范式。模型通过对比学习（contrastive learning）在共享的embedding空间中把图像和文本对齐。CLIP（Contrastive Language-Image Pre-training）是这一派的代表作。CLIP模型输入一个batch的图像-文本对，训练目标是让匹配的图文对在embedding空间中距离更近、不匹配的拉远。训练完成后，CLIP可以作为<strong>视觉编码器</strong>接入到LLM中——相当于给LLM配了一双"眼睛"。</p>
+
+        <p><strong>流派二：LLaVA-style特征连接</strong>。这是2024-2026年最主流的范式。核心思路是：<strong>保留预训练的LLM文本能力不变，通过一个轻量的连接模块（projection layer）把视觉特征映射到LLM的输入空间</strong>。训练分成两个阶段：第一阶段冻住LLM只训练projection layer（做图文对齐），第二阶段全部解冻做多模态SFT。LLaVA系列（LLaVA-1.5、LLaVA-NeXT）是这一派的标杆，它用最简单的single-layer MLP做projection就取得了出色的效果。优点是工程复杂度低、可快速集成新视觉编码器，缺点是视觉和语言的信息融合深度有限。</p>
+
+        <p><strong>流派三：原生多模态（Native Multi-modal）</strong>。最激进但理论上最优雅的方案——从一开始就用多模态数据预训练模型，而不是事后"嫁接"视觉能力。Google的Gemini和Meta的FLAVA是这个方向的代表。模型在预训练阶段就同时处理文本、图像、视频等多种模态的数据，所有模态共享同一个transformer backbone。优势是模态融合最深、跨模态理解最自然，缺点是训练成本极高、数据需求量巨大、工程实现复杂度远超前两种。</p>
+
+        <table>
+            <tr>
+                <th>范式</th>
+                <th>代表性模型</th>
+                <th>视觉-语言融合方式</th>
+                <th>训练成本</th>
+                <th>灵活性</th>
+            </tr>
+            <tr>
+                <td>CLIP-style</td>
+                <td>CLIP, SigLIP</td>
+                <td>对比学习（embedding对齐）</td>
+                <td>中</td>
+                <td>低（只能做检索/分类）</td>
+            </tr>
+            <tr>
+                <td>LLaVA-style</td>
+                <td>LLaVA, Qwen-VL, DeepSeek-VL2</td>
+                <td>Projection layer桥接</td>
+                <td>低-中</td>
+                <td>高（灵活替换encoder/LLM）</td>
+            </tr>
+            <tr>
+                <td>原生多模态</td>
+                <td>Gemini, FLAVA</td>
+                <td>统一transformer backbone</td>
+                <td>极高</td>
+                <td>低（一旦训完难修改）</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <p><strong>实践建议</strong>：除非你有Google级别的算力预算，否则LLaVA-style的特征连接范式是你的最佳选择。它的核心优势是"解耦"——视觉编码器和LLM可以独立升级。今天你用SigLIP做视觉编码器，明天有更好的视觉模型发布，换上去只需要重训一个轻量的projection layer。我领导的项目就经历过一次视觉编码器迁移——从CLIP ViT-L切换到SigLIP，只花了2天重训projection layer，整体多模态能力提升了十几个百分点。</p>
+        </div>
+
+        <h3>21.2 视觉编码器与对齐</h3>
+
+        <p>不管选哪个范式，<strong>视觉编码器</strong>都是多模态LLM的关键组件。它负责把原始图像像素转换为有语义意义的视觉特征向量。</p>
+
+        <p><strong>ViT（Vision Transformer）</strong>是当前最主流的视觉编码器架构。它将图像切分成固定大小的patch（比如16x16像素），然后像处理文本token一样用transformer编码这些patch。ViT的预训练方式主要有两种：一种是image-level的对比学习（如CLIP的训练方式），另一种是masked image modeling（类似BERT的mask预测，如MAE）。对于多模态LLM来说，<strong>CLIP-pretrained ViT</strong>是最常用的选择，因为它已经学会了"和文本对应"的视觉表示。</p>
+
+        <p><strong>SigLIP</strong>是Google在2024年提出的改进版，用sigmoid loss替代了CLIP的softmax-based contrastive loss。这个改变的好处是：<strong>不再需要global batch的negative samples</strong>，因此batch size可以更小、训练更稳定，同时效果还优于CLIP。2025年之后发布的很多多模态模型（包括DeepSeek-VL2）都从CLIP ViT转向了SigLIP。</p>
+
+        <p><strong>视觉特征的projection</strong>是把视觉特征送入LLM的关键步骤。LLaVA-1.5的做法最简单——一个单层MLP（linear projection）就够了。Qwen-VL使用了更复杂的Q-Former（Querying Transformer）结构——通过一组可学习的query向量从视觉特征中"提取"出LLM需要的信息。Q-Former的优点是可以在projection阶段大幅压缩视觉token数量（比如从256个降为32个），显著降低LLM处理视觉信息的计算开销。但代价是训练复杂度更高、收敛更慢。</p>
+
+        <pre><code># LLaVA-style 视觉特征投影的简化实现
+class VisionProjector(nn.Module):
+    def __init__(self, vision_dim=1024, llm_dim=4096):
+        super().__init__()
+        # LLaVA-1.5: 简单MLP
+        self.projector = nn.Sequential(
+            nn.Linear(vision_dim, llm_dim),
+            nn.GELU(),
+            nn.Linear(llm_dim, llm_dim),
+        )
+    def forward(self, vision_features):
+        # vision_features: [B, num_patches, vision_dim]
+        return self.projector(vision_features)
+        # 输出: [B, num_patches, llm_dim] 送入LLM的embedding层
+
+# Q-Former style (概念简化)
+class QFormerProjector:
+    def __init__(self, num_queries=32):
+        self.queries = nn.Parameter(torch.randn(num_queries, llm_dim))
+        # cross-attention: queries x vision_features
+    def forward(self, vision_features):
+        # queries从vision_features中提取信息
+        return cross_attention(self.queries, vision_features)
+        # 输出: [B, 32, llm_dim] 显著压缩视觉token数</code></pre>
+
+        <h3>21.3 多模态训练策略</h3>
+
+        <p>多模态模型的训练策略和纯文本模型有显著不同，核心问题在于：<strong>什么时候该冻住什么、什么时候该训练什么</strong>。这直接决定了训练效率、收敛速度、以及最终的效果。</p>
+
+        <p><strong>第一阶段：图文对齐预训练</strong>。冻住LLM backbone和视觉编码器，只训练projection layer。数据量一般在数千万到数亿图文对级别。这个阶段的目的是让projection layer学会把视觉特征映射到LLM能理解的embedding空间中——说白了就是"教LLM看懂图像"。为什么不解冻LLM？因为LLM的解冻会让它在大量图文对上"忘掉"纯文本能力（灾难性遗忘），而且图文对齐阶段只需要projection调整就够了，解冻LLM是浪费计算资源。</p>
+
+        <p><strong>第二阶段：多模态SFT</strong>。这个阶段解冻全部参数（或使用LoRA等PEFT方法），用多模态对话数据做指令微调。数据形式包括：图像描述、图像问答、多模态对话（多轮）、文档理解、图表推理等。这个阶段的目标是让模型学会"用自然语言描述和推理视觉内容"。注意在第二阶段如果full fine-tune LLM，需要混入一定比例的纯文本SFT数据（通常10-20%），否则模型的纯文本对话能力会明显下降。</p>
+
+        <p><strong>视觉编码器冻住还是解冻？</strong>这是一个关键决策点。如果冻住视觉编码器，训练速度快、显存占用低、稳定性好，但视觉表达能力受限——编码器的特征分布是训练时固定的，无法针对下游任务做微调。如果解冻视觉编码器，模型可以更好地适应特定任务（比如医学影像分析、细粒度物体识别），但训练成本更高、且容易过拟合。我的建议是：<strong>如果你在通用领域做多模态模型，冻住视觉编码器就够了；如果你在垂直领域（医疗、遥感、工业质检），解冻视觉编码器带来的提升非常可观</strong>。</p>
+
+        <table>
+            <tr>
+                <th>阶段</th>
+                <th>冻住/解冻</th>
+                <th>数据</th>
+                <th>训练目标</th>
+                <th>典型数据量</th>
+            </tr>
+            <tr>
+                <td>Phase 1: 图文对齐</td>
+                <td>冻住LLM+Encoder，只训Projector</td>
+                <td>图文对（image-caption）</td>
+                <td>视觉-语言embedding对齐</td>
+                <td>10M-100M</td>
+            </tr>
+            <tr>
+                <td>Phase 2: 多模态SFT</td>
+                <td>解冻全部（或LoRA）</td>
+                <td>多模态对话、文档理解等</td>
+                <td>指令遵循、视觉推理</td>
+                <td>100K-1M</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>核心技术细节</strong>：多模态训练中有一个经常被忽视的优化——视觉token的<strong>position encoding</strong>。ViT输出的视觉token是有空间位置的（左上、右上、左下、右下各有一个token）。但在送入LLM时，如果位置信息丢失，模型就无法理解"物体的空间关系"（比如"杯子在桌子的左边"）。LLaVA的做法是保留patch级别的position IDs，让LLM能感知视觉token的二维位置。而Q-Former-style的token压缩方式会丢失空间信息，需要额外的position embedding来补救。如果你的模型在"描述图像中物体的相对位置"上表现不佳，先检查位置编码是否传进去了。</p>
+        </div>
+
+        <h3>21.4 多模态SFT数据</h3>
+
+        <p>多模态SFT数据的质量和多样性直接决定了多模态模型的最终能力。和纯文本SFT一样——<strong>数据决定上限，训练逼近上限</strong>。</p>
+
+        <p><strong>图像-文本对</strong>是最基础的数据。每张图像配一条描述性文字（caption）。质量要求：描述要详细、准确、覆盖图像的各个区域。不好的caption："一只狗在草地上。"好的caption："一只金毛犬在阳光明媚的公园草地上奔跑，嘴里叼着一个红色飞盘，背景中可以看到几个孩子在荡秋千。"数据来源包括LAION-5B、COCO Captions、SBU Captions等公共数据集，但注意这些数据集的噪声很大——LAION-5B的图文匹配率据估计只有70-80%。</p>
+
+        <p><strong>多模态对话</strong>是提升模型多轮交互能力的关键。每个样本包含多轮图像相关的对话，比如："这张图里有什么？"→"一艘帆船航行在海上。"→"天气怎么样？"→"晴空万里，海面平静。"构建高质量的对话数据通常需要人工标注或利用强模型（GPT-4V/Gemini Pro Vision）进行"数据蒸馏"——让强模型看图生成对话。ShareGPT-4V和LLaVA-1.5的混合数据是常用的开源数据集。</p>
+
+        <p><strong>视频理解数据</strong>是更高级、也更具挑战性的数据。视频天然是图像序列加上时间维度。处理方式主要有两种：一是对视频做<strong>帧采样</strong>（比如每秒取1帧），把每一帧当成独立图像处理，然后在LLM中通过文本描述来建模时间关系；二是使用专门的<strong>video encoder</strong>（如VideoMAE、TimeSformer）来捕捉时序信息。数据构建方面，VideoChat和Video-ChatGPT等开源数据集提供了基础的视频问答数据，但大规模高质量的视频理解数据目前仍然是稀缺资源，很多团队选择自建：从YouTube等平台爬取视频，用ASR获取音频文字，再通过强模型生成视频内容摘要和问答对。</p>
+
+        <pre><code># 多模态SFT数据格式示例（LLaVA-style）
+{
+  "id": "sample_001",
+  "image": "path/to/image.jpg",
+  "conversations": [
+    {
+      "from": "human",
+      "value": "<image>\n请描述这张图片的内容。"
+    },
+    {
+      "from": "gpt",
+      "value": "这张图片拍摄于一个繁忙的都市街头。画面中央是一座..."
+    },
+    {
+      "from": "human",
+      "value": "图片中有什么特别的标志性建筑吗？"
+    },
+    {
+      "from": "gpt",
+      "value": "是的，背景中可以看到一座高耸的电视塔，顶部有..."
+    }
+  ]
+}</code></pre>
+
+        <h3>21.5 多模态模型的评估</h3>
+
+        <p>多模态模型的评估比纯文本复杂得多——你不仅要评测"回答的质量"，还要评测"模型是否真的在看图"。</p>
+
+        <p><strong>MME（Multi-modal Evaluation）</strong>是最常用的综合评测基准之一。它覆盖了感知（perception）和认知（cognition）两大类任务：感知包括物体存在性计数、位置推理、颜色识别等；认知包括推理、常识、OCR等。MME的特点是每个测试样本都对应一个"是/否"问题，通过计算准确率来评分。优点是评测过程客观、可复现，缺点是"是/否"问题过于简单，无法充分体现模型的细粒度理解能力。</p>
+
+        <p><strong>MMBench</strong>提供了更丰富的评测维度，包括物体属性识别、空间关系理解、图像推理等20个子任务。它的特色是引入了<strong>circular evaluation</strong>机制——同一个问题的不同表述版本会被重复测试，来检测模型是否"真的理解"而不是"记住了答案"。如果一个模型在"A在B的左边吗？"上答对了，但在"B在A的右边吗？"上答错了，说明模型对空间关系的理解是脆弱的。</p>
+
+        <p><strong>SEED-Bench</strong>是目前规模最大的多模态评测基准之一，包含超过19000道题目，覆盖12个维度（场景理解、动作识别、时间推理等）。它的优势在于问题全部人工标注，质量高、偏差小。</p>
+
+        <p><strong>隐性对齐问题</strong>是多模态评估中最容易被忽视的问题。什么叫隐性对齐？就是<strong>模型回答问题时没有真正"看"图像，而是靠文本上下文"猜"出了答案</strong>。比如你给模型看一张企鹅照片然后问"这是什么动物"，模型答"企鹅"——你以为是模型看懂了图，但其实图像里完全没输入（模型只接收了文本），它也能答对，因为问题中的"图像"和"企鹅"在训练数据中高频共现。检测隐性对齐的经典方法是做<strong>图像破坏测试</strong>：把图像模糊处理、随机打乱patch、甚至换成一张无关图像，然后看模型的回答是否发生变化。如果回答没变，说明模型根本没在看图——它是靠文本统计作弊的。</p>
+
+        <table>
+            <tr>
+                <th>基准</th>
+                <th>题目数</th>
+                <th>维度数</th>
+                <th>题型</th>
+                <th>特点</th>
+            </tr>
+            <tr>
+                <td>MME</td>
+                <td>2,194</td>
+                <td>14</td>
+                <td>是/否</td>
+                <td>客观可复现</td>
+            </tr>
+            <tr>
+                <td>MMBench</td>
+                <td>~3,000</td>
+                <td>20</td>
+                <td>多选+判断</td>
+                <td>Circular evaluation</td>
+            </tr>
+            <tr>
+                <td>SEED-Bench</td>
+                <td>~19,000</td>
+                <td>12</td>
+                <td>多选</td>
+                <td>大规模人工标注</td>
+            </tr>
+        </table>
+
+        <div class="warning">
+            <p><strong>踩坑案例</strong>：我遇到过最离谱的"隐性对齐"翻车。团队花了一个月训练了一个医学影像多模态模型，评估指标非常漂亮——MME上达到SOTA。大家很开心准备上线。但在做图像破坏测试时发现：把X光片换成一张完全无关的自然风景照，模型对"是否有肺部结节"的回答居然基本没变！原来训练数据中大量重复了"X光片→肺部结节"的简单模式，模型学会了"用户问肺部相关问题就输出结节分析"的捷径，而不是真正在看图像中的病变区域。从那以后我们把"图像破坏测试"加入了所有多模态模型的验收流程，作为上线前的一票否决项。</p>
+        </div>
+
+        <p>多模态模型训练是当前LLM领域最活跃的方向之一。从视觉编码器的选择到对齐策略的设计，从数据构建到评估体系，每个环节都在快速演进。最让人兴奋的是，多模态不再是"附加功能"而是"核心竞争力"——只懂文字的模型正在被淘汰，能看、能听、能说的模型才是未来。下一章我们要进入<strong>第22章「模型合并与知识蒸馏」</strong>，探讨一个非常实用的话题：如何在不从头训练的情况下，组合多个模型的能力、或者把一个巨大的模型压缩成更小的尺寸。咱们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

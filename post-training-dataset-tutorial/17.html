@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 DPO/PPO/ORPO数据适配</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 后训练概述与数据定位</a></li>
+            <li><a href="02.html">第2章 后训练数据分类体系</a></li>
+            <li><a href="03.html">第3章 数据格式与标准规范</a></li>
+            <li><a href="04.html">第4章 数据来源与采集策略</a></li>
+            <li><a href="05.html">第5章 数据质量评估框架</a></li>
+            <li><a href="06.html">第6章 数据生命周期管理</a></li>
+            <li><a href="07.html">第7章 HuggingFace数据生态入门</a></li>
+            <li><a href="08.html">第8章 通用英文SFT标杆数据集</a></li>
+            <li><a href="09.html">第9章 多轮对话SFT数据集</a></li>
+            <li><a href="10.html">第10章 推理增强SFT数据集</a></li>
+            <li><a href="11.html">第11章 中文SFT数据集体系</a></li>
+            <li><a href="12.html">第12章 垂直领域SFT数据</a></li>
+            <li><a href="13.html">第13章 SFT数据配比与混合策略</a></li>
+            <li><a href="14.html">第14章 SFT数据去噪与去重实战</a></li>
+            <li><a href="15.html">第15章 偏好对齐数据基础</a></li>
+            <li><a href="16.html">第16章 全球通用偏好数据标杆</a></li>
+            <li><a href="17.html" class="active">第17章 DPO/PPO/ORPO数据适配</a></li>
+            <li><a href="18.html">第18章 安全对齐与中文偏好数据</a></li>
+            <li><a href="19.html">第19章 思维链(CoT)推理数据</a></li>
+            <li><a href="20.html">第20章 GRPO/RLVR推理增强数据</a></li>
+            <li><a href="21.html">第21章 工具调用与Function Call数据</a></li>
+            <li><a href="22.html">第22章 Agent多步推理数据</a></li>
+            <li><a href="23.html">第23章 数据质量管线搭建</a></li>
+            <li><a href="24.html">第24章 训练框架数据适配</a></li>
+            <li><a href="25.html">第25章 许可证合规与商用风险</a></li>
+            <li><a href="26.html">第26章 2025-2026后训练数据新范式</a></li>
+            <li><a href="27.html">第27章 数据策略设计与评估体系</a></li>
+            <li><a href="28.html">第28章 综合实战：从零构建后训练数据流水线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第17章 DPO/PPO/ORPO数据适配</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们介绍了四大偏好数据标杆，你手上已经有了一份质量不错的原始偏好数据。但一个核心问题来了：<strong>同一份原始数据，你的 DPO 训练脚本认它，KTO 训练脚本可能不认识它。</strong>不同的偏好对齐算法，对数据的格式、结构和信息量有着截然不同的要求。</p>
+
+        <p>这一章，我们将逐一拆解主流偏好算法（DPO、SimPO、KTO、ORPO）对数据的"喜好"，并给出从原始数据到各算法所需格式的转换实战代码。</p>
+
+        <h2>同一份偏好数据，不同算法需要不同格式</h2>
+
+        <p>先把结论放在前面：<strong>你选择的算法，决定了你应该准备什么格式的数据</strong>。如果把一个算法需要的数据喂给另一个算法，轻则训练崩溃，重则模型学偏。下面这张图清晰地展示了不同算法对数据需求的差异：</p>
+
+        <pre><code>原始偏好数据（chosen / rejected 成对）
+    │
+    ├──→ DPO / SimPO：直接使用成对数据
+    │
+    ├──→ KTO：需要反解为「正/负」二值信号
+    │
+    ├──→ ORPO：需要成对数据 + SFT 信号
+    │
+    └──→ PPO / GRPO：需要奖励信号（或 RM 打分）
+
+关键决策点：
+- 有成对数据吗？ → DPO / SimPO / ORPO
+- 只有点赞/踩信号？ → KTO
+- 有奖励模型或评分？ → PPO / GRPO</code></pre>
+
+        <div class="highlight">
+            <strong>一个需要理解的重要区别：</strong>DPO 和 ORPO 虽然都使用成对数据，但训练目标不同。DPO 只在偏好对上进行优化，ORPO 同时优化 SFT 损失和偏好对比损失。这意味着如果你选择 ORPO，你的数据转换 Pipeline 需要额外保留 SFT 格式的副本。
+        </div>
+
+        <h2>DPO（Direct Preference Optimization）— 最常用的选择</h2>
+
+        <p><strong>DPO（Direct Preference Optimization）</strong>是 2024 年以来最主流的偏好对齐方法，它的核心贡献在于：<strong>无需显式训练奖励模型</strong>，直接通过偏好对优化策略模型。</p>
+
+        <p>DPO 对数据格式的要求非常直接——就是我们在第 15 章介绍的标准三元组：</p>
+
+        <pre><code>{
+  "prompt": "请列举三种减少塑料污染的方法",
+  "chosen": "1. 使用可重复使用的购物袋...（详细、具体的回答）",
+  "rejected": "少用塑料就行了。"
+}</code></pre>
+
+        <p>DPO 的 Loss 函数会同时做两件事：<strong>增加 chosen 回答的生成概率，同时降低 rejected 回答的生成概率</strong>（以参考模型为基准）。因此，chosen 和 rejected 之间的区分度至关重要——如果两者只有微小差别，DPO 的梯度信号将非常微弱。</p>
+
+        <p>在 HuggingFace TRL 库中使用 DPO 训练时，数据需要以以下格式加载：</p>
+
+        <pre><code>from datasets import Dataset
+from trl import DPOTrainer
+
+# DPO 要求的数据格式
+data = Dataset.from_list([
+    {
+        "prompt": "用简单的语言解释机器学习",
+        "chosen": "机器学习是让计算机从数据中学习...（优秀回答）",
+        "rejected": "机器学习就是用数据训练模型。（过于简单）"
+    },
+    {
+        "prompt": "Python 中列表和元组的区别",
+        "chosen": "主要区别在于：列表是可变的...（全面回答）",
+        "rejected": "列表可变，元组不可变。（不够详细）"
+    }
+])</code></pre>
+
+        <p>DPO 训练的关键超参数包括 β（KL 散度系数，控制与参考模型的偏离程度，默认 0.1）和损失函数类型（sigmoid / IPO / hinge）。数据层面，建议在训练前检查 chosen 和 rejected 之间的平均 token 长度差异——如果差异过大（比如 chosen 比 rejected 长 3 倍以上），模型可能会学到"长就是好"的偏差。</p>
+
+        <h2>SimPO — 更轻量的 DPO 变体</h2>
+
+        <p><strong>SimPO（Simple Preference Optimization）</strong>是 2024 年底提出的 DPO 改进版本。它的核心洞察是：<strong>既然 DPO 需要参考模型来计算 KL 散度，为什么不直接移除它？</strong></p>
+
+        <p>SimPO 的简化思路是：直接用模型对回答的平均对数概率作为"隐式奖励"，比较 chosen 和 rejected 的平均对数概率大小。这意味着：</p>
+
+        <ul>
+            <li><strong>内存减半</strong>——不需要同时加载策略模型和参考模型，OOM 风险大大降低</li>
+            <li><strong>训练速度提升 30-50%</strong>——少了参考模型的前向传播</li>
+            <li><strong>数据格式与 DPO 完全兼容</strong>——你不需要为 SimPO 准备任何额外数据</li>
+        </ul>
+
+        <p>换句话说，如果你的数据已经按 DPO 格式准备好了，<strong>切换到 SimPO 不需要改动一行数据代码</strong>，只需要在训练框架中将算法类型从 DPO 改为 SimPO。</p>
+
+        <div class="tip">
+            <strong>实际效果对比：</strong>在 MT-Bench 和 AlpacaEval 等主流评测上，SimPO 通常能达到与 DPO 相当甚至略优的效果。SimPO 的论文还发现，SimPO 对 β 超参数的敏感度更低，训练更稳定。如果你的 GPU 资源紧张（比如只负担得起 1 张 A100 来训练 7B 模型），SimPO 的更低内存需求是一个实实在在的优势。
+        </div>
+
+        <h2>KTO — 只需二值反馈</h2>
+
+        <p><strong>KTO（Kahneman-Tversky Optimization）</strong>的命名灵感来自行为经济学家 Kahneman 和 Tversky 的前景理论。它的最大特点是：<strong>不需要偏好对，只需要每个回答的"好/坏"二值标签</strong>。</p>
+
+        <p>这意味着你可以直接从生产环境获取训练信号：</p>
+
+        <ul>
+            <li><strong>点赞 👍</strong> → desirability = true（正样本）</li>
+            <li><strong>点踩 👎</strong> → desirability = false（负样本）</li>
+            <li><strong>没有用户行为</strong> → 中性样本，可以选择忽略或纳入训练</li>
+        </ul>
+
+        <p>KTO 的数据格式非常简洁：</p>
+
+        <pre><code>{
+  "prompt": "帮我写一封求职邮件",
+  "response": "尊敬的招聘经理...（一封完整的求职邮件）",
+  "is_desirable": true   // 用户点赞了
+}
+
+{
+  "prompt": "今天是星期几？",
+  "response": "根据我的计算，今天是周三，不过我不确定...",
+  "is_desirable": false  // 用户点踩了 > 回答太犹豫
+}</code></pre>
+
+        <p>KTO 在真实生产环境中有巨大的优势——<strong>不需要额外的标注成本</strong>。用户的点赞/踩行为已经在发生，你只需要把它们收集起来，转换成 KTO 格式即可。当然，KTO 也有代价：它的训练收敛速度通常比 DPO 和 SimPO 慢，需要更多的训练步数才能达到相同的对齐效果。</p>
+
+        <div class="warning">
+            <strong>KTO 的一个陷阱：</strong>生产环境中的用户反馈存在严重的"选择偏差"——用户更倾向于给那些"出乎意料"的回答点赞或点踩，而对"按预期工作"的回答保持沉默。这意味着你收集到的正/负样本并不能代表真实的数据分布。在实践中，建议定期用人工标注补充 KTO 的训练数据，确保训练信号的代表性。
+        </div>
+
+        <h2>ORPO — SFT 和偏好对齐的合二为一</h2>
+
+        <p><strong>ORPO（Odds Ratio Preference Optimization）</strong>是 2024 年提出的一种有意思的方法。它试图回答一个根深蒂固的问题：<strong>为什么要先做 SFT，再做偏好对齐？能否一次训练完成两个目标？</strong></p>
+
+        <p>ORPO 的训练数据非常特别：它需要一份特殊的"成对"数据，其中 chosen 既是"好的回答"，也是 SFT 的目标回答；而 rejected 仅用于偏好对比损失：</p>
+
+        <pre><code>{
+  "prompt": "解释什么是递归函数",
+  "chosen": "递归函数是指调用自身的函数...（这是一个好的回答，同时也作为 SFT 目标）",
+  "rejected": "就是自己调自己。（质量明显较低）"
+}</code></pre>
+
+        <p>在数据转换时，需要注意：ORPO 对 chosen 的质量要求比 DPO 更高——因为 chosen 同时承担了两个角色（SFT 目标 + 偏好正例），如果 chosen 的质量不够好，SFT 部分会把模型往错误方向拉。推荐的策略是：只保留那些 chosen 回答质量确实很高（比如专家人工编写或经过多次迭代优化）的样本。</p>
+
+        <h2>算法选择决策表</h2>
+
+        <p>面对这么多算法，如何选择？下面这张决策表可以帮助你根据自身条件快速定位：</p>
+
+        <table>
+            <tr>
+                <th>条件 / 需求</th>
+                <th>DPO</th>
+                <th>SimPO</th>
+                <th>KTO</th>
+                <th>ORPO</th>
+                <th>PPO</th>
+            </tr>
+            <tr>
+                <td>有成对偏好数据</td>
+                <td>✅</td>
+                <td>✅</td>
+                <td>✳️ 可转换</td>
+                <td>✅</td>
+                <td>✳️ 需 RM</td>
+            </tr>
+            <tr>
+                <td>仅有二值反馈</td>
+                <td>❌</td>
+                <td>❌</td>
+                <td>✅</td>
+                <td>❌</td>
+                <td>❌</td>
+            </tr>
+            <tr>
+                <td>无需参考模型</td>
+                <td>❌</td>
+                <td>✅</td>
+                <td>❌</td>
+                <td>✅</td>
+                <td>❌</td>
+            </tr>
+            <tr>
+                <td>低 GPU 内存需求</td>
+                <td>🟡 中等</td>
+                <td>✅ 低</td>
+                <td>🟡 中等</td>
+                <td>✅ 低</td>
+                <td>❌ 高</td>
+            </tr>
+            <tr>
+                <td>训练速度快</td>
+                <td>🟡 中等</td>
+                <td>✅ 快</td>
+                <td>🟡 中等</td>
+                <td>✅ 快</td>
+                <td>❌ 慢</td>
+            </tr>
+            <tr>
+                <td>无需 SFT 阶段</td>
+                <td>❌</td>
+                <td>❌</td>
+                <td>❌</td>
+                <td>✅</td>
+                <td>❌</td>
+            </tr>
+            <tr>
+                <td>适合生产环境反馈</td>
+                <td>🟡</td>
+                <td>🟡</td>
+                <td>✅</td>
+                <td>🟡</td>
+                <td>🟡</td>
+            </tr>
+            <tr>
+                <td>最擅长场景</td>
+                <td>通用偏好</td>
+                <td>资源受限</td>
+                <td>在线学习</td>
+                <td>冷启动</td>
+                <td>精细控制</td>
+            </tr>
+        </table>
+
+        <h2>格式转换实战 — 从 UltraFeedback 构造多种格式</h2>
+
+        <p>理论讲了很多，现在上代码。这是我们的核心实战环节——<strong>以 UltraFeedback 的多维度评分数据为原料，构造 DPO、SimPO 和 KTO 三种格式的数据</strong>：</p>
+
+        <pre><code>import json
+from datasets import load_dataset
+
+# 1. 加载 UltraFeedback 原始数据
+dataset = load_dataset("openbmb/UltraFeedback", split="train")
+
+def convert_to_dpo_format(example):
+    """构造 DPO/SimPO 格式：取总分最高的 vs 最低的"""
+    responses = example["responses"]
+    # 计算每个回答的总分
+    for r in responses:
+        r["total_score"] = sum(r["ratings"].values())
+    # 排序：最高分 = chosen, 最低分 = rejected
+    sorted_responses = sorted(responses,
+        key=lambda x: x["total_score"], reverse=True)
+    return {
+        "prompt": example["instruction"],
+        "chosen": sorted_responses[0]["content"],
+        "rejected": sorted_responses[-1]["content"]
+    }
+
+def convert_to_kto_format(example):
+    """构造 KTO 格式：每条回答变成一条独立样本"""
+    samples = []
+    responses = example["responses"]
+    for r in responses:
+        total = sum(r["ratings"].values())
+        # 阈值法：总分 &gt;= 16 (4维度×4分) 为正，&lt;= 10 为负
+        if total >= 16:
+            samples.append({
+                "prompt": example["instruction"],
+                "response": r["content"],
+                "is_desirable": True
+            })
+        elif total <= 10:
+            samples.append({
+                "prompt": example["instruction"],
+                "response": r["content"],
+                "is_desirable": False
+            })
+    return samples  # 返回列表，每条指令可产生多条 KTO 样本
+
+# 2. 批量转换
+dpo_data = dataset.map(convert_to_dpo_format, remove_columns=dataset.column_names)
+kto_data = dataset.map(convert_to_kto_format, remove_columns=dataset.column_names)
+# 展平 KTO 数据（每条指令产生多条）
+kto_data = kto_data.flatten()
+
+# 3. 保存
+dpo_data.to_json("ultrafeedback_dpo.jsonl")
+kto_data.to_json("ultrafeedback_kto.jsonl")</code></pre>
+
+        <div class="highlight">
+            <strong>关于 SimPO 格式的说明：</strong>从上面的代码可以看到，我们只实现了 DPO 和 KTO 两种格式的转换。SimPO 的格式与 DPO 完全一致，所以 <code>dpo_data</code> 可以直接用于 SimPO 训练。你在训练脚本中只需要将 <code>loss_type</code> 参数从 <code>"sigmoid"</code> （DPO）改为 <code>"simpo"</code> 即可——数据不需要任何变动。
+        </div>
+
+        <p>这个转换过程的几个关键决策点值得注意：</p>
+        <ul>
+            <li><strong>DPO 格式中，选择"最高分 vs 最低分"</strong>——确保 chosen 和 rejected 之间有足够的区分度。你也可以选择"平均分以下的随机选一个"，但我们的经验是"极端对比"的效果更稳定。</li>
+            <li><strong>KTO 格式中，阈值的选择</strong>——我们用了总分 ≥ 16 为正、≤ 10 为负。中间的灰色地带（11-15 分）被丢弃了，因为这些样本的反馈信号不够明确。阈值需要根据实际的数据分布来调整。</li>
+            <li><strong>数据平衡</strong>——KTO 转换后，正样本和负样本的数量可能严重不均衡。建议在训练前对多数类进行下采样，保持正负比例在 1:1 到 3:1 之间。</li>
+        </ul>
+
+        <p>掌握了这些数据转换技巧，你就能灵活地在不同算法之间切换，根据计算资源和数据可得性选择最合适的方案。第 18 章，我们将进入一个不能回避的话题——<strong>安全对齐</strong>。当模型面对有害请求时，它应该学会"有所不为"。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

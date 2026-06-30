@@ -1,6 +1,6 @@
 # 1998x-stack Tutorials
 
-A collection of 40 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 41 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
@@ -49,13 +49,14 @@ A collection of 40 free, comprehensive technical tutorials in Chinese — from f
 | 🖥️ | 计算机体系结构 · 从入门到精通 | 28 | [computer-architecture-tutorial](https://1998x-stack.github.io/computer-architecture-tutorial/) |
 | 🔧 | 集成电路设计 · 从入门到精通 | 28 | [integrated-circuit-design-tutorial](https://1998x-stack.github.io/integrated-circuit-design-tutorial/) |
 
-### 网络 / 通信 (3 courses)
+### 网络 / 通信 (4 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
 | 🌐 | HTTP协议 · 从入门到精通 | 28 | [HTTP-protocol-tutorial](https://1998x-stack.github.io/HTTP-protocol-tutorial/) |
 | 🚌 | CAN总线 · 从入门到精通 | 30 | [CAN-bus-tutorial](https://1998x-stack.github.io/CAN-bus-tutorial/) |
 | 🌐 | 以太网通信 | 28 | [ethernet-tutorial](https://1998x-stack.github.io/ethernet-tutorial/) |
+| 📡 | 传感网技术 · 从入门到精通 | 28 | [sensor-network-tutorial](https://1998x-stack.github.io/sensor-network-tutorial/) |
 
 ### 经济 / 金融 (6 courses)
 

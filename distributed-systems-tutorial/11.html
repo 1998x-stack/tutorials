@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 服务网格</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是分布式系统</a></li>
+            <li><a href="02.html">第2章 系统模型与时间</a></li>
+            <li><a href="03.html">第3章 CAP定理与取舍</a></li>
+            <li><a href="04.html">第4章 一致性模型</a></li>
+            <li><a href="05.html">第5章 通信基础</a></li>
+            <li><a href="06.html">第6章 序列化与编解码</a></li>
+            <li><a href="07.html">第7章 分布式系统设计模式</a></li>
+            <li><a href="08.html">第8章 RPC远程过程调用</a></li>
+            <li><a href="09.html">第9章 消息队列与事件驱动</a></li>
+            <li><a href="10.html">第10章 P2P与Gossip协议</a></li>
+            <li><a href="11.html" class="active">第11章 服务网格</a></li>
+            <li><a href="12.html">第12章 网络协议栈深度</a></li>
+            <li><a href="13.html">第13章 组通信与广播</a></li>
+            <li><a href="14.html">第14章 2026通信前沿</a></li>
+            <li><a href="15.html">第15章 复制与一致性</a></li>
+            <li><a href="16.html">第16章 分布式事务</a></li>
+            <li><a href="17.html">第17章 Raft共识算法</a></li>
+            <li><a href="18.html">第18章 Paxos与BFT</a></li>
+            <li><a href="19.html">第19章 并行计算模型</a></li>
+            <li><a href="20.html">第20章 数据并行</a></li>
+            <li><a href="21.html">第21章 模型与流水线并行</a></li>
+            <li><a href="22.html">第22章 分布式训练实战</a></li>
+            <li><a href="23.html">第23章 Docker与K8s编排</a></li>
+            <li><a href="24.html">第24章 可观测性</a></li>
+            <li><a href="25.html">第25章 调试与压测</a></li>
+            <li><a href="26.html">第26章 AI训练基础设施</a></li>
+            <li><a href="27.html">第27章 边缘计算与IoT</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第11章 服务网格</h2>
+
+        <p>微服务架构发展到一定规模后，你会意识到一个尴尬的事实：真正搞垮系统的往往不是业务逻辑，而是服务间通信的那些"基础设施"问题——服务发现、负载均衡、熔断、重试、监控、认证。每个微服务都要把这些功能以库的形式集成进来。用 Java 就是 Spring Cloud全家桶，用 Go 就得手写中间件中间件。升级库版本？抱歉，你得改代码、重新部署。</p>
+
+        <p>服务网格（Service Mesh）的思想是：把这些"通信基础设施"从应用程序里抽出来，放到一个独立的代理层中。你的服务只负责业务逻辑，剩下的交给网格。这听起来简单，但实现起来牵一发而动全身。这一章我们深度剖析 Istio/Envoy 的工作方式，然后回答那个关键问题：你到底需不需要服务网格。</p>
+
+        <h3>5.1 服务网格架构</h3>
+
+        <p>服务网格的架构可以用一个简单公式概括：<strong>Control Plane + Data Plane</strong>。</p>
+
+        <ul>
+          <li><strong>Data Plane</strong>：由一组轻量级的网络代理（通常是 Envoy）组成。每个服务的每个实例旁边都运行一个代理（Sidecar 模式），所有进出流量都经过这个代理。代理负责负载均衡、健康检查、流量路由、TLS 终止、指标收集等。</li>
+          <li><strong>Control Plane</strong>：管理这些代理的配置和策略。它负责服务发现、证书管理、访问控制策略下发、遥测数据汇聚。Control Plane 本身不处理请求，只配置 Data Plane。</li>
+        </ul>
+
+        <p>Sidecar 是怎么注入的？在 Kubernetes 里，Istio 利用<strong>Mutating Webhook Admission Controller</strong>自动修改 Pod 的 spec，在容器列表里追加 Envoy 容器。你部署的时候完全不用改代码，甚至不用意识到 Envoy 的存在。</p>
+
+        <p>流量劫持靠的是 <strong>iptables</strong>：Envoy 容器的 init container 在 Pod 启动时设置 iptables 规则，将入站和出站流量全部重定向到 Envoy 的端口（15006 和 15001）。应用程序完全不知道流量被拦截了——它照常发请求到 80 端口，iptables 悄无声息地把流量转到了 Envoy。</p>
+
+        <pre><code>Pod 内部视图：
+
+┌─────────────────────────────────┐
+│         App Container           │
+│   listening on :8080            │
+│   ──► 发请求到 service:80       │
+└─────────────┬───────────────────┘
+              │ 流量被 iptables 劫持
+              ▼
+┌─────────────────────────────────┐
+│      Envoy Sidecar              │
+│  ┌─── 15001 (出站代理) ────┐    │
+│  │  负载均衡、TLS、重试     │    │
+│  └──────────┬──────────────┘    │
+│  ┌─── 15006 (入站代理) ────┐    │
+│  │  认证、鉴权、速率限制     │    │
+│  └──────────┬──────────────┘    │
+└─────────────┼───────────────────┘
+              ▼
+          目标服务</code></pre>
+
+        <h3>5.2 Istio 深度解析</h3>
+
+        <p>Istio 是目前最成熟的服务网格实现。它的 Control Plane 由几个核心组件构成：</p>
+
+        <table>
+          <tr><th>组件</th><th>功能</th><th>类比</th></tr>
+          <tr><td>Pilot</td><td>服务发现 + 流量管理。从 Kubernetes API 获取服务信息，转换成 Envoy 可理解的 xDS 配置下发。负责路由规则、故障注入、灰度发布。</td><td>交通指挥中心</td></tr>
+          <tr><td>Citadel</td><td>证书管理 + mTLS。自动为每个服务生成 SPIFFE 身份证书，定时轮换。管理服务间的认证和授权策略。</td><td>身份认证局</td></tr>
+          <tr><td>Galley</td><td>配置验证和分发。作为 Istio 配置的"入口网关"，验证用户提交的 CRD 配置的合法性，然后分发给 Pilot 和其他组件。</td><td>配置审核台</td></tr>
+        </table>
+
+        <p>一个请求的完整生命周期是这样的：</p>
+
+        <ol>
+          <li>客户端 Pod 发请求到 Service A（例如 http://service-b:8080/api）。</li>
+          <li>iptables 劫持流量到 Sidecar Envoy 的 15001 端口。</li>
+          <li>Envoy 根据 Pilot 下发的路由规则（RDS）确定目标集群。</li>
+          <li>Envoy 通过服务发现（CDS/EDS）找到 Service B 的健康端点列表，选择目标 Pod。</li>
+          <li>Envoy 与目标 Pod 的 Sidecar Envoy 建立 mTLS 连接（由 Citadel 颁发的证书）。</li>
+          <li>目标 Sidecar 验证客户端身份，检查授权策略（RBAC），转发到业务容器。</li>
+          <li>业务容器处理请求，返回响应，经过同一路径返回。</li>
+        </ol>
+
+        <div class="tip">
+          <p><strong>理解关键</strong>：从你的应用代码的角度看，它只是发了一个普通的 HTTP 请求到 <code>service-b:8080</code>。它不知道、也不需要知道 TLS、负载均衡、重试、指标收集这些事——Envoy 全包了。</p>
+        </div>
+
+        <h3>5.3 xDS 协议</h3>
+
+        <p>Envoy 为什么能做到动态配置、无需重启？秘密在于 xDS 协议——它是一组"发现服务"（Discovery Service）的集合，每个 xDS 负责一类配置的动态下发。</p>
+
+        <table>
+          <tr><th>协议</th><th>全称</th><th>作用</th></tr>
+          <tr><td>LDS</td><td>Listener Discovery Service</td><td>告诉 Envoy 监听哪些端口、如何处理入站连接</td></tr>
+          <tr><td>RDS</td><td>Route Discovery Service</td><td>定义 HTTP 路由规则——URL 路径匹配、Header 改写、重定向</td></tr>
+          <tr><td>CDS</td><td>Cluster Discovery Service</td><td>定义上游服务集群的信息——连接超时、健康检查策略、负载均衡算法</td></tr>
+          <tr><td>EDS</td><td>Endpoint Discovery Service</td><td>实时更新集群的端点列表——哪些 Pod 是健康的、IP 是多少</td></tr>
+        </table>
+
+        <p>传统做法（如 Nginx 热加载）的配置发现延迟在 200ms 级别——你改了 upstream，要等到 Nginx 检测到配置变化、reload、新 worker 接替旧 worker，这需要几百毫秒。而 xDS 通过 gRPC stream 实时推送，从配置变更到 Envoy 生效能做到 <strong>15ms 以内</strong>。差别就在于是"轮询检测变化"还是"订阅推送变化"。</p>
+
+        <div class="highlight">
+          <p><strong>动态配置的价值</strong>：假设你发现 Service A 有故障，要立刻把 10% 的流量切到 Service B 做灰度验证。传统方式：改 Nginx 配置 → reload → 200ms 延迟 → 这期间可能有请求打到故障实例。xDS 方式：Pilot 下发新路由 → Envoy 15ms 内切换 → 几乎无感。在微服务架构中，这 185ms 的差距可能决定了用户会不会遇到 502。</p>
+        </div>
+
+        <h3>5.4 mTLS 与零信任</h3>
+
+        <p>"零信任"（Zero Trust）的安全模型假设网络不可信——即使在同一个 Kubernetes 集群、同一个 VPC 内，也不能默认服务之间的通信就是安全的。每个请求都必须被认证和授权。</p>
+
+        <p>服务网格实现零信任的核心是 <strong>mTLS（双向 TLS）</strong>：</p>
+        <ul>
+          <li>客户端和服务端都出示证书，互相验证身份。</li>
+          <li>通信信道加密，防止窃听和中间人攻击。</li>
+          <li>证书自动轮换，无需人工干预。</li>
+        </ul>
+
+        <p>Istio 使用 <strong>SPIFFE（Secure Production Identity Framework for Everyone）</strong> 标准来标识服务。每个服务的工作负载身份是 <code>spiffe://cluster.local/ns/&lt;namespace&gt;/sa/&lt;service-account&gt;</code>。Citadel 自动为每个 Service Account 签发证书，轮换周期默认为 24 小时。</p>
+
+        <p>结合 <strong>AuthorizationPolicy</strong>，你可以声明式地定义访问控制：</p>
+
+        <pre><code>apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: payment-policy
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: payment-service
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/default/sa/order-service"]
+    to:
+    - operation:
+        methods: ["POST"]
+        paths: ["/api/payment/charge"]</code></pre>
+
+        <p>这个策略的意思是：只有 <code>order-service</code> 的 Service Account 才能 POST 到 <code>payment-service</code> 的 <code>/api/payment/charge</code>。没有有效的 SPIFFE 证书的请求，直接在 Envoy 层被拒绝——根本到不了你的业务代码。</p>
+
+        <h3>5.5 网格的代价与选择</h3>
+
+        <p>服务网格不是免费的。你需要为它的能力付出明确的成本：</p>
+
+        <table>
+          <tr><th>成本维度</th><th>具体影响</th><th>说明</th></tr>
+          <tr><td>延迟开销</td><td>每跳增加 1-3ms</td><td>每个请求多经过一层 Envoy 代理（Sidecar 到 Sidecar），路径上多了两次代理转发</td></tr>
+          <tr><td>资源消耗</td><td>每 Pod 多 50-200MB 内存 + 0.5-2 vCPU</td><td>Envoy Sidecar 消耗的资源在规模扩大后会非常可观。1000 个 Pod 可能吃掉 100GB 内存</td></tr>
+          <tr><td>运维复杂度</td><td>Istio 控制面本身的运维门槛</td><td>升级 Istio 版本可能影响所有服务的通信——必须做好灰度升级方案</td></tr>
+          <tr><td>排障难度</td><td>请求路径多了一层代理</td><td>一个请求从 A 到 B，现在要排查：App→Envoy→mTLS→Envoy→App，每个环节都可能出问题</td></tr>
+        </table>
+
+        <div class="warning">
+          <p><strong>踩坑故事：Envoy 资源限制导致的雪崩</strong></p>
+          <p>某团队在生产环境启用 Istio 后，发现流量高峰期出现大量 503。排查发现：Envoy Sidecar 的内存 limit 只设了 64MB，在流量高峰时 Envoy 频繁 OOM Kill，导致 Sidecar 不可用，iptables 规则把流量送到死端口。更糟糕的是，重启后的 Envoy 需要重新从 Pilot 拉取全量配置（包括所有服务的 EDS 端点），导致 Pilot 负载飙升，进一步拖慢了其他 Sidecar 的配置更新。解决方案是把 Envoy 的 memory limit 调到 256MB，并开启 <strong>Envoy 的主动健康检查</strong>，在 Envoy 恢复前直接摘掉这个 Pod 的流量。</p>
+        </div>
+
+        <p>那到底该不该用服务网格？一个简单决策框架：</p>
+        <ul>
+          <li>少于 20 个服务 → 不需要，用库（如 Hystrix、Resilience4j）就够了。</li>
+          <li>20-100 个服务 → 可以考虑。如果团队运维能力强、有 Kubernetes 基础，值得引入。</li>
+          <li>超过 100 个服务 → 强烈推荐。手动管理通信基础设施的复杂度已经超过网格本身的复杂度。</li>
+        </ul>
+
+        <p>服务网格把通信基础设施从应用代码中抽离出来，给了你一个独立于业务逻辑的"网络操作系统"。但它不是银弹——它转移了复杂度，而不是消除了复杂度。下一章我们来深挖这些代理底层依赖的网络协议——HTTP/2、QUIC、WebSocket——看看协议选择如何从根本上影响系统性能。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

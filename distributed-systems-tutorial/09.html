@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 消息队列与事件驱动</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是分布式系统</a></li>
+            <li><a href="02.html">第2章 系统模型与时间</a></li>
+            <li><a href="03.html">第3章 CAP定理与取舍</a></li>
+            <li><a href="04.html">第4章 一致性模型</a></li>
+            <li><a href="05.html">第5章 通信基础</a></li>
+            <li><a href="06.html">第6章 序列化与编解码</a></li>
+            <li><a href="07.html">第7章 分布式系统设计模式</a></li>
+            <li><a href="08.html">第8章 RPC远程过程调用</a></li>
+            <li><a href="09.html" class="active">第9章 消息队列与事件驱动</a></li>
+            <li><a href="10.html">第10章 P2P与Gossip协议</a></li>
+            <li><a href="11.html">第11章 服务网格</a></li>
+            <li><a href="12.html">第12章 网络协议栈深度</a></li>
+            <li><a href="13.html">第13章 组通信与广播</a></li>
+            <li><a href="14.html">第14章 2026通信前沿</a></li>
+            <li><a href="15.html">第15章 复制与一致性</a></li>
+            <li><a href="16.html">第16章 分布式事务</a></li>
+            <li><a href="17.html">第17章 Raft共识算法</a></li>
+            <li><a href="18.html">第18章 Paxos与BFT</a></li>
+            <li><a href="19.html">第19章 并行计算模型</a></li>
+            <li><a href="20.html">第20章 数据并行</a></li>
+            <li><a href="21.html">第21章 模型与流水线并行</a></li>
+            <li><a href="22.html">第22章 分布式训练实战</a></li>
+            <li><a href="23.html">第23章 Docker与K8s编排</a></li>
+            <li><a href="24.html">第24章 可观测性</a></li>
+            <li><a href="25.html">第25章 调试与压测</a></li>
+            <li><a href="26.html">第26章 AI训练基础设施</a></li>
+            <li><a href="27.html">第27章 边缘计算与IoT</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第9章 消息队列与事件驱动</h2>
+
+        <p>上一章讲的 RPC 是"你叫我答"——同步、紧耦合、调用方等待被调用方。消息队列换了个玩法：你把消息往队列里一丢，扭头就走，消费者啥时候有空啥时候来取。发送方和接收方在时间上和空间上都解耦了。</p>
+
+        <p>但这不代表消息队列是银弹。解耦是有代价的——你现在要管理消息的顺序、重复、丢失，还要处理消费者挂了之后消息堆积的问题。消息队列承诺的"最终一致性"，往往是在你凌晨三点被告警叫醒时才真正理解它的含义。</p>
+
+        <h3>3.1 消息队列的核心模型</h3>
+
+        <p>消息队列有三种核心模型，它们不是递进关系，而是不同场景的匹配方案：</p>
+
+        <table>
+          <tr><th>模型</th><th>核心概念</th><th>消息分发</th><th>顺序保证</th><th>典型系统</th></tr>
+          <tr><td>队列（Queue）</td><td>生产者→队列→消费者</td><td>每条消息被一个消费者消费（点对点）</td><td>队列内 FIFO</td><td>RabbitMQ 基础模式、Beanstalkd</td></tr>
+          <tr><td>发布订阅（Topic）</td><td>发布者→Topic→多个订阅者</td><td>每条消息广播给所有订阅者</td><td>无全局顺序</td><td>RabbitMQ Fanout、Redis Pub/Sub</td></tr>
+          <tr><td>流（Stream）</td><td>生产者→分区日志→消费者组</td><td>分区内有序，组内负载均衡</td><td>分区内严格有序</td><td>Kafka、Pulsar、Kinesis</td></tr>
+        </table>
+
+        <p>队列模型适合任务分发（如发邮件任务、图片处理任务），每条消息只需要一个工人处理。发布订阅适合事件广播（如新用户注册通知多个下游系统）。流模型是两者的结合——它既有 Topic 的持久化和多消费者能力，又有分区内严格有序的保证。</p>
+
+        <div class="tip">
+          <p><strong>简单法则</strong>：需要"一定被处理一次"用 Queue，需要"让所有人知道"用 Topic，需要"告诉所有人并按顺序重放历史"用 Stream。</p>
+        </div>
+
+        <h3>3.2 Kafka 架构深度</h3>
+
+        <p>Kafka 是流模型的标杆。它的架构看起来简单，但每个组件都有精巧的设计：</p>
+
+        <ul>
+          <li><strong>Broker</strong>：Kafka 集群的节点，负责存储和提供消息。</li>
+          <li><strong>Topic</strong>：消息的逻辑分类，可以理解为数据库中的表。</li>
+          <li><strong>Partition</strong>：Topic 的物理分片，每个 Partition 是一个有序的、不可变的日志文件。</li>
+          <li><strong>ISR（In-Sync Replica）</strong>：与 Leader 保持同步的副本集合，Kafka 用它来平衡可用性和一致性。</li>
+          <li><strong>Leader / Follower</strong>：每个 Partition 有一个 Leader 处理读写，Followers 从 Leader 拉取数据同步。</li>
+          <li><strong>日志压缩（Log Compaction）</strong>：保留每条消息 key 的最新值，压缩历史日志节省空间。</li>
+        </ul>
+
+        <p>一条消息写入 Kafka 的过程如下：生产者发送消息到 Partition Leader，Leader 将消息追加到本地日志，Followers 从 Leader 拉取并同步。当 ISR 列表中的所有副本都同步完成后，Leader 向生产者返回确认。读消息时消费者从 Leader 拉取，通过 offset 确定消费位置。</p>
+
+        <pre><code>生产者                             Kafka Broker
+  │                                    │
+  │  send(record)                      │
+  │ ──────────────────►  Partition     │
+  │                      Leader        │
+  │                        │           │
+  │                        ├──► 本地日志（追加写入磁盘）
+  │                        │           │
+  │                        ├──► Follower1 ──► 同步日志
+  │                        │           │
+  │                        ├──► Follower2 ──► 同步日志
+  │                        │           │
+  │  ←──── ack ──────     │           │
+  │  (ISR 全部同步完毕)    │           │</code></pre>
+
+        <h3>3.3 消息可靠性</h3>
+
+        <p>消息可靠性是消息队列最昂贵的承诺。Kafka 的可靠性从三个层面配置：</p>
+
+        <p><strong>生产者 ack 策略</strong></p>
+        <table>
+          <tr><th>ack 设置</th><th>行为</th><th>可靠性</th><th>延迟</th><th>吞吐</th></tr>
+          <tr><td>acks=0</td><td>不等待任何确认</td><td>最低（可能丢消息）</td><td>最低</td><td>最高</td></tr>
+          <tr><td>acks=1</td><td>Leader 写入日志即确认</td><td>中等（Leader 挂了可能丢）</td><td>中</td><td>高</td></tr>
+          <tr><td>acks=all</td><td>等待 ISR 全部同步完成</td><td>最高</td><td>最高</td><td>较低</td></tr>
+        </table>
+
+        <p><strong>min.insync.replicas</strong> 参数设定了 ISR 至少要有多少个副本才接受写入。如果设 2，ISR 只剩 1 个副本时生产者会收到异常，避免在副本不足时写入后丢失。</p>
+
+        <p>生产者幂等性（<code>enable.idempotence=true</code>）解决"重试导致重复消息"的问题。Kafka 为每个生产者分配一个 Producer ID（PID），每条消息带一个序列号，Broker 端去重。这样即使生产者因网络问题重试，也不会写入重复数据。</p>
+
+        <div class="highlight">
+          <p><strong>at-least-once vs exactly-once 的工程取舍</strong>：at-least-once 很"便宜"——生产者重试直到收到 ack，消费者在处理前提交 offset，但消息可能被重复处理。exactly-once 很"贵"——需要事务 API 或幂等消费者，或者让下游做去重。绝大多数系统用 at-least-once + 下游幂等就够了。追求 exactly-once 往往是过度设计。</p>
+        </div>
+
+        <h3>3.4 消费者组与再平衡</h3>
+
+        <p>消费者组（Consumer Group）是 Kafka 实现水平扩展消费能力的关键机制。一个组内的消费者共同消费一个 Topic 的所有 Partition，每个 Partition 只分配给组内的一个消费者。这种"一对一"的分配保证分区内消息有序。</p>
+
+        <p>当消费者加入、离开或 Partition 数量变化时，Kafka 触发<strong>再平衡（Rebalance）</strong>。再平衡的"Stop-The-World"效应是 Kafka 用户最常见的痛：</p>
+
+        <ol>
+          <li>消费者 A 因为 GC 停顿超过 <code>session.timeout.ms</code>（默认 45s），Coordinator 判定 A 挂了。</li>
+          <li>Coordinator 发送 Rebalance 指令给组内所有消费者，所有消费暂停。</li>
+          <li>所有消费者重新加入组，重新分配 Partition。</li>
+          <li>新的消费者开始从 A 之前提交的 offset 恢复消费——如果 A 处理了但还没来得及提交 offset，这批消息会被重复消费。</li>
+          <li>整个再平衡过程可能需要几秒到几十秒，在高峰期这对延迟敏感的系统是致命打击。</td>
+        </ol>
+
+        <div class="warning">
+          <p><strong>真实踩坑：GC 引发的连锁 Rebalance</strong></p>
+          <p>我维护过一个 Kafka 集群，某天下午流量高峰突然出现大规模消费延迟。排查发现：一个消费者实例因为 Full GC 停顿了 50 秒，触发了 Rebalance；Rebalance 期间所有消费暂停，消息开始积压；积压导致消费者处理更慢，更多实例触发 GC，引发连锁 Rebalance。最后整个消费集群"抖动"了近 20 分钟才稳定下来。解决方案是：启用<strong>静态成员（Static Membership）</strong>，让 Rebalance 不因短时间掉线就把消费者踢出组；同时调大 <code>max.poll.interval.ms</code> 给消费者更多处理时间。</p>
+        </div>
+
+        <h3>3.5 事件驱动架构</h3>
+
+        <p>消息队列加上领域事件的建模思想，就是事件驱动架构。</p>
+
+        <p><strong>CQRS（Command Query Responsibility Segregation）</strong>：写操作（Command）和读操作（Query）走不同的数据模型。命令产生事件投递到消息队列，查询端消费事件构建自己的读模型。这样读写可以独立扩缩容、独立优化。</p>
+
+        <p><strong>Event Sourcing</strong>：不保存当前状态，而是保存所有发生过的事件。要得到当前状态，就从事件流中回放。这不是什么新鲜概念——Git 就是 Event Sourcing，每次 commit 就是一个事件，checkout 就是回放。</p>
+
+        <p><strong>死信队列（DLQ）</strong>：消费失败的消息不应该无限重试。重试 N 次后投递到死信队列，人工介入排查。没 DLQ 的 MQ 系统，凌晨三点你会在睡梦中被告警叫醒——因为一条错误格式的消息卡住了整个消费队列。</p>
+
+        <div class="warning">
+          <p><strong>踩坑故事：消息乱序导致账户余额异常</strong></p>
+          <p>在一个支付系统中，一个用户连续发了两笔交易：交易 A（充值 100 元）和交易 B（消费 50 元）。因为 Kafka 的分区策略不当，这两笔交易被路由到了不同 Partition，消费者从两个 Partition 拉取时可能先处理 B 再处理 A——先扣 50 再充 100，最终余额倒是没错（如果只算绝对值），但中间触发了"余额不足"告警。更严重的是，如果交易 A 是"修改支付密码"后面跟着交易 B "提现"，乱序可能直接导致安全漏洞。解决方案：<strong>所有同一实体的操作必须路由到同一个 Partition</strong>，用实体 ID 作为 Partition Key。</p>
+        </div>
+
+        <p>消息队列不是解耦的万能药，它把即时的问题变成了延迟的问题。但当你理解了模型、可靠性、消费者组和事件驱动模式后，消息队列就从一个"容易出问题的中间件"变成了"最能抗压的系统骨架"。下一章我们将从中心化转向去中心化——看 P2P 和 Gossip 协议如何在没有中心节点的情况下组织起整个网络。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

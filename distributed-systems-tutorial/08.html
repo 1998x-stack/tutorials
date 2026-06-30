@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 RPC远程过程调用</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是分布式系统</a></li>
+            <li><a href="02.html">第2章 系统模型与时间</a></li>
+            <li><a href="03.html">第3章 CAP定理与取舍</a></li>
+            <li><a href="04.html">第4章 一致性模型</a></li>
+            <li><a href="05.html">第5章 通信基础</a></li>
+            <li><a href="06.html">第6章 序列化与编解码</a></li>
+            <li><a href="07.html">第7章 分布式系统设计模式</a></li>
+            <li><a href="08.html" class="active">第8章 RPC远程过程调用</a></li>
+            <li><a href="09.html">第9章 消息队列与事件驱动</a></li>
+            <li><a href="10.html">第10章 P2P与Gossip协议</a></li>
+            <li><a href="11.html">第11章 服务网格</a></li>
+            <li><a href="12.html">第12章 网络协议栈深度</a></li>
+            <li><a href="13.html">第13章 组通信与广播</a></li>
+            <li><a href="14.html">第14章 2026通信前沿</a></li>
+            <li><a href="15.html">第15章 复制与一致性</a></li>
+            <li><a href="16.html">第16章 分布式事务</a></li>
+            <li><a href="17.html">第17章 Raft共识算法</a></li>
+            <li><a href="18.html">第18章 Paxos与BFT</a></li>
+            <li><a href="19.html">第19章 并行计算模型</a></li>
+            <li><a href="20.html">第20章 数据并行</a></li>
+            <li><a href="21.html">第21章 模型与流水线并行</a></li>
+            <li><a href="22.html">第22章 分布式训练实战</a></li>
+            <li><a href="23.html">第23章 Docker与K8s编排</a></li>
+            <li><a href="24.html">第24章 可观测性</a></li>
+            <li><a href="25.html">第25章 调试与压测</a></li>
+            <li><a href="26.html">第26章 AI训练基础设施</a></li>
+            <li><a href="27.html">第27章 边缘计算与IoT</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第8章 RPC远程过程调用</h2>
+
+        <p>访问一个远程服务上的函数，应该像调用本地函数一样简单——这个想法诞生于 1984 年的一个叫 Cam 的实验系统，随后被 Sun RPC、CORBA、DCOM、Java RMI 反复实践，直到今天成为微服务系统的基石。但这句话前半句是对的，后半句是谎言：让语法像本地调用很容易，让<strong>语义</strong>像本地调用却是不可能的。</p>
+
+        <p>网络不是本地总线的延伸。远程调用可能丢包、超时、被重复执行、或者在半路上等了 30 秒才返回结果。这一章我们来剥开 RPC 的外衣，看它到底做了什么、不能做什么，以及如何在现实世界里用好它。</p>
+
+        <h3>2.1 RPC 的工作原理</h3>
+
+        <p>一个 RPC 调用从客户端到服务端再返回，大致经历这么几步：</p>
+
+        <pre><code>Client Process                  Server Process
+     │                              │
+     │  client_app.foo(args)        │
+     │      ↓                       │
+     │  Client Stub                 │
+     │  (封装参数为字节流)           │
+     │      ↓                       │
+     │  RPC Runtime                 │
+     │  (序列化、添加消息头)         │
+     │      ↓                       │
+     │  Transport Layer             │
+     │  (TCP/UDP/HTTP2 发送)        │
+     │                              │
+     │         ──── 网络 ────►      │
+     │                              │
+     │                          Transport Layer
+     │                          (接收字节流)
+     │                              ↓
+     │                          RPC Runtime
+     │                          (反序列化、路由)
+     │                              ↓
+     │                          Server Skeleton
+     │                          (解包参数)
+     │                              ↓
+     │                          server_app.foo(args)
+     │                              │
+     │                          return result
+     │                              │
+     │         ◄─── 网络 ────       │
+     │                              │
+     │  RPC Runtime                 │
+     │  (反序列化返回值)            │
+     │      ↓                       │
+     │  客户端继续执行               │
+     │                              │</code></pre>
+
+        <p><strong>Client Stub</strong> 和 <strong>Server Skeleton</strong> 就像一对翻译官。客户端一侧把函数名和参数打包成网络字节流（这叫 <strong>marshalling</strong>），服务端一侧解包出来、调用实际函数、再打包返回值发回去。这对翻译官通常是自动生成的——你写一个接口定义，工具生成 stub 和 skeleton 代码。</p>
+
+        <p>序列化（Serialization）是 RPC 最核心也最容易被低估的环节。JSON 可读性好但慢，Protobuf 快但 schema 管理麻烦，Thrift 的 Binary 协议紧凑但调试困难。选错了序列化格式，整个系统的延迟和吞吐就卡在这里了。</p>
+
+        <h3>2.2 RPC vs 本地调用的鸿沟</h3>
+
+        <p>本地调用和远程调用之间的差异不是量变的，是质变的。来看对比：</p>
+
+        <table>
+          <tr><th>维度</th><th>本地调用</th><th>RPC 远程调用</th></tr>
+          <tr><td>延迟</td><td>纳秒级</td><td>毫秒级（0.1-100ms），差 10⁵-10⁸ 倍</td></tr>
+          <tr><td>失败语义</td><td>基本不失败（除 segfault）</td><td>网络超时、连接断开、服务端崩溃、负载过高</td></tr>
+          <tr><td>参数传递</td><td>传引用（指针就是同一个对象）</td><td>传值（必须序列化成字节，再反序列化还原）</td></tr>
+          <tr><td>返回结果</td><td>确定——要么对要么 crash</td><td>不确定——超时可能是服务端没收到，也可能是结果丢了</td></tr>
+          <tr><td>内存模型</td><td>共享同一地址空间</td><td>完全隔离，没有共享内存</td></tr>
+          <tr><td>调用成本</td><td>几条 CPU 指令</td><td>序列化+网络传输+反序列化，可能几百微秒</td></tr>
+          <tr><td>幂等性</td><td>天然幂等（同一个调用不会产生两次副作用）</td><td>不幂等——重试可能导致副作用重复执行</td></tr>
+        </table>
+
+        <div class="warning">
+          <p><strong>经典踩坑：把 RPC 当本地调用写的教训</strong></p>
+          <p>我曾经见过一个团队把 RPC 客户端封装成普通 Java 方法，业务代码里写了一个 for 循环不断调用，以为循环 100 次就调用 100 次。结果网络抖动导致第一次调用的响应延迟 30 秒，for 循环里的"超时重试"逻辑又不当，最后在 5 秒内发了 3000 个请求到服务端，直接把服务打崩了。RPC 不是本地调用——<strong>每一个远程调用都要考虑超时、限流、熔断、重试策略</strong>。</p>
+        </div>
+
+        <h3>2.3 gRPC 实战</h3>
+
+        <p>gRPC 是 Google 开源的 RPC 框架，基于 HTTP/2 和 Protobuf。它不像传统 RPC 那样用 TCP 长连接自己做传输协议，而是充分利用 HTTP/2 的多路复用能力：多个 Stream 共享一个 TCP 连接，避免了端口耗尽和连接频繁建立的开销。</p>
+
+        <p>gRPC 支持四种流式模式：</p>
+
+        <table>
+          <tr><th>模式</th><th>描述</th><th>适用场景</th></tr>
+          <tr><td>Unary RPC</td><td>客户端发一个请求，服务端回一个响应</td><td>标准的请求-响应，如查询用户信息</td></tr>
+          <tr><td>Server Streaming</td><td>客户端发一个请求，服务端回多个消息</td><td>订阅数据流，如实时日志推送</td></tr>
+          <tr><td>Client Streaming</td><td>客户端发多个请求，服务端回一个响应</td><td>批量上传，如文件分片上传</td></tr>
+          <tr><td>Bidirectional Streaming</td><td>两端同时收发多条消息</td><td>实时双向通信，如语音识别、聊天</td></tr>
+        </table>
+
+        <p>看一个简单的 gRPC proto 定义和 Go 服务端示例：</p>
+
+        <pre><code>// order.proto
+syntax = "proto3";
+package order;
+
+service OrderService {
+  rpc CreateOrder (CreateOrderRequest) returns (CreateOrderResponse);
+  rpc SubscribeOrderStatus (SubscribeRequest) returns (stream OrderStatus);
+}
+
+message CreateOrderRequest {
+  string user_id = 1;
+  repeated string item_ids = 2;
+  int64 total_amount = 3;
+}
+
+message CreateOrderResponse {
+  string order_id = 1;
+  int32 status = 2;
+}
+
+message OrderStatus {
+  string order_id = 1;
+  string status = 2;
+  int64 updated_at = 3;
+}</code></pre>
+
+        <pre><code>// Go 服务端代码片段
+type orderServer struct {
+    pb.UnimplementedOrderServiceServer
+}
+
+func (s *orderServer) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (*pb.CreateOrderResponse, error) {
+    // 业务逻辑：创建订单
+    orderID := uuid.New().String()
+    log.Printf("创建订单: user=%s, items=%v", req.UserId, req.ItemIds)
+    return &pb.CreateOrderResponse{OrderId: orderID, Status: 1}, nil
+}
+
+func (s *orderServer) SubscribeOrderStatus(req *pb.SubscribeRequest, stream pb.OrderService_SubscribeOrderStatusServer) error {
+    // 服务端流式推送订单状态更新
+    for {
+        select {
+        case &lt;-stream.Context().Done():
+            return nil
+        case status := &lt;-orderStatusChan:
+            stream.Send(&pb.OrderStatus{
+                OrderId:   req.OrderId,
+                Status:    status,
+                UpdatedAt: time.Now().Unix(),
+            })
+        }
+    }
+}</code></pre>
+
+        <div class="tip">
+          <p><strong>实用建议</strong>：gRPC 的默认消息大小限制是 4MB，如果传输大文件记得通过 <code>MaxCallRecvMsgSize</code> 调大。另外 gRPC 的 deadline（超时）一定要传——客户端设置 deadline，服务端读取并做优雅退出，否则一个慢请求能卡住整个连接池。</p>
+        </div>
+
+        <h3>2.4 RPC 的故障语义</h3>
+
+        <p>RPC 最恼人的问题就是"调用没有返回结果"——到底是服务端没收到、收到了但处理失败了、还是处理成功了但结果丢了？如果你直接重试，可能造成重复执行；如果不重试，可能丢失一次成功的操作。</p>
+
+        <p>这就是 RPC 的三种语义：</p>
+
+        <ul>
+          <li><strong>至少一次（At-Least-Once）</strong>：调用者持续重试直到收到成功响应。操作可能被执行多次。适用于幂等操作（如纯查询）。</li>
+          <li><strong>至多一次（At-Most-Once）</strong>：调用者最多发起一次，超时就不管了。操作最多被执行一次或零次，但可能丢失。适用于非幂等且不能重试的操作。</li>
+          <li><strong>恰好一次（Exactly-Once）</strong>：操作刚好执行一次。这在实践中几乎不可能保证——因为如果服务端处理完但 ACK 丢了，客户端没办法区分"没收到"和"没处理"。</li>
+        </ul>
+
+        <p>现实世界的 RPC 框架几乎都是"至多一次"的变体。gRPC 做了尽最大努力的"恰好一次"：如果请求被服务端处理了但响应没到，客户端会收到 <code>UNAVAILABLE</code> 错误——它实际上把不确定性踢给了应用层。</p>
+
+        <p>幂等性设计是 RPC 系统的必修课。在订单系统里，每个创建请求带上 <strong>idempotency key</strong>（幂等键），服务端检测到相同 key 就返回之前的结果，不重复执行。这是"恰好一次"语义在实际工程中最务实的近似。</p>
+
+        <h3>2.5 其他 RPC 框架</h3>
+
+        <p>选 RPC 框架就像选编程语言——生态、性能、团队经验共同决定。下面是几个主流框架的对比：</p>
+
+        <table>
+          <tr><th>框架</th><th>协议</th><th>序列化</th><th>生态</th><th>性能</th><th>主要场景</th></tr>
+          <tr><td>gRPC</td><td>HTTP/2</td><td>Protobuf</td><td>多语言、云原生 CNCF</td><td>高</td><td>微服务、跨语言通信</td></tr>
+          <tr><td>Apache Thrift</td><td>自定义 TCP</td><td>Thrift Binary/Compact</td><td>多语言</td><td>极高</td><td>高性能内部服务、大数据</td></tr>
+          <tr><td>Apache Dubbo</td><td>自定义 TCP</td><td>Hessian/JSON/Protobuf</td><td>Java 为主、Spring Cloud</td><td>高</td><td>Java 微服务、国内生态</td></tr>
+          <tr><td>tRPC</td><td>HTTP/2 / TCP</td><td>Protobuf / Flatbuffers</td><td>多语言、腾讯</td><td>极高</td><td>腾讯内部大规模服务</td></tr>
+          <tr><td>JSON-RPC</td><td>HTTP / WebSocket</td><td>JSON</td><td>极广</td><td>低</td><td>简单 API、调试、以太坊</td></tr>
+        </table>
+
+        <div class="highlight">
+          <p><strong>选型建议</strong>：如果你的服务已经是 Kubernetes 生态，从 gRPC 开始基本不会错。如果追求极致性能（微秒级延迟）、所有服务都用同一种语言，Thrift 或 Dubbo 值得考虑。如果只需要偶尔跨服务调一下、不想引入 schema 管理，JSON-RPC 虽然慢但架不住简单。</p>
+        </div>
+
+        <p>RPC 是分布式系统中使用最频繁的原语之一，但它从来不只是"远程函数调用"那么简单。理解了它的序列化、故障语义和框架差异，你才能真正在微服务架构中用好它。下一章我们来看另一种通信范式——消息队列，它用异步和缓冲的方式解决了 RPC 解决不了的问题。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

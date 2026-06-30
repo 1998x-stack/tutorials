@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 网络协议栈深度</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是分布式系统</a></li>
+            <li><a href="02.html">第2章 系统模型与时间</a></li>
+            <li><a href="03.html">第3章 CAP定理与取舍</a></li>
+            <li><a href="04.html">第4章 一致性模型</a></li>
+            <li><a href="05.html">第5章 通信基础</a></li>
+            <li><a href="06.html">第6章 序列化与编解码</a></li>
+            <li><a href="07.html">第7章 分布式系统设计模式</a></li>
+            <li><a href="08.html">第8章 RPC远程过程调用</a></li>
+            <li><a href="09.html">第9章 消息队列与事件驱动</a></li>
+            <li><a href="10.html">第10章 P2P与Gossip协议</a></li>
+            <li><a href="11.html">第11章 服务网格</a></li>
+            <li><a href="12.html" class="active">第12章 网络协议栈深度</a></li>
+            <li><a href="13.html">第13章 组通信与广播</a></li>
+            <li><a href="14.html">第14章 2026通信前沿</a></li>
+            <li><a href="15.html">第15章 复制与一致性</a></li>
+            <li><a href="16.html">第16章 分布式事务</a></li>
+            <li><a href="17.html">第17章 Raft共识算法</a></li>
+            <li><a href="18.html">第18章 Paxos与BFT</a></li>
+            <li><a href="19.html">第19章 并行计算模型</a></li>
+            <li><a href="20.html">第20章 数据并行</a></li>
+            <li><a href="21.html">第21章 模型与流水线并行</a></li>
+            <li><a href="22.html">第22章 分布式训练实战</a></li>
+            <li><a href="23.html">第23章 Docker与K8s编排</a></li>
+            <li><a href="24.html">第24章 可观测性</a></li>
+            <li><a href="25.html">第25章 调试与压测</a></li>
+            <li><a href="26.html">第26章 AI训练基础设施</a></li>
+            <li><a href="27.html">第27章 边缘计算与IoT</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第12章 网络协议栈深度</h2>
+
+        <p>前面几章我们一直在聊分布式系统的通信——RPC、消息队列、服务网格。但不管你用哪种通信方式，最终都依赖底层的网络协议。选 HTTP/1.1 还是 HTTP/2？要不要上 QUIC？WebSocket 能承载多少并发连接？TCP 拥塞控制是 BBR 还是 CUBIC？这些选择不是"随便挑一个"的问题——它们直接决定了你的系统的延迟天花板、吞吐上限和崩溃概率。</p>
+
+        <p>这一章我们不谈应用框架，只聊传输层和应用层的核心协议。理解它们的工作原理，你才能真正理解为什么有些系统"卡"在一个你意想不到的地方。</p>
+
+        <h3>6.1 HTTP/2 vs HTTP/1.1</h3>
+
+        <p>HTTP/1.1 的问题在微服务时代被放大了。最核心的痛点是 <strong>队头阻塞（Head-of-Line Blocking）</strong>——在同一个 TCP 连接上，请求必须串行，前一个没处理完后面的就得等着。浏览器想了一个歪招：开多个连接（通常 6 个），但治标不治本。</p>
+
+        <p>HTTP/2 做了几个关键改进：</p>
+
+        <table>
+          <tr><th>特性</th><th>HTTP/1.1</th><th>HTTP/2</th><th>收益</th></tr>
+          <tr><td>多路复用</td><td>一个连接一次一个请求</td><td>一个连接同时多个 Stream</td><td>减少连接数，消除队头请求阻塞</td></tr>
+          <tr><td>Header 压缩</td><td>明文，无压缩</td><td>HPACK 压缩（静态表+动态表+Huffman）</td><td>Header 从 500-800 字节降到 50-100 字节</td></tr>
+          <tr><td>Server Push</td><td>不支持</td><td>服务端主动推送资源</td><td>减少 RTT，提前加载 CSS/JS</td></tr>
+          <tr><td>二进制分帧</td><td>文本协议，按行解析</td><td>二进制帧，流式解析</td><td>解析效率高，更易扩展</td></tr>
+          <tr><td>优先级</td><td>不支持</td><td>Stream 优先级和依赖树</td><td>关键资源优先传输</td></tr>
+        </table>
+
+        <p>但是注意：<strong>HTTP/2 没有解决 TCP 层面的队头阻塞</strong>。虽然 HTTP/2 可以在一个 TCP 连接上多路复用多个 Stream，但 TCP 是可靠按序传输协议——如果一个 TCP 包丢了，所有 Stream 都要等待这个包重传。这就是所谓的"TCP 层 HoL Blocking"，也是 QUIC 要解决的核心问题。</p>
+
+        <div class="tip">
+          <p><strong>实测数据</strong>：Google 的测试表明，在 1% 丢包率的网络环境下，HTTP/2 的吞吐量比 HTTP/1.1 还差——因为 HTTP/2 所有流共享一个 TCP 连接，丢包影响所有流。HTTP/1.1 用 6 个连接，丢包只影响 1/6 的请求。所以 HTTP/2 在<strong>低丢包率、高带宽</strong>的网络下表现最好，在弱网环境反而可能不如 HTTP/1.1。</p>
+        </div>
+
+        <h3>6.2 QUIC 与 HTTP/3</h3>
+
+        <p>QUIC（Quick UDP Internet Connections）是 Google 为了解决 TCP 的"老问题"而从零设计的传输协议。它在 UDP 之上实现了可靠传输、加密、多路复用——本质上是一个"在用户空间实现的 TCP+TLS+HTTP/2"。HTTP/3 就是基于 QUIC 的 HTTP 协议。</p>
+
+        <p>QUIC 的核心改进：</p>
+
+        <ul>
+          <li><strong>0-RTT 握手</strong>：之前连接过的客户端可以缓存服务器参数，第二次连接时直接发送数据，省掉 1-2 个 RTT。对于 HTTP 这种短连接场景，延迟降低非常显著。</li>
+          <li><strong>连接迁移</strong>：TCP 连接靠 IP:Port 标识，切换网络（WiFi→4G）必须重新建连。QUIC 连接靠 Connection ID 标识，IP 变了连接还在——APP 从 WiFi 切到 4G 时视频不中断。</li>
+          <li><strong>独立流</strong>：QUIC 在 UDP 之上实现了多流（类似 HTTP/2 的 Stream），但每个流独立丢包重传——一个流丢包不影响其他流。这才是真正解决了队头阻塞。</li>
+          <li><strong>前向纠错（FEC）</strong>：发送冗余数据包，允许部分丢包无需重传即可恢复。但这功能在正式 RFC 中移除了——实测显示 CPU 开销超过了收益。</li>
+        </ul>
+
+        <pre><code>TCP + TLS 1.3 握手（2 RTT）：
+Client                          Server
+  │                                │
+  ├─── SYN ─────────────────────►  │
+  │◄─── SYN-ACK ─────────────────  │
+  ├─── ACK ─────────────────────►  │  ← TCP 握手（1 RTT）
+  │                                │
+  ├─── ClientHello ─────────────►  │
+  │◄─── ServerHello + Finished ──  │
+  ├─── Finished ────────────────►  │  ← TLS 握手（1 RTT）
+  │                                │
+  ├─── HTTP 请求 ───────────────►  │  ← 第 3 个 RTT 才开始发数据
+  │                                │
+
+QUIC 0-RTT（之前连接过）：
+Client                          Server
+  │                                │
+  ├─── 0-RTT 数据 + 握手信息 ───►  │  ← 直接发数据！
+  │                                │
+  │◄─── 响应 + 握手完成 ──────────  │
+  │                                │</code></pre>
+
+        <div class="highlight">
+          <p><strong>Google 的真实数据</strong>：YouTube 迁移到 QUIC 后，视频重新缓冲率降低了 20% 以上。Google 搜索的页加载延迟减少了 2-8%（取决于网络条件）。目前全球互联网流量中 QUIC 已经占到了 20% 以上——主要由 Google、Facebook、Cloudflare 等服务驱动。</p>
+        </div>
+
+        <h3>6.3 WebSocket 与长连接</h3>
+
+        <p>HTTP 是"你问我答"的请求-响应模型——服务端不能主动给客户端发消息。WebSocket 在 HTTP 之上建立了一个双向通信通道，连接建立后客户端和服务端可以随时互相发消息。</p>
+
+        <p>WebSocket 适合推送场景（实时行情、聊天、协作编辑），但连接数管理是个大问题。一个 TCP 连接消耗大约 10-50KB 内存（取决于内核参数和用户态缓存）。100 万个 WebSocket 连接意味着 10-50GB 内存——这还不算业务逻辑。从 C10K（1 万并发连接）到 C10M（1000 万），你面对的不是线性扩展的问题，而是架构的质变。</p>
+
+        <p>WebSocket 的<strong>心跳保活</strong>也是一个常被忽视的细节：</p>
+        <ul>
+          <li>TCP 的 keepalive 默认 2 小时才发一次探测，对 WebSocket 来说太慢了。</li>
+          <li>应用层心跳太频繁（如每 5 秒）会浪费带宽和 CPU。</li>
+          <li>心跳间隔通常取 30-60 秒，配合指数退避重连。</li>
+          <li>大规模部署时，要避免"心跳风暴"——所有客户端同时断连同时重连，服务端瞬间被连接请求打满。</li>
+        </ul>
+
+        <h3>6.4 TCP 拥塞控制演进</h3>
+
+        <p>TCP 拥塞控制算法从 1988 年的 Tahoe 演进到今天，每一代都对应着不同时代的网络特征。</p>
+
+        <table>
+          <tr><th>算法</th><th>年份</th><th>核心机制</th><th>公平性</th><th>高吞吐</th><th>低延迟</th></tr>
+          <tr><td>Tahoe</td><td>1988</td><td>慢启动 + 拥塞避免 + 快速重传</td><td>好</td><td>差</td><td>中</td></tr>
+          <tr><td>Reno</td><td>1990</td><td>增加快速恢复，丢包即减半窗口</td><td>好</td><td>差</td><td>中</td></tr>
+          <tr><td>BIC/CUBIC</td><td>2005/2008</td><td>三次函数探测带宽，丢包不减速太多</td><td>较好</td><td>高</td><td>差（Bufferbloat）</td></tr>
+          <tr><td>BBR</td><td>2016</td><td>基于带宽和 RTT 建模，不依赖丢包信号</td><td>中</td><td>高</td><td>好</td></tr>
+        </table>
+
+        <p><strong>CUBIC</strong> 是目前 Linux 的默认算法。它的窗口增长是三次函数曲线——窗口距离上次丢包点越远，增长越快，这样能快速利用空闲带宽。CUBIC 的问题是它依赖丢包作为拥塞信号，但是在高带宽网络中，为了制造一个丢包信号，缓冲区可能要积压很多数据——这就是"Bufferbloat"问题，导致延迟飙升。</p>
+
+        <p><strong>BBR（Bottleneck Bandwidth and Round-trip propagation time）</strong> 是 Google 的革新之作。它不再依赖丢包信号，而是通过实时测量瓶颈带宽和最小 RTT 来推算最优发送速率。BBR 在 YouTube 和 Google Cloud 上验证的效果很显著——同样网络条件下延迟降低了数十倍，吞吐提升了 2-25 倍。</p>
+
+        <div class="warning">
+          <p><strong>踩坑故事：BBR 的"不公平"问题</strong></p>
+          <p>某 CDN 厂商在边缘节点启用了 BBR 后发现，BBR 流和 CUBIC 流竞争时，BBR 会抢占 CUBIC 的带宽。原因：BBR 的 pacing rate 基于实测带宽，它不会像 CUBIC 那样在丢包时大幅降速。一个 BBR 连接可能占掉 70-80% 的共享瓶颈带宽，而 CUBIC 只分到 20-30%。在混合部署环境中，<strong>要么全上 BBR，要么全上 CUBIC</strong>，混用会导致严重的公平性问题。</p>
+        </div>
+
+        <h3>6.5 协议选择决策树</h3>
+
+        <p>不同场景适合不同的协议组合。下面是一个快速参考：</p>
+
+        <table>
+          <tr><th>场景</th><th>推荐协议</th><th>原因</th></tr>
+          <tr><td>服务间内部 RPC</td><td>gRPC (HTTP/2)</td><td>多路复用、双向流、Protobuf 高效序列化</td></tr>
+          <tr><td>Web 实时推送（行情/通知）</td><td>WebSocket</td><td>双向实时通信，浏览器原生支持</td></tr>
+          <tr><td>文件传输（大文件）</td><td>TCP + 应用层分块</td><td>TCP 可靠传输、丢包重传保证完整性</td></tr>
+          <tr><td>弱网环境（移动端/卫星）</td><td>QUIC / HTTP/3</td><td>0-RTT 握手、连接迁移、独立流不受丢包影响</td></tr>
+          <tr><td>IoT / 低功耗设备</td><td>MQTT over TCP</td><td>头部极小、协议轻量、支持 QoS 等级</td></tr>
+          <tr><td>视频直播/实时音视频</td><td>WebRTC (基于 QUIC/SCTP)</td><td>低延迟、自适应码率、支持 NAT 穿透</td></tr>
+          <tr><td>高丢包率环境</td><td>KCP / QUIC</td><td>UDP 基础上的可靠协议，比 TCP 在丢包下表现好</td></tr>
+        </table>
+
+        <p>协议选择看起来是"技术选型"，其实是"对网络的认知"——你到底理解不理解你的系统在什么网络条件下运行。数据中心内部 0.01% 的丢包率和移动网络 5% 的丢包率，选择的协议栈完全不同。下一章我们将从一个全新的角度看待通信——当多个节点需要就"发生了什么"达成一致时，组通信与广播协议是如何工作的。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

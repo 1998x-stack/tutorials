@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第23章 数据去重与质量过滤</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🧹 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 数据准备的演进与新范式</a></li>
+            <li><a href="02.html">第2章 应用就绪数据质量模型</a></li>
+            <li><a href="03.html">第3章 LLM作为通用数据操作符</a></li>
+            <li><a href="04.html">第4章 提示工程用于数据任务</a></li>
+            <li><a href="05.html">第5章 上下文学习与少样本数据操作</a></li>
+            <li><a href="06.html">第6章 微调LLM用于数据任务</a></li>
+            <li><a href="07.html">第7章 数据准备评估体系</a></li>
+            <li><a href="08.html">第8章 数据错误检测：规则到LLM</a></li>
+            <li><a href="09.html">第9章 上下文感知清洗：LLMClean</a></li>
+            <li><a href="10.html">第10章 混合零样本错误检测</a></li>
+            <li><a href="11.html">第11章 数据填补与缺失值修复</a></li>
+            <li><a href="12.html">第12章 函数合成驱动的清洗</a></li>
+            <li><a href="13.html">第13章 异常检测与数据验证</a></li>
+            <li><a href="14.html">第14章 端到端清洗工作流自动化</a></li>
+            <li><a href="15.html">第15章 实体匹配：LLM增强方法</a></li>
+            <li><a href="16.html">第16章 模式匹配：语义对齐</a></li>
+            <li><a href="17.html">第17章 跨域零样本实体匹配</a></li>
+            <li><a href="18.html">第18章 Agent驱动的数据集成编排</a></li>
+            <li><a href="19.html">第19章 LLM数据标注自动化</a></li>
+            <li><a href="20.html">第20章 数据画像与语义类型发现</a></li>
+            <li><a href="21.html">第21章 知识图谱增强的数据处理</a></li>
+            <li><a href="22.html">第22章 表格理解与大模型集成</a></li>
+            <li><a href="23.html" class="active">第23章 数据去重与质量过滤</a></li>
+            <li><a href="24.html">第24章 数据混合法则与域选择</a></li>
+            <li><a href="25.html">第25章 合成数据生成与知识蒸馏</a></li>
+            <li><a href="26.html">第26章 Data-Juicer与端到端框架</a></li>
+            <li><a href="27.html">第27章 数据治理、溯源与安全保障</a></li>
+            <li><a href="28.html">第28章 实战：构建LLM数据准备系统</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>为什么去重让模型更好</h2>
+
+        <p>大家好，我是你们的讲师。有没有想过一个问题：你用 15T tokens 训练了一个模型，其中有多少是真正有效的信息？更尖锐地问——有多少是你已经在其他数据里见过的？</p>
+
+        <p>2022 年，一篇题为 <strong>"Deduplicating Training Data Makes Language Models Better"</strong> (Lee et al., 2022) 的论文引爆了这个方向。研究团队发现，在 C4 数据集中，仅仅做一次精确去重，就能让模型在多个基准上的困惑度降低 1-2 个点。更令人震惊的是，他们估算 Common Crawl 这样的超大语料中，重复率高达 30-50%。也就是说，你花几百万美元训练模型，小一半的算力都在学已经学过的东西。</p>
+
+        <p>理解去重的价值，关键在于理解"重复"的不同形态：有的重复是精确的——同一段文字出现在不同的 URL 中；有的是近似的——两段文档 90% 相似，只是段落顺序做了调整；有的是语义的——维基百科和百度百科对同一概念的描述完全不同文，但说的是一件事。对付不同形态的重复，需要完全不同的武器。</p>
+
+        <div class="highlight">
+            <strong>核心洞察：</strong> "重复数据不仅浪费算力，更致命的是它会扭曲模型的概率分布。如果某段话出现 100 次而另一段同等重要的内容只出现 1 次，模型会错误地认为前者的重要性是后者的 100 倍。去重的本质，是恢复数据的真实分布。"
+        </div>
+
+        <h2>精确去重与近似去重</h2>
+
+        <p>去重策略可以按照精度从高到低排列，每种策略都有自己的适用场景和成本。我们先从最基础说起。</p>
+
+        <h3>精确去重：Exact Match</h3>
+
+        <p>精确去重是最朴素也是最有效的方法。它的核心思想是：如果两篇文档的文本完全相同（或哈希值相同），只保留一份。具体实现通常用 <code>sha256</code> 对文档内容做哈希，然后通过布隆过滤器或哈希表判断重复。</p>
+
+        <p>但精确去重的局限性也很明显——稍微改动一个标点符号、添加一个空格，两篇几乎一模一样的文章就会被认为是"不同"的。这就是近似去重登场的理由。</p>
+
+        <h3>MinHash + LSH：近似去重的基石</h3>
+
+        <p>MinHash (Broder, 1997) 是近似去重领域最经典的技术。它的思路很巧妙：把文档转化为一组特征（通常用 n-gram 或 shingle），然后用多个独立的哈希函数为每个文档生成一个"签名"（signature）。两篇文档的 Jaccard 相似度，就可以通过它们的 MinHash 签名相等的比例来近似估计。</p>
+
+        <p>为了提高效率，MinHash 通常和 <strong>LSH（Locality-Sensitive Hashing，局部敏感哈希）</strong> 配合使用。LSH 将签名矩阵分桶（banding），只有落在同一桶中的文档对才需要计算真正的相似度，避免了 O(n²) 的两两比较。</p>
+
+        <p>下面是精确去重和近似去重主要策略的对比：</p>
+
+        <table>
+            <thead>
+                <tr><th>方法</th><th>基本原理</th><th>粒度</th><th>时间复杂度</th><th>召回率</th><th>误报率</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Exact Match (SHA256)</td><td>全文哈希比较</td><td>文档级</td><td>O(n)</td><td>~100%（精确重复）</td><td>~0%</td></tr>
+                <tr><td>URL去重</td><td>相同的 URL 只保留一次</td><td>URL级</td><td>O(n)</td><td>中等</td><td>低</td></tr>
+                <tr><td>MinHash + LSH</td><td>n-gram 签名 + 分桶比较</td><td>文档级</td><td>O(n log n)</td><td>高（可调阈值）</td><td>可调</td></tr>
+                <tr><td>SimHash</td><td>特征加权 + 海明距离</td><td>文档级</td><td>O(n)</td><td>中等</td><td>中等</td></tr>
+                <tr><td>段落级去重</td><td>按段落切分后分别去重</td><td>段落级</td><td>O(n × k)</td><td>更高</td><td>更低</td></tr>
+            </tbody>
+        </table>
+
+        <p>下面是 MinHash + LSH 的一个简化 Python 实现示例：</p>
+
+        <pre><code>import hashlib
+import random
+
+def minhash_signature(text, num_hashes=128, shingle_size=5):
+    """为一段文本生成 MinHash 签名"""
+    # 生成 shingle（n-gram）
+    shingles = set()
+    for i in range(len(text) - shingle_size + 1):
+        shingle = text[i:i+shingle_size]
+        shingle_hash = hashlib.md5(shingle.encode()).hexdigest()
+        shingles.add(int(shingle_hash, 16))
+
+    # 生成随机哈希函数（使用 universal hashing）
+    seed = 42
+    rng = random.Random(seed)
+    a = [rng.randint(1, 2**31) for _ in range(num_hashes)]
+    b = [rng.randint(0, 2**31) for _ in range(num_hashes)]
+    p = 2**31 - 1
+
+    signature = []
+    for i in range(num_hashes):
+        min_hash = min((a[i] * s + b[i]) % p for s in shingles)
+        signature.append(min_hash)
+    return signature
+
+def lsh_bucket(signature, bands=16, rows_per_band=8):
+    """将签名分桶，用于近邻搜索"""
+    buckets = {}
+    for b in range(bands):
+        start = b * rows_per_band
+        end = start + rows_per_band
+        band_hash = hashlib.md5(
+            str(signature[start:end]).encode()
+        ).hexdigest()
+        if band_hash not in buckets:
+            buckets[band_hash] = []
+        buckets[band_hash].append(b)
+    return buckets</code></pre>
+
+        <p>在实际大规模应用中，业界普遍使用 <code>datasketch</code> 或 <code>spark-lsh</code> 等成熟库来加速。例如，HuggingFace 的 Datatrove 和 AI2 的 Dolma 工具链都将 MinHash + LSH 作为标准配置。</p>
+
+        <h2>语义去重</h2>
+
+        <p>精确和近似去重只能处理文本层面的重复，但真正的挑战在于语义层面的重复——内容相同、表达不同。这时，我们需要语义去重。</p>
+
+        <h3>SemDeDup：语义级去重</h3>
+
+        <p>SemDeDup (Abbas et al., 2023) 利用预训练模型的嵌入表示来检测语义相似的文档。具体来说，它使用 Sentence-BERT 等模型将文档编码为稠密向量，然后通过 K-Means 聚类将文档分组，在同一簇内基于余弦相似度去除冗余。</p>
+
+        <p>SemDeDup 的一个重要发现是：<strong>不需要把所有的语义重复都去掉</strong>。论文实验表明，移除 50% 的语义重复即可获得大部分收益，继续增加去重力度反而会损害模型在多样性任务上的表现。他们建议将去重阈值设置在 0.7-0.8 的余弦相似度范围内。</p>
+
+        <h3>FairDeDup 与 D4</h3>
+
+        <p>FairDeDup (Yun et al., 2024) 在 SemDeDup 的基础上增加了群体公平性约束。它的核心洞察是：无差别的语义去重可能会系统性移除某些群体的代表性样本。例如，对某个少数群体的文本，由于表达方式较为相似，去重算法可能会将它们全部判定为"冗余"而删除，导致模型对该群体的理解能力下降。FairDeDup 通过在聚类去重过程中引入分组感知的正则化项来解决这个问题。</p>
+
+        <p>D4 (Diverse Dedup for Datasets) 则是另一个有趣的方向。它关注的不再是"两篇文档是否重复"，而是"移除这篇文档会降低多少数据集的总体多样性"。D4 利用行列式点过程 (DPP) 来量化每篇文档对数据集多样性的边际贡献，从而在去重时保留最有"差异性"的样本。</p>
+
+        <div class="tip">
+            <strong>实践建议：</strong> 在大规模数据工程中，推荐采用"三级去重"流水线——先做精确去重（成本最低），再做 MinHash 近似去重，最后根据预算和需求决定是否做语义去重。每一级都用上一级的输出作为输入，这样可以大幅降低语义去重的计算量。
+        </div>
+
+        <h2>质量过滤策略</h2>
+
+        <p>去重去掉的是重复，过滤去掉的是低质量。在预训练场景中，"低质量"的定义五花八门：垃圾广告、机器生成的无意义文本、格式混乱的文档、包含有害内容的页面……不同的过滤策略捕捉不同维度的质量问题。</p>
+
+        <h3>困惑度过滤</h3>
+
+        <p>困惑度 (Perplexity, PPL) 过滤是最经典的质量信号之一。它的想法很简单：用一个已经训练好的语言模型来评估每篇文档——如果模型对这篇文档"感到困惑"（PPL 很高），说明文档质量可能很低。</p>
+
+        <p>C4 数据集就是使用困惑度过滤的典型代表。他们用 KenLM 在 Wikipedia 文本上训练一个 5-gram 语言模型，然后过滤掉 PPL 过高的文档。但这有一个方法论上的隐患：<strong>语言模型会偏好自己训练数据相似类型的文本</strong>。用 Wikipedia 训练的 PPL 模型天然会偏好 encyclopedia 风格，而对高质量的论坛讨论、技术博客产生误判。</p>
+
+        <h3>SuperFiltering：弱到强过滤</h3>
+
+        <p>SuperFiltering (Li et al., 2024) 提出了一种巧妙的"弱到强"过滤范式。它的核心洞察是：训练一个弱小的分类器（比如使用 n-gram 特征的逻辑回归或小 BERT）来识别高质量数据，然后用这个弱分类器去过滤更大规模的数据。这个"弱"模型对训练数据的"偏见"反而成了优势——它的学习边界比大模型更保守，不会因为看了太多数据而对噪声不敏感。</p>
+
+        <p>具体实现上，SuperFiltering 的流程如下：人类专家标注几千条高质量/低质量的样本，训练一个小型质量分类器（比如 DistilBERT），然后用这个分类器去评分整个数据集。实验证明，这种方法可以用极少的标注成本（几千条）达到与百万级标注接近的过滤效果。</p>
+
+        <h3>QuRating</h3>
+
+        <p>QuRating (Wettig et al., 2024) 则提出了一个更有趣的角度：与其用单一质量分数，不如让模型对文档在多个维度上评分——知识密度、教育价值、叙事流畅度、事实准确性等。每个维度独立评分，然后根据下游任务的需求加权组合。这种多维度评分在需要精细控制数据配比时非常有用。</p>
+
+        <table>
+            <thead>
+                <tr><th>过滤方法</th><th>质量信号来源</th><th>标注需求</th><th>计算开销</th><th>主要优点</th><th>主要局限</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>困惑度 (PPL)</td><td>语言模型</td><td>无</td><td>中</td><td>无需标注，通用</td><td>有训练数据偏置</td></tr>
+                <tr><td>启发式规则</td><td>人工定义</td><td>无</td><td>极低</td><td>速度快，可解释</td><td>覆盖不全，误伤</td></tr>
+                <tr><td>质量分类器</td><td>标注数据</td><td>500-5000条</td><td>低（推理时）</td><td>准确率高</td><td>需要标注</td></tr>
+                <tr><td>SuperFiltering</td><td>弱分类器</td><td>2000-5000条</td><td>低</td><td>标注效率极高</td><td>上限受限于弱模型</td></tr>
+                <tr><td>QuRating</td><td>LLM多维评分</td><td>无（prompt驱动）</td><td>高</td><td>多维度可控</td><td>LLM推理成本高</td></tr>
+                <tr><td>LLM评判</td><td>大语言模型</td><td>无</td><td>极高</td><td>最灵活</td><td>成本高昂，有偏</td></tr>
+            </tbody>
+        </table>
+
+        <h2>去重与过滤的平衡艺术</h2>
+
+        <p>去重和过滤不是越激进越好。实际上，过度去重和过度过滤都会带来反效果。</p>
+
+        <p><strong>FLUX</strong> (Foucart et al., 2025) 的研究发现了一个反直觉的结果：当前主流的数据去重和过滤策略，平均浪费了约 25% 的可用有效 token。也就是说，大量的有用信息被去重或过滤算法错误地丢弃了。FLUX 的方法是通过对每个文档评估"信息边际贡献"来决定是否保留，而不是依赖于硬阈值。</p>
+
+        <p><strong>数据要"够脏"还是"够干净"？</strong> 现实的答案是——两者都要。预训练阶段适度包含一些"次优"数据反而能提升模型的鲁棒性。关键的平衡技巧包括：</p>
+
+        <ul>
+            <li><strong>域自适应过滤阈值</strong>：不同领域的数据质量分布差异很大，应该为每个域设置独立的质量阈值</li>
+            <li><strong>分层去重</strong>：对高质量语料（如书籍、论文）使用宽松去重，对低质量语料（如网页）使用严格去重</li>
+            <li><strong>渐进式过滤</strong>：先做宽过滤保留尽可能多的数据，随着训练进展逐步收紧</li>
+            <li><strong>多样化保留</strong>：在去重时考虑多样性指标，确保每个主题和风格都有足够的代表样本</li>
+        </ul>
+
+        <h3>实战案例：去重太狠，模型成了"复读机"</h3>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong> 某团队在训练一个代码大模型时，对训练数据做了激进的文档级去重（阈值设为 0.6 的 MinHash 相似度）。结果模型在生成代码时表现出严重的"复读机"现象——当用户请求"写一个排序算法"时，模型只输出冒泡排序；当请求"写一个 web server"时，模型永远输出 Flask hello world。检查发现，去重阈值太严，导致所有"不同实现方式但核心逻辑相似"的代码都被去掉了。剩下的都是"最典型的"示例，模型的生成多样性彻底丧失。将阈值调整到 0.85 后问题解决。
+        </div>
+
+        <p>这个案例提醒我们：<strong>去重的目标不是最小化重复率，而是最大化数据集的信息密度和多样性</strong>。一个好的去重策略应该像一位编辑——保留不同角度的报道，而不是只留下一篇"代表性"文章。</p>
+
+        <p>好了，去重和过滤为我们准备好了高质量的干净数据。但下一个问题随之而来：不同来源、不同质量的干净数据，应该按什么比例混合才能达到最佳训练效果？这正是我们下一章要深入探讨的话题——<strong>数据混合法则与域选择</strong>。</p>
+
+        <div class="footer-nav">
+            <a href="22.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="24.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

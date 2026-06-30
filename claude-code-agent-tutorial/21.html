@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 实现 Skills 系统</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html" class="active">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>🔨 第21章 实现 Skills 系统</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们深入讨论了 Context Engineering——如何用最少的 token 传递最多的信息。但这里有一个更深层的矛盾：<strong>你既希望 Agent 拥有尽可能多的专业知识，又不想把这些知识全部塞进上下文</strong>。全部塞进去，上下文爆炸、API 账单上天；不塞进去，Agent 碰到特定领域任务时表现拉胯。</p>
+
+        <p>Skills 系统就是 Claude Code 对这个矛盾的优雅解答。我在早期自己写 Agent 的时候，犯过一个典型的错误：我把所有我知道的知识点——Python 最佳实践、Docker 命令、Git 工作流、Kubernetes 操作——全部写进了 System Prompt。结果呢？Agent 在处理一个简单的文件读写任务时，却花了几千 token "思考"要不要用 K8s 命令。这不是 Agent 的问题，是我的问题——<strong>我不应该让 Agent 背着整个图书馆去散步，而是应该在它需要一本书的时候才帮它借</strong>。</p>
+
+        <h3>Skills 系统的架构</h3>
+
+        <p>Skills 系统的核心是 <strong>SkillManager</strong>，它负责管理技能的完整生命周期：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>阶段</th>
+                    <th>触发条件</th>
+                    <th>执行动作</th>
+                    <th>持续时间</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Discover</td>
+                    <td>Agent 启动 / 手动触发</td>
+                    <td>扫描 .claude/skills/ 目录下的 SKILL.md 文件</td>
+                    <td>一次性</td>
+                </tr>
+                <tr>
+                    <td>Load</td>
+                    <td>用户指令命中触发词 / 显式调用 SkillTool</td>
+                    <td>解析 SKILL.md，将技能内容注入上下文</td>
+                    <td>当前任务期间</td>
+                </tr>
+                <tr>
+                    <td>Inject</td>
+                    <td>技能加载完成后，下一次模型调用前</td>
+                    <td>将技能内容作为 SKILL CONTEXT 部分添加到 System Prompt</td>
+                    <td>当前调用 / 持续到任务切换</td>
+                </tr>
+                <tr>
+                    <td>Evict</td>
+                    <td>任务完成 / Agent 检测到上下文主题切换</td>
+                    <td>从 System Prompt 中移除技能内容</td>
+                    <td>立即</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>Skills 架构的一个关键设计决策是：<strong>技能不在 Agent 启动时加载</strong>。启动时只做一次"发现"（discover），记录有哪些技能可用。实际加载发生在技能被匹配到用户指令之后。这种按需加载（lazy loading）策略确保了上下文不被无关知识污染。</p>
+
+        <h3>SKILL.md 解析器实现</h3>
+
+        <p>每个技能由一个 <code>SKILL.md</code> 文件定义，放在 <code>.claude/skills/</code> 目录下（可以用于目录组织子目录）。文件格式遵循 YAML frontmatter + Markdown 正文的结构：</p>
+
+        <pre><code>---
+name: python-testing
+description: Guidelines for writing and running Python unit tests
+triggers:
+  - "test"
+  - "unittest"
+  - "pytest"
+  - "单元测试"
+tools_needed:
+  - "bash"
+  - "read"
+  - "write"
+priority: 5
+---
+
+## Python Testing Skills
+
+When writing tests in this project:
+1. Use pytest as the test runner
+2. Test files go in the `tests/` directory
+3. Follow the Arrange-Act-Assert pattern
+4. Mock external services using `unittest.mock`
+...</code></pre>
+
+        <p>解析器的实现：使用 Python 的 <code>yaml.safe_load</code> 解析 frontmatter，剩余部分作为 Markdown 正文。然后执行字段验证——确保 name 不为空、triggers 是列表、body 有合理长度。</p>
+
+        <pre><code>import yaml
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
+
+
+@dataclass
+class SkillDef:
+    name: str
+    description: str
+    triggers: List[str] = field(default_factory=list)
+    tools_needed: List[str] = field(default_factory=list)
+    body: str = ""
+    priority: int = 0
+
+
+def parse_skill_file(path: Path) -> Optional[SkillDef]:
+    """Parse a SKILL.md file with YAML frontmatter."""
+    content = path.read_text(encoding="utf-8")
+    if not content.startswith("---"):
+        return None
+    _, frontmatter, body = content.split("---", 2)
+    meta = yaml.safe_load(frontmatter)
+    # Validate
+    if not meta.get("name"):
+        return None
+    if not isinstance(meta.get("triggers"), list):
+        meta["triggers"] = []
+    return SkillDef(
+        name=meta["name"],
+        description=meta.get("description", ""),
+        triggers=meta["triggers"],
+        tools_needed=meta.get("tools_needed", []),
+        body=body.strip(),
+        priority=meta.get("priority", 0),
+    )</code></pre>
+
+        <div class="tip">
+            <strong>技能粒度建议：</strong>一个容易犯的错误是把技能粒度弄得太细或太粗。太细（比如"写 print 语句的技能"），你会管理几十个小技能，匹配成本和上下文切换开销很大。太粗（比如"全栈开发技能"），包含了太多不相关的内容，稀释了技能的针对性。黄金法则是：<strong>一个技能对应一个任务类型，而不是一个工具</strong>。Python 测试是一个技能，Git 工作流是另一个技能，Docker 部署又是一个技能。
+        </div>
+
+        <h3>触发匹配与按需加载</h3>
+
+        <p>SkillManager 如何决定何时加载哪个技能？有三种触发方式：</p>
+
+        <ul>
+            <li><strong>关键词匹配</strong>：用户消息中包含技能的 trigger 词。比如用户说"给我写个测试"，触发 <code>python-testing</code> 技能。</li>
+            <li><strong>上下文匹配</strong>：当前任务的上下文（比如工作目录中的文件类型、最近使用的工具）暗示了技能域。这个模式更复杂，通常需要模型参与判断。</li>
+            <li><strong>显式调用</strong>：用户通过 <code>load_skill</code> 工具显式加载技能。这是最直接的触发方式，也适用于新手用户。</li>
+        </ul>
+
+        <p>匹配算法的核心是一个相关性评分函数：</p>
+
+        <pre><code>def relevance_score(skill: SkillDef, query: str) -> float:
+    """Score how relevant a skill is to the given query."""
+    query_lower = query.lower()
+    score = 0.0
+
+    # Exact skill name mention -> high boost
+    if skill.name.lower() in query_lower:
+        score += 2.0
+
+    # Trigger word matches -> moderate boost per match
+    for trigger in skill.triggers:
+        if trigger.lower() in query_lower:
+            score += 1.0
+
+    # Priority modifier
+    score *= (1.0 + skill.priority * 0.1)
+
+    return score</code></pre>
+
+        <p>这个评分函数设计上的考虑：显式技能名匹配比 trigger 匹配权重更高（精确性 > 模糊性），priority 作为一个乘法因子而非加法因子，意味着高优先级的技能在同等匹配度下胜出。</p>
+
+        <p>一个重要的防误匹配机制：<strong>不加载空匹配的技能</strong>。如果 query 中没有出现任何 trigger，relevance_score 返回 0，技能不会被加载。这避免了 Agent 因为"看起来有点相关"就加载一堆无用的技能。</p>
+
+        <h3>优先级合并策略</h3>
+
+        <p>当多个技能同时匹配时，SkillManager 需要决定哪些技能被加载以及按什么顺序放置。合并策略按以下优先级排序：</p>
+
+        <ol>
+            <li><strong>精确性</strong>：技能名称直接匹配的 > trigger 匹配的（精确性优先）</li>
+            <li><strong>明确性</strong>：显式调用加载的 > 关键词匹配的（用户意图优先）</li>
+            <li><strong>时效性</strong>：最近使用过的 > 长期未使用的（recency boost）</li>
+            <li><strong>优先级</strong>：高 priority 值的 > 低 priority 值的（权重优先）</li>
+        </ol>
+
+        <p>合并后的技能内容需要被组装成一个整体，作为 System Prompt 的一部分注入。组装逻辑：</p>
+
+        <pre><code>def build_skill_context(loaded_skills: List[SkillDef]) -> str:
+    """Build SKILL CONTEXT section from loaded skills."""
+    if not loaded_skills:
+        return ""
+
+    parts = ["<SKILL_CONTEXT>"]
+    for skill in loaded_skills:
+        header = f"--- {skill.name}: {skill.description} ---"
+        parts.append(header)
+        parts.append(skill.body)
+        parts.append("")  # blank line separator
+    parts.append("</SKILL_CONTEXT>")
+    return "\n".join(parts)</code></pre>
+
+        <h3>动态 Prompt 构建</h3>
+
+        <p>Skills 注入到 System Prompt 的过程不是简单地在后面追加。它遵循"<strong>有界注入</strong>"原则——技能内容被包裹在 <code>&lt;SKILL_CONTEXT&gt;...&lt;/SKILL_CONTEXT&gt;</code> 标签中，形成一个清晰的上下文边界。这个边界有两个作用：</p>
+
+        <ul>
+            <li><strong>帮助模型识别</strong>：模型看到 <code>&lt;SKILL_CONTEXT&gt;</code> 标签就知道这是一段临时加载的外部知识，不是核心 System Prompt。</li>
+            <li><strong>便于移除</strong>：任务切换时，Harness 不需要重新生成整个 System Prompt，只需要移除 <code>&lt;SKILL_CONTEXT&gt;</code> 块中的内容。</li>
+        </ul>
+
+        <p>Token 预算管理也是一个关键点。SkillManager 维护一个 <code>_max_skill_tokens</code>（默认 8192）的预算上限。加载技能时，按匹配度从高到低依次加载，直到预算用完。如果单个技能就超过了预算（这种情况应该很少见），它仍然会被加载（因为部分知识总比没有好）。</p>
+
+        <div class="highlight">
+            <strong>注意：</strong>技能内容会在任务切换时被自动移除。但什么叫"任务切换"呢？Claude Code 使用了一个启发式判断：如果用户连续 3 轮对话中的工具调用分布发生了显著变化（比如从大量文件操作切换到了大量 Git 操作），或者用户显式提到了一个新任务，Harness 就会触发技能上下文重置。
+        </div>
+
+        <h3>完整实现：SkillManager + SkillTool</h3>
+
+        <p>以下是 SkillManager 和 SkillTool 的完整实现：</p>
+
+        <pre><code>import yaml
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional
+
+
+@dataclass
+class SkillDef:
+    name: str
+    description: str
+    triggers: List[str] = field(default_factory=list)
+    tools_needed: List[str] = field(default_factory=list)
+    body: str = ""
+    priority: int = 0
+
+
+class SkillManager:
+    """Discovers, loads, and injects skills on demand."""
+
+    def __init__(self, skills_dir: str = ".claude/skills"):
+        self._skills_dir = Path(skills_dir)
+        self._all_skills: Dict[str, SkillDef] = {}
+        self._loaded: Dict[str, SkillDef] = {}
+        self._max_skill_tokens = 8192
+
+    def discover(self) -> Dict[str, SkillDef]:
+        """Scan skills directory for SKILL.md files."""
+        self._all_skills.clear()
+        if not self._skills_dir.exists():
+            return self._all_skills
+        for skill_file in self._skills_dir.rglob("SKILL.md"):
+            skill = self._parse_skill_file(skill_file)
+            if skill:
+                self._all_skills[skill.name] = skill
+        return self._all_skills
+
+    def _parse_skill_file(self, path: Path) -> Optional[SkillDef]:
+        content = path.read_text(encoding="utf-8")
+        if not content.startswith("---"):
+            return None
+        _, frontmatter, body = content.split("---", 2)
+        meta = yaml.safe_load(frontmatter)
+        if not meta or not meta.get("name"):
+            return None
+        if not isinstance(meta.get("triggers"), list):
+            meta["triggers"] = []
+        return SkillDef(
+            name=meta["name"],
+            description=meta.get("description", ""),
+            triggers=meta["triggers"],
+            tools_needed=meta.get("tools_needed", []),
+            body=body.strip(),
+            priority=meta.get("priority", 0),
+        )
+
+    def match(self, query: str) -> List[SkillDef]:
+        """Find skills relevant to the query, scored by relevance."""
+        query_lower = query.lower()
+        scored = []
+        for skill in self._all_skills.values():
+            score = self._relevance_score(skill, query_lower)
+            if score > 0:
+                scored.append((score, skill))
+        scored.sort(key=lambda x: -x[0])
+        return [s[1] for s in scored]
+
+    def _relevance_score(self, skill: SkillDef, query: str) -> float:
+        score = 0.0
+        if skill.name.lower() in query:
+            score += 2.0
+        for trigger in skill.triggers:
+            if trigger.lower() in query:
+                score += 1.0
+        score *= (1.0 + skill.priority * 0.1)
+        return score
+
+    def load_skills(self, query: str) -> List[SkillDef]:
+        """Load skills up to the token budget, highest relevance first."""
+        matched = self.match(query)
+        loaded = []
+        total_tokens = 0
+        for skill in matched:
+            tokens = len(skill.body.split())
+            if total_tokens + tokens <= self._max_skill_tokens:
+                self._loaded[skill.name] = skill
+                loaded.append(skill)
+                total_tokens += tokens
+        return loaded
+
+    def build_prompt_section(self) -> str:
+        """Build the SKILL CONTEXT section for system prompt injection."""
+        if not self._loaded:
+            return ""
+        parts = ["<SKILL_CONTEXT>"]
+        for skill in self._loaded.values():
+            parts.append(f"--- {skill.name}: {skill.description} ---")
+            parts.append(skill.body)
+        parts.append("</SKILL_CONTEXT>")
+        return "\n\n".join(parts)
+
+    def evict(self, skill_name: str):
+        self._loaded.pop(skill_name, None)
+
+    def clear_loaded(self):
+        self._loaded.clear()
+
+
+class SkillTool:
+    """Tool that lets the agent load skills at runtime."""
+
+    name = "load_skill"
+    description = "Load a skill by name or topic into the current context"
+
+    def __init__(self, manager: SkillManager):
+        self._manager = manager
+
+    async def execute(self, query: str) -> str:
+        skills = self._manager.load_skills(query)
+        if not skills:
+            return "No matching skills found."
+        names = [s.name for s in skills]
+        return f"Loaded skills: {', '.join(names)}"</code></pre>
+
+        <p>集成到 v4 Agent 中很简单：在 Agent 初始化时创建 SkillManager，调用 <code>discover()</code>，然后将 SkillTool 添加到工具注册表中。当 Agent 需要加载技能时，它调用 <code>load_skill</code> 工具，之后的下一次模型调用中，技能内容会自动出现在 System Prompt 中。</p>
+
+        <p>至此，你的 Agent 拥有了按需加载专业知识的能力。它不再需要背着一整个图书馆散步了。但这里有一个更深层的问题：这些技能加载进来之后，Agent 如何"知道自己该做什么"？这就引出了我们课程中最重要的一个设计模式讨论——<strong>Harness 设计模式</strong>。在下一章中，我们将对比分析三种主流的 Harness 完成模式，看看它们各自的优劣和适用场景。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

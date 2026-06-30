@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 实现 MCP 集成</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html" class="active">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>🔨 第19章 实现 MCP 集成</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们深度解剖了 MCP 协议的每一个细节——从 JSON-RPC 消息格式到完整的握手流程。但知道协议怎么工作是一回事，真正把它集成到你的 Agent 中，让它可以连接多个 MCP Server、自动发现工具、优雅地处理崩溃和重连——那就是另一回事了。</p>
+
+        <p>我第一次尝试给 Agent 接入 MCP 的时候，犯了一个现在看来很蠢的错误：我把所有 MCP Server 的启动逻辑写到了一个 <code>while True</code> 循环里，希望它能保持永久连接。结果呢？系统资源被迅速耗尽——每个 Server 启动了一个子进程，我同时起了 5 个 Server，15 分钟后 Linux OOM Killer 把整个 Agent 进程干掉了。那是凌晨三点，我听到笔记本风扇像飞机引擎一样轰鸣。从那次经历之后，我意识到 MCP 集成不是简单的"调个 API"，它涉及进程管理、协议握手、错误恢复、工具注册等一系列系统工程问题。今天我们就来一一解决这些问题。</p>
+
+        <h3>MCP 集成的架构设计</h3>
+
+        <p>在 Claude Code 的架构中，MCP 集成层扮演着一个"桥梁"的角色：它一端连接着内部的 Tool Registry（工具注册中心），另一端连接着外部的一个或多个 MCP Server。这个桥梁的核心就是 <strong>MCPClientManager</strong>。</p>
+
+        <p>MCPClientManager 在整个架构中的位置很清晰。回顾第 8 章讲到的 QueryEngine 主循环：Agent 收到用户指令后进入 ReAct 循环，每次需要调用工具时从 Tool Registry 查找匹配的工具描述，然后执行对应的函数。MCPClientManager 位于这个流程中，扮演"工具提供者"——它对上向 Tool Registry 注册工具（这些工具的描述来自 MCP Server 的 list_tools 响应），对下管理 MCP Server 的连接生命周期。</p>
+
+        <p>设计上有几个关键目标：</p>
+
+        <ul>
+            <li><strong>对 Agent 透明</strong>：Agent 不需要知道一个工具是原生实现的还是通过 MCP 获取的。调用方式完全统一。</li>
+            <li><strong>容错性</strong>：单个 MCP Server 的崩溃不应影响 Agent 整体运行。如果一个 Server 挂了，只是它的工具不可用，Agent 仍然可以正常工作。</li>
+            <li><strong>延迟连接</strong>：MCP Server 不是在 Agent 启动时全部连接，而是在真正需要时才建立连接。这就像 Python 中的 lazy import。</li>
+        </ul>
+
+        <h3>STDIO Server 启动与管理</h3>
+
+        <p>STDIO 传输是最常见也最简单的 MCP 传输方式。它的模型很直观：Agent 启动一个子进程（subprocess），通过该进程的标准输入（stdin）发送 JSON-RPC 请求，从标准输出（stdout）读取响应。标准错误（stderr）则用于日志和诊断信息。</p>
+
+        <p>启动流程如下：构造进程启动参数（command、args、环境变量），使用 <code>asyncio.create_subprocess_exec</code> 启动子进程，启动异步读取任务持续从 stdout 读取数据，发送 <code>initialize</code> 请求完成协议握手，最后发送 <code>list_tools</code> 请求发现工具。</p>
+
+        <p>JSON-RPC 消息使用标准的 HTTP 风格帧格式：</p>
+
+        <pre><code>Content-Length: 137\r\n
+\r\n
+{"jsonrpc":"2.0","id":1,"method":"initialize",
+ "params":{"protocolVersion":"2025-03-26","capabilities":{}}}</code></pre>
+
+        <p>这种帧格式允许在同一个流上多路复用多个请求和响应。每个请求携带独立的 <code>id</code>，响应通过 <code>id</code> 匹配请求。这就是为什么我们需要维护一个 <code>_pending</code> 字典来映射请求 ID 到 Future 对象。</p>
+
+        <p>Server 的健康监控通过定期发送 <code>ping</code> 请求来实现。如果 ping 超时或失败，MCPClientManager 会将对应 Server 标记为 unhealthy，并触发错误恢复流程——通常是指令 Agent 切换到备用策略后尝试重启 Server 进程。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我在实现 STDIO Server 的重启逻辑时遇到过一个隐蔽的问题。Server 进程崩溃后，我简单地重新 spawn 了一个新进程，但忘记了旧的 <code>_read_loop</code> task 还在运行。结果两个 read loop 同时在读取同一个新进程的 stdout，导致消息乱序和解析错误。正确的做法是在重启前先 cancel 老的 read task，清理掉所有 pending futures，再重新开始。<strong>进程管理中最容易出错的不是启动，而是清理。</strong>
+        </div>
+
+        <h3>Streamable HTTP Client 实现</h3>
+
+        <p>除了 STDIO 传输，MCP 还支持 Streamable HTTP 传输。这种传输方式通过一个单一的 HTTP 端点（通常是 <code>/mcp</code>）来处理所有 JSON-RPC 消息。每个请求都是一个 HTTP POST，请求体是 JSON-RPC 消息，响应体是 JSON-RPC 响应。</p>
+
+        <p>与 STDIO 相比，HTTP 传输有几个显著的区别：</p>
+
+        <ul>
+            <li><strong>无子进程</strong>：没有进程管理的开销，也没有僵尸进程的风险。</li>
+            <li><strong>网络延迟</strong>：需要处理网络层面的延迟、超时和重试。</li>
+            <li><strong>认证</strong>：通常需要携带 API Key 或其他认证凭证。</li>
+            <li><strong>会话管理</strong>：通过 <code>Mcp-Session-Id</code> 头维护会话状态。</li>
+        </ul>
+
+        <p>在实现上，HttpServerConnection 使用 httpx 异步客户端。关键的设计点是 session ID 的管理——initialize 响应会返回一个 session ID，后续所有请求都需要在头中带上这个 ID：</p>
+
+        <pre><code>class HttpServerConnection(MCPServerConnection):
+    def __init__(self, name: str, url: str, api_key: Optional[str] = None):
+        super().__init__(name)
+        self._url = url.rstrip("/") + "/mcp"
+        self._client = httpx.AsyncClient(timeout=30.0)
+        self._session_id: Optional[str] = None
+        self._headers = {}
+        if api_key:
+            self._headers["Authorization"] = f"Bearer {api_key}"
+
+    async def send_request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        resp = await self._client.post(
+            self._url, headers=self._headers,
+            json={"jsonrpc": "2.0", "id": 1,
+                  "method": method, "params": params},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            raise RuntimeError(data["error"]["message"])
+        return data.get("result", {})</code></pre>
+
+        <h3>工具发现与动态注册</h3>
+
+        <p>MCP 的核心价值之一就是"工具即插即用"。一个 MCP Server 可以提供多个工具，Agent 通过 <code>list_tools</code> 请求发现这些工具，然后动态注册到自己的工具注册中心。</p>
+
+        <p>发现流程如下：建立连接后发送 <code>initialize</code> 握手；发送 <code>list_tools</code> 获取工具列表；解析每个工具定义（name、description、inputSchema）；使用命名前缀 <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> 注册到内部注册表；将工具描述注入 System Prompt 的工具列表中。</p>
+
+        <p>工具名前缀的设计非常关键。不同的 MCP Server 可能有同名工具（比如两个 Server 都提供了 <code>read_file</code>），如果不加前缀就会产生命名冲突。前缀方案虽然简单但很有效：<code>mcp__filesystem__read_file</code> 和 <code>mcp__github__read_file</code> 可以被清晰区分。Agent 根据前缀知道去哪个 Server 调用工具。</p>
+
+        <div class="tip">
+            <strong>实现细节：</strong>工具列表并不是一成不变的。Server 重启后可能提供了不同的工具集。因此 MCPClientManager 在每次重新连接后都应该重新执行 <code>list_tools</code> 并更新注册表——老的工具要移除，新的工具要加入。这个"重新发现"机制在 Server 版本更新时尤其重要。
+        </div>
+
+        <h3>多 Server 聚合</h3>
+
+        <p>一个 Agent 同时连接多个 MCP Server 是非常常见的场景。比如你可能同时连接了一个 Filesystem Server（提供文件读写）、一个 GitHub Server（提供仓库和 Issue 管理）、一个 Database Server（提供 SQL 查询）。MCPClientManager 需要将这些 Server 的工具聚合到一个统一的注册表中。</p>
+
+        <pre><code>async def add_server(self, name: str, server: MCPServerConnection):
+    self._servers[name] = server
+    await self._discover_tools(server)
+
+async def _discover_tools(self, server: MCPServerConnection):
+    tools = await server.list_tools()
+    for t in tools:
+        prefixed = f"mcp__{server.name}__{t['name']}"
+        self._tool_registry[prefixed] = MCPToolDef(
+            server_name=server.name,
+            original_name=t["name"],
+            description=t.get("description", ""),
+            input_schema=t.get("inputSchema", t.get("parameters", {})),
+        )</code></pre>
+
+        <p>但这里有一个实际问题——"工具过载"。假设你有 3 个 MCP Server，每个提供 10 个工具，注册表中就有 30 个工具。把这些全部注入 System Prompt 可能占用 3000-5000 tokens。面对 30 个工具，Agent 的选择困难症会加重——它需要花更多 token 来"思考用哪个工具"，有时还会选错。</p>
+
+        <p>一种解决方案是<strong>渐进式发现</strong>：不在启动时一次性加载所有工具，而是根据当前任务上下文只加载相关的工具。比如，当用户提到"GitHub"或"issue"时，才加载 GitHub Server 的工具。这需要引入一个上下文感知的加载调度器。</p>
+
+        <h3>传输方式对比</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>传输方式</th>
+                    <th>延迟</th>
+                    <th>复杂度</th>
+                    <th>进程管理</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>STDIO</td>
+                    <td>低（进程内通信）</td>
+                    <td>中</td>
+                    <td>需管理子进程生命周期</td>
+                    <td>本地工具、需要高速通信的场景</td>
+                </tr>
+                <tr>
+                    <td>Streamable HTTP</td>
+                    <td>中（网络延迟）</td>
+                    <td>低</td>
+                    <td>无</td>
+                    <td>远程服务、API 网关背后的工具</td>
+                </tr>
+                <tr>
+                    <td>SSE (Server-Sent Events)</td>
+                    <td>高（长连接开销）</td>
+                    <td>高</td>
+                    <td>无</td>
+                    <td>实时推送、流式结果的场景</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>完整实现：MCPClientManager</h3>
+
+        <p>以下是 MCPClientManager 的完整实现，整合了本章讨论的所有模式：</p>
+
+        <pre><code>import asyncio
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+
+@dataclass
+class MCPToolDef:
+    """Internal representation of an MCP-discovered tool."""
+    server_name: str
+    original_name: str
+    description: str
+    input_schema: Dict[str, Any]
+
+
+class MCPServerConnection:
+    """Base class for MCP server connections."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self._initialized = False
+
+    async def connect(self):
+        raise NotImplementedError
+
+    async def disconnect(self):
+        raise NotImplementedError
+
+    async def send_request(self, method: str,
+                           params: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    async def initialize(self):
+        resp = await self.send_request("initialize", {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {"tools": {}},
+        })
+        self._initialized = True
+        return resp
+
+    async def ping(self):
+        await self.send_request("ping", {})
+
+    async def list_tools(self) -> List[Dict[str, Any]]:
+        resp = await self.send_request("list_tools", {})
+        return resp.get("tools", [])
+
+
+class StdioServerConnection(MCPServerConnection):
+    """MCP server via STDIO (subprocess) transport."""
+
+    def __init__(self, name: str, command: str,
+                 args: List[str], env: Optional[Dict[str, str]] = None):
+        super().__init__(name)
+        self._command = command
+        self._args = list(args)
+        self._env = {**(env or {}), "MCP_MODE": "stdio"}
+        self._process: Optional[asyncio.subprocess.Process] = None
+        self._request_id = 0
+        self._pending: Dict[int, asyncio.Future] = {}
+        self._read_task: Optional[asyncio.Task] = None
+
+    async def connect(self):
+        self._process = await asyncio.create_subprocess_exec(
+            self._command, *self._args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._env,
+        )
+        self._read_task = asyncio.create_task(self._read_loop())
+        await self.initialize()
+
+    async def _read_loop(self):
+        """Continuously read JSON-RPC responses from subprocess stdout."""
+        buffer = b""
+        while self._process and self._process.returncode is None:
+            chunk = await self._process.stdout.read(65536)
+            if not chunk:
+                break
+            buffer += chunk
+            while True:
+                header_end = buffer.find(b"\r\n\r\n")
+                if header_end == -1:
+                    break
+                header = buffer[:header_end].decode()
+                length = int(header.split(":")[1].strip())
+                body_start = header_end + 4
+                if len(buffer) < body_start + length:
+                    break
+                body = json.loads(
+                    buffer[body_start:body_start + length].decode()
+                )
+                buffer = buffer[body_start + length:]
+                self._handle_response(body)
+
+    def _handle_response(self, body: Dict[str, Any]):
+        msg_id = body.get("id")
+        if msg_id is not None and msg_id in self._pending:
+            future = self._pending.pop(msg_id)
+            if "error" in body:
+                future.set_exception(
+                    RuntimeError(body["error"]["message"])
+                )
+            else:
+                future.set_result(body.get("result", {}))
+
+    async def send_request(self, method: str,
+                           params: Dict[str, Any]) -> Dict[str, Any]:
+        self._request_id += 1
+        msg_id = self._request_id
+        msg = json.dumps({
+            "jsonrpc": "2.0", "id": msg_id,
+            "method": method, "params": params,
+        })
+        frame = f"Content-Length: {len(msg.encode())}\r\n\r\n{msg}"
+        future = asyncio.get_event_loop().create_future()
+        self._pending[msg_id] = future
+        self._process.stdin.write(frame.encode())
+        await self._process.stdin.drain()
+        return await asyncio.wait_for(future, timeout=30.0)
+
+    async def disconnect(self):
+        if self._read_task:
+            self._read_task.cancel()
+        if self._process and self._process.returncode is None:
+            try:
+                self._process.terminate()
+                await asyncio.wait_for(
+                    self._process.wait(), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                self._process.kill()
+                await self._process.wait()
+
+
+class HttpServerConnection(MCPServerConnection):
+    """MCP server via Streamable HTTP transport."""
+
+    def __init__(self, name: str, url: str,
+                 api_key: Optional[str] = None):
+        super().__init__(name)
+        self._url = url.rstrip("/") + "/mcp"
+        self._client = httpx.AsyncClient(timeout=30.0)
+        self._session_id: Optional[str] = None
+        self._headers = {}
+        if api_key:
+            self._headers["Authorization"] = f"Bearer {api_key}"
+
+    async def connect(self):
+        resp = await self.initialize()
+        self._session_id = resp.get("sessionId")
+        if self._session_id:
+            self._headers["Mcp-Session-Id"] = self._session_id
+        return resp
+
+    async def send_request(self, method: str,
+                           params: Dict[str, Any]) -> Dict[str, Any]:
+        resp = await self._client.post(
+            self._url, headers=self._headers,
+            json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": method, "params": params,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            raise RuntimeError(data["error"]["message"])
+        return data.get("result", {})
+
+    async def disconnect(self):
+        await self._client.aclose()
+
+
+class MCPClientManager:
+    """Orchestrates multiple MCP server connections and tool discovery."""
+
+    def __init__(self):
+        self._servers: Dict[str, MCPServerConnection] = {}
+        self._tool_registry: Dict[str, MCPToolDef] = {}
+
+    async def add_stdio(self, name: str, command: str,
+                        args: List[str],
+                        env: Optional[Dict[str, str]] = None):
+        server = StdioServerConnection(name, command, args, env)
+        await server.connect()
+        self._servers[name] = server
+        await self._discover_tools(server)
+        return server
+
+    async def add_http(self, name: str, url: str,
+                       api_key: Optional[str] = None):
+        server = HttpServerConnection(name, url, api_key)
+        await server.connect()
+        self._servers[name] = server
+        await self._discover_tools(server)
+        return server
+
+    async def _discover_tools(self, server: MCPServerConnection):
+        tools = await server.list_tools()
+        for t in tools:
+            prefixed = f"mcp__{server.name}__{t['name']}"
+            self._tool_registry[prefixed] = MCPToolDef(
+                server_name=server.name,
+                original_name=t["name"],
+                description=t.get("description", ""),
+                input_schema=t.get("inputSchema",
+                                   t.get("parameters", {})),
+            )
+
+    async def call_tool(self, prefixed_name: str,
+                        arguments: Dict[str, Any]) -> Any:
+        tool = self._tool_registry.get(prefixed_name)
+        if not tool:
+            raise ValueError(f"Unknown tool: {prefixed_name}")
+        server = self._servers.get(tool.server_name)
+        if not server:
+            raise RuntimeError(
+                f"Server '{tool.server_name}' not connected"
+            )
+        return await server.send_request("tools/call", {
+            "name": tool.original_name,
+            "arguments": arguments,
+        })
+
+    async def remove_server(self, name: str):
+        server = self._servers.pop(name, None)
+        if server:
+            await server.disconnect()
+        self._tool_registry = {
+            k: v for k, v in self._tool_registry.items()
+            if v.server_name != name
+        }
+
+    def get_all_tool_defs(self) -> Dict[str, MCPToolDef]:
+        return dict(self._tool_registry)
+
+    async def health_check(self) -> Dict[str, str]:
+        results = {}
+        for name, server in self._servers.items():
+            try:
+                await server.ping()
+                results[name] = "healthy"
+            except Exception as e:
+                results[name] = f"unhealthy: {e}"
+        return results
+
+    async def shutdown_all(self):
+        for name in list(self._servers):
+            await self.remove_server(name)</code></pre>
+
+        <p>这个 <code>MCPClientManager</code> 设计上遵循了几条原则：一是每个 Server 连接都是独立封装的，崩溃不会互相影响；二是工具注册使用带前缀的名称避免冲突；三是提供统一的 <code>call_tool</code> 接口屏蔽传输差异。</p>
+
+        <div class="tip">
+            <strong>版本兼容性提醒：</strong>MCP 协议目前仍在快速迭代中。`protocolVersion` 字段在 initialize 握手时用于协商协议版本——客户端声明其支持的版本，Server 回复实际使用的版本。如果版本不兼容，Server 可以返回错误，由客户端决定是降级还是放弃。生产环境中建议在代码里做版本检查，不要假设所有 Server 都支持同一个版本。目前主流版本是 2025-03-26，但建议以你所连接 Server 的文档为准。
+        </div>
+
+        <p>好了，MCPClientManager 的完整实现我们已经有了。从现在开始，你的 Agent 可以和任何实现了 MCP 协议的服务对接。但这里还有一个更深层的问题——当工具、Server、上下文都堆在一起的时候，<strong>Context</strong> 的管理就成了新的瓶颈。在下一章中，我们将探讨一个在 2025-2026 年迅速崛起的新领域——<strong>Context Engineering</strong>。它的核心问题是：如何用最少的 token 传递最多的信息？</p>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

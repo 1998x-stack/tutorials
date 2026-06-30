@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 Context Engineering 深度分析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html" class="active">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第20章 Context Engineering 深度分析</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们在 Agent 中集成了 MCP 支持，让它能和外部工具对话了。但有一个问题很多人会忽略——当你把 System Prompt、工具定义、对话历史、MCP 工具描述全部塞进上下文后，你的 API 账单会像坐了火箭一样飞涨。我在第一个月用 Claude Code 的时候就踩过这个坑：每天跑几小时的 Agent 任务，月底收到 API 账单时差点从椅子上摔下来。</p>
+
+        <p>这引出了一个关键问题：在 Agent 系统中，<strong>Context 不仅仅是你和模型说话的内容，它本身就是系统的一个核心资源</strong>。如何管理这个资源——如何最大化缓存命中率、如何最小化 token 浪费、如何在长对话中保持一致性——这已经形成了一门新学科：Context Engineering。2025-2026 年，这可能是 AI Agent 领域最被低估的技能。</p>
+
+        <h3>Context Engineering 是什么</h3>
+
+        <p>Context Engineering 不是 Prompt Engineering。Prompt Engineering 关心的是"对模型说什么能让它表现更好"，而 Context Engineering 关心的是"如何组织整个对话结构以最大化系统效率"。它位于 Prompt Engineering 和 Systems Design 的交叉点上。</p>
+
+        <p>具体来说，Context Engineering 要解决以下几个问题：</p>
+
+        <ul>
+            <li><strong>缓存效率</strong>：如何安排消息顺序使得尽可能多的内容被缓存命中？</li>
+            <li><strong>断点放置</strong>：在上下文的哪些位置放置 <code>cache_control</code> 断点能最大化效用？</li>
+            <li><strong>预热策略</strong>：在正式对话前发送什么消息可以"预热"缓存，降低后续请求的实际成本？</li>
+            <li><strong>对话压缩</strong>：当上下文过长时，如何压缩历史而不丢失关键信息？</li>
+            <li><strong>Token 预算管理</strong>：在有限的上下文窗口中，如何分配 System Prompt、工具定义、对话历史、工具结果的 token 配额？</li>
+        </ul>
+
+        <p>这些问题的背后是一条根本原则：<strong>上下文是有限的，而且很贵</strong>。Anthropic API 每百万输入 token 收费 $3（标准）/$0.30（缓存读），输出 token 收费 $15。在一个典型的 Agent session 中，你可能发送了 50 万输入 token——其中 92% 可能被缓存命中，但剩下的 8% 加上输出部分，运行一天可能就消耗 $50-100。如果缓存命中率从 92% 降到 80%，成本直接翻倍。</p>
+
+        <h3>Prefix 复用率 92% 的秘密</h3>
+
+        <p>Claude Code 能达到约 92% 的缓存读取率，这来自于一个精心的设计。先看看一个典型的 Agent 请求上下文中包含哪些内容：</p>
+
+        <ol>
+            <li>System Prompt — 约 4-6K tokens，基本不变</li>
+            <li>Tool Definitions — 约 8-12K tokens，随注册的工具数量变化，但通常在一个 session 内稳定</li>
+            <li>Assistant 消息 — 模型生成的思考过程，逐轮增长</li>
+            <li>User 消息 — 用户的指令，每轮至少一条</li>
+            <li>Tool Results — 工具执行结果，可能是最长的一部分（文件内容、命令输出等）</li>
+        </ol>
+
+        <p>92% 的缓存命中率意味着什么呢？在一个 100K token 的请求中，92K 是缓存读取（不产生实际计算成本，只收 10% 的缓存服务费），只有 8K 是新的非缓存内容（全额收费）。</p>
+
+        <p>做个对比：如果你没有做任何缓存优化，每次请求 100K token 全价收费，成本是缓存优化方案的 5-8 倍。一个月的账单从 $3000 降到 $500，这就是 Context Engineering 的力量。</p>
+
+        <p>Claude Code 实现高缓存命中率的关键策略：</p>
+
+        <ul>
+            <li><strong>稳顶原则</strong>：System Prompt 永远放在最前面，而且内容在 session 内不变化。这确保了每次请求的前 4-6K tokens 始终命中缓存。</li>
+            <li><strong>工具定义缓存块</strong>：工具定义紧随 System Prompt，作为一个整体缓存块。只要工具注册表不变化，这个块也全部命中缓存。</li>
+            <li><strong>增量更新</strong>：只有最新的几轮对话消息和工具结果是未缓存的新内容。历史对话缓存随着时间自然滑动。</li>
+        </ul>
+
+        <h3>预热调用的设计巧思</h3>
+
+        <p>Claude Code 有一个很少被注意到的设计：在用户发送第一条消息之前，它会先自动发送一个<strong>预热调用</strong>（warmup call）。这个调用使用 Claude Haiku——最便宜也最快的模型——目的不是为了完成任务，而是为了：</p>
+
+        <ul>
+            <li><strong>初始化缓存</strong>：让 System Prompt 和工具定义在后续的真实请求中命中缓存。</li>
+            <li><strong>检测 API 配额</strong>：检查 API Key 是否有效、是否有足够的配额执行任务。</li>
+            <li><strong>探测网络连通性</strong>：确认 API 端点可达、网络延迟在正常范围内。</li>
+            <li><strong>检测对话主题</strong>（可选）：分析用户的工作目录，推断可能的任务类型。</li>
+        </ul>
+
+        <p>为什么用 Haiku 而不是 Sonnet 做预热？原因很简单：<strong>性价比</strong>。预热调用不需要复杂的推理能力——它只需要加载上下文、触发缓存。Haiku 的成本是 Sonnet 的 1/5，速度却差不多。而且 Haiku 的缓存 TTL 虽然比 Sonnet 短（约 5 分钟 vs 10 分钟），但预热的目的只是为下一个请求"暖场"，5 分钟完全够用。</p>
+
+        <p>这个预热设计告诉我们一个重要的原则：<strong>缓存不是天然生效的，需要主动"种"进去</strong>。预热调用是在缓存系统中"播种"，让后续请求能收获。</p>
+
+        <h3>Cache 断点自动放置算法</h3>
+
+        <p>Anthropic API 最多支持在每个请求中放置 <strong>4 个 cache_control breakpoints</strong>。Claude Code 需要决定这 4 个断点放在哪里能最大化缓存效用。这是一个典型的资源分配问题。</p>
+
+        <p>断点放置策略：</p>
+
+        <ul>
+            <li><strong>System Prompt 末尾</strong>（必须）：这是第一个也是最稳定的断点。后续内容变化时，之前的内容仍然完全缓存。</li>
+            <li><strong>Tool Definitions 末尾</strong>（高度推荐）：工具定义通常在 session 内不变，是第二个断点的理想位置。</li>
+            <li><strong>每 N 轮用户消息后</strong>（策略性）：取决于配置的轮数间隔，通常在 3-5 轮后放一个断点。这样历史对话的一部分可以被缓存。</li>
+            <li><strong>压缩前</strong>（可选）：在上下文压缩操作前放置断点，确保压缩后的摘要能被缓存。</li>
+        </ul>
+
+        <p>这里有一个关键的约束：Anthropic API 要求 cache_control breakpoints 严格按照从 <code>true</code> 到 <code>false</code> 的顺序放置。也就是说，一旦某个位置的 <code>cache_control</code> 设为 <code>false</code>（非缓存），后面的内容就不能再出现 <code>true</code>。这其实很合理——API 需要确定一个清晰的"缓存前缀"范围。</p>
+
+        <p>以下是一个简单的断点优化器实现：</p>
+
+        <pre><code>from dataclasses import dataclass
+from typing import List, Optional
+
+
+@dataclass
+class CacheBreakpoint:
+    """A candidate position for a cache_control breakpoint."""
+    location: str  # human-readable label
+    index: int     # position in the messages list
+    estimated_tokens: int
+    stability: float  # 0-1, how likely this content is to change
+
+
+class CacheBreakpointOptimizer:
+    """Places cache_control breakpoints optimally subject to API limits."""
+
+    MAX_BREAKPOINTS = 4
+
+    def __init__(self, messages: List[dict]):
+        self.messages = messages
+        self._candidates: List[CacheBreakpoint] = []
+
+    def scan(self) -> List[CacheBreakpoint]:
+        """Identify all candidate breakpoint positions."""
+        self._candidates = []
+        for i, msg in enumerate(self.messages):
+            role = msg.get("role", "")
+            tokens = msg.get("estimated_tokens", 0)
+            if role == "system" and i == 0:
+                self._candidates.append(
+                    CacheBreakpoint("system_prompt", i, tokens, 1.0)
+                )
+            elif role == "tool" and tokens > 2000:
+                self._candidates.append(
+                    CacheBreakpoint(f"tool_result_{i}", i, tokens, 0.8)
+                )
+            elif role == "user" and i > 0:
+                self._candidates.append(
+                    CacheBreakpoint(f"user_message_{i}", i, tokens, 0.6)
+                )
+        return self._candidates
+
+    def optimize(self) -> List[int]:
+        """Select up to MAX_BREAKPOINTS breakpoints maximizing stability."""
+        candidates = self.scan()
+        # Prefer stable, large blocks first; then fill remaining slots
+        candidates.sort(key=lambda x: (x.stability, x.estimated_tokens),
+                        reverse=True)
+        selected = candidates[:self.MAX_BREAKPOINTS]
+        selected.sort(key=lambda x: x.index)
+        return [bp.index for bp in selected]
+
+    def apply(self) -> List[dict]:
+        """Return messages with cache_control breakpoints inserted."""
+        indices = self.optimize()
+        result = []
+        for i, msg in enumerate(self.messages):
+            result.append(msg)
+            if i in indices:
+                result[-1]["cache_control"] = {"type": "ephemeral"}
+        return result</code></pre>
+
+        <p>实际 Claude Code 的放置算法更复杂——它会考虑消息的预估 token 大小、历史稳定性、再加上一些启发式规则（比如 system prompt 和 tool definitions 是最高优先级的断点位置）。但核心思想是相同的：<strong>用有限的断点槽位覆盖尽可能多的稳定内容</strong>。</p>
+
+        <div class="warning">
+            <strong>缓存失效陷阱：</strong>如果工具定义在 session 中发生变化（比如新的 MCP Server 被添加），之前放在 tools definitions 末尾的缓存断点就完全失效了。整个前缀（system prompt + old tool definitions）需要重新计算。这就是为什么在生产环境中，Claude Code 会尽量保持工具注册表的稳定性，只在必要时才更新。对于重度用户来说，建议在添加或移除 MCP Server 后主动触发一次"缓存预热"，让新内容进入缓存。
+        </div>
+
+        <h3>HuggingFace 社区分析文章解读</h3>
+
+        <p>2025 年底，HuggingFace 社区出现了几篇对 Claude Code 上下文模式进行深度逆向分析的文章，作者通过分析 Claude Code 的通信日志，还原了它的消息结构设计。几个核心发现：</p>
+
+        <ul>
+            <li><strong>消息结构分析</strong>：每个请求包含约 8-15 条消息，其中 System Prompt 始终在第 0 位。工具结果占据了总 token 的 40-60%，是内容的大头。</li>
+            <li><strong>Token 分布分析</strong>：令人惊讶的是，<strong>工具结果消耗的 token 远多于模型输出</strong>。在一个典型的 50 轮对话中，工具结果占用了约 70% 的 token。这意味着，优化缓存命中率的关键不在于让模型"少说话"，而在于减少重复性的工具结果。</li>
+            <li><strong>缓存命中率衰减</strong>：随着对话轮数增加，缓存命中率会缓慢下降（从 95% 逐渐降到 85% 左右），因为历史对话越长，新的非缓存内容越多。Claude Code 通过定期压缩历史来对抗这个衰减。</li>
+        </ul>
+
+        <p>其中一个最有价值的发现是：<strong>大多数 token 花在了工具结果上，而不是模型输出上</strong>。这告诉我们，如果你想省 token，重点不是让模型少思考，而是优化工具返回的数据量——比如在 <code>read_file</code> 时只读取相关片段而不是整文件，在 <code>bash</code> 命令中限制输出长度。</p>
+
+        <h3>不同模型的 Cache 行为差异</h3>
+
+        <p>不同 Claude 模型的缓存行为有显著差异，了解这些差异有助于设计合理的上下文策略：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>模型</th>
+                    <th>缓存 TTL</th>
+                    <th>每轮缓存衰减</th>
+                    <th>最佳断点数</th>
+                    <th>性价比</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Claude Haiku</td>
+                    <td>~5 分钟</td>
+                    <td>较高（小模型缓存浅）</td>
+                    <td>2-3</td>
+                    <td>便宜但缓存窗口短</td>
+                </tr>
+                <tr>
+                    <td>Claude Sonnet</td>
+                    <td>~10 分钟</td>
+                    <td>低（最稳定）</td>
+                    <td>3-4</td>
+                    <td>最佳性价比，推荐用于 Agent</td>
+                </tr>
+                <tr>
+                    <td>Claude Opus</td>
+                    <td>~10 分钟</td>
+                    <td>低（缓存效果好）</td>
+                    <td>4</td>
+                    <td>最贵但绝对节省最大</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>Sonnet 的缓存行为是最可预测的。它不像 Haiku 那样容易因为模型负载波动而刷新缓存，也不像 Opus 那样成本高昂。对于大多数 Agent 应用场景，Sonnet 是缓存效率和推理质量的 sweet spot。</p>
+
+        <p>有趣的一点是：虽然 Opus 的每 token 成本更高，但它的缓存命中率也是最高的（因为用户更倾向于在复杂任务中使用 Opus，而复杂任务往往有更长的稳定前缀）。这意味着 Opus 用户的绝对节省数额最大——可能每月 $500-1000。</p>
+
+        <p>各消息类型的缓存命中率统计：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>消息类型</th>
+                    <th>平均 Token 占比</th>
+                    <th>缓存命中率</th>
+                    <th>优化建议</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>System Prompt</td>
+                    <td>5%</td>
+                    <td>~99%</td>
+                    <td>保持稳定，不要动态修改</td>
+                </tr>
+                <tr>
+                    <td>Tool Definitions</td>
+                    <td>8-12%</td>
+                    <td>~95%</td>
+                    <td>批量更新，减少碎片化变更</td>
+                </tr>
+                <tr>
+                    <td>Assistant Messages</td>
+                    <td>15-20%</td>
+                    <td>~80%</td>
+                    <td>定期压缩历史对话</td>
+                </tr>
+                <tr>
+                    <td>User Messages</td>
+                    <td>5-10%</td>
+                    <td>~60%</td>
+                    <td>精简提示，去除非必要内容</td>
+                </tr>
+                <tr>
+                    <td>Tool Results</td>
+                    <td>55-70%</td>
+                    <td>~85%</td>
+                    <td>限制输出长度，使用增量读取</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>Context Engineering 可能是 2025-2026 年 AI Agent 领域最被低估的技能</strong>——它不性感，不涉及炫酷的模型或复杂的算法，但它直接决定你的 API 账单是 100 美元还是 1000 美元。一个优秀的 Context Engineer 和一个普通开发者之间的差距，可能比模型本身的代际差距还要大。花时间优化你的上下文结构，是你能为自己的 Agent 系统做的最有性价比的投资。
+        </div>
+
+        <p>好了，关于 Context Engineering 我们就讲到这里。理解了如何高效组织上下文，我们就可以进入下一个实战环节了——<strong>实现 Skills 系统</strong>。Skills 是 Claude Code 中最优雅的设计之一，它让 Agent 能够在需要时加载专业知识，而不必在启动时就把所有知识塞进上下文。怎么做到的呢？下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

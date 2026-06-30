@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第26章 Lua脚本与事务</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html" class="active">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第26章：Lua 脚本与事务</h2>
+
+        <p>大家好，我是你们的讲师。前几章我们详细解剖了 Redis 的网络 IO 和命令处理流程，你已经知道了一条 SET 命令从网卡到内核再到 redisServer 的完整旅程。但 Redis 不仅仅是一个单命令执行器——它还提供了<strong>事务</strong>和<strong>Lua 脚本</strong>两种机制，让你能批量执行多条命令并保证原子性。很多同学把 Lua 脚本单纯当成"原子性批处理"，把事务当成"简化版脚本"，但如果你读过源码就会发现：这两套机制尽管目标相似，却走了完全不同的实现路径，各自的性能特性和适用场景差异巨大。</p>
+
+        <p>本章我们从源码层面深入 <code>script.c</code> / <code>script_lua.c</code> 和 <code>multi.c</code>，看看 Lua 引擎是怎么嵌入 Redis 的，MULTI/EXEC 事务又是如何用状态机和命令队列拼凑出"原子性"的。理解了这些，你才能真正用好 EVAL 和 MULTI，避免那些让人头皮发麻的生产事故。</p>
+
+        <h2>Lua 脚本在 Redis 中的位置</h2>
+
+        <p>Redis 从 2.6 版本开始嵌入了 <strong>Lua 5.1</strong> 解释器，这是整个 <code>deps/lua/</code> 目录存在的意义。为什么是 Lua？因为 Lua 的解释器极其轻量，核心代码只有约 2 万行 C 代码，编译后体积仅 100KB 左右，且提供了沙箱化执行的能力。这些特性让 Lua 成为嵌入到 Redis 这样追求极致性能的系统中的理想选择。</p>
+
+        <p>Lua 引擎在 Redis 中的核心骨架由三个文件构成：</p>
+
+        <ul>
+            <li><strong><code>script.c</code></strong>：脚本管理的通用框架层。它定义了脚本执行的生命周期——加载、缓存、执行、超时中断、复制。它不直接与 Lua 交互，而是通过一个抽象的 <code>scriptRun()</code> 接口与后端对接，这个设计其实为后来引入的 <strong>Redis Function</strong>（7.0+）奠定了基础。</li>
+            <li><strong><code>script_lua.c</code></strong>：Lua 引擎的具体实现。它创建 <code>lua_State</code> 虚拟机，注册 Redis 提供的 C 函数（如 <code>redis.call</code>、<code>redis.pcall</code>），处理错误和类型转换。</li>
+            <li><strong><code>functions.c</code></strong>：7.0 引入的 Redis Function 子系统，可以理解为脚本的"一等公民"版——脚本被注册到 Redis 中并持久化到 RDB/AOF，不像 EVAL 那样依赖客户端重复发送。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>小贴士：</strong>每个连接到 Redis 的客户端都有一个独立的 <code>lua_State</code> 吗？不是的。Redis 全局只维护<strong>一个</strong> <code>lua_State</code>，所有脚本共享同一个 Lua 环境。这意味着一个脚本中定义的全局变量会被其他脚本看到——虽然实践中很少这样用，但了解这个细节有助于你理解 Lua 沙箱的安全边界。
+        </div>
+
+        <h2>EVAL / EVALSHA 源码解析</h2>
+
+        <p>当我们执行 <code>EVAL "return redis.call('GET', KEYS[1])" 1 mykey</code> 时，Redis 内部发生了什么？让我们走进 <code>evalCommand</code> 的核心流程：</p>
+
+        <pre><code>/* script_lua.c — evalCommand 简化流程 */
+void evalCommand(client *c) {
+    /* 1. 检查脚本是否为 SHA1 格式 */
+    if (isSHA1(c-&gt;argv[1]-&gt;ptr)) {
+        /* 尝试从缓存字典中查找 */
+        sds sha = c-&gt;argv[1]-&gt;ptr;
+        if (dictFind(server.lua_scripts, sha) == NULL) {
+            addReplyError(c, "NOSCRIPT No matching script");
+            return;
+        }
+        evalShaCommand(c);  /* 走 EVALSHA 路径 */
+        return;
+    }
+
+    /* 2. 从参数中分离 KEYS[] 和 ARGV[] */
+    int numkeys = atoi(c-&gt;argv[2]-&gt;ptr);
+    /* 3. 创建 Lua 函数：将脚本包装为 f_&lt;SHA1&gt; 函数 */
+    char funcname[256];
+    int sha1_len = 40 + 2;  /* f_ + 40 位 hex */
+    /* 计算脚本的 SHA1 摘要 */
+    sha1hex(sha1, c-&gt;argv[1]-&gt;ptr, sdslen(c-&gt;argv[1]-&gt;ptr));
+    /* 4. 调用 luaCallFunction 执行 */
+    luaCallFunction(c, funcname, numkeys, 0);
+}</code></pre>
+
+        <p>这个流程中有几个关键设计值得一提：</p>
+
+        <ul>
+            <li><strong>SHA1 摘要：</strong>每个脚本在执行前都会计算 SHA1 哈希，这个哈希既用作缓存键（存入 <code>server.lua_scripts</code> 字典），也用作函数名。所以 <code>EVALSHA</code> 可以直接用 SHA1 找到已缓存的脚本，避免重复传输脚本体。</li>
+            <li><strong>server.lua_scripts 字典：</strong>这是一个 <code>dict *</code>，以 SHA1 为 key，以脚本源码的 <code>sds</code> 为 value。所有通过 EVAL 或 SCRIPT LOAD 加载的脚本都会缓存到这里，直到 <code>SCRIPT FLUSH</code> 或服务器重启才会清空。</li>
+            <li><strong>脚本缓存不上限：</strong>这是有意为之——antirez 认为脚本的数量应该由开发者控制，Redis 不做强制限制。但如果滥用，会导致内存持续增长。</li>
+        </ul>
+
+        <p>再看 <code>SCRIPT LOAD</code> 的实现——它只做了两件事：计算 SHA1、存入 <code>server.lua_scripts</code>，但不执行脚本。这比 EVAL 少了一个执行步骤，适合在初始化阶段预先加载脚本。</p>
+
+        <h2>脚本执行机制</h2>
+
+        <p>当 <code>luaCallFunction</code> 真正执行 Lua 脚本时，内部有一整套精心设计的参数传递和错误处理机制：</p>
+
+        <pre><code>/* script_lua.c — luaCallFunction 核心逻辑 */
+int luaCallFunction(client *c, char *funcname, int numkeys, int flags) {
+    lua_State *lua = server.lua;  /* Redis 全局唯一的 Lua VM */
+
+    /* 1. 将 KEYS[] 推入 Lua 栈 */
+    lua_newtable(lua);
+    for (int j = 0; j &lt; numkeys; j++) {
+        lua_pushstring(lua, c-&gt;argv[j + 3]-&gt;ptr);  /* argv[3] 之后是 key */
+        lua_rawseti(lua, -2, j + 1);
+    }
+
+    /* 2. 将 ARGV[] 推入 Lua 栈 */
+    int arg_idx = 3 + numkeys;
+    lua_newtable(lua);
+    for (int j = arg_idx; j &lt; c-&gt;argc; j++) {
+        lua_pushstring(lua, c-&gt;argv[j]-&gt;ptr);
+        lua_rawseti(lua, -2, j - arg_idx + 1);
+    }
+
+    /* 3. 执行 Lua 函数 */
+    if (lua_pcall(lua, 2, 1, 0) != LUA_OK) {
+        /* 处理 Lua 运行时错误 */
+        addReplyErrorFormat(c, "ERR Error running script: %s",
+                            lua_tostring(lua, -1));
+        lua_pop(lua, 1);
+        return C_ERR;
+    }
+
+    /* 4. 将 Lua 返回值转换为 Redis 回复 */
+    luaReplyToRedisReply(c, lua);
+    return C_OK;
+}</code></pre>
+
+        <p>执行过程中的两个重要机制：</p>
+
+        <ul>
+            <li><strong>lua-replicate-commands：</strong>这个配置项（默认开启，7.0+ 成为唯一行为）控制脚本内的写命令如何复制到从库。开启时，脚本中的每个写命令会被<strong>单独复制</strong>（逐命令复制），而不是将整个脚本作为整体复制。这样做的好处是：主库和从库各自执行相同的命令序列，即使 Lua 本身有随机性（比如 <code>math.random</code>），也不会导致主从不一致。</li>
+            <li><strong>脚本超时中断：</strong>Redis 默认的 <code>lua-time-limit</code> 是 5000ms。当脚本运行超过这个阈值，Redis 不会立即杀死它（那样会破坏 Lua VM 的状态），而是给脚本发一个"你超时了，请自己结束"的信号。Redis 通过 <code>lua_timedout</code> 标志位标记超时状态，每次 <code>redis.call()</code> 返回时检查这个标志。这意味着：如果你的脚本不调用 <code>redis.call()</code>，只是纯 Lua 做死循环，Redis 是无法中途中断它的——这是 Lua 沙箱的一个硬伤。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我曾经在一个电商大促项目中遇到过一次严重故障。运营同学写了一个 Lua 脚本，里面循环调用了 5 万次 <code>redis.call('GET', key)</code> 做复杂的价格校验，本意是想原子性保证库存扣减。但问题是，这个脚本执行耗时达到了 8 秒——直接导致整个 Redis 实例在这 8 秒内无法服务任何其他请求。所有依赖这个 Redis 实例的服务集体超时，雪崩效应导致线上瘫痪了 15 分钟。事后分析：首先，EVAL 每次都要传输完整的脚本体，网络开销大；其次，脚本执行期间单线程阻塞了所有其他命令。正确的做法是：用 <code>SCRIPT LOAD</code> 预先加载脚本得到 SHA1，然后在业务代码中用 <code>EVALSHA</code> 调用；更重要的是，<strong>脚本执行时间必须控制在 1ms 以下</strong>的原则绝对不能突破。
+        </div>
+
+        <h2>事务实现：MULTI / EXEC / WATCH</h2>
+
+        <p>事务在 Redis 中的实现与 Lua 脚本有本质不同。如果说 Lua 脚本是"去 C 侧执行自定义逻辑"，那么事务就是"在 C 侧批量排队执行已有命令"。事务的核心文件是 <code>multi.c</code>，整个流程围绕一个简单的<strong>状态机</strong>展开。</p>
+
+        <pre><code>/* multi.c — MULTI 命令设置事务标志 */
+void multiCommand(client *c) {
+    /* 设置 CLIENT_MULTI 标志位，标记客户端处于事务模式 */
+    c-&gt;flags |= CLIENT_MULTI;
+    addReply(c, shared.ok);
+}
+
+/* multi.c — 事务中的命令不立即执行，而是入队 */
+int processCommand(client *c) {
+    /* 如果客户端处于事务模式，将命令入队而非执行 */
+    if (c-&gt;flags &amp; CLIENT_MULTI) {
+        /* 某些命令（如 WATCH、MULTI、EXEC、DISCARD）不受事务影响 */
+        if (!(c-&gt;cmd-&gt;proc == execCommand ||
+              c-&gt;cmd-&gt;proc == discardCommand ||
+              c-&gt;cmd-&gt;proc == multiCommand ||
+              c-&gt;cmd-&gt;proc == watchCommand)) {
+            queueMultiCommand(c);  /* 入队到 c-&gt;mstate.commands */
+            addReply(c, shared.queued);
+            return C_OK;  /* 不入队时不执行 */
+        }
+    }
+    /* 正常执行路径... */
+}
+
+/* multi.c — EXEC 批量执行所有已入队命令 */
+void execCommand(client *c) {
+    /* 1. 检查 WATCH 键是否被修改 */
+    if (isWatchedKeyModified(c)) {
+        c-&gt;flags |= CLIENT_DIRTY_CAS;
+    }
+
+    /* 2. 如果 WATCH 检测到修改，事务失败 */
+    if (c-&gt;flags &amp; CLIENT_DIRTY_CAS) {
+        addReply(c, shared.nullarray[c-&gt;resp]);  /* 返回 nil */
+        unwatchAllKeys(c);
+        return;
+    }
+
+    /* 3. 逐条执行已入队的命令 */
+    for (int j = 0; j &lt; c-&gt;mstate.count; j++) {
+        c-&gt;mstate.commands[j].argc = ...;
+        c-&gt;mstate.commands[j].argv = ...;
+        call(c, c-&gt;mstate.commands[j], CMD_CALL_FULL);
+    }
+}</code></pre>
+
+        <p>关键数据结构 <code>client.mstate</code>（multiState 类型）记录了事务的状态：</p>
+
+        <pre><code>/* server.h — multiState 结构体 */
+typedef struct multiState {
+    multiCmd *commands;    /* 已入队的命令数组 */
+    int count;             /* 已入队的命令数量 */
+    int alloc;             /* 已分配的容量 */
+    int cmd_flags;         /* 累积的命令标志 */
+    int cmd_inv_flags;     /* 反转的命令标志 */
+} multiState;
+
+typedef struct multiCmd {
+    robj **argv;           /* 参数数组 */
+    int argc;              /* 参数个数 */
+    struct redisCommand *cmd;  /* 指向命令表条目 */
+} multiCmd;</code></pre>
+
+        <p><strong>WATCH 乐观锁</strong>的实现也很精巧。当客户端执行 <code>WATCH key</code> 时，Redis 将这个客户端注册到 <code>server.watched_keys</code> 字典中。这个字典以 <code>key</code> 为键，以 <code>watchedKey</code> 链表为值，每个 <code>watchedKey</code> 记录了哪个客户端正在监视这个 key。当任何命令修改了这个 key（比如 SET、HSET、DEL 等），都会触发 <code>touchWatchedKey()</code> 函数，将监视该 key 的客户端标记为 <code>CLIENT_DIRTY_CAS</code>。之后这个客户端执行 <code>EXEC</code> 时，看到脏标记就会直接返回 nil——这就是"乐观锁"的全部秘密。</p>
+
+        <h2>Redis 事务 vs ACID</h2>
+
+        <p>很多从关系数据库转过来的同学会问：Redis 事务支持 ACID 吗？答案比你想象的要复杂一些：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>ACID 属性</th>
+                    <th>Redis 事务支持情况</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>原子性（Atomicity）</td>
+                    <td>部分支持。EXEC 批量执行过程中不会被打断，但如果中间某条命令失败，后面的命令<strong>仍然继续执行</strong>，不会回滚</td>
+                </tr>
+                <tr>
+                    <td>一致性（Consistency）</td>
+                    <td>基本支持。数据类型约束在命令执行层面会被检查，不会出现类型混乱</td>
+                </tr>
+                <tr>
+                    <td>隔离性（Isolation）</td>
+                    <td>天然支持。Redis 是单线程执行模型，EXEC 执行期间不会有其他命令穿插</td>
+                </tr>
+                <tr>
+                    <td>持久性（Durability）</td>
+                    <td>取决于持久化配置。仅 AOF + always fsync 才能保证，但性能代价极高</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>Redis 事务<strong>不支持回滚</strong>是 antirez 有意为之的设计决策。他认为：事务中的命令失败只有两种可能，一是语法错误（命令本身写错了），这类错误应该在入队时就发现；二是运行时错误（比如对 string 类型执行了 LPUSH），这类错误属于<strong>编程错误</strong>，应该修正代码而不是依赖回滚。与其在 Redis 中实现复杂的回滚机制（这会影响性能和代码复杂度），不如让开发者在上层检测并处理错误。</p>
+
+        <div class="tip">
+            <strong>小贴士：</strong>语法错误和运行时错误的区别很关键。语法错误（比如命令名写错）会在 <code>queueMultiCommand</code> 时被检测到，Redis 会直接拒绝整个 EXEC。但运行时错误（比如对 string 执行 LPUSH）只有在 EXEC 执行到那条命令时才会发现——此时前面的命令已经执行完毕，无法撤回。这也意味着在 EXEC 返回的数组结果中，可能既有成功回复也有错误回复，你需要自己检查每个结果。
+        </div>
+
+        <h2>脚本与事务的原子性保证</h2>
+
+        <p>事务和 Lua 脚本都声称自己具有"原子性"，但此原子性非彼原子性。我们来做一个对比：</p>
+
+        <p><strong>Redis 事务的原子性：</strong>MULTI 加 EXEC 保证了多条命令在<strong>执行批次</strong>上的原子性——EXEC 命令被处理时，Redis 会在这个事件循环迭代中连续执行所有入队命令，中间不处理其他客户端的请求。但如果执行到一半机器崩溃，已经执行的部分不会回滚。</p>
+
+        <p><strong>Lua 脚本的原子性：</strong>整个脚本作为一个整体在事件循环中执行，期间 Redis 不会处理任何其他命令。而且 Lua 脚本还多了一层保证：如果脚本执行过程中 Redis 崩溃重启，脚本要么完全没执行，要么执行完毕——因为 AOF 和复制日志是以整个脚本为单位记录的。</p>
+
+        <p>在实际生产中，<strong>Lua 脚本通常比事务更受欢迎</strong>，原因很简单：Lua 脚本可以包含条件逻辑和循环，能够实现"读-改-写"这种 CAS 操作，而事务的每条命令都是预先排好的，没有条件判断能力。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>特性</th>
+                    <th>Lua 脚本 (EVAL)</th>
+                    <th>事务 (MULTI/EXEC)</th>
+                    <th>Pipeline</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>原子性</td>
+                    <td>整个脚本原子执行</td>
+                    <td>批量命令原子执行</td>
+                    <td>无保证</td>
+                </tr>
+                <tr>
+                    <td>条件逻辑</td>
+                    <td>支持（if/else/loop）</td>
+                    <td>不支持（命令预编排）</td>
+                    <td>不支持</td>
+                </tr>
+                <tr>
+                    <td>网络往返</td>
+                    <td>1 次（脚本体大时传输开销大）</td>
+                    <td>MULTI + N条QUEUED + EXEC = N+2 次</td>
+                    <td>1 次</td>
+                </tr>
+                <tr>
+                    <td>可调试性</td>
+                    <td>差（黑盒执行）</td>
+                    <td>中（每条命令独立回显）</td>
+                    <td>好</td>
+                </tr>
+                <tr>
+                    <td>缓存支持</td>
+                    <td>EVALSHA + SCRIPT LOAD</td>
+                    <td>不适用</td>
+                    <td>不适用</td>
+                </tr>
+                <tr>
+                    <td>适合场景</td>
+                    <td>复杂原子操作、限流、计数器</td>
+                    <td>批量无依赖操作</td>
+                    <td>批量只读查询</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>经验总结：</strong>大多数需要"原子性"的场景，都应该优先考虑 Lua 脚本而不是事务。事务在 Redis 中的地位更像是一个"渐进增强"——当你已经有了一套命令序列，想确保它们不被穿插执行时，套上 MULTI/EXEC 是最简单的改造方式。而如果你需要根据某个 key 的当前值来决定下一步操作，那必须用 Lua 脚本。
+        </div>
+
+        <p>Lua 脚本和事务都是 Redis 在"单线程事件循环"框架下实现原子性的不同思路，它们各自有清晰的适用边界。下一章我们要讨论的话题更加深入——如何通过 <strong>Module</strong> 系统完全跳出 Redis 内置命令的限制，用 C/C++ 扩展 Redis 的能力边界。从"怎么用"到"怎么扩展"，这正是源码阅读带来的进阶之路。</p>
+
+        <div class="footer-nav">
+            <a href="25.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="27.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

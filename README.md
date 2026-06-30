@@ -1,12 +1,12 @@
 # 1998x-stack Tutorials
 
-A collection of 45 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 47 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
 ## Tutorials by Discipline
 
-### AI / 数据科学 (12 courses)
+### AI / 数据科学 (13 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -22,8 +22,9 @@ A collection of 45 free, comprehensive technical tutorials in Chinese — from f
 | 🔥 | PyTorch 深度学习实战教程 | 28 | [pytorch-tutorial](https://1998x-stack.github.io/pytorch-tutorial/) |
 | 🎙️ | TTS模型发展史 | 28 | [tts-model-history-tutorial](https://1998x-stack.github.io/tts-model-history-tutorial/) |
 | 🤖 | 大模型训练与部署深度分析 | 28 | [llm-training-deployment-tutorial](https://1998x-stack.github.io/llm-training-deployment-tutorial/) |
+| 📊 | 抽样技术 · 从入门到精通 | 28 | [sampling-tutorial](https://1998x-stack.github.io/sampling-tutorial/) |
 
-### 数学基础 (7 courses)
+### 数学基础 (8 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -34,6 +35,7 @@ A collection of 45 free, comprehensive technical tutorials in Chinese — from f
 | 📐 | 运筹学与调度理论 · 从入门到精通 | 28 | [operations-research-scheduling-tutorial](https://1998x-stack.github.io/operations-research-scheduling-tutorial/) |
 | 📊 | 随机信号分析 · 从入门到精通 | 28 | [random-signal-analysis-tutorial](https://1998x-stack.github.io/random-signal-analysis-tutorial/) |
 | 🎛️ | 数字信号处理DSP · 从入门到精通 | 28 | [digital-signal-processing-tutorial](https://1998x-stack.github.io/digital-signal-processing-tutorial/) |
+| 🔢 | 数论(高中奥数竞赛) | 22 | [olympiad-number-theory-tutorial](https://1998x-stack.github.io/olympiad-number-theory-tutorial/) |
 
 ### 系统 / 基础设施 (13 courses)
 

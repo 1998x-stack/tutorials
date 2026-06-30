@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 45 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 47 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
 ## Active Tutorials
 
-### AI / 数据科学 (12)
+### AI / 数据科学 (13)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `machine-learning-tutorial/` | 机器学习 | 28 | `https://1998x-stack.github.io/machine-learning-tutorial/` |
@@ -25,8 +25,9 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `pytorch-tutorial/` | PyTorch深度学习 | 28 | `https://1998x-stack.github.io/pytorch-tutorial/` |
 | `tts-model-history-tutorial/` | TTS模型发展史 | 28 | `https://1998x-stack.github.io/tts-model-history-tutorial/` |
 | `llm-training-deployment-tutorial/` | 大模型训练与部署 | 28 | `https://1998x-stack.github.io/llm-training-deployment-tutorial/` |
+| `sampling-tutorial/` | 抽样技术 | 28 | `https://1998x-stack.github.io/sampling-tutorial/` |
 
-### 数学基础 (7)
+### 数学基础 (8)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `numerical-analysis-tutorial/` | 数值分析 | 28 | `https://1998x-stack.github.io/numerical-analysis-tutorial/` |
@@ -36,6 +37,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `operations-research-scheduling-tutorial/` | 运筹学与调度理论 | 28 | `https://1998x-stack.github.io/operations-research-scheduling-tutorial/` |
 | `random-signal-analysis-tutorial/` | 随机信号分析 | 28 | `https://1998x-stack.github.io/random-signal-analysis-tutorial/` |
 | `digital-signal-processing-tutorial/` | 数字信号处理DSP | 28 | `https://1998x-stack.github.io/digital-signal-processing-tutorial/` |
+| `olympiad-number-theory-tutorial/` | 数论(高中奥数竞赛) | 22 | `https://1998x-stack.github.io/olympiad-number-theory-tutorial/` |
 
 ### 系统 / 基础设施 (13)
 | Directory | Topic | Chapters | URL |

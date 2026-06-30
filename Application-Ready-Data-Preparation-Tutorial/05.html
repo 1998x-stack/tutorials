@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第5章 上下文学习与少样本数据操作 - 数据准备教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🧹 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 数据准备的演进与新范式</a></li>
+            <li><a href="02.html">第2章 应用就绪数据质量模型</a></li>
+            <li><a href="03.html">第3章 LLM作为通用数据操作符</a></li>
+            <li><a href="04.html">第4章 提示工程用于数据任务</a></li>
+            <li><a href="05.html" class="active">第5章 上下文学习与少样本数据操作</a></li>
+            <li><a href="06.html">第6章 微调LLM用于数据任务</a></li>
+            <li><a href="07.html">第7章 数据准备评估体系</a></li>
+            <li><a href="08.html">第8章 数据错误检测：规则到LLM</a></li>
+            <li><a href="09.html">第9章 上下文感知清洗：LLMClean</a></li>
+            <li><a href="10.html">第10章 混合零样本错误检测</a></li>
+            <li><a href="11.html">第11章 数据填补与缺失值修复</a></li>
+            <li><a href="12.html">第12章 函数合成驱动的清洗</a></li>
+            <li><a href="13.html">第13章 异常检测与数据验证</a></li>
+            <li><a href="14.html">第14章 端到端清洗工作流自动化</a></li>
+            <li><a href="15.html">第15章 实体匹配：LLM增强方法</a></li>
+            <li><a href="16.html">第16章 模式匹配：语义对齐</a></li>
+            <li><a href="17.html">第17章 跨域零样本实体匹配</a></li>
+            <li><a href="18.html">第18章 Agent驱动的数据集成编排</a></li>
+            <li><a href="19.html">第19章 LLM数据标注自动化</a></li>
+            <li><a href="20.html">第20章 数据画像与语义类型发现</a></li>
+            <li><a href="21.html">第21章 知识图谱增强的数据处理</a></li>
+            <li><a href="22.html">第22章 表格理解与大模型集成</a></li>
+            <li><a href="23.html">第23章 数据去重与质量过滤</a></li>
+            <li><a href="24.html">第24章 数据混合法则与域选择</a></li>
+            <li><a href="25.html">第25章 合成数据生成与知识蒸馏</a></li>
+            <li><a href="26.html">第26章 Data-Juicer与端到端框架</a></li>
+            <li><a href="27.html">第27章 数据治理、溯源与安全保障</a></li>
+            <li><a href="28.html">第28章 实战：构建LLM数据准备系统</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第5章 上下文学习与少样本数据操作</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们深入探讨了提示工程的核心技术——CoT推理、结构化约束、多轮策略。但无论你的提示写得多么精妙，它始终面临一个根本限制：<strong>零样本提示依赖模型本身的内置知识</strong>。当任务涉及特定领域规则、自定义分类体系或特殊数据格式时，零样本的准确率往往不够用。</p>
+
+        <p>这时候就需要一种更强大的技术：<strong>上下文学习（In-Context Learning, ICL）</strong>。通过在提示中提供输入-输出的示例对，模型可以"现场学习"任务的模式和规则，而不需要更新模型权重。这种方式非常适合数据准备任务——你只需要准备几个标注好的示例，模型就能举一反三地处理大批量相似数据。本章我们将系统性地学习ICL在数据操作中的原理、策略和工程实践。</p>
+
+        <div class="highlight">
+            <p><strong>本章核心知识点脉络：</strong> ICL原理与能力边界 → 示例选择策略 → 批处理效率优化 → 位置偏差与缓解 → ICL示例顺序陷阱</p>
+        </div>
+
+        <h2>上下文学习的威力与局限</h2>
+
+        <p>ICL的核心思想非常直观：在提示中放入<b>K</b>个输入-输出示例（称为few-shot示例），然后输入待处理的数据，模型会"照猫画虎"输出处理后的结果。这个过程不需要梯度更新、不需要微调、不需要模型权重改变——只是注意力机制在上下文窗口中的模式匹配。</p>
+
+        <p>为什么ICL对数据准备任务特别有效？因为数据操作本质上是一个<strong>"模式识别 + 模式应用"</strong>的过程：</p>
+        <ul>
+            <li><strong>实体匹配：</strong> 提供几个"同一实体"和"不同实体"的示例，模型就能理解匹配规则。</li>
+            <li><strong>数据标注：</strong> 提供几个标注示例，模型就能按同样的标签体系标注新数据。</li>
+            <li><strong>错误修复：</strong> 提供几个"错误→正确"的转换示例，模型就能对类似错误做同样修复。</li>
+        </ul>
+
+        <p>但ICL并非万能。以下是它的核心局限：</p>
+        <ul>
+            <li><strong>上下文窗口限制：</strong> 示例越多越准确，但示例太多会超过上下文窗口。典型的数据任务ICL示例在3-20个之间。</li>
+            <li><strong>位置偏差：</strong> 示例的顺序对结果有显著影响，我们在后文详述。</li>
+            <li><strong>模型能力依赖：</strong> 小模型（<7B）的ICL能力远弱于大模型，对于复杂模式可能"学不会"。</li>
+            <li><strong>计算成本：</strong> 每个示例都会消耗token，增加API调用成本和延迟。</li>
+        </ul>
+
+        <div class="tip">
+            <p><strong>实用建议：</strong> 如果你的任务规则非常明确且不随时间变化，传统的规则引擎或硬编码映射效率远高于ICL。ICL的核心价值在于那些"规则说不清但人一看就懂"的任务——比如文本分类、语义匹配、模糊清洗。判断标准是："给你5个示例，一个数据标注新手能学会我的规则吗？"如果能，那就适合ICL。</p>
+        </div>
+
+        <h2>示例选择策略</h2>
+
+        <p>ICL的核心工程决策是：<strong>从你的标注数据中，选择哪K个示例效果最好？</strong>不是所有示例价值相同——选对了事半功倍，选错了事倍功半。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>策略</th>
+                    <th>方法</th>
+                    <th>适用场景</th>
+                    <th>效果</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>随机采样</strong></td>
+                    <td>从标注池中随机选择K个</td>
+                    <td>数据分布均匀、类别平衡</td>
+                    <td>基线水平</td>
+                </tr>
+                <tr>
+                    <td><strong>语义相似度</strong></td>
+                    <td>用嵌入向量检索与当前输入最相似的K个示例</td>
+                    <td>分类、匹配任务</td>
+                    <td>比随机提升10-20%</td>
+                </tr>
+                <tr>
+                    <td><strong>多样性采样</strong></td>
+                    <td>最大化K个示例间的差异性（MMR算法）</td>
+                    <td>覆盖长尾分布的数据</td>
+                    <td>提升召回率15-25%</td>
+                </tr>
+                <tr>
+                    <td><strong>代表性采样</strong></td>
+                    <td>选择聚类中心附近的样本</td>
+                    <td>数据分布集中的场景</td>
+                    <td>提升精确率10-15%</td>
+                </tr>
+                <tr>
+                    <td><strong>困惑度排序</strong></td>
+                    <td>选择模型困惑度适中的示例</td>
+                    <td>困难样本识别</td>
+                    <td>综合提升10-30%</td>
+                </tr>
+                <tr>
+                    <td><strong>标签平衡</strong></td>
+                    <td>确保K个示例涵盖所有输出类别</td>
+                    <td>类别不平衡严重的数据</td>
+                    <td>防止模型偏向高频类别</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>其中，**语义相似度选择**在实际工程中最为实用。方法是通过嵌入模型（如text-embedding-3-small或BGE系列）将每个候选示例编码为向量，然后对当前输入计算向量相似度，选取最相似的K个作为动态示例。</p>
+
+        <pre><code># 语义相似度示例选择
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+def select_fewshot_examples(query, candidate_pool, k=5, embedding_model):
+    """
+    基于语义相似度选择few-shot示例。
+
+    Args:
+        query: 当前待处理的数据点（字符串）
+        candidate_pool: 候选示例池，每个元素为 (input_str, output_str)
+        k: 示例数量
+        embedding_model: 嵌入模型
+    Returns:
+        选中的示例列表
+    """
+    # 计算查询嵌入
+    query_emb = embedding_model.encode([query])
+
+    # 计算候选示例嵌入
+    candidate_inputs = [c[0] for c in candidate_pool]
+    candidate_embs = embedding_model.encode(candidate_inputs)
+
+    # 计算相似度
+    similarities = cosine_similarity(query_emb, candidate_embs)[0]
+
+    # 选取top-k
+    top_k_indices = np.argsort(similarities)[-k:][::-1]
+
+    selected = [candidate_pool[i] for i in top_k_indices]
+    return selected
+
+# 应用：数据标注任务
+query_address = "深圳市南山区科技园南区"
+pool = [
+    ("北京市海淀区中关村", "北京;海淀"),
+    ("上海市浦东新区张江", "上海;浦东"),
+    ("广州市天河区珠江新城", "广州;天河"),
+    ("浙江省杭州市西湖区", "浙江;杭州;西湖"),
+    # ... 更多示例
+]
+examples = select_fewshot_examples(query_address, pool, k=3, model=embedder)
+# 期望选出：上海、广州、浙江的示例（语义上与深圳最相似——都是经济发达城市）</code></pre>
+
+        <h2>批处理与效率优化</h2>
+
+        <p>在生产环境中，LLM数据操作面临的核心矛盾是：<strong>质量 vs. 成本 vs. 延迟</strong>。单独处理每条数据可能有最高质量，但token成本和延迟都难以接受。一个关键优化手段就是批处理（Batching）。</p>
+
+        <p>批处理的基本思路是将多条数据合并到一个LLM调用中处理。这有几方面好处：</p>
+        <ul>
+            <li><strong>共享上下文：</strong> 同一个batch中的示例只需要加载一次，所有数据共享。</li>
+            <li><strong>交叉验证：</strong> 模型可以在一个batch内对比不同数据点，提高判断一致性。</li>
+            <li><strong>减少调用次数：</strong> 将N次API调用减少为N/B次（B为batch size）。</li>
+        </ul>
+
+        <p>但批处理也有风险：batch过大时模型容易"注意力涣散"，对batch中间部分的数据处理质量下降。经验batch size建议为5-20条，取决于模型上下文窗口和任务复杂度。</p>
+
+        <pre><code># 批处理策略实现
+def batch_process_with_icl(llm, data_batch, examples, task_instruction):
+    """
+    批处理 + ICL数据操作。
+
+    Args:
+        data_batch: 待处理的数据批次，每条为字符串
+        examples: few-shot示例列表，每个为 (input, output) 元组
+        task_instruction: 任务指令
+    """
+    # 构建示例部分
+    examples_text = "\n".join([
+        f"示例 {i+1}:\n输入: {inp}\n输出: {out}"
+        for i, (inp, out) in enumerate(examples)
+    ])
+
+    # 构建批处理输入
+    batch_input = "\n---\n".join([
+        f"数据 {i+1}: {item}"
+        for i, item in enumerate(data_batch)
+    ])
+
+    # 完整提示
+    prompt = f"""{task_instruction}
+
+以下是一些处理示例：
+{examples_text}
+
+请按同样的方式处理以下数据，每一条数据的输出格式必须与示例一致。
+处理时请注意保持同一批次内的规则一致性。
+
+{batch_input}
+
+请逐条输出处理结果，使用"数据 X: 结果"的格式。
+"""
+
+    response = llm.generate(prompt)
+    return parse_batch_response(response)</code></pre>
+
+        <div class="warning">
+            <p><strong>批次一致性问题：</strong> 批处理时，LLM倾向于让同一批次内的输出"看起来相似"。这意味着如果batch中的第一条数据处理方式有轻微偏差，后续数据可能"传染"同一偏差。解决方案是定期在batch中插入"校验数据"——即已知正确答案的数据，监控校验数据的处理结果是否出现漂移。</p>
+        </div>
+
+        <h2>位置偏差与上下文长度依赖</h2>
+
+        <p>位置偏差（Position Bias）是ICL中最隐形的杀手。大量研究表明，示例在提示中的位置对ICL效果有显著影响：</p>
+        <ul>
+            <li><strong>首因效应（Primacy Effect）：</strong> 排在最前面的示例影响力最大。模型倾向于"最像第一个示例的方式"来处理输入。</li>
+            <li><strong>近因效应（Recency Effect）：</strong> 排在最后面的示例影响力也很大——尤其是在长上下文窗口中。</li>
+            <li><strong>中间遗忘：</strong> 排在中间位置的示例最容易被模型"忽略"。</li>
+        </ul>
+
+        <p>对数据操作任务，位置偏差可能造成严重后果。例如，在实体匹配任务中，如果排在第一位的示例正好是"匹配"的正例，模型可能会倾向于将所有输入都判断为"匹配"，导致假阳性飙升。</p>
+
+        <pre><code># 位置偏差消减实验
+import itertools
+
+def icl_with_position_mitigation(llm, test_input, examples, task_desc):
+    """
+    通过多轮投票缓解位置偏差。
+
+    Args:
+        examples: 示例列表
+        test_input: 待处理输入
+    Returns:
+        投票后的最终结果
+    """
+    # 策略：将示例顺序打乱多次，取多数结果
+    all_results = []
+
+    for permutation in itertools.permutations(examples, len(examples)):
+        if len(all_results) >= 5:  # 限制轮次
+            break
+        permuted = list(permutation)
+        prompt = build_icl_prompt(task_desc, permuted, test_input)
+        result = llm.generate(prompt)
+        all_results.append(normalize_result(result))
+
+    # 多数投票
+    from collections import Counter
+    final = Counter(all_results).most_common(1)[0][0]
+    return final
+
+# 实际工程中更实用的方法：随机打乱+3次投票
+def robust_icl_vote(llm, test_input, examples, k_rounds=3):
+    """随机打乱示例顺序，取多数结果"""
+    results = []
+    for _ in range(k_rounds):
+        shuffled = examples.copy()
+        random.shuffle(shuffled)
+        prompt = build_prompt(shuffled, test_input)
+        results.append(llm.generate(prompt))
+    return Counter(results).most_common(1)[0][0]</code></pre>
+
+        <p>除了示例顺序，上下文窗口内的位置还有另一种偏差：<strong>数据在batch中的位置</strong>也会影响处理结果。通常batch中越靠后的数据，模型的注意力越分散，错误率越高。</p>
+
+        <div class="tip">
+            <p><strong>综合缓解方案：</strong> 1) 将最重要的示例放在首位和末位，次要示例放中间；2) 对于K个示例，K=3-5通常是最优区间——太少学不到模式，太多中间示例被忽略；3) 使用"标签交替"排列：正例-负例-正例-负例的交替排列通常比所有正例在前效果更稳定；4) 对关键任务，使用3次随机打乱投票，将准确率从85%提升到90%以上。</p>
+        </div>
+
+        <h2>实战案例：ICL示例顺序导致匹配结果完全相反</h2>
+
+        <p>这是我亲身经历的一个令人震惊的案例。在一个跨域实体匹配项目中，我们需要判断不同电商平台的商品是否为同一产品。任务本身已经很困难了——不同平台对同一产品的描述方式完全不同。</p>
+
+        <p>我准备了6个标注示例（3个匹配、3个不匹配），放在ICL提示中。测试时发现了一个诡异的现象：<strong>同一个测试样本，在上午测试时输出"匹配"，下午测试时输出"不匹配"——而模型、提示、示例都没有任何变化！</strong></p>
+
+        <p>经过整整两天的排查，终于发现了真相：</p>
+
+        <pre><code># 上午的ICL提示（示例顺序）
+examples_am = [
+    ("iPhone 15 128GB 蓝色", "Apple iPhone 15 128GB Blue", "匹配"),   # 正例在首位
+    ("MacBook Pro M3 14寸", "Apple MacBook Pro M3 14-inch", "匹配"),
+    ("Java编程思想 中文版", "Thinking in Java English Edition", "不匹配"),
+    ("可口可乐330ml罐装", "Coca-Cola 330ml Can", "匹配"),
+    ("电动牙刷 飞利浦 HX6730", "Philips Sonicare HX6730", "匹配"),
+    ("无印良品 敏感肌化妆水", "MUJI 敏感肌 化粧水 200ml", "不匹配"),
+]
+# 结果：偏向"匹配"——因为前几个示例都是正例
+
+# 下午的ICL提示（示例顺序被意外打乱）
+examples_pm = [
+    ("Java编程思想 中文版", "Thinking in Java English Edition", "不匹配"),  # 负例到了首位
+    ("可口可乐330ml罐装", "Coca-Cola 330ml Can", "匹配"),
+    ("iPhone 15 128GB 蓝色", "Apple iPhone 15 128GB Blue", "匹配"),
+    ("电动牙刷 飞利浦 HX6730", "Philips Sonicare HX6730", "匹配"),
+    ("无印良品 敏感肌化妆水", "MUJI 敏感肌 化粧水 200ml", "不匹配"),
+    ("MacBook Pro M3 14寸", "Apple MacBook Pro M3 14-inch", "匹配"),
+]
+# 结果：偏向"不匹配"——因为第一个示例是不匹配</code></pre>
+
+        <p>两个顺序的示例内容完全相同，只是排列顺序不同，但对同一个测试样本的输出结果完全相反。首因效应的强度远超我的预期。<strong>排在首位的示例相当于"暗默的默认规则"</strong>，模型会把这个示例的模式放大为整个任务的核心特征。</p>
+
+        <div class="highlight">
+            <p><strong>工程解决方案：</strong> 这个案例之后，我制定了一条铁律——生产环境中的ICL数据操作必须使用"交替标签排列 + 3轮随机投票"。具体来说：1) 手动控制示例顺序，确保首尾都是中性的边界示例而非极端案例；2) 每次调用时随机打乱示例顺序后调用，至少执行3次；3) 取3次结果的多数投票作为最终输出。这个方案将我们的实体匹配F1-score从82%提升到了91%，而且消除了"上午结果和下午结果不一致"的诡异问题。</p>
+        </div>
+
+        <p>本章我们深入了解了上下文学习在数据操作中的原理、示例选择策略、批处理优化和位置偏差问题。ICL是一个强大的工具，但它有明确的天花板——当你的数据任务规模很大、规则极其复杂或需要深度领域知识时，few-shot示例占用的上下文窗口成本可能变得不可接受。这时候，我们需要另一种技术路径：<strong>微调（Fine-Tuning）</strong>。下一章，我们将讨论如何通过监督微调和参数高效微调（LoRA）来训练专属于你数据任务的LLM。</p>
+
+        <div class="footer-nav">
+            <a href="04.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="06.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

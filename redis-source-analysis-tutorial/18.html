@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 AOF与混合持久化</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html" class="active">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第18章：AOF 与混合持久化</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们深入了 RDB 持久化的实现——全量快照、fork 写时复制、紧凑的二进制格式。RDB 的加载速度确实快，但它有一个天生的弱点：两次快照之间的数据全部暴露在丢失风险中。对于缓存场景也许可以接受，但如果 Redis 存储的是订单状态、用户 Session 或计数数据，"丢几分钟数据"是完全不能容忍的。</p>
+
+        <p>这一章我们来学习 AOF（Append Only File）持久化——Redis 的增量日志方案。它会把每一条<strong>修改数据</strong>的命令以 RESP 协议的形式追加到文件末尾，重启时逐条重放这些命令来恢复数据。由于 AOF 的写入粒度可以控制在"每条命令"甚至"每秒批量刷盘"，数据丢失窗口可以缩小到 1 秒甚至更少。我们还会探讨混合持久化——RDB 的全量快照和 AOF 的增量日志如何珠联璧合。</p>
+
+        <h2>AOF 写入流程</h2>
+
+        <p>AOF 的写入流程可以概括为三个步骤：命令传播 → 缓冲 → 刷盘。</p>
+
+        <h3>feedAppendOnlyFile — 命令传播</h3>
+        <p>当一条写命令（SET、LPUSH、SADD 等）执行完成后，<code>call()</code> 函数会调用 <code>propagate()</code> 将命令传播给 AOF 和从节点。传播到 AOF 的入口就是 <code>feedAppendOnlyFile</code>：</p>
+
+        <pre><code>/* feedAppendOnlyFile — 将命令追加到 AOF 缓冲区 */
+void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
+    sds buf = sdsempty();
+
+    /* Step 1: 如果操作的数据库编号与上次不同，追加 SELECT 命令 */
+    if (dictid != server.aof_selected_db) {
+        char seldb[64];
+        snprintf(seldb, sizeof(seldb), "*2\r\n$6\r\nSELECT\r\n$%d\r\n%d\r\n",
+                 numDigits(dictid), dictid);
+        buf = sdscat(buf, seldb);
+        server.aof_selected_db = dictid;
+    }
+
+    /* Step 2: 将命令参数编码为 RESP 协议格式 */
+    buf = catAppendOnlyGenericCommand(buf, argc, argv);
+
+    /* Step 3: 将 RESP 命令追加到 AOF 缓冲区 */
+    if (server.aof_state == AOF_ON)
+        server.aof_buf = sdscatlen(server.aof_buf, buf, sdslen(buf));
+
+    /* Step 4: 如果是后台 I/O 线程写 AOF，通知线程 */
+    if (server.aof_use_threads &amp;&amp; server.aof_state == AOF_ON)
+        aofThreadWake(&server.aof_client);
+
+    sdsfree(buf);
+}</code></pre>
+
+        <p>这里有两个关键细节。第一，<code>catAppendOnlyGenericCommand</code> 负责将 <code>argv</code> 参数数组编码为 RESP 协议的 Bulk String 数组——这就是 AOF 文件里存储的格式。第二，<code>aof_buf</code> 是一个 SDS 字符串，所有待写入的命令都先堆积在这里，等待 <code>flushAppendOnlyFile</code> 统一刷盘。</p>
+
+        <h3>flushAppendOnlyFile — 刷盘</h3>
+        <p><code>flushAppendOnlyFile</code> 是 AOF 写入磁盘的关键函数，它在 <code>beforeSleep</code> 中被调用，每秒最多执行一次（取决于 fsync 策略）：</p>
+
+        <pre><code>/* flushAppendOnlyFile — 将 AOF 缓冲区写入磁盘 */
+void flushAppendOnlyFile(int force) {
+    ssize_t nwritten;
+    int sync_in_progress = 0;
+
+    /* Step 1: 如果 AOF 缓冲区为空，直接返回 */
+    if (sdslen(server.aof_buf) == 0) {
+        /* 如果距离上次 fsync 超过了 rewrite 阈值，触发 AOF 重写 */
+        if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
+            sync_in_progress = bioPendingJobsOfType(BIO_AOF_FSYNC) != 0;
+        goto update_interval;
+    }
+
+    /* Step 2: 将缓冲区写入 AOF 文件 */
+    nwritten = write(server.aof_fd, server.aof_buf, sdslen(server.aof_buf));
+    if (nwritten != (ssize_t)sdslen(server.aof_buf)) {
+        /* 写入失败处理 */
+        if (nwritten == -1) {
+            serverLog(LL_WARNING, "Error writing to AOF file: %s",
+                      strerror(errno));
+        }
+        goto write_err;
+    }
+
+    /* Step 3: 根据 fsync 策略决定是否立即调用 fsync */
+    if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
+        /* always: 每条写入都 fsync */
+        redis_fsync(server.aof_fd);
+    } else if (server.aof_fsync == AOF_FSYNC_EVERYSEC) {
+        /* everysec: 交给后台线程每秒 fsync 一次 */
+        if (!sync_in_progress)
+            aof_background_fsync(server.aof_fd);
+    }
+    /* no: 什么也不做，由 OS 决定刷盘时机 */
+
+    /* Step 4: 缩短 AOF 缓冲区 */
+    server.aof_buf = sdsempty();
+}</code></pre>
+
+        <h2>fsync 三种策略</h2>
+
+        <p>fsync 策略是 AOF 性能与安全性的核心权衡点。Redis 提供了三种选择：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>策略</th>
+                    <th>配置值</th>
+                    <th>写入时机</th>
+                    <th>fsync 时机</th>
+                    <th>数据安全性</th>
+                    <th>写入吞吐</th>
+                    <th>典型延迟</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>每次写入都 fsync</td>
+                    <td><code>always</code></td>
+                    <td>每条命令</td>
+                    <td>每条命令后立即 fsync</td>
+                    <td>最高（最多丢 1 条命令）</td>
+                    <td>低（约 20% 吞吐）</td>
+                    <td>~2ms/次</td>
+                </tr>
+                <tr>
+                    <td>每秒 fsync</td>
+                    <td><code>everysec</code></td>
+                    <td>每秒批量写</td>
+                    <td>后台线程每秒一次</td>
+                    <td>中等（最多丢 1 秒数据）</td>
+                    <td>高（接近无 AOF）</td>
+                    <td>~1ms（磁盘空闲时）</td>
+                </tr>
+                <tr>
+                    <td>由 OS 决定</td>
+                    <td><code>no</code></td>
+                    <td>无固定间隔</td>
+                    <td>由内核脏页回写策略决定</td>
+                    <td>低（可能丢 30s+ 数据）</td>
+                    <td>最高</td>
+                    <td>取决于 OS 策略</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p><strong>生产环境推荐 <code>everysec</code></strong>——它在绝大多数场景下做到了"几乎不输 RDB 的吞吐 + 最多丢 1 秒数据"的理想平衡。<code>always</code> 适合金融级场景，但你需要接受吞吐的大幅下降。<code>no</code> 基本不建议使用，除非你明确知道自己不需要 AOF 的数据安全保障。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我经历过一次由于 <code>everysec</code> 策略引发的严重事故。当时线上某台 Redis 机器的磁盘 IO 出现了周期性抖动（来自同机的其他服务大量写日志），导致 AOF 的 fsync 延迟从 1ms 飙到了 2s+。Redis 的 <code>everysec</code> 策略中有个"保护机制"：如果后台 fsync 线程在 2 秒内没有完成上次的 fsync，主线程的下一次 <code>flushAppendOnlyFile</code> 会被<strong>阻塞等待</strong>——因为如果放任不管，缓冲区会无限膨胀。结果就是主线程被阻塞了 2 秒，所有客户端请求都排起了长队，延迟毛刺到达了秒级。<strong>根因不是 Redis 本身的问题，而是磁盘 IO 被共享机器的其他进程争抢了</strong>。解决方案是对 Redis 的磁盘做 IO 隔离（使用 cgroup 或独立磁盘），或者降级到 <code>no</code> 策略临时应急，忍受数据丢失风险。
+        </div>
+
+        <h2>AOF 重写机制</h2>
+
+        <p>AOF 文件是追加写入的，随着运行时间的增长，文件会越来越大。考虑一个极端场景：你对同一个 key 做了 100 万次 <code>INCR</code>，AOF 里就记录了 100 万条 <code>INCR key</code> 命令。重启后 Redis 要逐条重放这 100 万条命令，耗时极长。更优雅的做法是：把这 100 万条 <code>INCR</code> 合并成一条 <code>SET key 1000000</code>。</p>
+
+        <p>AOF 重写（<code>BGREWRITEAOF</code>）就是做这个"压缩"工作的。它的核心思想是：<strong>基于当前内存中的数据状态，生成最小命令集</strong>。</p>
+
+        <pre><code>/* rewriteAppendOnlyFile — AOF 重写的核心逻辑 */
+int rewriteAppendOnlyFile(char *filename) {
+    rio aof;
+    FILE *fp;
+    char tmpfile[256];
+
+    /* 写入临时文件 */
+    snprintf(tmpfile, sizeof(tmpfile), "temp-rewriteaof-%d.%d",
+             (int)getpid(), (int)time(NULL));
+
+    /* 打开临时文件 */
+    fp = fopen(tmpfile, "w");
+    if (!fp) {
+        serverLog(LL_WARNING, "无法打开临时 AOF 文件: %s", strerror(errno));
+        return C_ERR;
+    }
+
+    /* Step 1: 如果启用了混合持久化，先写入 RDB 格式头 */
+    if (server.aof_use_rdb_preamble) {
+        if (rdbSaveRio(&aof, &rsi, RDB_SAVE_AOF_PREAMBLE) == C_ERR) {
+            goto werr;
+        }
+    } else {
+        /* Step 2: 遍历所有数据库，生成最小 AOF 命令 */
+        for (int j = 0; j &lt; server.dbnum; j++) {
+            redisDb *db = server.db + j;
+            dict *d = db->dict;
+
+            if (dictSize(d) == 0) continue;
+
+            /* 写入 SELECT 命令 */
+            snprintf(seldb, sizeof(seldb),
+                     "*2\r\n$6\r\nSELECT\r\n$%d\r\n%d\r\n",
+                     numDigits(j), j);
+            if (rioWrite(&aof, seldb, strlen(seldb)) == 0) goto werr;
+
+            /* 遍历当前数据库的所有键，为每个键生成重建命令 */
+            di = dictGetSafeIterator(d);
+            while ((de = dictNext(di))) {
+                robj *o = dictGetVal(de);
+                /* 根据对象类型调用对应的重写函数 */
+                rewriteAppendOnlyFileRio(&aof, o, keystr, expire);
+            }
+            dictReleaseIterator(di);
+        }
+    }
+
+    /* Step 3: 用临时文件原子替换正式 AOF 文件 */
+    if (rename(tmpfile, filename) == -1) {
+        serverLog(LL_WARNING, "重命名 AOF 临时文件失败: %s", strerror(errno));
+        unlink(tmpfile);
+        return C_ERR;
+    }
+
+    return C_OK;
+}</code></pre>
+
+        <p>AOF 重写利用了和 BGSAVE 同样的 fork 机制：主进程 fork 出子进程，子进程基于 fork 时的内存快照生成新的 AOF 文件。重写期间主进程继续处理请求，新的写命令同时写入旧的 AOF 文件和重写缓冲区。重写完成后，重写缓冲区的增量命令被追加到新 AOF 文件中，然后原子替换旧文件。这样就实现了"零停机 AOF 压缩"。</p>
+
+        <div class="highlight">
+            <strong>优化洞察：</strong>不同类型的键在重写时使用了不同的压缩策略。例如，List 使用 <code>RPUSH</code> 批量重建（一次性 <code>RPUSH key elem1 elem2 ... elemL</code>），Hash 使用 <code>HMSET</code> 批量重建。这样生成的 AOF 命令数远远少于原始操作数，重放速度也快得多。
+        </div>
+
+        <h2>混合持久化</h2>
+
+        <p>Redis 4.0 引入了一个非常实用的功能——混合持久化（<code>aof-use-rdb-preamble</code>）。它的想法很直白：AOF 重写时，不再生成纯 RESP 文本，而是先生成一个 RDB 快照，然后在后面追加重写期间的增量 AOF 命令。</p>
+
+        <p>这样生成的 AOF 文件结构如下：</p>
+
+        <pre><code>+-------------------+------------------------+
+| RDB 格式全量数据    | AOF 格式增量命令        |
+| (rdbSaveRio 生成)  | (重写期间的增量)        |
++-------------------+------------------------+
+        ^                          ^
+        |                          |
+  启动时快速加载              重放增量命令
+  (几秒完成)                 (秒级完成)</code></pre>
+
+        <p>混合持久化的好处非常明显：</p>
+        <ul>
+            <li><strong>加载速度接近 RDB：</strong>大部分数据通过 RDB 的二进制格式快速加载，不需要逐条重放命令。</li>
+            <li><strong>数据安全性接近 AOF：</strong>增量部分仍然是 RESP 协议，最多丢失 1 秒数据（取决于 fsync 策略）。</li>
+            <li><strong>文件大小适中：</strong>RDB 部分本身就是压缩的，比纯 AOF 小得多。</li>
+        </ul>
+
+        <p>启用方式很简单，在 <code>redis.conf</code> 中设置：</p>
+
+        <pre><code># 开启混合持久化（Redis 4.0+）
+aof-use-rdb-preamble yes</code></pre>
+
+        <p>目前混合持久化已经是 Redis 官方推荐的默认配置，大多数云厂商的托管 Redis 也默认开启了这个选项。</p>
+
+        <h2>AOF 文件修复</h2>
+
+        <p>任何持久化方案都绕不开一个现实问题：文件损坏了怎么办？意外的机器断电、磁盘坏道、或者写 AOF 的过程中进程崩溃，都可能导致 AOF 文件尾部不完整。</p>
+
+        <h3>redis-check-aof 工具</h3>
+        <p>Redis 提供了一个专门的修复工具 <code>redis-check-aof</code>，它可以扫描 AOF 文件并尝试修复：</p>
+
+        <pre><code># 检查 AOF 文件完整性
+redis-check-aof appendonly.aof
+
+# 修复 AOF 文件（会截断尾部不完整的命令）
+redis-check-aof --fix appendonly.aof</code></pre>
+
+        <p>修复的原理是：AOF 文件中每条命令都是以 <code>*</code>（数组长度标识）开头，并且每条 Bulk String 都有明确的前缀长度。工具从文件头开始逐条解析，当遇到解析失败时，就从失败位置开始向前回溯到上一个完整的 <code>\r\n</code> 边界，然后截断文件。这种"截断尾部"的方式虽然会丢失最后几条不完整的命令，但至少能保证 Redis 可以正常重启。</p>
+
+        <h3>Multi-Part AOF（8.x 新特性）</h3>
+        <p>Redis 8.x 引入了 Multi-Part AOF，它将单个 AOF 文件拆分成多个部分：<code>base.aof</code>（基础全量数据）、<code>incr.aof</code>（增量数据）和 <code>manifest.aof</code>（元数据清单）。这样做的好处是：即使增量文件损坏，基础文件仍然完好；修复时可以精确到损坏的部分，不需要整个重做。</p>
+
+        <div class="tip">
+            <strong>小贴士：</strong>线上环境建议定期（比如每天凌晨低谷期）运行 <code>redis-check-aof</code> 对 AOF 文件做预防性检查。同时，AOF 文件和 RDB 文件应该存储在<strong>不同磁盘</strong>甚至<strong>不同机器</strong>上——否则磁盘挂了，两种持久化方案同时失效。多做一份异地冷备永远不嫌多。
+        </div>
+
+        <h2>总结</h2>
+
+        <p>至此，持久化的两大支柱我们都讲完了。RDB 是全量快照，快但数据有丢失窗口；AOF 是增量日志，数据安全但文件大、加载慢。混合持久化取两者之长：以 RDB 格式做全量基础，以 AOF 格式做增量补充。</p>
+
+        <p>从源码层面，我们追踪了一条写命令从 <code>feedAppendOnlyFile</code> 追加到 <code>aof_buf</code> 缓冲区，到 <code>flushAppendOnlyFile</code> 写盘并通过 <code>fsync</code> 保证落盘的完整链路。AOF 重写通过 fork 子进程将百万条 <code>INCR</code> 合并为一条 <code>SET</code>，解决了文件无限膨胀的问题。最后我们看了 <code>redis-check-aof</code> 工具和 Multi-Part AOF 的新特性。</p>
+
+        <p>持久化保证了数据在磁盘上的安全，但内存终究是有限的。即使你把 32GB 的内存全用上，如果业务数据增长到了 40GB，Redis 该怎么办？拒绝写入？按照某种策略淘汰旧数据？下一章我们进入《键过期与内存淘汰》，看看 Redis 如何在有限内存中优雅地管理数据的生命周期。</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

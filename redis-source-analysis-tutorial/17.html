@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 RDB持久化</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html">第16章 命令处理全流程</a></li>
+            <li><a href="17.html" class="active">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第17章：RDB 持久化</h2>
+
+        <p>大家好，我是你们的讲师。前面几章我们一直在讲 Redis 作为内存数据库是怎么工作的——数据怎么存（数据结构篇）、怎么来（网络 IO 篇）、怎么执行（命令处理篇）。但内存是易失的，断电、重启、进程崩溃，任何意外都会让内存数据灰飞烟灭。如果 Redis 只是缓存层，丢了也就丢了，大不了从 DB 回源。但如果 Redis 承载了 session、计数器、订单状态等关键数据，数据丢失就是事故。</p>
+
+        <p>这一章我们来看 Redis 最经典的持久化方案——<strong>RDB（Redis Database）</strong>。它通过 fork 子进程的方式生成全量快照，以紧凑的二进制格式写入磁盘。我们将从设计哲学到文件格式，再到 fork 的写时复制机制和序列化源码，一步步揭开 RDB 的底层原理。</p>
+
+        <h2>RDB 设计哲学</h2>
+
+        <p>RDB 的核心思想很朴素：把内存中所有数据<strong>在某个时刻完整地拍一张快照</strong>，存到磁盘上。它和 AOF 的增量日志思路完全不同：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>RDB 快照</th>
+                    <th>AOF 日志</th>
+                    <th>混合持久化</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>数据形态</td>
+                    <td>二进制全量快照</td>
+                    <td>RESP 协议文本追加</td>
+                    <td>RDB 头 + AOF 增量</td>
+                </tr>
+                <tr>
+                    <td>文件大小</td>
+                    <td>小（压缩存储）</td>
+                    <td>大（文本协议）</td>
+                    <td>中等</td>
+                </tr>
+                <tr>
+                    <td>加载速度</td>
+                    <td>快（直接加载到内存）</td>
+                    <td>慢（逐条重放命令）</td>
+                    <td>快（RDB 加载 + AOF 重放）</td>
+                </tr>
+                <tr>
+                    <td>数据安全性</td>
+                    <td>可能丢失上次快照后的数据</td>
+                    <td>最多丢失 1 秒数据（everysec）</td>
+                    <td>与 AOF 一致</td>
+                </tr>
+                <tr>
+                    <td>资源开销</td>
+                    <td>fork 子进程，COW 可能翻倍内存</td>
+                    <td>持续写入，磁盘 IO 压力大</td>
+                    <td>两者兼具</td>
+                </tr>
+                <tr>
+                    <td>适用场景</td>
+                    <td>冷备、迁移、灾备恢复</td>
+                    <td>数据完整性要求高的场景</td>
+                    <td>生产环境推荐</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>RDB 最适合的场景是：<strong>你需要在最短时间内恢复大量数据，且能接受分钟级别的数据丢失窗口</strong>。比如凌晨 3 点备份、新从库全量同步、或者灾备中心的冷数据恢复。</p>
+
+        <h2>fork 写时复制</h2>
+
+        <p>RDB 最精妙也最危险的设计就是利用了操作系统的 <code>fork()</code> 系统调用和写时复制（Copy-On-Write, COW）机制。</p>
+
+        <h3>fork() 创建子进程</h3>
+        <p>当 Redis 执行 <code>BGSAVE</code> 时，主进程调用 <code>fork()</code> 创建一个子进程。子进程拥有父进程的<strong>完整内存快照</strong>——确切地说，子进程看到的内存页和父进程完全一样，因为它们共享同一份物理内存页。</p>
+
+        <p>这就是 COW 的精髓：<strong>fork 时不复制内存，只复制页表</strong>。父子进程各自持有指向同一物理页面的页表项，并将这些页面标记为"只读"。当任何一方尝试写入时，触发缺页异常，内核才真正复制该页面。</p>
+
+        <h3>COW 的内存翻倍风险</h3>
+        <p>COW 虽然节约了 fork 时的开销，但它有一个隐藏的陷阱：如果父进程在子进程持久化期间大量写入（修改数据），每个被修改的页面都需要复制一份。在最坏的情况下——父进程遍历了整个数据集——内存使用可能翻倍。这对于内存接近上限的 Redis 实例来说是非常危险的。</p>
+
+        <pre><code>/* rdbSaveBackground — 后台 RDB 保存（BGSAVE） */
+int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
+    pid_t childpid;
+
+    if ((childpid = fork()) == 0) {
+        /* 子进程上下文 */
+        int retval;
+
+        /* 关闭子进程无用的文件描述符 */
+        closeListeningSockets(0);
+
+        /* 设置子进程标题，方便 ps 识别 */
+        redisSetProcTitle("redis-rdb-bgsave");
+
+        /* 执行实际的 RDB 保存 */
+        retval = rdbSave(filename, rsi);
+        if (retval == C_OK) {
+            /* 向父进程发送 SIGUSR1 表示成功 */
+            sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE,
+                "RDB: %zu MB of COW memory",
+                zmalloc_get_private_dirty(0) / (1024 * 1024));
+        }
+        exitFromChild((retval == C_OK) ? 0 : 1);
+    } else {
+        /* 父进程上下文 */
+        /* 记录子进程 PID，serverCron 将监控子进程的退出状态 */
+        server.child_pid = childpid;
+        server.child_type = CHILD_TYPE_RDB;
+        /* 更新延迟监控 */
+        latencyStartMonitor(rdb_save_latency);
+        return C_OK;
+    }
+}</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>这是我在生产环境中遇到的最经典的"踩坑"案例之一。某次线上 Redis 在凌晨 3 点自动触发 BGSAVE 时，延迟从平时的 1ms 飙升到了 500ms+，持续了将近 1 秒。排查后发现元凶是<strong>透明大页（THP, Transparent Huge Pages）</strong>。Linux 的 THP 会将 4KB 的普通页合并为 2MB 的大页，这在大多数场景下能提升性能。但在 fork + COW 的场景下，THP 带来了灾难性后果：即使父进程只修改了一个字节，COW 也需要复制整个 2MB 的大页，而不是 4KB 的普通页。这意味着 COW 的写放大达到了 512 倍。对于一个 8GB 内存的 Redis，在 BGSAVE 期间如果 key 频繁更新，COW 的内存复制量可能从几十 MB 暴涨到几个 GB，导致严重的延迟毛刺。<strong>解决方案是在操作系统层面关闭 THP</strong>：<code>echo never > /sys/kernel/mm/transparent_hugepage/enabled</code>。Redis 官方也在文档中强烈建议关闭 THP。
+        </div>
+
+        <h2>RDB 文件格式</h2>
+
+        <p>RDB 文件是一个精心设计的二进制格式，它的整体结构如下：</p>
+
+        <pre><code>+------------------+--------------------+------------------+
+| REDIS0009        | 数据库段 1         | 数据库段 N       |
+| (魔数 + 版本号)   | (SELECT + 键值对)  |                  |
++------------------+--------------------+------------------+
+                                                 |
+                                            +----+
+                                            v
+                                     +-----------+
+                                     | CRC64     |
+                                     | 校验和     |
+                                     +-----------+</code></pre>
+
+        <p>具体来说，RDB 文件包含以下部分：</p>
+
+        <ul>
+            <li><strong>魔数头（5 字节）：</strong><code>REDIS</code> 字符串，用于快速识别文件类型。</li>
+            <li><strong>版本号（4 字节）：</strong>ASCII 数字，如 <code>0009</code> 表示 RDB 版本 9（Redis 7.x 使用）。</li>
+            <li><strong>数据库段：</strong>以 <code>0xFE</code>（SELECTDB）开头，后跟数据库编号，然后是键值对序列。</li>
+            <li><strong>键值对编码：</strong>每个键值对包含过期时间（可选）、值类型编码、键（SDS 字符串）、值（取决于类型）。</li>
+            <li><strong>文件结束标记：</strong><code>0xFF</code> 表示 RDB 文件结束。</li>
+            <li><strong>CRC64 校验和（8 字节）：</strong>对整个文件（不含校验和自身）的校验，保证数据完整性。</li>
+        </ul>
+
+        <h2>rdbSave 序列化源码</h2>
+
+        <p>RDB 序列化的核心函数是 <code>rdbSaveRio</code>，它遍历所有数据库和所有键值对，逐条写入文件：</p>
+
+        <pre><code>/* rdbSaveRio — 将数据库序列化到 RDB 文件的核心函数 */
+int rdbSaveRio(rio *rdb, rdbSaveInfo *rsi) {
+    int j;
+    size_t processed = 0;
+
+    /* Step 1: 写入魔数和版本号 */
+    if (rdbSaveType(rdb, RDB_OPCODE_MODULE_AUX) == -1) goto werr;
+    snprintf(magic, sizeof(magic), "REDIS%04d", RDB_VERSION);
+    if (rdbWriteRaw(rdb, magic, 9) == -1) goto werr;
+
+    /* Step 2: 遍历所有数据库 (0..15) */
+    for (j = 0; j &lt; server.dbnum; j++) {
+        redisDb *db = server.db + j;
+        dict *d = db->dict;
+        if (dictSize(d) == 0) continue;
+
+        /* 写入 SELECTDB 操作码 + 数据库编号 */
+        if (rdbSaveType(rdb, RDB_OPCODE_SELECTDB) == -1) goto werr;
+        if (rdbSaveLen(rdb, j) == -1) goto werr;
+
+        /* Step 3: 遍历当前数据库中的所有键值对 */
+        di = dictGetSafeIterator(d);
+        while ((de = dictNext(di))) {
+            sds keystr = dictGetKey(de);
+            robj *key, *o = dictGetVal(de);
+            long long expire = getExpire(db, keystr);
+
+            /* 写入键值对（包括过期时间、值类型编码、键、值） */
+            if (rdbSaveKeyValuePair(rdb, key, o, expire, j) == -1)
+                goto werr;
+        }
+        dictReleaseIterator(di);
+    }
+
+    /* Step 4: 写入结束标记和校验和 */
+    if (rdbSaveType(rdb, RDB_OPCODE_EOF) == -1) goto werr;
+    if (rioWrite(rdb, &cksum, 8) == -1) goto werr;
+
+    return C_OK;
+
+werr:
+    /* 统一错误处理：释放资源并返回错误 */
+    return C_ERR;
+}</code></pre>
+
+        <p>不同类型的值有不同的序列化格式。例如，String 类型直接存储裸字节；List 先存元素个数，再逐个存元素；Hash 存储键值对个数后再依次存储键和值。压缩列表（ziplist）和整数集合（intset）则以它们的原始编码形式整体存储——这也是 RDB 文件比较紧凑的原因之一。</p>
+
+        <div class="highlight">
+            <strong>代码观察：</strong>注意 <code>rdbSaveRio</code> 中的 <code>goto werr</code> 模式——这是 Redis 统一的错误处理风格。任何写入失败都会跳转到统一的错误处理标签，避免在每个分支都重复写清理代码。这种模式在资源管理复杂的场景下比嵌套 if-else 要优雅得多。
+        </div>
+
+        <h2>BGSAVE 调度</h2>
+
+        <p>BGSAVE 不是只有手动执行才会触发。Redis 的 <code>serverCron</code>（时间事件处理函数，每 100ms 执行一次）会检查是否需要自动触发 BGSAVE：</p>
+
+        <pre><code>/* serverCron 中的持久化检查逻辑 */
+int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
+    /* ... 其他周期性任务 ... */
+
+    /* 检查 BGSAVE 触发条件 */
+    for (int j = 0; j &lt; server.saveparamslen; j++) {
+        struct saveparam *sp = server.saveparams + j;
+
+        /* sp->changes: 修改次数阈值, sp->seconds: 时间阈值
+         * 如果距离上次保存已经过了 sp->seconds 秒
+         * 且修改次数超过了 sp->changes 次
+         * 就触发 BGSAVE */
+        if (server.dirty &gt;= sp->changes &amp;&amp;
+            server.unixtime - server.lastsave &gt; sp->seconds &amp;&amp;
+            !server.child_pid &amp;&amp;  /* 没有正在执行的后台子进程 */
+            !hasActiveChildProcess()) {  /* 没有其他子进程 */
+            serverLog(LL_NOTICE, "%d changes in %d seconds. Saving...",
+                sp->changes, sp->seconds);
+            rdbSaveBackground(server.rdb_filename, rsi);
+            break;
+        }
+    }
+
+    /* 监控 BGSAVE 子进程 */
+    if (server.child_pid != -1) {
+        int statloc;
+        pid_t waitret;
+
+        /* 非阻塞地检查子进程状态 */
+        waitret = wait3(&statloc, WNOHANG, NULL);
+        if (waitret == server.child_pid) {
+            /* 子进程结束，处理结果 */
+            backgroundSaveDoneHandler(exitcode, bysignal);
+        }
+    }
+}</code></pre>
+
+        <p>配置文件中的 <code>save</code> 指令就是用来设置这些阈值的：</p>
+
+        <pre><code># redis.conf 中的默认配置
+save 900 1      # 900 秒内至少 1 次修改，触发保存
+save 300 10     # 300 秒内至少 10 次修改
+save 60 10000   # 60 秒内至少 10000 次修改</code></pre>
+
+        <p>子进程结束后，父进程通过 <code>SIGCHLD</code> 信号获知子进程退出，在 <code>backgroundSaveDoneHandler</code> 中更新 <code>server.lastsave</code> 和 <code>server.dirty</code> 计数器，并记录本次 RDB 的文件大小和耗时。</p>
+
+        <h2>RDB 加载恢复</h2>
+
+        <p>Redis 启动时如果检测到 RDB 文件存在，会调用 <code>rdbLoad</code> 加载数据。加载过程是<strong>渐进式</strong>的——它不是一次性把所有数据加载完才提供服务，而是加载完键空间后就可以接受请求，但对键的访问可能触发进一步的加载。</p>
+
+        <pre><code>/* rdbLoad — 加载 RDB 文件 */
+int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
+    /* 打开文件 */
+    if ((fp = fopen(filename, "r")) == NULL) return C_ERR;
+
+    /* 初始化 rio（Redis IO 抽象） */
+    rioInitWithFile(&rdb, fp);
+
+    /* 读取并校验魔数和版本号 */
+    if (rdbReadMagic(&rdb) == -1) goto err;
+
+    /* 逐条读取键值对，插入对应数据库 */
+    while (1) {
+        int type;
+        if ((type = rdbLoadType(&rdb)) == -1) goto err;
+
+        if (type == RDB_OPCODE_EXPIRETIME) {
+            /* 读取过期时间（秒级） */
+        } else if (type == RDB_OPCODE_EOF) {
+            /* 文件结束 */
+            break;
+        } else if (type == RDB_OPCODE_SELECTDB) {
+            /* 切换数据库 */
+        } else {
+            /* 读取键值对 */
+            rdbLoadObject(type, &rdb, &key, &val);
+            /* 插入到数据库 */
+            dbAdd(db, key, val);
+        }
+    }
+
+    /* 尝试验证 CRC64 校验和 */
+    /* 关闭文件 */
+    fclose(fp);
+    return C_OK;
+}</code></pre>
+
+        <div class="tip">
+            <strong>小贴士：</strong>加载 RDB 的时间大致可以用这个公式估算：<strong>加载时间 ≈ RDB 文件大小 / 磁盘读取速度</strong>。一个 10GB 的 RDB 文件，如果磁盘读取速度是 500MB/s，加载时间大约 20 秒。但实际会更长一些，因为还有 CRC 校验和重建数据结构的开销。如果担心加载时间过长，可以使用 <code>redis-check-rdb</code> 工具提前验证 RDB 文件的完整性。
+        </div>
+
+        <h2>总结</h2>
+
+        <p>这一章我们深入了 RDB 的方方面面。它的设计哲学是"定期全量快照"，利用 fork + COW 实现非阻塞持久化。我们看了 RDB 文件的二进制格式——魔数头、数据库段、键值对编码、CRC64 校验的完整结构。通过 <code>rdbSaveRio</code> 的源码，我们理解了序列化的核心流程。BGSAVE 的调度机制是从 serverCron 中周期性检查 <code>save</code> 配置条件触发的。最后我们还看了 RDB 加载的渐进式恢复流程。</p>
+
+        <p>但 RDB 有一个绕不过去的问题：两次快照之间的数据更新全部会丢失。如果主进程恰好在快照写入后不久崩溃，这期间的所有写入就没了。为了把数据丢失窗口从"分钟级"缩小到"秒级甚至零级"，我们需要另一种持久化方式——AOF。下一章我们进入 AOF 与混合持久化的世界。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

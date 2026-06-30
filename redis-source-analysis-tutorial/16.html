@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 命令处理全流程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Redis源码全景图</a></li>
+            <li><a href="02.html">第2章 编译与调试环境搭建</a></li>
+            <li><a href="03.html">第3章 内存管理：zmalloc与jemalloc</a></li>
+            <li><a href="04.html">第4章 SDS动态字符串</a></li>
+            <li><a href="05.html">第5章 链表、压缩列表与listpack</a></li>
+            <li><a href="06.html">第6章 字典与渐进式rehash</a></li>
+            <li><a href="07.html">第7章 跳表与整数集合</a></li>
+            <li><a href="08.html">第8章 redisObject与编码转换</a></li>
+            <li><a href="09.html">第9章 String与Hash命令实现</a></li>
+            <li><a href="10.html">第10章 List命令与阻塞操作</a></li>
+            <li><a href="11.html">第11章 Set与Sorted Set命令实现</a></li>
+            <li><a href="12.html">第12章 Stream、Geo与HyperLogLog</a></li>
+            <li><a href="13.html">第13章 事件循环（上）：文件事件</a></li>
+            <li><a href="14.html">第14章 事件循环（下）：时间事件</a></li>
+            <li><a href="15.html">第15章 网络IO架构</a></li>
+            <li><a href="16.html" class="active">第16章 命令处理全流程</a></li>
+            <li><a href="17.html">第17章 RDB持久化</a></li>
+            <li><a href="18.html">第18章 AOF与混合持久化</a></li>
+            <li><a href="19.html">第19章 键过期与内存淘汰</a></li>
+            <li><a href="20.html">第20章 主从复制（上）</a></li>
+            <li><a href="21.html">第21章 主从复制（下）</a></li>
+            <li><a href="22.html">第22章 Sentinel哨兵与Cluster集群</a></li>
+            <li><a href="23.html">第23章 性能诊断工具链</a></li>
+            <li><a href="24.html">第24章 生产环境踩坑指南</a></li>
+            <li><a href="25.html">第25章 源码级问题定位实战</a></li>
+            <li><a href="26.html">第26章 Lua脚本与事务</a></li>
+            <li><a href="27.html">第27章 Module开发实战</a></li>
+            <li><a href="28.html">第28章 Redis 8.x前瞻与手写Mini-Redis</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第16章：命令处理全流程</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们讲了网络 IO 架构——数据从网线进来，经过 epoll 的唤醒、IO 线程的分发，最终到达了 <code>readQueryFromClient</code>。但接下来呢？一段 TCP 字节流如何变成一条 Redis 命令？Redis 如何在百万分之一秒内找到正确的命令处理函数并执行？执行完后结果如何回到客户端？这一章我们沿着"命令从生到死"的全流程走一遍，从 RESP 协议解析，到命令查找与执行，再到 ACL 校验和响应返回。这是 Redis 源码中最重要的一条执行路径，理解了它，你就掌握了 Redis 后台的主干逻辑。</p>
+
+        <h2>RESP 协议解析</h2>
+
+        <p>Redis 自定义了一个文本协议叫 RESP（REdis Serialization Protocol）。它有两个版本：RESP2（传统行协议）和 RESP3（7.x 引入的类型化协议）。</p>
+
+        <h3>RESP2 — 行协议</h3>
+        <p>RESP2 的核心理念是"以行首字符标识类型"。一条命令就是一组 RESP 数组，每一行都以一个单字符前缀开头：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>首字符</th>
+                    <th>类型</th>
+                    <th>示例</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>+</code></td>
+                    <td>Simple String</td>
+                    <td><code>+OK\r\n</code></td>
+                    <td>简单字符串，常用于状态回复</td>
+                </tr>
+                <tr>
+                    <td><code>-</code></td>
+                    <td>Error</td>
+                    <td><code>-ERR unknown command\r\n</code></td>
+                    <td>错误消息</td>
+                </tr>
+                <tr>
+                    <td><code>:</code></td>
+                    <td>Integer</td>
+                    <td><code>:1000\r\n</code></td>
+                    <td>整数</td>
+                </tr>
+                <tr>
+                    <td><code>$</code></td>
+                    <td>Bulk String</td>
+                    <td><code>$5\r\nhello\r\n</code></td>
+                    <td>二进制安全的字符串，以长度前缀</td>
+                </tr>
+                <tr>
+                    <td><code>*</code></td>
+                    <td>Array</td>
+                    <td><code>*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n</code></td>
+                    <td>数组（用于命令和批量响应）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>当你用 <code>redis-cli</code> 发送 <code>SET name redis</code> 时，实际传输的字节流是：</p>
+
+        <pre><code>*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$5\r\nredis\r\n</code></pre>
+
+        <p>翻译成人话就是：一个数组包含 3 个元素，分别是 "SET"（3 字节）、"name"（4 字节）、"redis"（5 字节）。</p>
+
+        <h3>RESP3 — 类型化协议</h3>
+        <p>RESP3 在 RESP2 的基础上增加了更多数据类型，如 Map、Set、Null、Boolean、Double、Big Number 等。它的引入主要是为了支持更丰富的客户端交互场景——比如 <code>HGETALL</code> 的响应可以用 Map 类型原生态地表达键值对语义，而不是用数组对去套。</p>
+
+        <h3>解析源码 — resp_parser.c</h3>
+        <p>在 Redis 7.2 中，命令解析从 <code>networking.c</code> 中独立出来，放在了 <code>resp_parser.c</code>。核心入口是 <code>readQueryFromClient</code>：</p>
+
+        <pre><code>/* readQueryFromClient — 从客户端连接中读取查询数据 */
+void readQueryFromClient(connection *conn) {
+    client *c = connGetPrivateData(conn);
+    int nread;
+    size_t qblen;
+
+    /* 读取数据到 querybuf */
+    nread = connRead(c->conn, c->querybuf + c->qb_pos,
+                     c->querybuf_remaining);
+    if (nread) {
+        qblen = sdslen(c->querybuf) - c->qb_pos;
+        c->qb_pos += nread;
+
+        /* 尝试解析 querybuf 中的命令 */
+        if (processInputBuffer(c) != C_OK) {
+            /* 解析失败，继续等待更多数据 */
+            return;
+        }
+    }
+    /* 检查 querybuf 是否超过限制 */
+    if (sdslen(c->querybuf) &gt; server.client_max_querybuf_len) {
+        sds ci = catClientInfoString(sdsempty(), c);
+        serverLog(LL_WARNING, "Closing client that reached max query buffer length: %s", ci);
+        sdsfree(ci);
+        freeClient(c);
+        return;
+    }
+}</code></pre>
+
+        <p><code>querybuf</code> 是一个 SDS 动态字符串，所有从 socket 读到的原始数据都先存在这里。然后 <code>processInputBuffer</code> 逐行解析，每解析出一条完整的命令就立刻执行——注意，它是一次性尽量多地消费 querybuf 中的数据，而不是"读一条命令就等下一次事件"。</p>
+
+        <div class="highlight">
+            <strong>优化细节：</strong><code>querybuf</code> 用 SDS 实现意味着扩容是 O(1) 的。更重要的是，Redis 在 <code>processInputBuffer</code> 解析完成后会调用 <code>sdsrange</code> 来"裁剪"已消耗的字节，而不是重新分配内存。这种"读取→消费→裁剪"的模式避免了大量的内存拷贝。
+        </div>
+
+        <h2>命令查找</h2>
+
+        <p>解析出命令名（比如 "GET"、"SET"）之后，Redis 需要在命令表中找到对应的处理函数。这个命令表在 <code>server.c</code> 的 <code>populateCommandTable</code> 中初始化：</p>
+
+        <h3>命令表的构建</h3>
+        <p>Redis 使用一个字典（<code>server.commands</code>）来存储命令名到 <code>redisCommand</code> 结构体的映射。每个命令对应一个 <code>redisCommand</code> 结构体，包含了命令的元信息和指向实现的函数指针：</p>
+
+        <pre><code>/* redisCommand — 命令描述结构体 */
+struct redisCommand {
+    char *name;                          /* 命令名 */
+    redisCommandProc *proc;              /* 实现函数指针 */
+    int arity;                           /* 参数个数（负数表示至少多少个） */
+    char *sflags;                        /* 字符串格式的标志 */
+    uint64_t flags;                      /* 位掩码标志 */
+    int firstkey, lastkey, keystep;      /* 键参数位置 */
+    long long microseconds, calls;       /* 延迟统计 */
+};</code></pre>
+
+        <p>查找过程通过 <code>lookupCommand</code> 完成，命令名匹配是<strong>大小写不敏感</strong>的（这就是为什么 <code>GET</code>、<code>get</code>、<code>Get</code> 都有效）：</p>
+
+        <pre><code>/* lookupCommand — 查找命令（大小写不敏感） */
+struct redisCommand *lookupCommand(sds name) {
+    return dictFetchValue(server.commands, name);
+}
+
+/* 命令表初始化时，所有命令名都被统一转换为小写 */
+void populateCommandTable(void) {
+    for (int j = 0; j &lt; commandCount; j++) {
+        struct redisCommand *c = commandTable + j;
+        char *desc = commandTable[j].decl;
+        /* ... 解析 desc 字段填充命令表 ... */
+        c->name = sdsnew(desc);  /* 已经是小写 */
+        dictAdd(server.commands, c->name, c);
+    }
+}</code></pre>
+
+        <h2>命令执行</h2>
+
+        <p>找到命令后，Redis 进入执行阶段。这个阶段的入口是 <code>processCommand</code>——它是 Redis 命令执行的总阀门。</p>
+
+        <h3>processCommand — 前置检查</h3>
+        <p>在执行命令之前，<code>processCommand</code> 会做一系列检查——这就像登机前的安检，每道关卡都可能把命令拦截下来：</p>
+
+        <ul>
+            <li><strong>命令是否存在：</strong>如果 <code>lookupCommand</code> 返回 NULL，返回 <code>-ERR unknown command</code>。</li>
+            <li><strong>参数个数：</strong>检查 <code>c->argc</code> 是否满足 <code>cmd->arity</code>（正数表示严格等于，负数表示至少多少个）。</li>
+            <li><strong>认证状态：</strong>如果开启了 <code>requirepass</code> 且客户端未认证，返回 <code>NOAUTH</code>。</li>
+            <li><strong>ACL 权限：</strong>调用 <code>ACLCheckCommandPermissions</code> 校验用户是否有权执行该命令。</li>
+            <li><strong>集群重定向：</strong>在集群模式下，按键的 hash slot 定位目标节点，如果需要重定向，返回 <code>MOVED</code> 或 <code>ASK</code>。</li>
+            <li><strong>内存检查：</strong>如果已开启最大内存限制且当前内存超出，<code>getMaxmemoryState</code> 触发内存淘汰，淘汰失败则拒绝写入命令。</li>
+            <li><strong>子进程保护：</strong>如果正在执行 <code>BGSAVE</code> 或 <code>BGREWRITEAOF</code>，对于写命令可能会延迟执行（取决于配置）。</li>
+        </ul>
+
+        <pre><code>/* processCommand — 命令执行的前置检查与分发 */
+int processCommand(client *c) {
+    /* Step 1: 查找命令 */
+    c->cmd = c->lastcmd = lookupCommand(c->argv[0]-&gt;ptr);
+    if (!c->cmd) {
+        addReplyErrorFormat(c, "unknown command '%s'",
+                            (char*)c->argv[0]-&gt;ptr);
+        return C_OK;
+    }
+
+    /* Step 2: ACL 权限校验 */
+    int acl_retval = ACLCheckAllPerm(c, &acl_errpos);
+    if (acl_retval != ACL_OK) {
+        addReplyError(c, ...);
+        return C_OK;
+    }
+
+    /* Step 3: 最大内存检查（写命令触发淘汰） */
+    if (server.maxmemory &amp;&amp; !(c->flags &amp; CLIENT_MASTER)) {
+        if (performEvictions() == EVICT_FAIL) {
+            rejectCommand(c, shared.oomerr);
+            return C_OK;
+        }
+    }
+
+    /* Step 4: 如果开启了 multi/exec 事务，入队 */
+    if (c-&gt;flags &amp; CLIENT_MULTI &amp;&amp;
+        c-&gt;cmd-&gt;proc != execCommand) {
+        queueMultiCommand(c);
+        addReply(c, shared.queued);
+        return C_OK;
+    }
+
+    /* Step 5: 真正执行命令 */
+    if (c-&gt;flags &amp; CLIENT_DENY_BLOCKING &amp;&amp;
+        (c-&gt;cmd-&gt;flags &amp; CMD_BLOCKING)) {
+        /* 阻塞命令在内部线程中不可用 */
+        addReply(c, shared.busykeyerror);
+    } else {
+        call(c, CMD_CALL_FULL);  /* 执行 */
+    }
+    return C_OK;
+}</code></pre>
+
+        <h3>call 函数 — 命令执行的核心</h3>
+        <p><code>call(c, CMD_CALL_FULL)</code> 是执行命令的最后一步。它做了以下几件事：</p>
+
+        <ul>
+            <li>调用 <code>cmd->proc(c)</code> ——多态调用命令的具体实现函数。</li>
+            <li>统计执行时间，更新 <code>cmd->microseconds</code> 和 <code>cmd->calls</code>。</li>
+            <li>如果开启了 <code>slowlog</code> 且执行时间超过阈值，记录慢日志。</li>
+            <li>将命令传播到 AOF 缓冲区和从节点（如果开启了 AOF 或复制）。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>小贴士：</strong><code>call()</code> 是 Redis 命令执行统计的精确数据来源。你可以用 <code>INFO COMMANDSTATS</code> 查看每个命令的平均耗时和调用次数——这些数字就是在 <code>call()</code> 中被统计的。
+        </div>
+
+        <h2>ACL 权限校验</h2>
+
+        <p>Redis 6.0 引入的 ACL（Access Control List）系统为 Redis 提供了细粒度的权限控制。ACL 校验的入口是 <code>ACLCheckCommandPermissions</code>：</p>
+
+        <ul>
+            <li><strong>用户认证：</strong>每个 client 关联一个 <code>user</code> 结构体。默认用户是 <code>default</code>，可以通过 <code>AUTH &lt;username&gt; &lt;password&gt;</code> 切换用户。</li>
+            <li><strong>命令权限：</strong>ACL 规则可以指定用户能否执行某些命令类别（如 <code>+@admin</code>、<code>-@dangerous</code>）或特定命令（<code>+SET</code>、<code>-FLUSHALL</code>）。</li>
+            <li><strong>键权限：</strong>支持基于键的权限模式，例如 <code>~cache:*</code> 表示用户只能访问以 <code>cache:</code> 为前缀的键。</li>
+            <li><strong>ACL LOG：</strong>被拒绝的操作会记录在 ACL LOG 中，方便排查为什么某个命令被拒绝了。</li>
+        </ul>
+
+        <h2>响应返回到客户端</h2>
+
+        <p>命令执行完毕后，结果通过 <code>addReply</code> 系列函数返回到客户端。Redis 提供了一组方便的高层 API：</p>
+
+        <ul>
+            <li><code>addReply(c, shared.ok)</code> —— 返回 <code>+OK\r\n</code></li>
+            <li><code>addReplyBulk(c, obj)</code> —— 返回 Bulk String</li>
+            <li><code>addReplyError(c, "msg")</code> —— 返回 <code>-ERR msg\r\n</code></li>
+            <li><code>addReplyLongLong(c, val)</code> —— 返回 Integer</li>
+            <li><code>addReplyArrayLen(c, len)</code> —— 设置 Array 长度前缀（流式构建数组响应）</li>
+        </ul>
+
+        <p>这些响应数据先被写入 <code>client->buf</code> 或 <code>client->reply</code> 链表（详见上一章的输出缓冲区管理），然后在 <code>beforeSleep</code> 中批量刷入 socket。这个"攒一批再写"的设计显著减少了系统调用次数。</p>
+
+        <h2>事务与流水线</h2>
+
+        <p>Redis 的事务通过 <code>MULTI</code> / <code>EXEC</code> / <code>WATCH</code> 实现，虽然不像传统数据库那样支持回滚，但在某些场景下非常有用。事务的实现机制在 <code>multi.c</code> 中：</p>
+
+        <ul>
+            <li><strong>MULTI：</strong>设置 <code>c->flags |= CLIENT_MULTI</code>，之后的命令不会立即执行，而是 <code>queueMultiCommand(c)</code> 将命令入队到 <code>c->mstate.commands</code> 数组中。</li>
+            <li><strong>EXEC：</strong>遍历 <code>mstate.commands</code>，对每条命令调用 <code>call(c, CMD_CALL_FULL)</code>，将结果存入 <code>c->bpop</code> 的多回复中，最后一次性返回给客户端。</li>
+            <li><strong>WATCH：</strong>在 <code>server.watched_keys</code> 字典中记录被监视的键。如果在执行 EXEC 之前有任何被监视的键被修改（在 <code>signalModifiedKey</code> 中标记），EXEC 返回 nil，事务被丢弃。</li>
+            <li><strong>流水线（Pipeline）：</strong>客户端可以不等待回复连续发送多条命令。服务端读取 <code>querybuf</code> 时逐个解析执行，响应也都暂存在输出缓冲区中。流水线的性能提升主要来自减少网络 RTT，而非 Redis 处理速度的提升。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>几年前有团队在生产环境开启了 <code>MONITOR</code> 命令进行调试，结果发现 Redis 的吞吐下降了 50% 以上。为什么会这样？<code>MONITOR</code> 的实现原理是：在执行 <code>call()</code> 时，如果开启了 MONITOR，每条命令的执行信息都会被 <code>replicationFeedMonitors</code> 写入 MONITOR 客户端的输出缓冲区。换句话说，每条命令<strong>多了一个输出客户端</strong>——所有的写操作都被加倍了。更糟糕的是，如果 MONITOR 客户端消费速度跟不上，输出缓冲区会持续堆积，进而导致客户端被断开或内存膨胀。所以生产环境<strong>绝对不要</strong>长时间开启 MONITOR，确有调试需要可以用 <code>redis-cli monitor | head -100</code> 抓几秒就关掉。
+        </div>
+
+        <h2>总结</h2>
+
+        <p>这一章我们完整追踪了一条 Redis 命令的生命周期：TCP 字节流 → querybuf 缓冲 → RESP 协议解析 → 命令表查找 → ACL 权限检查 → 前置校验 → <code>call()</code> 调用处理函数 → <code>addReply</code> 将结果写入输出缓冲区 → 最终通过 socket 发回客户端。这个过程在理想情况下只需要几十微秒，每一个环节都经过精心优化。</p>
+
+        <p>但是等等——<code>SET name redis</code> 执行完了，数据存在了内存中。断电怎么办？重启怎么办？内存数据丢失是所有数据库的天敌。下一章我们就来解决这个问题——深入解读 Redis 的 RDB 快照持久化机制。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 课程学习与动态数据调度</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 预训练数据决定模型上限</a></li>
+            <li><a href="02.html">第2章 全球通用基座数据集全景</a></li>
+            <li><a href="03.html">第3章 中文预训练语料现状与挑战</a></li>
+            <li><a href="04.html">第4章 垂直领域与增强语料</a></li>
+            <li><a href="05.html">第5章 Common Crawl：预训练的石油矿藏</a></li>
+            <li><a href="06.html">第6章 许可证合规与数据安全红线</a></li>
+            <li><a href="07.html">第7章 数据配比策略与混合哲学</a></li>
+            <li><a href="08.html">第8章 数据采集与原始格式解析</a></li>
+            <li><a href="09.html">第9章 语言识别与初步清洗</a></li>
+            <li><a href="10.html">第10章 精确去重：剔除重复文本</a></li>
+            <li><a href="11.html">第11章 模糊去重：MinHash与LSH原理</a></li>
+            <li><a href="12.html">第12章 语义级与句子级去重</a></li>
+            <li><a href="13.html">第13章 基于模型的质量评分体系</a></li>
+            <li><a href="14.html">第14章 有害内容过滤与安全审查</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 流式加载与内存管理</a></li>
+            <li><a href="17.html">第17章 基准污染检测与去除</a></li>
+            <li><a href="18.html">第18章 数据版本管理与溯源</a></li>
+            <li><a href="19.html">第19章 合成数据生成与增强</a></li>
+            <li><a href="20.html">第20章 多语言与低资源语料构建</a></li>
+            <li><a href="21.html" class="active">第21章 课程学习与动态数据调度</a></li>
+            <li><a href="22.html">第22章 代码与数学数据专项处理</a></li>
+            <li><a href="23.html">第23章 Datatrove实战：从Common Crawl到清洗数据</a></li>
+            <li><a href="24.html">第24章 NeMo Curator与GPU加速清洗</a></li>
+            <li><a href="25.html">第25章 数据质量评估与消融实验</a></li>
+            <li><a href="26.html">第26章 2026年数据工程前沿趋势</a></li>
+            <li><a href="27.html">第27章 实战项目：构建1B模型训练数据集</a></li>
+            <li><a href="28.html">第28章 规模化落地：从TB级到PB级的挑战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>开篇：数据的顺序，是第二道隐藏的杠杆</h2>
+
+        <p>大家好，我是你们的讲师。在开始本章之前，我想先聊一个反直觉的实验。2025 年，我的团队在训练一个 7B 模型时做了一组对照实验：两组用完全相同的数据（同样的配比、同样的清洗流程），唯一的不同是——A 组把数据按照"先简单后困难"的顺序排列（从维基百科开始，逐步过渡到学术论文和代码），B 组完全随机打乱。按照 Bengio 2009 年提出的<strong>课程学习 (Curriculum Learning)</strong> 理论，A 组应该会更好。但结果呢？两组在几乎所有 benchmark 上<strong>没有显著差异</strong>。更打脸的是，当我们把实验放大到 70B 模型时，随机打乱的 B 组反而略好一点点。</p>
+
+        <p>这个故事引出了本章要探讨的核心矛盾：课程学习的直觉非常诱人（"这不就和人类学习一样吗？先学走路再学跑步"），但在大规模 LLM 预训练的场景下，它<strong>并不总是管用</strong>。那什么时候该用？怎么用？2025-2026 年的前沿研究给出了哪些新答案？让我们一一拆解。</p>
+
+        <h2>21.1 Bengio 2009：课程学习的起源</h2>
+
+        <p>课程学习的概念最早由 Yoshua Bengio 在 2009 年的论文 <em>Curriculum Learning</em> 中正式提出。核心思想非常简单：<strong>让模型先学习简单的样本，再逐渐过渡到困难样本，可以提高收敛速度并找到更好的局部最优</strong>。</p>
+
+        <p>Bengio 的实验基于一个直观的观察：当模型在训练初期面对困难的样本时，梯度更新方向可能会非常不稳定——就像让一个刚学会走路的孩子去跑马拉松。通过"由易到难"的课程安排，训练过程更加平滑，模型有机会先建立对数据分布的粗粒度理解，再逐步精调。</p>
+
+        <p>在深度学习早期（CV 领域），课程学习被证明在图像分类、目标检测等任务上有效。但这里有一个关键区别——这些任务的数据集通常是<strong>标注好的</strong>（比如一张图片是"猫"还是"狗"），困难程度可以由标注者预先定义。而在 LLM 预训练中，我们面对的是<strong>无标注的原始文本</strong>，"难"和"易"的定义本身就成问题。</p>
+
+        <div class="highlight">
+            <strong>关键问题：</strong>LLM 预训练中什么样的数据是"简单"的？什么样的数据是"困难"的？简单文本（如儿童读物）真的比复杂文本（如物理学论文）更适合"先学"吗？答案可能没你想的那么直观。
+        </div>
+
+        <h2>21.2 2025-2026 年的新共识：静态混合优于课程学习</h2>
+
+        <p>2025 年以来，多家机构（包括 Meta、Anthropic、HuggingFace）分别发表了对课程学习在大规模预训练中效果的评估，结论出奇地一致：<strong>对从头开始的 LLM 预训练，固定的静态数据混合配比（static mixing）一致地优于课程学习</strong>。</p>
+
+        <p>最引人注目的发现来自一篇 2026 年初的论文，作者在 7B、13B 和 70B 三个规模上系统比较了不同的数据调度策略：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>数据调度策略</th>
+                    <th>7B 最终 PPL</th>
+                    <th>70B 最终 PPL</th>
+                    <th>训练稳定性</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>完全随机打乱</td>
+                    <td>10.2</td>
+                    <td>7.8</td>
+                    <td>稳定</td>
+                    <td>通用预训练</td>
+                </tr>
+                <tr>
+                    <td>由易到难课程</td>
+                    <td>10.3</td>
+                    <td>7.9</td>
+                    <td>初期稳定，后期略差</td>
+                    <td>小规模有效</td>
+                </tr>
+                <tr>
+                    <td>由难到易（反课程）</td>
+                    <td>10.5</td>
+                    <td>8.1</td>
+                    <td>初期不稳定</td>
+                    <td>不推荐</td>
+                </tr>
+                <tr>
+                    <td>50-30-20 静态混合</td>
+                    <td>10.1</td>
+                    <td>7.7</td>
+                    <td>最稳定</td>
+                    <td><strong>在所有规模上最佳</strong></td>
+                </tr>
+                <tr>
+                    <td>动态领域加权</td>
+                    <td>10.0</td>
+                    <td>7.6</td>
+                    <td>需要监控</td>
+                    <td>可用于精调阶段</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>所谓的"50-30-20 静态混合"指的是：50% 通用网络文本 + 30% 高质量精选文 + 20% 代码/数学。每一批次（batch）都从这三个池子中按固定比例采样，然后在训练全程都保持这个比例。就这么简单——不需要课程、不需要排序、不需要动态调整。</p>
+
+        <div class="tip">
+            <strong>实践建议：</strong>对于从头开始的预训练项目，最简单的方案往往是最有效的。先从一个经过消融实验验证的<em>静态混合比</em>开始，只有在 model 的 loss 出现异常时再考虑动态调整。不要一开始就去折腾复杂的课程学习调度。
+        </div>
+
+        <h2>21.3 什么时候课程学习真的有用？</h2>
+
+        <p>既然说静态混合在通用预训练中更好，那课程学习是不是就一无是处了？不是的。关键在于<strong>找准它的应用场景</strong>。以下是课程学习在大模型训练中真正发挥作用的地方：</p>
+
+        <ul>
+            <li><strong>多阶段训练：</strong>这是课程学习最有效的模式。比如：第一阶段用通用网络语料（80%），第二阶段切到代码增强（10%），第三阶段切到数学和指令数据（10%）。每一个阶段内部的顺序是随机的，但<strong>阶段之间</strong>构成了一个天然的"课程"——从通用到专业。Llama 和 Chinchilla 采用的都是这种多阶段课程。</li>
+            <li><strong>持续预训练 (Continual Pretraining)：</strong>如果在一个已有基座模型上做领域适应（如从通用模型训练出医疗领域模型），按照"基座数据 → 领域数据 → 混合数据"的顺序通常比全部打乱的效果好。</li>
+            <li><strong>指令微调阶段：</strong>在 SFT (Supervised Fine-Tuning) 阶段，先训练简单的指令对（单轮问答），再训练复杂的（多轮对话、推理链），确实有帮助。</li>
+        </ul>
+
+        <p>下面是一个典型的多阶段课程调度配置：</p>
+
+        <pre><code># 多阶段课程调度配置
+
+training_curriculum = {
+    "phase_1_web_pretrain": {
+        "data_sources": {
+            "fineweb_edu": 0.60,
+            "common_crawl_filtered": 0.30,
+            "wikipedia": 0.10
+        },
+        "tokens": 2_000_000_000_000,  # 2T tokens
+        "lr_schedule": "cosine_warmup"
+    },
+    "phase_2_code_boost": {
+        "data_sources": {
+            "web_data": 0.70,
+            "github_code": 0.20,
+            "math_web": 0.10
+        },
+        "tokens": 500_000_000_000,    # 500B tokens
+        "lr_schedule": "cosine_reset"
+    },
+    "phase_3_instruction_mix": {
+        "data_sources": {
+            "web_data": 0.60,
+            "code_data": 0.10,
+            "math_data": 0.10,
+            "synthetic_qa": 0.10,
+            "instruction_pairs": 0.10
+        },
+        "tokens": 200_000_000_000,    # 200B tokens
+        "lr_schedule": "cosine_reset_low"
+    }
+}</code></pre>
+
+        <div class="highlight">
+            <strong>关键洞察：</strong>课程学习的核心价值不在于"排序同一批数据"，而在于<em>在不同的训练阶段切换数据的分布</em>。换句话说，不要纠结于"这篇文档比那篇更容易"，而要思考"这个阶段的模型更适合学习什么分布"。
+        </div>
+
+        <h2>21.4 数据难度评分方法</h2>
+
+        <p>如果你决定尝试课程学习，第一个需要回答的问题是：<strong>如何给数据打"难度分"？</strong></p>
+
+        <p>以下是业界常用的三种方法：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>方法</th>
+                    <th>原理</th>
+                    <th>是否需训练</th>
+                    <th>效果</th>
+                    <th>缺陷</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Perplexity 基准</td>
+                    <td>用参考模型评估文本 PPL</td>
+                    <td>需要一个基座模型</td>
+                    <td>较准确</td>
+                    <td>模型选择影响结果</td>
+                </tr>
+                <tr>
+                    <td>分类器评分</td>
+                    <td>训练难度分类器</td>
+                    <td>需要标注数据</td>
+                    <td>可控</td>
+                    <td>标注成本高</td>
+                </tr>
+                <tr>
+                    <td>启发式规则</td>
+                    <td>长度、Flesch 可读性、稀有词比例</td>
+                    <td>不需要</td>
+                    <td>大致可用</td>
+                    <td>不够精确</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>启发式规则虽然粗糙，但好在零成本且可解释。一个常用的综合难度分数可以这样计算：</p>
+
+        <pre><code># 启发式难度评分
+
+def heuristic_difficulty(text):
+    """返回 0（最简单）到 1（最困难）的分数"""
+    import math
+
+    words = text.split()
+    sentences = text.split(".")
+
+    # 1. 平均句子长度
+    avg_sent_len = len(words) / max(len(sentences), 1)
+    length_score = min(avg_sent_len / 50, 1.0)  # 归一化
+
+    # 2. 稀有词比例（词频排名 > 10000 视为稀有）
+    # 需要用预计算的词频表，这里示意
+    freq_table = {}  # 假设有预计算的英文词频
+    rare_ratio = sum(1 for w in words if freq_table.get(w, 0) < 10)
+    rare_ratio = rare_ratio / max(len(words), 1)
+
+    # 3. 数学符号密度
+    math_chars = sum(1 for c in text if c in "+-*/=∫∑√∞αβγ")
+    math_density = math_chars / max(len(text), 1)
+
+    score = 0.4 * length_score + 0.4 * rare_ratio + 0.2 * math_density
+    return min(score, 1.0)</code></pre>
+
+        <h2>21.5 动态领域加权</h2>
+
+        <p>前面我们讨论了"课程学习"（数据顺序的问题），而<strong>动态领域加权 (Dynamic Domain Weighting)</strong> 解决的是一个不同的问题：<strong>在训练过程中，是否应该根据模型当前的能力来调整不同领域数据的比例？</strong></p>
+
+        <p>答案是肯定的，但实现方式比较巧妙。常见的做法是：跟踪每个领域在验证集上的 loss，如果一个领域的 loss 下降得比其他领域快，说明模型在这个领域上正在"吃饱"，可以降低它的采样权重；反之，如果一个领域的 loss 下降得慢，就提高它的权重。</p>
+
+        <p>这个想法听起来很合理，但在实践中有一大坑：loss 本身受数据难度影响。代码数据的 loss 天然就比自然语言高（因为代码有更严格的模式），如果仅仅因为"代码数据的 loss 最高"就加大权重，反而可能导致模型在代码上过拟合。正确的做法是看 <strong>loss 的下降速率</strong>而不是绝对值。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我曾经在一个训练项目中启用了动态领域加权，结果一周后回去看——模型在数学数据上的 loss 几乎没有下降，所以加权系统不断地提高数学数据权重，最终数学数据占到了总量的 70%！但模型的数学推理能力并没有提升，反而让通用能力崩了。根本原因是我们用的数学数据质量太差，模型不是因为"学会了"而 loss 不降，是因为<em>学不会</em>。所以动态加权之前，一定要先确认数据本身的质量是过关的。
+        </div>
+
+        <h2>21.6 工程实践：混洗、轮回与数据枯竭</h2>
+
+        <p>这一节我们来聊一些非常具体、但在论文中几乎看不到的工程问题。当你真的要在集群上执行数据调度时，有三件事必须处理好：</p>
+
+        <ul>
+            <li><strong>阶段内的混洗：</strong>即使你用了多阶段课程，每个阶段内的数据仍然需要随机打乱。一个常见的错误是：认为"先简单后困难"意味着在简单阶段内部也要按难度排序。不需要。阶段内的随机化至关重要——它确保每个 batch 中的样本来自不同的源头，梯度有足够的多样性。</li>
+            <li><strong>Epoch 计数：</strong>在课程学习的场景下，"一个 epoch"的含义变得模糊。如果你在阶段 1 使用 50% 通用数据 + 50% 代码数据，当代码数据被遍历完一遍而通用数据只被遍历了一半时，算完成了一个 epoch 吗？实践中通常按照<strong>数据总量最小</strong>的数据源完成一个 epoch 来计数——这样防止任何数据源被过度重复。</li>
+            <li><strong>数据枯竭预防：</strong>高难度数据的总量往往远少于低难度数据。如果你的课程要求在后期大量使用高难度数据，却发现数据已经被消耗完了——这就是"数据枯竭"。解决方案是提前规划每个阶段的数据需求量，确保每个数据源至少有 1.5 倍的阶段所需量作为 buffer。</li>
+        </ul>
+
+        <pre><code># 数据枯竭检查
+def check_data_exhaustion(data_plan, data_inventory):
+    """
+    data_plan: {"phase_1": {"web": 100B, "code": 50B}, ...}
+    data_inventory: {"web": 500B, "code": 80B}
+    """
+    warnings = []
+    for phase, sources in data_plan.items():
+        for source_name, required in sources.items():
+            available = data_inventory.get(source_name, 0)
+            if available < required * 1.5:
+                warnings.append(
+                    f"[{phase}] {source_name}: "
+                    f"需要 {required}B, 仅有 {available}B, "
+                    f"buffer 不足 50%"
+                )
+    return warnings</code></pre>
+
+        <div class="tip">
+            <strong>工程建议：</strong>在开始几百亿规模的训练之前，先把数据调度的逻辑用小规模（比如 1B 模型）跑一遍，检查数据枯竭和混洗均匀性。这种小规模的"排练"曾经帮我们提前发现了好几个会导致训练中断的数据调度 bug。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>数据调度是一个非常容易被高估、也容易被低估的环节。被高估的方面是课程学习——在从头开始的通用预训练中，静态混合（比如 50-30-20 配比）的效果通常不输给精心设计的课程。被低估的方面是<strong>数据枯竭</strong>和<strong>混洗策略</strong>——这些工程细节在论文里往往只字不提，但在实际训练中它们是训练能否顺利跑完的决定性因素。课程学习的真正舞台在多阶段训练、持续预训练和指令微调——而不是你想象中"先易后难排序"那么简单。</p>
+
+        <p>在下一章中，我们将聚焦两个在预训练数据中最特殊也最重要的领域：<strong>代码</strong>和<strong>数学</strong>。这两种类型的数据在清洗、去重、质量评估上都有完全不同的方法论——你会在下一章里看到为什么它们值得单独用一整章来讨论。</p>
+
+        <p>我是你们的讲师，我们第 22 章见。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 54 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 55 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
 ## Active Tutorials
 
-### AI / 数据科学 (18)
+### AI / 数据科学 (19)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `machine-learning-tutorial/` | 机器学习 | 28 | `https://1998x-stack.github.io/machine-learning-tutorial/` |
@@ -33,6 +33,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `MOE-tutorial/` | MoE混合专家模型 | 28 | `https://1998x-stack.github.io/MOE-tutorial/` |
 | `llm-agent-engineering-tutorial/` | 大模型工程实践：Agent框架 | 28 | `https://1998x-stack.github.io/llm-agent-engineering-tutorial/` |
 | `aigc-tutorial/` | AIGC生成模型 | 28 | `https://1998x-stack.github.io/aigc-tutorial/` |
+| `pretraining-dataset-tutorial/` | LLM预训练数据集 | 28 | `https://1998x-stack.github.io/pretraining-dataset-tutorial/` |
 
 ### 数学基础 (9)
 | Directory | Topic | Chapters | URL |

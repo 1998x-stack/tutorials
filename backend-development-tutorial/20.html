@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 Kubernetes 核心概念</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 后端开发全景图</a></li>
+            <li><a href="02.html">第2章 网络协议基础</a></li>
+            <li><a href="03.html">第3章 Linux 基础与环境</a></li>
+            <li><a href="04.html">第4章 版本控制与协作</a></li>
+            <li><a href="05.html">第5章 编程语言选型</a></li>
+            <li><a href="06.html">第6章 数据结构与算法实战</a></li>
+            <li><a href="07.html">第7章 设计模式与架构原则</a></li>
+            <li><a href="08.html">第8章 RESTful API 设计</a></li>
+            <li><a href="09.html">第9章 认证与授权体系</a></li>
+            <li><a href="10.html">第10章 关系型数据库设计</a></li>
+            <li><a href="11.html">第11章 NoSQL 与缓存策略</a></li>
+            <li><a href="12.html">第12章 消息队列与事件驱动</a></li>
+            <li><a href="13.html">第13章 gRPC 与微服务通信</a></li>
+            <li><a href="14.html">第14章 GraphQL 与 BFF 模式</a></li>
+            <li><a href="15.html">第15章 测试策略与质量保障</a></li>
+            <li><a href="16.html">第16章 安全攻防实战</a></li>
+            <li><a href="17.html">第17章 日志、指标与告警</a></li>
+            <li><a href="18.html">第18章 CI/CD 流水线设计</a></li>
+            <li><a href="19.html">第19章 Docker 深入与实践</a></li>
+            <li><a href="20.html" class="active">第20章 Kubernetes 核心概念</a></li>
+            <li><a href="21.html">第21章 K8s 网络与存储</a></li>
+            <li><a href="22.html">第22章 K8s 生产运维实战</a></li>
+            <li><a href="23.html">第23章 GitOps 与声明式运维</a></li>
+            <li><a href="24.html">第24章 可观测性进阶</a></li>
+            <li><a href="25.html">第25章 Serverless 与 FaaS</a></li>
+            <li><a href="26.html">第26章 AI 驱动的后端开发</a></li>
+            <li><a href="27.html">第27章 云原生前沿技术</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>开篇：从 docker run 到 kubectl apply——为什么需要编排</h2>
+
+        <p>假设你的业务开始增长了。从一台服务器变成三台，然后变成十台、五十台。你的微服务从三个变成十几个。这时候你面临的问题就不只是"容器怎么启动"了——你需要回答的是：哪个容器应该跑在哪台机器上？哪个机器挂了，上面的容器谁来重启？新版本如何平滑滚动升级？流量如何分发到正确的容器？</p>
+
+        <p>手动管理这一切是根本不可能的。<strong>容器编排就是自动化回答这些问题的系统</strong>。而 Kubernetes（简称 K8s，来自 Google Borg 系统的设计经验）就是今天容器编排领域的事实标准——不是因为它最时髦，而是因为它用一套统一、声明式的 API 模型，解决了上述所有问题。</p>
+
+        <p>我至今记得第一次将一个 Docker Compose 管理的三服务应用迁移到 K8s 的经历。在 Docker Compose 模式下，每次部署都是手动 ssh 上机器、git pull、docker compose up -d。某个周末凌晨，一台宿主机挂了，三个服务全部下线，团队没有任何自动化恢复机制。迁移到 K8s 之后，同样的情况——节点宕机触发 Node Controller 自动驱逐 Pod，Kubelet 在健康节点上重新调度，整个过程我们在监控面板上看到了一行状态变更记录，用户甚至没有察觉到任何异常。从"人肉运维"到"声明式自愈"，K8s 带来的不是"锦上添花"，而是"质的变化"。</p>
+
+        <div class="highlight">
+            <strong>💡 核心认知：</strong>K8s 不是一个"高级版的 Docker Compose"。它的本质是一个声明式的、自修复的、去中心化的系统——你告诉它"我想要什么状态"（比如 3 个副本、RollingUpdate、每个 Pod 占用 0.5 CPU），它负责让实际状态不断趋近你声明的目标状态。你不需要告诉它"怎么做到"。
+        </div>
+
+        <h2>K8s 架构剖析：API Server / etcd / Scheduler / Kubelet / Controller Manager</h2>
+
+        <p>要理解 K8s 如何工作，首先要理解它的核心组件——它们分工明确，各司其职，构成了 K8s 的控制面（Control Plane）和数据面（Data Plane）。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>组件</th>
+                    <th>属于</th>
+                    <th>职责</th>
+                    <th>关键特征</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>API Server (kube-apiserver)</td>
+                    <td>控制面</td>
+                    <td>所有操作的入口，暴露 RESTful API，负责认证、授权、准入控制</td>
+                    <td>无状态，可水平扩展，etcd 的唯一读写者</td>
+                </tr>
+                <tr>
+                    <td>etcd</td>
+                    <td>控制面</td>
+                    <td>分布式键值存储，保存 K8s 全部集群状态</td>
+                    <td>基于 Raft 一致性协议，必须 3/5/7 节点奇数部署</td>
+                </tr>
+                <tr>
+                    <td>Scheduler (kube-scheduler)</td>
+                    <td>控制面</td>
+                    <td>为新创建的 Pod 选择最合适的 Node</td>
+                    <td>基于资源需求、亲和性、污点容忍度打分决策</td>
+                </tr>
+                <tr>
+                    <td>Controller Manager (kube-controller-manager)</td>
+                    <td>控制面</td>
+                    <td>运行各种 Controller 循环（Deployment、Node、Namespace 等），确保实际状态趋近期望状态</td>
+                    <td>通过 Informer 监听 API Server 的变更事件</td>
+                </tr>
+                <tr>
+                    <td>Kubelet</td>
+                    <td>数据面</td>
+                    <td>每个 Node 上的代理，负责管理 Pod 的生命周期（启动、健康检查、停止）</td>
+                    <td>与容器运行时（containerd / CRI-O）通过 CRI 交互</td>
+                </tr>
+                <tr>
+                    <td>Kube-proxy</td>
+                    <td>数据面</td>
+                    <td>维护 Node 上的网络规则，实现 Service 的负载均衡</td>
+                    <td>支持 iptables / IPVS 模式，v1.36 默认使用 nftables 后端</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这六个组件的协作流程是这样的：你通过 <code>kubectl apply</code> 提交一个 YAML 到 API Server → API Server 校验并将其存入 etcd → Controller Manager 中的对应 Controller 发现当前状态不匹配期望状态 → 创建 Pod 对象 → Scheduler 为 Pod 选择一个 Node → 该 Node 的 Kubelet 通过容器运行时启动容器。整个过程是事件驱动的、异步的，这也是 K8s 声明式模型的精髓。</p>
+
+        <h2>Pod：最小调度单元的设计哲学</h2>
+
+        <p>Pod 是 K8s 中最核心的抽象——它是容器的最小调度单元。初学者最容易犯的错误是把 Pod 等同于"一个容器"。但 K8s 的设计哲学是：<strong>Pod 是一个"逻辑主机"，里面可以运行一个或多个容器</strong>。同一个 Pod 中的容器共享 Network Namespace（同一个 IP 和端口空间）和存储卷，它们之间可以通过 localhost 通信。</p>
+
+        <p>为什么要把多个容器塞进同一个 Pod？常见场景包括：Sidecar 模式（日志采集容器 + 主业务容器）、Proxy 模式（Envoy + 应用容器）、初始化容器（Init Container 在业务容器启动前执行数据库迁移）。把"协作密切"的容器放在同一个 Pod 中，将"松耦合"的服务放在不同的 Pod 中——这个边界决策直接决定了你的架构质量。</p>
+
+<pre><code>apiVersion: v1
+kind: Pod
+metadata:
+  name: web-app
+  labels:
+    app: web
+    tier: frontend
+spec:
+  # 用户命名空间隔离（K8s v1.36 GA）
+  hostUsers: true
+  containers:
+  - name: app
+    image: myapp:v1.23
+    ports:
+    - containerPort: 8080
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  - name: sidecar-log
+    image: fluent-bit:3.0
+    volumeMounts:
+    - name: log-volume
+      mountPath: /var/log/app</code></pre>
+
+        <p>注意上面 YAML 中的 <code>hostUsers: true</code>——这是 K8s v1.36（Haru）中正式 GA 的 User Namespaces 支持。它让 Pod 中的 root 用户（UID 0）实际上映射到宿主机上的一个非特权用户，即使用户命名空间内的权限被突破，攻击者在宿主机上也不具备 root 权限。这是 K8s 在安全隔离方面迈出的一大步。</p>
+
+        <h2>Deployment 与 ReplicaSet：声明式部署与自愈</h2>
+
+        <p>直接创建 Pod 在生产环境中几乎从不这么做——因为单个 Pod 没有自愈能力，节点宕机它就永远消失了。你需要 <strong>Deployment</strong> 来管理 Pod 的生命周期。</p>
+
+        <p>Deployment 的核心设计是"三层控制"：Deployment 管理 ReplicaSet，ReplicaSet 管理 Pod。当用户更新 Deployment 的镜像版本时，Deployment Controller 会创建一个新的 ReplicaSet，然后逐步增加新 ReplicaSet 的副本数、减少旧 ReplicaSet 的副本数——实现零停机滚动更新。同时，ReplicaSet 确保在任何时刻，运行中的 Pod 数量都与期望值一致——如果某个 Pod 因为节点宕机而消失，ReplicaSet 会立即创建一个新 Pod 来补位。这就是"自愈"的底层机制。</p>
+
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: payment
+  template:
+    metadata:
+      labels:
+        app: payment
+    spec:
+      containers:
+      - name: payment
+        image: payment:v2.5
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 1
+            memory: 1Gi</code></pre>
+
+        <p>滚动更新的策略参数很关键。<code>maxUnavailable: 1</code> 表示滚动过程中最多允许 1 个 Pod 不可用（确保基本服务能力），<code>maxSurge: 1</code> 表示可以多启动 1 个 Pod（确保更新速度）。对于关键业务，可以设置 <code>maxUnavailable: 0</code> + <code>maxSurge: 1</code> 实现"先启动新 Pod，再停止旧 Pod"的蓝绿式更新，但要注意这会短暂地加倍资源占用。</p>
+
+        <h2>Service 与网络：ClusterIP / NodePort / LoadBalancer</h2>
+
+        <p>Pod 是"朝生暮死"的——每次重启 IP 都会变。Service 是 K8s 的网络抽象层，它为了一组 Pod 提供一个稳定的 VIP（虚拟 IP）和 DNS 名称，同时负责请求的负载均衡。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Service 类型</th>
+                    <th>访问方式</th>
+                    <th>适用场景</th>
+                    <th>端口范围</th>
+                    <th>负载均衡</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>ClusterIP（默认）</td>
+                    <td>集群内 VIP</td>
+                    <td>服务间内部通信</td>
+                    <td>任意</td>
+                    <td>kube-proxy 轮询</td>
+                </tr>
+                <tr>
+                    <td>NodePort</td>
+                    <td>节点 IP : 静态端口</td>
+                    <td>开发调试、非云环境暴露</td>
+                    <td>30000-32767</td>
+                    <td>kube-proxy → iptables/nftables</td>
+                </tr>
+                <tr>
+                    <td>LoadBalancer</td>
+                    <td>云负载均衡器 IP</td>
+                    <td>生产环境对外暴露服务</td>
+                    <td>由云平台分配</td>
+                    <td>云 LB 分发 → kube-proxy</td>
+                </tr>
+                <tr>
+                    <td>Headless (ClusterIP: None)</td>
+                    <td>DNS 返回所有 Pod IP</td>
+                    <td>StatefulSet、有状态服务</td>
+                    <td>N/A</td>
+                    <td>无（由客户端自行负载均衡）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>三者的选择策略很清楚：<strong>服务内部调用用 ClusterIP，需要暴露给集群外部但没有云 LB 的用 NodePort（搭配 Ingress），云环境对外暴露用 LoadBalancer</strong>。对于无头服务（Headless Service），它返回的是所有符合条件的 Pod IP 列表，由客户端自行选择——这适合 Cassandra、Elasticsearch 等需要感知全部对端地址的有状态应用。</p>
+
+        <h2>ConfigMap 与 Secret：配置与代码分离</h2>
+
+        <p>十二要素应用（The Twelve-Factor App）中的第三要素要求"配置与代码严格分离"——同一份代码应该能在不同的环境中（开发、测试、生产）运行，只需要替换配置即可。K8s 提供了两个资源来实现这个目标：ConfigMap 用于存储非敏感配置，Secret 用于存储敏感信息（密码、Token、证书）。</p>
+
+<pre><code>apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  APP_ENV: production
+  LOG_LEVEL: info
+  DB_HOST: postgres-clusterip
+  DB_PORT: "5432"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secrets
+type: Opaque
+stringData:
+  DB_PASSWORD: "s3cret!"
+  API_KEY: "sk-..."
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: config-demo
+spec:
+  containers:
+  - name: app
+    image: myapp:latest
+    envFrom:
+    - configMapRef:
+        name: app-config
+    - secretRef:
+        name: app-secrets
+    env:
+    - name: DB_URL
+      value: "postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/myapp"</code></pre>
+
+        <div class="tip">
+            <strong>💡 关于 Secret 的安全说明：</strong>默认情况下，Secret 只做了 Base64 编码（不是加密！），任何有 etcd 访问权限的人都可以读取。要达到真正的安全性，需要配合 <strong>KMS 加密</strong>（在 etcd 层面加密存储 Secret 数据）和 <strong>RBAC</strong>（限制 Secret 的访问权限）。K8s v1.36 中的 DRA AdminAccess 特性也允许管理员对设备资源访问进行更精细的审计控制。
+        </div>
+
+        <p>ConfigMap 和 Secret 的设计背后有一个重要思想：<strong>配置是环境的一部分，而不是应用的一部分</strong>。你的 Docker 镜像一旦构建完成就应该是"环境无关"的——它在任何环境中的行为差异，完全由启动时注入的配置决定。做到这一点，你才能在开发环境测试同一个镜像，然后把它直接推送到生产环境，无需重新构建。</p>
+
+        <p>掌握了 Pod、Deployment、Service 和 ConfigMap，你已经能用 K8s 把应用跑起来了。但要让应用在生产环境中真正"跑得好"，你还需要理解更深入的东西——Pod 之间如何高效通信、流量如何进入集群、数据如何持久化。在下一章中，我们将深入 K8s 的网络模型、Service Mesh 和持久化存储系统。</p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

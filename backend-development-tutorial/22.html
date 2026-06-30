@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 K8s 生产运维实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 后端开发全景图</a></li>
+            <li><a href="02.html">第2章 网络协议基础</a></li>
+            <li><a href="03.html">第3章 Linux 基础与环境</a></li>
+            <li><a href="04.html">第4章 版本控制与协作</a></li>
+            <li><a href="05.html">第5章 编程语言选型</a></li>
+            <li><a href="06.html">第6章 数据结构与算法实战</a></li>
+            <li><a href="07.html">第7章 设计模式与架构原则</a></li>
+            <li><a href="08.html">第8章 RESTful API 设计</a></li>
+            <li><a href="09.html">第9章 认证与授权体系</a></li>
+            <li><a href="10.html">第10章 关系型数据库设计</a></li>
+            <li><a href="11.html">第11章 NoSQL 与缓存策略</a></li>
+            <li><a href="12.html">第12章 消息队列与事件驱动</a></li>
+            <li><a href="13.html">第13章 gRPC 与微服务通信</a></li>
+            <li><a href="14.html">第14章 GraphQL 与 BFF 模式</a></li>
+            <li><a href="15.html">第15章 测试策略与质量保障</a></li>
+            <li><a href="16.html">第16章 安全攻防实战</a></li>
+            <li><a href="17.html">第17章 日志、指标与告警</a></li>
+            <li><a href="18.html">第18章 CI/CD 流水线设计</a></li>
+            <li><a href="19.html">第19章 Docker 深入与实践</a></li>
+            <li><a href="20.html">第20章 Kubernetes 核心概念</a></li>
+            <li><a href="21.html">第21章 K8s 网络与存储</a></li>
+            <li><a href="22.html" class="active">第22章 K8s 生产运维实战</a></li>
+            <li><a href="23.html">第23章 GitOps 与声明式运维</a></li>
+            <li><a href="24.html">第24章 可观测性进阶</a></li>
+            <li><a href="25.html">第25章 Serverless 与 FaaS</a></li>
+            <li><a href="26.html">第26章 AI 驱动的后端开发</a></li>
+            <li><a href="27.html">第27章 云原生前沿技术</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>开篇：部署只是开始，运维才是日常</h2>
+
+        <p>我还记得自己第一次成功用 K8s 部署一个生产服务时的兴奋感——<code>kubectl apply -f deployment.yaml</code> 回车，看着 Pod 一个个变成 Running，Service 的 Endpoint 变为 Ready，域名解析生效，curl 测试返回 200……那一刻觉得自己掌握了云原生的真谛。</p>
+
+        <p>这种兴奋感持续了大概 48 小时。然后凌晨两点，手机告警响了——某个 Pod 反复 CrashLoopBackOff。查了日志发现是 OOMKill。加了内存 limit 重启后，第二天又收到告警——某个 Node 因为磁盘压力进入 NotReady 状态。第三周，一次错误的 RBAC 配置导致 CI/CD 流水线全线瘫痪——某个同事不小心删了包含 ServiceAccount Token 的 Secret。在最痛苦的一次事故中，一个错误的 liveness probe 配置引发了"雪崩式重启"——所有 Pod 同时被判定不健康，K8s 尝试重启所有容器，导致整个服务完全不可用达 15 分钟。</p>
+
+        <p>这些血的教训教会我一件事：<strong>部署一个应用只需要几分钟，但让它稳定地运行需要你对 K8s 的每个运维细节有深入理解</strong>。本章就是把这些"血的教训"提炼成可操作的最佳实践。</p>
+
+        <h2>资源管理：requests vs limits 的调优策略</h2>
+
+        <p>资源管理是 K8s 生产运维中最基础也最容易出错的话题。每个 Pod 都可以指定 CPU 和内存的 requests（预留量）和 limits（上限），这两个参数的含义和影响完全不同：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>参数</th>
+                    <th>CPU</th>
+                    <th>内存</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>requests</td>
+                    <td>调度时确保可用，运行时 CFS 配额保障最低份额</td>
+                    <td>调度时确保可用，Kubelet 保证节点内存满足所有 Pod requests 之和</td>
+                </tr>
+                <tr>
+                    <td>limits</td>
+                    <td>Cgroups CFS 配额硬限制，超限后限速（throttle）</td>
+                    <td>Cgroups memory.limit_in_bytes 硬限制，超限后 OOMKill</td>
+                </tr>
+                <tr>
+                    <td>未设置时</td>
+                    <td>继承 Node 的 capacity（可能抢占其他 Pod）</td>
+                    <td>继承 Node 的 capacity（被 OOMKill 风险高）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这里有个关键但又反直觉的调优原则：<strong>不要盲目设置低 requests 来"省钱"</strong>。如果 requests 设置过低，调度器可能在同一个 Node 上堆叠过多 Pod，当流量尖峰到来时，它们一起争抢 CPU、内存不足触发 OOMKill——结果是所有 Pod 一起"跪"。合理的做法是基于实际监控数据（过去 7 天的 P99 用量）来设置 requests，留出 20% 的 buffer；limits 设为目标值的 1.5-2 倍，允许突发。</p>
+
+        <p>在资源紧张时，K8s 还会按 QoS（服务质量）等级决定谁先被驱逐：</p>
+
+<pre><code># Guaranteed（最高优先级）：requests == limits
+resources:
+  requests:
+    cpu: 1
+    memory: 1Gi
+  limits:
+    cpu: 1
+    memory: 1Gi
+
+# Burstable（中等优先级）：requests &lt; limits
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 1
+    memory: 1Gi
+
+# BestEffort（最低优先级）：无 requests 也无 limits
+# 节点资源紧张时最先被驱逐</code></pre>
+
+        <p>生产环境的推荐策略：对关键服务（API 网关、认证服务）使用 Guaranteed QoS，确保它们不会被驱逐；对批处理任务和辅助服务使用 Burstable；永远不要使用 BestEffort——它们在任何资源压力下都会先被杀掉。</p>
+
+        <h2>自动扩缩容：HPA 原理与配置</h2>
+
+        <p>应对流量洪峰的最佳方案不是"配大机器"，而是"自动扩缩"。Horizontal Pod Autoscaler（HPA）根据 CPU、内存或自定义指标自动调整 Pod 副本数。K8s v1.36（Haru）中，HPA 的一个重要特性——<strong>scale-to-zero</strong>——正式 GA：当没有流量时，HPA 可以把副本数缩到 0，配合事件驱动触发（如 Knative），实现真正意义上的"零耗能空闲"。</p>
+
+<pre><code>apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payment-service-hpa
+spec:
+  # scale-to-zero GA 特性（K8s v1.36）
+  minReplicas: 0
+  maxReplicas: 20
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payment-service
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  # 弹性行为配置，防止频繁抖动
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15</code></pre>
+
+        <p>HPA 的行为配置（behavior）是不容忽视的细节。上面的配置中，scaleDown 设置了 300 秒的稳定窗口——这意味着 CPU 降下来后，HPA 会等待 5 分钟再开始缩容，避免"流量波动的波谷瞬间"导致的误缩。scaleUp 设置了 0 秒窗口 + 每次允许翻倍的激进策略，确保在流量突增时 Pod 能快速扩容。你需要在"响应速度"和"稳定性"之间找到平衡——不同业务场景需要的参数差异很大。</p>
+
+        <h2>健康检查：liveness vs readiness vs startup probe</h2>
+
+        <p>K8s 提供了三种探针来监控容器健康状态。区分三者的用途，是 K8s 生产运维中最基础但也最容易被搞混的知识点之一。</p>
+
+        <ul>
+            <li><strong>Liveness Probe</strong>：告诉 K8s "容器还活着吗？"如果失败，Kubelet 会重启容器。适用于检测死锁、内存泄漏、goroutine 泄漏等无法自发恢复的问题。</li>
+            <li><strong>Readiness Probe</strong>：告诉 K8s "容器能接受流量吗？"如果失败，Service 和 Ingress 会将该 Pod 从 Endpoint 中移除。适用于检测依赖服务（数据库、缓存）是否就绪、请求队列是否已满。</li>
+            <li><strong>Startup Probe</strong>：告诉 K8s "容器启动完成了吗？"在启动探针成功之前，liveness 和 readiness 探针不会启动检查。适用于启动耗时较长的应用（如 Java 应用、加载大型模型）。</li>
+        </ul>
+
+<pre><code>apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-demo
+spec:
+  containers:
+  - name: app
+    image: myapp:latest
+    ports:
+    - containerPort: 8080
+    startupProbe:
+      httpGet:
+        path: /health/startup
+        port: 8080
+      initialDelaySeconds: 0
+      periodSeconds: 5
+      failureThreshold: 30  # 最多等 150 秒启动
+    readinessProbe:
+      httpGet:
+        path: /health/ready
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+    livenessProbe:
+      httpGet:
+        path: /health/live
+        port: 8080
+      initialDelaySeconds: 15
+      periodSeconds: 15
+      failureThreshold: 3</code></pre>
+
+        <div class="warning">
+            <strong>⚠️ 一个真实的教训：</strong>我见过一个团队给所有服务配了完全相同的 liveness probe——直接返回 200 OK 的静态端点。这意味着即使容器的业务逻辑已经完全卡死（goroutine 泄漏导致请求队列堆积），liveness probe 仍然是 200，K8s 不会重启。更糟糕的是，他们在 readiness probe 上配了过于激进的阈值，导致网络抖动时大量 Pod 被摘除流量，服务容量瞬间减半，引发雪崩。核心原则：<strong>liveness 要轻量（不查依赖），readiness 要覆盖依赖健康检查，startup 要给慢启动应用留足时间</strong>。
+        </div>
+
+        <h2>RBAC 实战：ServiceAccount / Role / RoleBinding</h2>
+
+        <p>默认情况下，Pod 中运行的进程以 default ServiceAccount 的身份与 API Server 通信——它有操作大部分资源的权限。这意味着如果你的应用被攻击者利用，攻击者可以通过容器的 ServiceAccount Token 直接操作整个集群。这显然是不安全的。</p>
+
+        <p>RBAC（基于角色的访问控制）是 K8s 的安全防线。它的核心是四个资源：<strong>ServiceAccount</strong>（身份）→ <strong>Role / ClusterRole</strong>（权限集合）→ <strong>RoleBinding / ClusterRoleBinding</strong>（身份与权限的绑定）。</p>
+
+<pre><code>---
+# 1. 创建专用 ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payment-sa
+---
+# 2. 创建 Role（命名空间级别权限）
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: payment
+  name: payment-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list"]
+---
+# 3. 绑定 Role 到 ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: payment
+  name: payment-binding
+subjects:
+- kind: ServiceAccount
+  name: payment-sa
+  namespace: payment
+roleRef:
+  kind: Role
+  name: payment-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# 4. 在 Pod 中使用
+apiVersion: v1
+kind: Pod
+metadata:
+  name: payment-app
+spec:
+  serviceAccountName: payment-sa  # 使用最小权限的 SA
+  containers:
+  - name: app
+    image: payment:v2.5</code></pre>
+
+        <p>RBAC 的最佳实践遵循"最小权限原则"：每个 ServiceAccount 只拥有其正常工作需要的权限。CI/CD 流水线使用的 Token 应该只能操作特定 Deployment 和 Namespace，不能访问集群级别的 Node 资源。生产环境推荐开启 <code>--authorization-mode=Node,RBAC</code> 和 <code>--enable-admission-plugins=NodeRestriction</code>，防止被攻破的节点通过 kubelet 操作非自身的 Pod。</p>
+
+        <div class="tip">
+            <strong>💡 审计建议：</strong>定期运行 <code>kubectl auth can-i --list --as=system:serviceaccount:payment:payment-sa</code> 来审查 ServiceAccount 的实际权限。结合 K8s v1.36 的 DRA AdminAccess 特性，管理员可以更精细地审计和限制设备资源（如 GPU、NVMe 磁盘）的访问，这对多租户集群尤其重要。
+        </div>
+
+        <h2>故障演练：Pod 驱逐、节点宕机、OOMKill 的应对策略</h2>
+
+        <p>在 K8s 中，故障不是"会不会发生"的问题，而是"什么时候发生"的问题。好的运维团队会主动通过故障演练来验证系统的韧性，而不是等生产环境出问题时再被动响应。下面是三类最常见故障的应对方案。</p>
+
+        <h3>Pod 驱逐（Eviction）</h3>
+        <p>当节点资源不足时，Kubelet 会根据 QoS 等级驱逐 Pod。应对策略：关键服务使用 Guaranteed QoS 确保优先级；使用 PodDisruptionBudget（PDB）限制自愿驱逐时最多不可用的 Pod 数量；配置合适的 requests 和 limits 避免资源争抢。</p>
+
+<pre><code>apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payment-pdb
+spec:
+  minAvailable: 2   # 至少保留 2 个副本
+  selector:
+    matchLabels:
+      app: payment</code></pre>
+
+        <h3>节点宕机（Node Failure）</h3>
+        <p>节点宕机后，Kubelet 停止心跳，Node Controller 会在 <code>--node-monitor-grace-period</code>（默认 40 秒）后将节点标记为 NotReady，再经过 <code>--pod-eviction-timeout</code>（默认 5 分钟）后开始驱逐 Pod。应对策略：使用 PodAntiAffinity 将副本分散到不同节点和可用区；跨可用区部署控制面节点（etcd 必须是奇数，且分布在至少 3 个可用区）。</p>
+
+        <h3>OOMKill（内存超限）</h3>
+        <p>当容器内存超过 limits 时，内核的 OOM Killer 会杀掉进程，K8s 重启容器。这是最常见的"隐性故障"——它不像节点宕机那么显眼，但可能频繁发生且不被注意。应对策略：在监控面板上关注 <code>container_oom_events_total</code> 指标；分析内存 profiles（Go 的 pprof、Java 的 Heap Dump）找出内存泄漏源；配置合理的 limits，而不是随意放大。</p>
+
+        <div class="warning">
+            <strong>⚠️ 一个真实的教训（雪崩式重启）：</strong>我们曾有一个 Java 服务上线后，liveness probe 配置了查询数据库的健康检查端点。数据库连接池因为慢查询开始堆积，readiness probe 检测到依赖失败后正确地将 Pod 从 Service 中摘除。但 liveness probe 也调用了同样的检查端点，结果它也开始失败——K8s 判断容器不健康，触发重启。重启后 Pod 加入 Service 接收流量，但连接池还没有完全恢复，再次被 OOMKill 或者被 liveness 判定不健康……这个循环导致"所有副本在 5 分钟内全部重启了一遍"，服务完全不可用。解决方案很明确：<strong>liveness probe 必须轻量</strong>，只检查进程本身的健康状态（如 TCP 端口是否响应），不应检查依赖服务的可用性——那是 readiness probe 的职责。
+        </div>
+
+        <p>Part 4 的这四章从 Docker 深入、K8s 核心概念、网络与存储，到生产运维，带你走完了容器化与编排的完整知识链。但这并不是终点——在生产环境中，你还需要一套系统化的工具来管理"集群的状态"而不是"集群中的机器"。在下一章中，我们将进入 Part 5 的第一站——GitOps 与声明式运维，看看如何用 Git 仓库作为集群状态的"唯一真相来源"。在 K8s 的世界里，真正优秀的运维是"少动"，而不是"勤动"。</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

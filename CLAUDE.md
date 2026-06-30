@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 48 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 49 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
 ## Active Tutorials
 
-### AI / 数据科学 (13)
+### AI / 数据科学 (14)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `machine-learning-tutorial/` | 机器学习 | 28 | `https://1998x-stack.github.io/machine-learning-tutorial/` |
@@ -26,6 +26,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `tts-model-history-tutorial/` | TTS模型发展史 | 28 | `https://1998x-stack.github.io/tts-model-history-tutorial/` |
 | `llm-training-deployment-tutorial/` | 大模型训练与部署 | 28 | `https://1998x-stack.github.io/llm-training-deployment-tutorial/` |
 | `sampling-tutorial/` | 抽样技术 | 28 | `https://1998x-stack.github.io/sampling-tutorial/` |
+| `llama-tutorial/` | LLaMA大模型技术 | 28 | `https://1998x-stack.github.io/llama-tutorial/` |
 
 ### 数学基础 (9)
 | Directory | Topic | Chapters | URL |

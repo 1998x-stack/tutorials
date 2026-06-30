@@ -1,12 +1,12 @@
 # 1998x-stack Tutorials
 
-A collection of 48 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 49 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
 ## Tutorials by Discipline
 
-### AI / 数据科学 (13 courses)
+### AI / 数据科学 (14 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -23,6 +23,7 @@ A collection of 48 free, comprehensive technical tutorials in Chinese — from f
 | 🎙️ | TTS模型发展史 | 28 | [tts-model-history-tutorial](https://1998x-stack.github.io/tts-model-history-tutorial/) |
 | 🤖 | 大模型训练与部署深度分析 | 28 | [llm-training-deployment-tutorial](https://1998x-stack.github.io/llm-training-deployment-tutorial/) |
 | 📊 | 抽样技术 · 从入门到精通 | 28 | [sampling-tutorial](https://1998x-stack.github.io/sampling-tutorial/) |
+| 🦙 | LLaMA大模型技术 · 从入门到精通 | 28 | [llama-tutorial](https://1998x-stack.github.io/llama-tutorial/) |
 
 ### 数学基础 (9 courses)
 

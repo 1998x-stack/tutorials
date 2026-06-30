@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 日志与调试</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🦀 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Rust简介与安装</a></li>
+            <li><a href="02.html">第2章 变量与数据类型</a></li>
+            <li><a href="03.html">第3章 函数与控制流</a></li>
+            <li><a href="04.html">第4章 所有权初探</a></li>
+            <li><a href="05.html">第5章 切片与字符串</a></li>
+            <li><a href="06.html">第6章 结构体</a></li>
+            <li><a href="07.html">第7章 枚举与模式匹配</a></li>
+            <li><a href="08.html">第8章 项目管理与模块</a></li>
+            <li><a href="09.html">第9章 集合类型</a></li>
+            <li><a href="10.html">第10章 错误处理</a></li>
+            <li><a href="11.html">第11章 泛型</a></li>
+            <li><a href="12.html">第12章 Trait</a></li>
+            <li><a href="13.html">第13章 生命周期</a></li>
+            <li><a href="14.html">第14章 闭包与迭代器</a></li>
+            <li><a href="15.html">第15章 测试体系</a></li>
+            <li><a href="16.html">第16章 Cargo生态进阶</a></li>
+            <li><a href="17.html">第17章 常见实用Trait</a></li>
+            <li><a href="18.html" class="active">第18章 日志与调试</a></li>
+            <li><a href="19.html">第19章 智能指针</a></li>
+            <li><a href="20.html">第20章 并发编程</a></li>
+            <li><a href="21.html">第21章 异步编程</a></li>
+            <li><a href="22.html">第22章 Unsafe Rust</a></li>
+            <li><a href="23.html">第23章 常用库选型</a></li>
+            <li><a href="24.html">第24章 性能分析</a></li>
+            <li><a href="25.html">第25章 宏编程入门</a></li>
+            <li><a href="26.html">第26章 实战：CLI工具</a></li>
+            <li><a href="27.html">第27章 实战：Web API</a></li>
+            <li><a href="28.html">第28章 2027 Edition展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>开篇：那个只有println!的生产事故</h2>
+
+        <p>我永远不会忘记那个凌晨三点。线上一个实时数据处理服务突然开始丢数据——不是全都丢，是间歇性地丢。没有任何异常，没有panic，没有OOM——就只是某些消息"消失"了。我登录服务器，打开了服务的日志文件……一片空白。服务没有写任何日志。</p>
+
+        <p>为什么？"上线前来不及加日志了，先用println!凑合一下，回头补"——然而回头永远没补。那些<code>println!</code>输出都去了stdout，而生产环境的<code>stdout</code>没有被任何日志收集器捕获，就那样飘散在了系统的风中。没办法，我只能重新编译一个带<code>eprintln!</code>的版本，部署上去，等待问题复现——这一等就是三个小时。最终定位到问题，加上补丁，天已经亮了。</p>
+
+        <p>那次事故后我在团队里立了条规矩：<strong>任何服务在上线之前，必须配置好分级日志系统</strong>。这不只是Rust的问题——但Rust的<code>log</code>和<code>tracing</code>生态让这件事变得异常简单。今天我们就来学习这些工具。</p>
+
+        <h2>log crate与env_logger — 日志级别、过滤、配置</h2>
+
+        <p>Rust的日志生态建立在<code>log</code> crate之上——它是一个<strong>外观</strong>（facade）crate，定义了日志的接口和级别，但不负责具体输出。你需要选择一个<strong>后端</strong>（logger implementation）来实际将日志写入到某个地方。</p>
+
+        <h3>日志级别</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>级别</th>
+                    <th>宏</th>
+                    <th>用途</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>ERROR</code></td>
+                    <td><code>error!("……")</code></td>
+                    <td>严重错误，需要立即处理</td>
+                </tr>
+                <tr>
+                    <td><code>WARN</code></td>
+                    <td><code>warn!("……")</code></td>
+                    <td>异常情况，但服务仍能继续运行</td>
+                </tr>
+                <tr>
+                    <td><code>INFO</code></td>
+                    <td><code>info!("……")</code></td>
+                    <td>关键生命周期事件（启动、关闭、配置加载）</td>
+                </tr>
+                <tr>
+                    <td><code>DEBUG</code></td>
+                    <td><code>debug!("……")</code></td>
+                    <td>开发调试信息，对排查问题有用</td>
+                </tr>
+                <tr>
+                    <td><code>TRACE</code></td>
+                    <td><code>trace!("……")</code></td>
+                    <td>最详细的跟踪，通常只用于深入排查</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>搭配env_logger使用</h3>
+
+        <p>在<code>Cargo.toml</code>中添加：</p>
+
+        <pre><code>[dependencies]
+log = "0.4"
+env_logger = "0.11"</code></pre>
+
+        <p>然后在<code>main.rs</code>中初始化并开始使用：</p>
+
+        <pre><code>use log::{info, warn, error, debug};
+
+fn main() {
+    env_logger::init();
+
+    info!("服务启动完成");
+    warn!("配置文件未找到，使用默认值");
+    error!("数据库连接失败: {:?}", err);
+    debug!("当前请求参数: {:?}", params);
+}</code></pre>
+
+        <h3>日志过滤</h3>
+
+        <p><code>env_logger</code>通过环境变量<code>RUST_LOG</code>来控制日志级别和模块过滤：</p>
+
+        <pre><code># 全局最低级别为 info
+RUST_LOG=info cargo run
+
+# 不同模块不同级别
+RUST_LOG=warn,my_crate=debug,my_crate::sensitive_module=trace cargo run
+
+# 关闭某些crate的日志
+RUST_LOG=info,noisy_crate=off cargo run</code></pre>
+
+        <p>这个过滤系统可以极其精细——你可以把第三方crate的日志关掉（它们通常太吵了），只关注自己代码的日志。</p>
+
+        <div class="tip">
+            <strong>小技巧</strong>：<code>env_logger</code>只是入门级别的后端。对于生产级应用，考虑使用<code>log4rs</code>（支持滚动文件、JSON格式、远程发送）或<code>slog</code>（结构化日志的老牌库）。Rust社区的生态丰富到你可以选择任何层面——从轻量级到企业级都有对应方案。
+        </div>
+
+        <h2>tracing生态 — span、event、结构化日志、OpenTelemetry</h2>
+
+        <p><code>tracing</code>是<code>log</code>的现代化继任者。它不仅仅记录"一个级别+一条消息"，而是引入了<strong>span</strong>（跨度）和<strong>event</strong>（事件）的概念，让日志天然具有了<strong>结构化和可关联性</strong>。</p>
+
+        <h3>span与event</h3>
+
+        <p><code>span</code>代表一段代码执行的时间范围——比如处理一个HTTP请求、执行一次数据库查询。<code>event</code>则是在某个时间点发生的事情——两者通过层级关系自动关联：</p>
+
+        <pre><code>use tracing::{info, error, span, Level};
+use tracing_subscriber;
+
+fn process_request(request_id: u64) {
+    // 创建一个 span，它代表"处理这个请求"的整个过程
+    let span = span!(Level::INFO, "process_request", request_id);
+    let _guard = span.enter();  // 进入 span，离开作用域时自动退出
+
+    info!("开始处理请求");
+
+    if let Err(e) = query_database(request_id) {
+        error!(error = %e, "数据库查询失败");
+    }
+
+    info!("请求处理完成");
+}
+
+fn query_database(request_id: u64) -&gt; Result&lt;(), String&gt; {
+    let span = span!(Level::DEBUG, "query_database", request_id);
+    let _guard = span.enter();
+
+    info!("执行SQL查询");
+    // 模拟成功
+    Ok(())
+}
+
+fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .init();
+
+    process_request(42);
+}</code></pre>
+
+        <p>输出会包含span的层级信息和结构化字段：</p>
+
+        <pre><code>2026-07-01T10:00:00.123Z INFO process_request{request_id=42}: 开始处理请求
+2026-07-01T10:00:00.124Z INFO process_request{request_id=42}:query_database{request_id=42}: 执行SQL查询
+2026-07-01T10:00:00.125Z INFO process_request{request_id=42}: 请求处理完成</code></pre>
+
+        <p>注意第二行——它同时包含了<code>process_request</code>和<code>query_database</code>两个span的上下文信息。这就是tracing的核心价值：日志记录自动携带了"我在哪段代码路径中"的上下文，不需要你在每条日志里手动加上<code>request_id</code>。</p>
+
+        <h3>结构化日志与OpenTelemetry</h3>
+
+        <p>在分布式系统中，tracing可以结合<strong>OpenTelemetry</strong>标准，将span和event直接导出到Jaeger、Zipkin等分布式追踪系统：</p>
+
+        <pre><code>[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-opentelemetry = "0.27"
+opentelemetry-jaeger = "0.22"
+
+// 配置 Jaeger 导出
+fn init_tracing() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    let tracer = opentelemetry_jaeger::new_agent_pipeline()
+        .with_service_name("my_service")
+        .install_simple()?;
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::filter::EnvFilter::from_default_env())
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .with(tracing_subscriber::fmt::layer().json())  // JSON格式输出
+        .init();
+    Ok(())
+}</code></pre>
+
+        <p>这样一来，你的所有<code>info!</code>、<code>error!</code>以及span都会自动包含trace ID和span ID，整个请求链路可以从客户端穿透到多个后端服务，在Jaeger的UI上以火焰图的形式展示。</p>
+
+        <div class="highlight">
+            <strong>tracing vs log</strong>：小型CLI工具用<code>env_logger</code>就够了。中大型服务——尤其是需要处理分布式请求追踪的——建议直接用<code>tracing</code>。<code>tracing</code>的API设计兼容了<code>log</code>的<code>info!</code>/<code>error!</code>宏，迁移成本很低。你甚至可以同时使用两者：让<code>tracing</code>桥接（bridge）<code>log</code>的宏调用到自己的span体系中。
+        </div>
+
+        <h2>dbg!宏与eprintln! — 调试打印、stderr输出</h2>
+
+        <p>说到最原始的调试方法——打印，Rust提供了比<code>println!</code>更合适的选项。</p>
+
+        <h3>dbg!宏：调试界的瑞士军刀</h3>
+
+        <p><code>dbg!</code>是一个神奇的宏：它打印文件名、行号、表达式本身、以及表达式的值，然后返回这个值（所有权不转移）。它可以包在任何表达式外面：</p>
+
+        <pre><code>fn main() {
+    let x = 42;
+    let y = dbg!(x * 2);  // 输出: [src/main.rs:3] x * 2 = 84
+    dbg!(y);               // 输出: [src/main.rs:4] y = 84
+
+    // 一个更有用的场景——在链式调用中插入 dbg!
+    let result = vec![1, 2, 3, 4, 5]
+        .iter()
+        .map(|x| dbg!(x * 2))     // 看看每个元素被映射成什么
+        .filter(|x| dbg!(x &gt; &amp;5)) // 看看哪些被过滤了
+        .collect::&lt;Vec&lt;_&gt;&gt;();
+}</code></pre>
+
+        <p><code>dbg!</code>输出的目标不是<code>stdout</code>，而是<code>stderr</code>——所以它不会污染你程序正常的管道输出。这是一个很贴心的设计：你在调试时加的<code>dbg!</code>不会干扰到<code>grep</code>、管道重定向等操作。</p>
+
+        <div class="tip">
+            <strong>dbg! vs println!</strong>：<code>println!("{:?}", x)</code>输出到stdout，<code>dbg!(x)</code>输出到stderr且自动包含位置和表达式信息。如果你只是在调试一个问题，用<code>dbg!</code>——它更短、信息更多、还不污染stdout。<code>println!</code>应该留给程序正式的输出，而不是调试。
+        </div>
+
+        <h3>eprintln! — 正式的stderr输出</h3>
+
+        <p><code>eprintln!</code>是<code>println!</code>的stderr版本：</p>
+
+        <pre><code>fn main() {
+    println!("这是正常的程序输出");  // stdout
+    eprintln!("这是一个错误消息");   // stderr
+}</code></pre>
+
+        <p>运行<code>cargo run 2&gt;/dev/null</code>，stderr被重定向到空设备，你只能看到正常输出。这在写CLI工具时非常重要——错误消息应该走stderr，让用户可以把正常输出和错误输出分开处理。</p>
+
+        <h2>rust-analyzer技巧 — 类型提示、跳转定义、重构</h2>
+
+        <p>好的工具能让你事半功倍。在Rust开发中，<strong>rust-analyzer</strong>是比任何调试器都更常用的"调试辅助工具"——因为它能在你写代码的阶段就帮助你理解类型和发现潜在问题。</p>
+
+        <h3>类型提示（Inlay Hints）</h3>
+
+        <p>rust-analyzer会在代码中自动显示推断出的类型，以"幽灵文字"的形式出现在变量声明的旁边：</p>
+
+        <pre><code>let x = 42;           // 显示: i32
+let y = &amp;x;           // 显示: &amp;i32
+let z = vec![1, 2, 3]; // 显示: Vec&lt;i32&gt;</code></pre>
+
+        <p>在VS Code的<code>settings.json</code>中，你可以控制哪些类型的提示显示：</p>
+
+        <pre><code>{
+    "rust-analyzer.inlayHints.typeHints.enable": true,
+    "rust-analyzer.inlayHints.parameterHints.enable": true,
+    "rust-analyzer.inlayHints.chainingHints.enable": true
+}</code></pre>
+
+        <h3>跳转定义和查找引用</h3>
+
+        <ul>
+            <li><strong>F12 / Cmd+Click</strong>：跳转到定义（变量、函数、类型等）</li>
+            <li><strong>Shift+F12</strong>：查找所有引用</li>
+            <li><strong>F2</strong>：重命名符号——rust-analyzer会自动找到所有引用并一起重命名</li>
+        </ul>
+
+        <p>这些功能对于理解陌生crate的代码来说价值连城。遇到一个不熟悉的函数？跳转到它的定义；看到一个trait但不知道谁实现了它？查找引用；想重构某个类型但害怕漏掉引用？用重命名。</p>
+
+        <h3>代码动作（Code Actions）</h3>
+
+        <p>rust-analyzer提供了大量的自动重构动作，通过<code>Ctrl+.</code>（或灯泡图标）触发：</p>
+        <ul>
+            <li>自动导入缺失的类型</li>
+            <li>将变量改为不可变/可变</li>
+            <li>提取表达式为变量</li>
+            <li>提取函数</li>
+            <li>生成struct的构造函数</li>
+            <li>自动填充match分支</li>
+            <li>将<code>if let</code>转换为<code>match</code>（或反向）</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>一个节省大量时间的设置</strong>：在VS Code中开启<code>editor.formatOnSave: true</code>，配合<code>"rust-analyzer.checkOnSave": true</code>。这样每次保存文件都会自动运行<code>rustfmt</code>格式化和<code>cargo check</code>编译检查。无需手动运行<code>cargo fmt</code>和<code>cargo check</code>——错误和警告会直接在编辑器中用红色波浪线标出。
+        </div>
+
+        <h2>断点调试 — VS Code + lldb、rr逆向调试</h2>
+
+        <p>虽然Rust的所有权系统大大减少了运行时bug，但总有些问题单靠读代码和打日志解决不了。这时候就需要真正的调试器登场了。</p>
+
+        <h3>VS Code + CodeLLDB</h3>
+
+        <p>在VS Code中安装<strong>CodeLLDB</strong>扩展（由Vadim Chugunov维护的那个），然后你就可以像调试C++一样调试Rust了：</p>
+        <ul>
+            <li>在代码行号旁边点击添加断点</li>
+            <li>按<code>F5</code>启动调试</li>
+            <li>在调试面板中查看局部变量、调用栈、表达式求值</li>
+        </ul>
+
+        <p>要确保调试信息可用，你需要在<code>Cargo.toml</code>中设置：</p>
+
+        <pre><code>[profile.debug]
+inherits = "dev"    # 继承 dev profile
+debug = 2           # 完整调试符号
+opt-level = 0       # 不优化，保留源码映射</code></pre>
+
+        <p>然后在VS Code的<code>.vscode/launch.json</code>中添加配置：</p>
+
+        <pre><code>{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug Rust",
+            "cargo": {
+                "args": ["build", "--profile=debug"]
+            },
+            "program": "${workspaceFolder}/target/debug/&lt;你的程序名&gt;",
+            "sourceLanguages": ["rust"]
+        }
+    ]
+}</code></pre>
+
+        <h3>rr — 逆向调试</h3>
+
+        <p>如果断点调试还不够——比如某个bug在跑了10万次迭代后才出现一次，你需要的是<strong>rr</strong>。rr是Mozilla开发的一个"记录与重放"调试器。它记录程序的一次完整执行过程，然后你可以回放并<strong>逆向执行</strong>：</p>
+
+        <pre><code># 安装 rr（需要 Linux + x86_64）
+sudo apt install rr
+
+# 记录程序的执行
+rr record ./my_program
+
+# 回放并调试
+rr replay
+
+# 在 rr 中使用 "反向继续" 命令
+(rr) reverse-continue  # 反向执行直到上一个断点
+(rr) reverse-step      # 反向单步
+(rr) reverse-next      # 反向跳过</code></pre>
+
+        <p>想象一下这个场景：你在日志里看到某个变量在<code>第315行</code>的值是错误的，但不知道它是在哪里被改成错误的。用rr，你可以在第315行设置断点，然后用<code>reverse-continue</code>退回到"这个变量最后一次被修改的地方"——一切清清楚楚。</p>
+
+        <div class="warning">
+            <strong>调试器不是万能的</strong>：在Rust中，调试器对<strong>release模式</strong>编译的代码帮助有限——因为优化器可能内联函数、重排指令、甚至完全消除某些变量。如果你在release模式下调试时发现变量显示为"optimized out"，这很正常。切换到debug模式编译，或者在不影响问题复现的前提下，给关键变量加上<code>#[inline(never)]</code>来防止内联。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>日志和调试是开发者的"第二双眼"。这一章我们从最基础的<code>log</code> + <code>env_logger</code>出发，学习了分级日志和过滤配置；然后进入了现代化的<code>tracing</code>生态——span、event、结构化日志，以及如何通过OpenTelemetry进行分布式追踪。我们还学习了<code>dbg!</code>和<code>eprintln!</code>这两种更安全的调试打印方式。最后，从rust-analyzer的IDE工具技巧，到VS Code + lldb的断点调试，再到rr的逆向调试——你手里已经有了从"轻量"到"重型"的完整调试工具箱。</p>
+
+        <p>下一章我们将进入一个全新的话题——智能指针。之前我们多次提到<code>Box&lt;T&gt;</code>、<code>Rc&lt;T&gt;</code>、<code>RefCell&lt;T&gt;</code>，但从未深入讲解。第19章将会全面拆解这些智能指针：它们的工作原理、使用场景、以及那些让你头疼的借用规则。</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

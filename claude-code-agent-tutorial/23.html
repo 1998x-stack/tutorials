@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第23章 Agent 调试与可观测性</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html" class="active">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第23章 Agent 调试与可观测性</h2>
+
+        <p>大家好，我是你们的讲师。在此之前，我们一直在搭建 Agent 的功能模块——工具系统、上下文管理、权限控制、Sub-Agent 调度。每写完一个模块，你可能跟我一样，觉得"这不就跑起来了吗？"但真实世界会告诉你：<strong>跑起来不等于能正常工作</strong>。</p>
+
+        <p>本章我们要聊一个经常被忽视但极其重要的话题——调试与可观测性。我在刚接触 Agent 开发时犯过一个典型的错误：花了两周时间写了一个看起来很完美的 Agent 系统，然后信心满满地交给同事测试。结果同事问的第一个问题让我哑口无言——"它花了多少 Token？为什么这么慢？在哪一步出错的？"我答不上来，因为我根本没有在任何地方埋观测点。那一刻我意识到：<strong>没有可观测性的 Agent，就像没有仪表盘的飞机——你能飞，但你不知道什么时候会掉下来</strong>。</p>
+
+        <h3>23.1 Agent 调试为什么这么难</h3>
+
+        <p>传统的软件调试——你设个断点、打行 <code>print</code>、看变量值——这套方法论在 Agent 系统中几乎全面失效。原因有三个，每个都很要命。</p>
+
+        <p><strong>第一，非确定性行为。</strong>同一个输入，Agent 两次执行的结果可以完全不同。模型本身的采样随机性、LLM API 的负载均衡、工具执行的时序差异——每个环节都在引入不确定性。你在调试时看到的一个 bug，下一次运行可能就不复现了，但一个全新的 bug 又冒出来了。传统调试器对这种"幽灵 bug"毫无办法。</p>
+
+        <p><strong>第二，多步因果链。</strong>一个 Agent 会话可能包含几十甚至上百个步骤。错误往往在第 1 步埋下伏笔，到第 10 步才显现。比如权限拒绝可能是因为第 3 步某个工具调用返回了格式错误的 session token，而那个 token 被存在了上下文里，被后续所有调用使用。你看到的是"第 10 步权限错误"，但根因在第 3 步。没有跨步骤的追踪能力，你连问题在哪都找不到。</p>
+
+        <p><strong>第三，隐藏状态。</strong>模型内部的推理过程（CoT、内部 monologue）是不透明的。你看到模型的输出——工具调用参数、最终回答——但你不知道它为什么选择调用这个工具而不是那个，也不知道它在推理中是否产生了幻觉。模型的"思考"是一个黑盒，你只能通过观察它的行为来推测。</p>
+
+        <div class="tip">
+            <strong>调试心态转变：</strong>传统的调试是"找到 bug 然后消灭它"，Agent 调试更像是"收集证据然后推断发生了什么"。你需要把可观测性当作功能需求而非事后补救——在设计 Agent 的第一天就要考虑"我以后怎么调试它"。
+        </div>
+
+        <h3>23.2 三层日志体系</h3>
+
+        <p>面对上述挑战，我推荐一个经过验证的实践——<strong>三层日志体系</strong>。每一层回答不同的问题，使用不同的日志格式，面向不同的受众。</p>
+
+        <p><strong>API 层</strong>：记录每次模型 API 调用的完整信息——请求的 messages 列表（不含过大内容）、Token 计数（input cached、input uncached、output）、响应时间、<code>stop_reason</code>、模型版本。这一层回答的问题是"模型在做什么"和"花了多少钱"。</p>
+
+        <p><strong>工具层</strong>：记录每个工具调用的参数、执行结果（或错误）、执行耗时、调用的来源（模型主动调用还是系统触发）。这一层回答的问题是"工具执行是否正确"和"瓶颈在哪里"。</p>
+
+        <p><strong>系统层</strong>：记录 Agent 内部事件——权限检查结果、缓存命中/未命中、上下文压缩事件、Sub-Agent 创建和销毁、内存操作。这一层回答的问题是"系统内部发生了什么"。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>层级</th>
+                    <th>记录内容</th>
+                    <th>输出格式</th>
+                    <th>示例条目</th>
+                    <th>谁需要它</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>API</td>
+                    <td>请求/响应摘要、Token 明细、延迟、stop_reason</td>
+                    <td>JSON Lines (.jsonl)</td>
+                    <td>{"layer":"api","turn":3,"input_tokens":4521,"output_tokens":892,"latency_ms":3400,"stop_reason":"tool_use"}</td>
+                    <td>成本分析、模型行为研究者</td>
+                </tr>
+                <tr>
+                    <td>Tool</td>
+                    <td>工具名称、参数哈希、结果摘要、执行耗时、错误码</td>
+                    <td>JSON Lines (.jsonl)</td>
+                    <td>{"layer":"tool","tool":"Read","target":"src/main.py","duration_ms":12,"success":true}</td>
+                    <td>性能调优、功能调试者</td>
+                </tr>
+                <tr>
+                    <td>System</td>
+                    <td>权限决策、缓存事件、压缩事件、生命周期事件</td>
+                    <td>JSON Lines + 控制台</td>
+                    <td>{"layer":"system","event":"cache_hit","key":"system_prompt_v3","hit":true}</td>
+                    <td>平台工程师、安全审计</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>以下是一个 Python 日志中间件的实现，展示了如何在 Agent 中同时输出这三个层次的日志：</p>
+
+        <pre><code>import json, time, logging
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+
+# 结构化日志基类
+@dataclass
+class LogEvent:
+    layer: str          # "api" | "tool" | "system"
+    turn: int
+    timestamp: float = field(default_factory=time.time)
+
+class AgentLogger:
+    def __init__(self, log_dir: str = "logs"):
+        self.turn = 0
+        self.api_log = open(f"{log_dir}/api.jsonl", "a")
+        self.tool_log = open(f"{log_dir}/tool.jsonl", "a")
+        self.sys_log = open(f"{log_dir}/system.jsonl", "a")
+        self._setup_console_handler()
+
+    def log_api(self, *, request: dict, response: dict,
+                input_tokens: int, output_tokens: int,
+                cached_input: int, latency_ms: float):
+        self.turn += 1
+        event = {
+            "layer": "api", "turn": self.turn,
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input,
+            "output_tokens": output_tokens,
+            "latency_ms": latency_ms,
+            "stop_reason": response.get("stop_reason"),
+            "model": response.get("model"),
+            "timestamp": time.time(),
+        }
+        self._write(self.api_log, event)
+        self._console(f"[API] 回合 {self.turn}: "
+                      f"输入 {input_tokens}(缓存 {cached_input}) "
+                      f"→ 输出 {output_tokens} | "
+                      f"{latency_ms:.0f}ms | {event['stop_reason']}")
+
+    def log_tool(self, *, name: str, params: dict,
+                 result: str, duration_ms: float, error: Optional[str] = None):
+        event = {
+            "layer": "tool", "turn": self.turn,
+            "tool": name,
+            "params_hash": hash(frozenset(params.items())),
+            "result_size": len(result),
+            "duration_ms": round(duration_ms, 1),
+            "success": error is None,
+            "error": error,
+        }
+        self._write(self.tool_log, event)
+        status = "OK" if error is None else f"ERR: {error}"
+        self._console(f"[Tool] {name} → {status} "
+                      f"({duration_ms:.0f}ms, {len(result)}B)")
+
+    def log_system(self, *, event: str, **kwargs):
+        entry = {"layer": "system", "turn": self.turn,
+                 "event": event, **kwargs}
+        self._write(self.sys_log, entry)
+        self._console(f"[Sys] {event}: {kwargs}")
+
+    def _write(self, fh, obj):
+        fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        fh.flush()
+
+    def _console(self, msg):
+        print(f"\033[90m{msg}\033[0m")  # dim gray for console
+
+    def close(self):
+        for fh in (self.api_log, self.tool_log, self.sys_log):
+            fh.close()</code></pre>
+
+        <h3>23.3 Token 消耗追踪与成本归因</h3>
+
+        <p>AI Agent 的最大运营成本来自模型 API 调用。如果你不追踪 Token 消耗，你就是在闭着眼睛花钱。</p>
+
+        <p>每次 API 调用的 Token 构成远比大部分人想象的要复杂。你需要拆解三部分：<strong>输入 Token</strong>（又分为 cached 和 uncached）、<strong>输出 Token</strong>、以及被很多人忽略的 <strong>工具定义开销</strong>（tool schema 作为 system prompt 的一部分，每次调用都要发送）。</p>
+
+        <p>目前的定价模型大致如下（以 Anthropic API 为例）：</p>
+
+        <ul>
+            <li>缓存命中（cached input）：$0.10/M tokens</li>
+            <li>缓存未命中（uncached input）：$1.00/M tokens</li>
+            <li>输出 Token（output）：$5.00/M tokens</li>
+        </ul>
+
+        <p>这意味着一件事：<strong>缓存的输入比未缓存的便宜 10 倍</strong>。提升缓存命中率是成本优化的第一要务，我们会在下一章深入讨论。这里我们先聚焦如何追踪。</p>
+
+        <p>我推荐对每轮对话建立一个成本归因表。一个典型的昂贵回合可能长这样：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>回合</th>
+                    <th>输入 (缓存/未缓存)</th>
+                    <th>输出</th>
+                    <th>工具定义</th>
+                    <th>估算成本</th>
+                    <th>原因分析</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>1 (首次)</td>
+                    <td>0 / 85,000</td>
+                    <td>1,200</td>
+                    <td>~4,500</td>
+                    <td>$0.091</td>
+                    <td>首次调用，全量未缓存</td>
+                </tr>
+                <tr>
+                    <td>2-8</td>
+                    <td>~72,000 / ~5,000</td>
+                    <td>800-1,500</td>
+                    <td>~4,500</td>
+                    <td>$0.013-0.018</td>
+                    <td>缓存命中，只有增量未缓存</td>
+                </tr>
+                <tr>
+                    <td>9 (压缩后)</td>
+                    <td>0 / 120,000</td>
+                    <td>2,100</td>
+                    <td>~4,500</td>
+                    <td>$0.131</td>
+                    <td>上下文压缩后缓存失效</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>注意回合 9——上下文压缩后，之前的缓存全部失效，Agent 不得不重新发送大量历史信息。这是成本的一个隐藏炸弹，也解释了为什么 Claude Code 团队在上下文压缩算法上投入了那么多精力。</p>
+
+        <p>识别 Token 浪费是成本归因的另一大目标。常见浪费模式包括：</p>
+
+        <ul>
+            <li><strong>冗余工具结果</strong>：一个工具返回了 50KB 的数据，但模型只用了其中 200 字节。考虑截断或摘要。</li>
+            <li><strong>过大的 System Prompt</strong>：每个回合都附带了完整的工具定义和规则说明。考虑分场景裁剪。</li>
+            <li><strong>无意义的重试</strong>：工具调用超时后，Agent 用完全相同的参数重试，而不是调整策略。</li>
+        </ul>
+
+        <h3>23.4 执行时间线可视化</h3>
+
+        <p>当你面对一个 50 回合的 Agent 会话，日志文件堆了几千行 JSON，你最需要的是什么？一张 <strong>时间线图</strong>。</p>
+
+        <p>时间线把每个 API 调用、工具执行、用户交互按照时间顺序排列在一条水平轴上。一眼就能看出哪里不对劲：某个 Read 工具为什么执行了 3 秒（应该是毫秒级）？为什么两个独立的 Read 被串行执行了？为什么模型在某个工具返回后沉默了 10 秒（TTFT 过长）？</p>
+
+        <p>社区中最实用的可视化工具是 <strong>claude-code-reverse</strong>（作者 Yuyz0112）。它可以直接解析 Claude Code 的日志并生成交互式的时间线 HTML 页面。你可以点击每个时间块查看详细信息——那是哪个工具调用、返回了什么结果、花了多少 Token。</p>
+
+        <p>以下是时间线可视化可以帮你发现的典型瓶颈：</p>
+
+        <ul>
+            <li><strong>慢工具执行</strong>：某个 Bash 命令跑了几十秒，阻塞了后续所有操作。是否需要超时机制？是否需要异步执行？</li>
+            <li><strong>高 API 延迟</strong>：某些回合的 TTFT 异常高（>10s），可能是模型负载高或者你的 prompt 太长导致预处理慢。</li>
+            <li><strong>可并行的任务串行化</strong>：模型依次调用了 <code>Read(file_a)</code>、<code>Read(file_b)</code>、<code>Read(file_c)</code>——这三个完全可以并行，但模型默认串行执行。一个简单的并行调度就能把 3 秒缩短到 1 秒。</li>
+        </ul>
+
+        <h3>23.5 踩坑：我花了两天查的一个 Bug</h3>
+
+        <p>分享一个真实案例。有段时间，我的 Agent 频繁出现一个诡异行为：它在循环调用同一个工具——<code>Edit</code> 同一个文件、同一个位置、同一个内容——然后说自己完成了，但实际上文件根本没变。</p>
+
+        <p>我第一步检查 API 日志。好，模型每次都返回了 <code>stop_reason: "tool_use"</code>，参数看起来也对——<code>file_path</code>、<code>old_string</code>、<code>new_string</code> 都正确。第二步检查工具日志。好，<code>Edit</code> 工具每次都成功执行了，返回了 <code>success: true</code>。那问题出在哪？</p>
+
+        <p>我打印了模型在下一回合实际看到的 messages——这是调试 Agent 最容易被忽略的一步。结果真相大白了：<strong>工具结果（tool_result）被追加到了错误的 tool_use_id 上</strong>。模型的响应里有三个 <code>tool_use</code> content block，它们各有自己的 <code>id</code>。我本应该把执行结果挂到对应的 <code>tool_result</code> block 上，但因为一个序列化 bug，结果被挂到了一个不存在的 id 上。API 端收到了这个 <code>tool_result</code>，但因为找不到对应的 <code>tool_use</code>，就<strong>默默地丢弃了它</strong>。API 不会报错——它只是忽略了这个输入。</p>
+
+        <p>所以模型看到的是：它发出的工具调用没有返回值。于是它理所当然地重试——因为对模型来说，工具"没有返回"就意味着"可能还没执行完"或者"需要再试一次"。模型是对的，是我们（Agent 实现者）把 id 搞错了。</p>
+
+        <p>修复只有一行代码：确保 <code>tool_result</code> 的 <code>tool_use_id</code> 精确匹配模型下发的 <code>id</code> 字段。但这个 bug 让我浪费了两天时间，就是因为<strong>我没有在日志中记录"工具结果到底挂到了哪个 id 上"</strong>。</p>
+
+        <div class="warning">
+            <strong>教训：</strong>日志不仅要记录"发生了什么"，还要记录"你把它关联到了什么"。每一次工具返回，都应该清楚记录它对应的 tool_use_id、它在 messages 中的插入位置、以及模型后续是否真的"看到"了它。这个级别的可观测性往往决定了调试一个 Agent bug 需要两小时还是两天。
+        </div>
+
+        <h3>23.6 构建可观测性面板</h3>
+
+        <p>有了日志数据，下一步是把它们变成可视化的仪表盘。你不一定需要 Grafana——对于 Agent 开发来说，一个简单的终端面板或者静态 HTML 就足够了。</p>
+
+        <p>我推荐关注以下几个核心指标：</p>
+
+        <ul>
+            <li><strong>Token 用量仪表</strong>：当前会话的输入/输出 Token 总量，以及缓存命中率。一眼看出成本状况。</li>
+            <li><strong>回合计数器</strong>：当前是第几回合。超过 30 回合就要警惕上下文膨胀问题。</li>
+            <li><strong>工具执行直方图</strong>：每个工具的执行次数和平均耗时。快速识别慢工具和过度使用的工具。</li>
+            <li><strong>错误率迷你图</strong>：工具调用失败率、API 错误率。趋势上升时提前干预。</li>
+        </ul>
+
+        <p>用 Python 的 <code>rich</code> 库可以快速实现终端仪表盘：</p>
+
+        <pre><code># 终端可观测性面板（依赖 rich）
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.live import Live
+from rich.table import Table
+from collections import Counter, defaultdict
+
+class AgentDashboard:
+    def __init__(self):
+        self.token_input = 0
+        self.token_output = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.turn = 0
+        self.tool_stats = defaultdict(lambda: {"calls": 0, "total_ms": 0, "errors": 0})
+
+    def update(self, log_event: dict):
+        layer = log_event.get("layer")
+        if layer == "api":
+            self.token_input += log_event.get("input_tokens", 0)
+            self.token_output += log_event.get("output_tokens", 0)
+            self.turn = log_event.get("turn", self.turn)
+        elif layer == "tool":
+            name = log_event.get("tool", "?")
+            self.tool_stats[name]["calls"] += 1
+            self.tool_stats[name]["total_ms"] += log_event.get("duration_ms", 0)
+            if not log_event.get("success", True):
+                self.tool_stats[name]["errors"] += 1
+
+    def render(self) -> Layout:
+        layout = Layout()
+        layout.split_column(
+            Layout(Panel(f"Token 输入: {self.token_input:,} | "
+                         f"输出: {self.token_output:,} | "
+                         f"回合: {self.turn}"), title="概览"),
+            Layout(self._tool_table(), title="工具执行"),
+        )
+        return layout
+
+    def _tool_table(self):
+        table = Table("工具", "调用次数", "平均耗时(ms)", "错误率")
+        for name, s in sorted(self.tool_stats.items()):
+            avg = s["total_ms"] / s["calls"] if s["calls"] else 0
+            err_rate = s["errors"] / s["calls"] if s["calls"] else 0
+            table.add_row(name, str(s["calls"]),
+                          f"{avg:.1f}", f"{err_rate:.0%}")
+        return table</code></pre>
+
+        <div class="tip">
+            <strong>结构化日志 vs 漂亮打印：</strong>JSON Lines 格式是给机器读的——便于 grep、jq 查询、指标聚合。给人类看的时候，用 rich 或类似的库做格式化输出。两条输出流互不干扰：文件里写 JSON Lines，终端里显示彩色面板。不要试图用一种格式满足两个受众。
+        </div>
+
+        <p>本章我们讨论了三层日志体系、Token 成本归因、时间线可视化、以及一个我踩过的坑。可观测性是 Agent 工程中被低估的环节——它不会让你的 Agent "功能更多"，但它能让你<strong>在出问题的时候知道自己为什么出了什么问题</strong>。下一章我们将进入更主动的领域——性能优化。既然我们会测量了，那么下一步就是让它跑得更快、更便宜。</p>
+
+        <div class="footer-nav">
+            <a href="22.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="24.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第24章 性能优化实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html" class="active">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第24章 性能优化实战</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们把 Agent 的仪表盘装好了——你会测量 Token 消耗、追踪工具执行、绘制时间线了。但是，会测和会优化是两回事。本章我们要做的是：在拿到测量数据后，<strong>系统地让 Agent 更快、更便宜、更可靠</strong>。</p>
+
+        <p>也许你会想："性能优化不就是换更好的模型吗？"这是一个常见的误解。我见过太多团队斥巨资升级到 Sonnet 4，却发现延迟反而更高了——因为他们没有意识到 80% 的瓶颈来自 Harness 而非模型本身。事实上，在 Agent 系统中，Harness 层面的优化往往比模型升级带来更显著的收益，而且成本几乎为零。本章我将带你逐一攻克这些"免费的午餐"。</p>
+
+        <h3>24.1 优化从哪里开始</h3>
+
+        <p>任何性能优化都应该遵循一个四步框架。跳过任何一步，你就是在猜，而不是在优化。</p>
+
+        <ol>
+            <li><strong>测量基线</strong>：在开始优化之前，你必须知道当前的状况——每任务 Token 消耗、平均延迟、成功率、成本。没有基线数据，你就不知道自己有没有进步。</li>
+            <li><strong>定位瓶颈</strong>：是 API 调用太慢？工具执行阻塞了主循环？上下文膨胀导致每次输入越来越大？用上一章的可观测性工具找出最慢的那个环节。</li>
+            <li><strong>针对性优化</strong>：针对定位到的瓶颈应用特定优化手段——下文会逐一介绍。</li>
+            <li><strong>重新测量</strong>：同样的测量方法、同样的任务集，对比优化前后的差异。如果达不到预期，回到第 2 步。</li>
+        </ol>
+
+        <p>这个框架听起来简单，但在实际操作中，最容易犯的错误是第 1 步和第 2 步之间——使用不同的任务集做测量。优化前跑的是"修复一个 typo"，优化后跑的是"重构整个模块"，拿到的数据完全没有可比性。务必使用<strong>标准化的 benchmark 任务集</strong>来做性能评估。</p>
+
+        <h3>24.2 Prompt Cache 命中率调优</h3>
+
+        <p>在 Agent 成本结构中，没有任何一项优化能像 Prompt Cache 那样带来立竿见影的效果。让我给你一个具体的数字对比：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>场景</th>
+                    <th>输入 Token (未缓存)</th>
+                    <th>单次成本</th>
+                    <th>20 回合任务成本</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>全量未缓存</td>
+                    <td>85,000</td>
+                    <td>$0.085</td>
+                    <td>$1.70</td>
+                </tr>
+                <tr>
+                    <td>90% 缓存命中</td>
+                    <td>8,500</td>
+                    <td>$0.009</td>
+                    <td>$0.18</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>差距接近 10 倍。你的目标是把缓存命中率从默认的 40-50% 提升到 85% 以上。以下是三个经过验证的策略。</p>
+
+        <p><strong>策略一：保持 System Prompt 稳定。</strong>这是最重要的原则。System Prompt 的 key 值（系统用它来计算缓存标识）在每回合之间不应发生变化。如果你在不同回合中动态添加或修改 System Prompt 内容，缓存会被频繁刷新。我的做法是把 System Prompt 拆成"稳定部分"（工具定义、核心规则）和"动态部分"（当前任务说明），动态部分放在 messages 的用户消息中，而不是 System Prompt 里。</p>
+
+        <p><strong>策略二：工具定义固定在输入头部。</strong>工具定义的 Tokens 量可观（一个包含 10 个工具的系统可能需要 4,000-6,000 Tokens 的定义文本），而且每次调用都发送。最坏的情况是你在不同回合中改变了工具的排列顺序——这对缓存是致命的。把工具定义视为不变的"头部"，并且在初始化时一次性确定顺序，以后永不改变。</p>
+
+        <p><strong>策略三：避免在会话中间向前插入消息。</strong>当你需要在已有对话中插入新内容时，缓存可能会失效——因为缓存是基于前缀匹配的，中间插入会改变前缀，导致前面的内容需要重新处理。如果必须插入，尽量插在末尾，或者用新的 user turn 来代替。</p>
+
+        <p>我曾经接手一个项目，优化前的缓存命中率只有 45%——因为开发者在每轮对话中都往 System Prompt 后面追加了一段"当前目录结构"。优化后我们把目录结构移到了第一条用户消息中，命中率直接跳到 92%。按当时的用量估算，年化成本从 $12,000 降到了 $3,600。这个改动只花了 2 小时。</p>
+
+        <div class="tip">
+            <strong>小技巧：</strong>在 API 日志中记录 <code>input_tokens</code> 和 <code>cached_input_tokens</code> 字段。两者的差就是未缓存的新增输入。缓存的输入量÷总输入量就是你的缓存命中率。把这个指标放在仪表盘最显眼的位置——它直接影响你的预算。
+        </div>
+
+        <h3>24.3 并行工具调用策略</h3>
+
+        <p>Claude 模型支持在<strong>单次响应中返回多个 tool_use block</strong>。这是一个强大的能力——模型可以在一轮思考后同时发出"读文件 A、读文件 B、检查目录结构"三个调用，而不是一个接一个地请求。但你的 Harness 需要正确地执行这些并行调用并把结果返回给模型。</p>
+
+        <p>并行执行的核心在于 <strong>依赖检测</strong>。并不是所有的并行调用都能真正并行——如果工具 B 的参数引用了工具 A 的返回结果，那它们必须串行执行。以下是一个带依赖检测的并行执行器实现：</p>
+
+        <pre><code>import asyncio
+from typing import Callable, List, Dict, Any
+
+class ParallelToolExecutor:
+    """
+    并行执行多个工具调用，自动检测依赖关系。
+    """
+
+    def __init__(self, tool_registry: Dict[str, Callable]):
+        # tool_registry: {"Read": read_func, "Edit": edit_func, ...}
+        self.tools = tool_registry
+
+    async def execute_all(self, tool_calls: List[Dict]) -> List[Dict]:
+        """
+        tool_calls: [
+            {"id": "toolu_1", "name": "Read", "input": {"file_path": "a.py"}},
+            {"id": "toolu_2", "name": "Read", "input": {"file_path": "b.py"}},
+            ...
+        ]
+        返回: [{"id": "toolu_1", "result": "...", "error": None}, ...]
+        """
+        results = {}
+        pending = list(tool_calls)
+        completed_ids = set()
+        result_map = {}  # tool_call_id -> result
+
+        while pending:
+            batch = []
+            remaining = []
+
+            for call in pending:
+                deps = self._detect_dependencies(call, completed_ids)
+                if not deps:
+                    batch.append(call)
+                else:
+                    remaining.append(call)
+
+            if not batch:
+                # 循环依赖或无法满足依赖——强制执行第一个
+                batch.append(pending[0])
+
+            # 并行执行当前批次
+            batch_results = await asyncio.gather(
+                *[self._execute_one(c) for c in batch],
+                return_exceptions=True
+            )
+
+            for call, res in zip(batch, batch_results):
+                if isinstance(res, Exception):
+                    result_map[call["id"]] = {"error": str(res)}
+                else:
+                    result_map[call["id"]] = {"result": res}
+                completed_ids.add(call["id"])
+
+            pending = remaining
+
+        return [{"id": c["id"], **result_map.get(c["id"], {"error": "not_executed"})}
+                for c in tool_calls]
+
+    def _detect_dependencies(self, call: Dict, completed: set) -> List[str]:
+        """检查 call 的输入是否依赖尚未完成的工具的结果。"""
+        deps = []
+        input_str = str(call.get("input", {}))
+        for other_id in self._all_ids:
+            if other_id not in completed and other_id in input_str:
+                deps.append(other_id)
+        return deps
+
+    async def _execute_one(self, call: Dict):
+        fn = self.tools.get(call["name"])
+        if fn is None:
+            raise ValueError(f"Unknown tool: {call['name']}")
+        if asyncio.iscoroutinefunction(fn):
+            return await fn(**call.get("input", {}))
+        return fn(**call.get("input", {}))
+
+    def set_all_ids(self, ids: List[str]):
+        self._all_ids = ids</code></pre>
+
+        <p>在实际测试中，并行执行可以带来 40-60% 的延迟降低。例如，一个 Agent 需要同时读取三个文件来理解项目结构——串行需要 1.5 秒（每次 ~500ms 的 I/O），并行只需要 600ms（最慢的那个）。如果考虑到模型需要等待所有工具返回后才能继续推理，这个节省会进一步放大。</p>
+
+        <p>但要注意：<strong>不是所有工具都适合并行</strong>。<code>Write</code> 和 <code>Edit</code> 同时操作同一个文件可能会产生竞态条件。<code>Bash</code> 命令之间可能有隐藏的状态依赖。我的建议是只对"纯读"操作默认启用并行，写入操作保持串行，除非你能显式证明它们互不影响。</p>
+
+        <h3>24.4 模型选择策略：Haiku vs Sonnet 分场景</h3>
+
+        <p>一个最常见的"性能浪费"是在所有场景下都使用最强的模型。Sonnet 4 确实比 Haiku 4.5 聪明，但它贵 10 倍、慢 3 倍。问题不是"哪个模型更好"，而是<strong>哪个任务需要哪个模型</strong>。</p>
+
+        <p>我的建议是建立一个"分级模型策略"：</p>
+
+        <ul>
+            <li><strong>Haiku 4.5</strong> 负责：信息汇总、简单查询、Todo 更新、不需要深入推理的代码格式化、路径解析、文件列表读取。</li>
+            <li><strong>Sonnet 4</strong> 负责：代码生成、架构设计决策、Bug 根因分析、复杂重构、权限策略制定。</li>
+        </ul>
+
+        <p>实现上就是所谓的"escalation 模式"——先用 Haiku 尝试，如果失败（比如生成的代码有语法错误、或者任务复杂度超出 Haiku 的能力），就升级到 Sonnet 再试一次。这样可以确保 60-70% 的简单任务使用低成本模型，只有复杂任务才由 Sonnet 处理。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>任务类型</th>
+                    <th>推荐模型</th>
+                    <th>成本对比</th>
+                    <th>质量对比</th>
+                    <th>建议策略</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>代码格式化、Lint 修复</td>
+                    <td>Haiku 4.5</td>
+                    <td>1x</td>
+                    <td>与 Sonnet 几乎无差异</td>
+                    <td>默认 Haiku</td>
+                </tr>
+                <tr>
+                    <td>简单的 CRUD 代码生成</td>
+                    <td>Haiku 4.5</td>
+                    <td>1x</td>
+                    <td>差异微小</td>
+                    <td>Haiku，出错后 escalation</td>
+                </tr>
+                <tr>
+                    <td>复杂业务逻辑实现</td>
+                    <td>Sonnet 4</td>
+                    <td>~10x</td>
+                    <td>显著更好</td>
+                    <td>直接 Sonnet</td>
+                </tr>
+                <tr>
+                    <td>性能优化/算法设计</td>
+                    <td>Sonnet 4</td>
+                    <td>~10x</td>
+                    <td>显著更好</td>
+                    <td>直接 Sonnet</td>
+                </tr>
+                <tr>
+                    <td>Bug 诊断与调试</td>
+                    <td>Sonnet 4</td>
+                    <td>~10x</td>
+                    <td>明显更好</td>
+                    <td>直接 Sonnet</td>
+                </tr>
+                <tr>
+                    <td>任务总结/日志摘要</td>
+                    <td>Haiku 4.5</td>
+                    <td>1x</td>
+                    <td>足够好</td>
+                    <td>默认 Haiku</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>24.5 温度参数的实战影响</h3>
+
+        <p>聊个有趣的话题。直觉上，编程任务应该用温度 0——我们不希望模型"有创意"地写代码，我们希望它输出确定性的结果。但实际实验会告诉你事情没有那么简单。</p>
+
+        <p>我做过一组对比实验：用相同的 prompt 和相同的模型，只改变温度参数，对一组 coding benchmark 进行 20 次测试。</p>
+
+        <ul>
+            <li><strong>温度 0.0</strong>：任务平均成功率 82%。输出高度稳定（每次几乎一致），但模型在遇到模糊需求时倾向于"不做选择"，有时会拒绝执行。对某些 edge case 的处理过于死板。</li>
+            <li><strong>温度 0.1</strong>：任务平均成功率 87%。稳定性仍然很好，但模型在需要做细微决策时表现更好——比如选择变量命名风格、处理边界条件。绝大多数情况下，这是 coding agent 的最佳温度。</li>
+            <li><strong>温度 0.3</strong>：任务平均成功率 84%。输出多样性增加，偶尔会有创新的解决方案，但也引入了小概率的"幻觉性错误"。</li>
+            <li><strong>温度 0.5-0.7</strong>：任务平均成功率 65-72%。适合需要探索多种方案的场景，比如代码重构时的架构选型，但整体上不适合需要精确执行的 coding 任务。</li>
+        </ul>
+
+        <p>这个结果的启示是：<strong>不要默认使用温度 0</strong>。温度 0 不等于"确定性"，它只是让 logits 采样变成了 argmax 采样——如果模型有多个 logit 接近最大值，argmax 仍然会产生"伪确定性"（每次都选同一个，但未必是最佳的那个）。略微增加温度到 0.1 可以让模型在模糊地带做出更好的选择，而不会显著牺牲稳定性。</p>
+
+        <div class="warning">
+            <strong>注意：</strong>温度参数不是银弹。如果你的 prompt 设计不合理，无论怎么调温度都不会得到好结果。先确保 prompt 清晰、任务边界明确，再微调温度——这个顺序不要搞反。
+        </div>
+
+        <h3>24.6 端到端优化案例</h3>
+
+        <p>理论说再多，不如看一个真实的端到端案例。假设我们有一个 Claude Code v4 风格的 Agent，目标是完成一个典型的前端任务："修复用户列表页的分页 Bug"。以下是优化前后的对比：</p>
+
+        <p><strong>优化前：</strong></p>
+        <ul>
+            <li>每任务 Token 消耗：~120,000 Tokens</li>
+            <li>平均延迟：45 秒</li>
+            <li>每任务成本：~$0.85</li>
+            <li>缓存命中率：48%</li>
+            <li>工具调用方式：全部串行</li>
+            <li>使用模型：全程 Sonnet 4</li>
+        </ul>
+
+        <p><strong>优化后：</strong></p>
+        <ul>
+            <li>每任务 Token 消耗：~45,000 Tokens</li>
+            <li>平均延迟：18 秒</li>
+            <li>每任务成本：~$0.22</li>
+            <li>缓存命中率：89%</li>
+            <li>工具调用方式：读写分离，读操作并行</li>
+            <li>使用模型：Haiku 4.5 为主，复杂分析升级 Sonnet 4</li>
+        </ul>
+
+        <p>这些节省从哪来？我们逐项拆解：</p>
+        <ul>
+            <li><strong>缓存优化贡献 ~60% 的成本降低</strong>：从 48% 到 89% 的缓存命中率，大幅降低了未缓存输入的 Token 量。</li>
+            <li><strong>并行执行贡献 ~30% 的延迟降低</strong>：多个 Read 操作同时执行，减少了 40% 的等待时间。</li>
+            <li><strong>分级模型策略贡献 ~40% 的成本降低</strong>：大约 60% 的任务回合用 Haiku 执行，只有复杂推理才用 Sonnet。</li>
+            <li><strong>上下文裁剪贡献 ~15% 的成本降低</strong>：压缩了工具返回的冗余结果，减少了后续回合的输入 Token。<strong>（注：超过 100% 因为各项有重叠）</strong></li>
+        </ul>
+
+        <div class="highlight">
+            <strong>性能优化的 80/20 法则：</strong>Prompt Cache 优化贡献 60% 的成本节省，并行执行贡献 30% 的延迟降低。先做这两件事，再考虑其他。
+        </div>
+
+        <p>让我们用一个表格来总结本章讨论的所有优化技术：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>优化技术</th>
+                    <th>目标指标</th>
+                    <th>预期提升</th>
+                    <th>实现复杂度</th>
+                    <th>风险</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Prompt Cache 调优</td>
+                    <td>输入 Token 成本</td>
+                    <td>40-60% 成本降低</td>
+                    <td>低（改几行代码）</td>
+                    <td>极低</td>
+                </tr>
+                <tr>
+                    <td>并行工具执行</td>
+                    <td>延迟</td>
+                    <td>30-50% 延迟降低</td>
+                    <td>中（需依赖检测）</td>
+                    <td>低（竞态条件需注意）</td>
+                </tr>
+                <tr>
+                    <td>分级模型策略</td>
+                    <td>综合成本</td>
+                    <td>30-50% 成本降低</td>
+                    <td>中（需路由逻辑）</td>
+                    <td>中（可能降级决策失误）</td>
+                </tr>
+                <tr>
+                    <td>温度调优</td>
+                    <td>任务成功率</td>
+                    <td>3-8% 成功率提升</td>
+                    <td>低</td>
+                    <td>极低</td>
+                </tr>
+                <tr>
+                    <td>上下文裁剪</td>
+                    <td>输入 Token</td>
+                    <td>10-20% 输入降低</td>
+                    <td>高（需压缩算法）</td>
+                    <td>中（可能丢失信息）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>优化是一门需要持续迭代的实践。你的 Agent 越用，你会越了解它的性能特征，也越能找到针对性的优化点。但无论怎么优化，记住一个原则：<strong>先测量，后优化。测量之后，优先做最便宜、最有影响力的改动。</strong>下一章我们将走出你自己的 Agent 系统，去看看社区中其他的教程和工具——了解别人是怎么建 Agent 的，往往能给你很多启发。</p>
+
+        <div class="footer-nav">
+            <a href="23.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="25.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

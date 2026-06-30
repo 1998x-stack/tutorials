@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第25章 推理引擎与服务架构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 大模型训练全景图</a></li>
+            <li><a href="02.html">第2章 预训练数据工程</a></li>
+            <li><a href="03.html">第3章 Tokenizer原理与实践</a></li>
+            <li><a href="04.html">第4章 Transformer架构深度解析</a></li>
+            <li><a href="05.html">第5章 分布式训练基础</a></li>
+            <li><a href="06.html">第6章 优化器与学习率调度</a></li>
+            <li><a href="07.html">第7章 混合精度与显存优化</a></li>
+            <li><a href="08.html">第8章 3D并行与大规模训练</a></li>
+            <li><a href="09.html">第9章 MoE混合专家架构</a></li>
+            <li><a href="10.html">第10章 训练稳定性与收敛</a></li>
+            <li><a href="11.html">第11章 Scaling Laws与算力规划</a></li>
+            <li><a href="12.html">第12章 长上下文训练技术</a></li>
+            <li><a href="13.html">第13章 合成数据与数据配比</a></li>
+            <li><a href="14.html">第14章 Mid-training与继续预训练</a></li>
+            <li><a href="15.html">第15章 监督微调(SFT)原理与实践</a></li>
+            <li><a href="16.html">第16章 RLHF与奖励模型</a></li>
+            <li><a href="17.html">第17章 DPO与偏好对齐优化</a></li>
+            <li><a href="18.html">第18章 参数高效微调(PEFT)</a></li>
+            <li><a href="19.html">第19章 RLVR与推理增强技术</a></li>
+            <li><a href="20.html">第20章 指令微调与Agent能力</a></li>
+            <li><a href="21.html">第21章 多模态模型训练</a></li>
+            <li><a href="22.html">第22章 模型合并与知识蒸馏</a></li>
+            <li><a href="23.html">第23章 模型量化技术深度</a></li>
+            <li><a href="24.html">第24章 推理优化技术</a></li>
+            <li><a href="25.html" class="active">第25章 推理引擎与服务架构</a></li>
+            <li><a href="26.html">第26章 端侧部署与边缘推理</a></li>
+            <li><a href="27.html">第27章 集群运维与故障恢复</a></li>
+            <li><a href="28.html">第28章 从零到一：完整实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第25章 推理引擎与服务架构</h2>
+
+        <p>大家好，我是你们的讲师。前两章我们分别讲了量化（让模型变"瘦"）和推理优化（让模型变"快"），但还有一个问题没解决——<strong>怎么把所有这些技术组织成一个稳定、高效、可扩展的服务？</strong>这就是推理引擎和服务架构要做的事。</p>
+
+        <p>我记得有个技术团队的负责人跟我抱怨过："我们用了市面上最好的推理库，单卡延迟很低啊，但一上线就崩了。"我一看他们的架构：简单粗暴的"模型加载→FastAPI→Gunicorn→Kubernetes"，没有请求队列、没有批处理调度、没有前缀缓存。15个并发用户就把服务打垮了，因为每个请求独占了整张卡。这就是典型的"单点优化很强，系统工程稀烂"——<strong>模型推理的瓶颈往往不在模型本身，而在架构</strong>。这一章我们来补上这一课。</p>
+
+        <h3>25.1 主流推理引擎对比</h3>
+
+        <p>当前主流的推理引擎有四个：vLLM、SGLang、TensorRT-LLM和LMDeploy。它们的定位和侧重点差异很大，我们逐个来看。</p>
+
+        <p><strong>vLLM。</strong>由UC Berkeley的Sky Computing Lab开发，是目前社区使用最广的开源推理引擎。其核心创新PagedAttention我们在第24章已经介绍过了。vLLM的优势在于：生态兼容性（huggingface模型几乎即插即用）、灵活的调度策略（支持continuous batching和prefix caching）、丰富的模型支持（包括MoE和multi-modal）。在8B-70B级别的模型上，vLLM的单机推理性能非常优秀。它的劣势是：对FP8的支持还在完善中，大规模多节点推理的优化不如TensorRT-LLM。</p>
+
+        <p><strong>SGLang。</strong>由UC Berkeley和NVIDIA联合开发，定位是"面向LLM的编程语言级推理框架"。SGLang引入了<strong>RadixAttention</strong>——一种基于radix tree的KV Cache管理系统，本质上是prefix caching的泛化版本。传统prefix caching只能匹配完全一致的前缀，RadixAttention可以匹配所有公共前缀，甚至支持前缀的自动补全和共享。SGLang还有一个叫"结构化生成"（Structured Generation）的特性，通过约束解码（constrained decoding）支持JSON、SQL等格式化输出，对Agent和Function Calling场景特别友好。SGLang目前只支持GPU推理，不支持CPU。</p>
+
+        <p><strong>TensorRT-LLM。</strong>NVIDIA官方出品的推理引擎，与H100的硬件深度绑定。它最大优势是<strong>性能极致</strong>——NVIDIA把CUDA核心、Tensor Core、NVLink、InfiniBand的每一个细节都优化到了极致。在H100集群上，TensorRT-LLM的吞吐量通常比vLLM高20-30%。它的劣势也很明显：<strong>部署复杂</strong>。模型需要经过TRT-LLM的编译优化流程（build engine），这个过程耗时且容易出错。每次模型更新都要重新build。另外，TensorRT-LLM对非NVIDIA硬件不兼容。</p>
+
+        <p><strong>LMDeploy。</strong>由上海AI Lab（Shanghai AI Laboratory）和LMMs社区开发，是国内用户最多的推理引擎之一。它的特点是：<strong>对国内模型生态支持好</strong>（Qwen系列、InternLM系列都有官方优化），部署简单（pip install一键安装，不需要build），管理工具完善（自带推理服务监控和负载均衡）。不过在极致性能上，还是略逊于TensorRT-LLM和vLLM。</p>
+
+        <table>
+            <tr>
+                <th>特性</th>
+                <th>vLLM</th>
+                <th>SGLang</th>
+                <th>TensorRT-LLM</th>
+                <th>LMDeploy</th>
+            </tr>
+            <tr>
+                <td>核心创新</td>
+                <td>PagedAttention</td>
+                <td>RadixAttention</td>
+                <td>硬件极致优化</td>
+                <td>生态简便</td>
+            </tr>
+            <tr>
+                <td>推理吞吐</td>
+                <td>优秀</td>
+                <td>优秀</td>
+                <td>极致（+20-30%）</td>
+                <td>良好</td>
+            </tr>
+            <tr>
+                <td>部署复杂度</td>
+                <td>低（pip install）</td>
+                <td>低（pip install）</td>
+                <td>高（需要build engine）</td>
+                <td>低（pip install）</td>
+            </tr>
+            <tr>
+                <td>模型兼容性</td>
+                <td>广泛（HuggingFace生态）</td>
+                <td>较广</td>
+                <td>有限（需NVIDIA官方支持）</td>
+                <td>国内模型优先</td>
+            </tr>
+            <tr>
+                <td>FP8支持</td>
+                <td>有限（H100+）</td>
+                <td>完善（H100+）</td>
+                <td>最完善（全硬件）</td>
+                <td>完善</td>
+            </tr>
+            <tr>
+                <td>Multi-node推理</td>
+                <td>支持（较新）</td>
+                <td>支持</td>
+                <td>原生支持</td>
+                <td>有限</td>
+            </tr>
+            <tr>
+                <td>结构化生成</td>
+                <td>ad-hoc（需外部库）</td>
+                <td>原生支持</td>
+                <td>部分支持</td>
+                <td>部分支持</td>
+            </tr>
+            <tr>
+                <td>开源协议</td>
+                <td>Apache 2.0</td>
+                <td>Apache 2.0</td>
+                <td>Apache 2.0</td>
+                <td>Apache 2.0</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <p><strong>选型建议</strong>：追求极致性能且团队有NVIDIA工具链使用经验，选TensorRT-LLM。追求开发和迭代效率，首选vLLM（社区最活跃，遇到问题能快速找到答案）。Agent/Function Calling场景多，SGLang的结构化生成能力会大大简化你的工程。面向国内用户、部署Qwen/InternLM系列模型，LMDeploy是最省心的选择。</p>
+        </div>
+
+        <h3>25.2 Prefill-Decode Disaggregation</h3>
+
+        <p>传统推理引擎把prefill（预填充）和decode（解码）两个阶段放在同一张GPU上。这有什么问题呢？prefill和decode的计算特征完全不同——<strong>prefill是计算密集型</strong>（需要并行处理整个prompt的attention），而<strong>decode是访存密集型</strong>（逐token生成，受限于内存带宽）。把它们放在同一张卡上，要么卡在prefill阶段是高计算利用率但低显存利用率，要么在decode阶段是高显存利用率但低计算利用率。你永远无法同时优化两者。</p>
+
+        <p><strong>分离的理论基础。</strong>Prefill-Decode Disaggregation（也叫PD分离）的思路很简单：<strong>用不同的GPU集群来处理prefill和decode</strong>。prefill集群配置高计算能力的GPU（多SM、高Tensor Core利用率），decode集群配置大显存、高带宽的GPU（更看重内存带宽和容量）。两个集群之间通过高速网络（NVLink/RoCE）连接。当一个请求到达时，先发送给prefill GPU处理prompt，prefill完成后将KV Cache传输给decode GPU，decode GPU就从prefill的结果开始逐token生成。</p>
+
+        <p><strong>实践效果。</strong>PD分离在实际部署中效果非常显著。阿里公布的RTP-LLM实践数据显示，PD分离后整体吞吐量提升了1.5-2倍，prefill的P99延迟下降了60%，decode的P99延迟下降了40%。原因很简单：prefill不再被decode拖慢（不用等待前一批decode完成），decode也不再被prefill阻塞（不用等新请求的prefill）。两个集群各司其职，GPU利用率都从50-60%提升到了85-95%。</p>
+
+        <p><strong>关键挑战。</strong>PD分离也不是银弹，有四个关键挑战需要解决。第一，<strong>KV Cache传输延迟</strong>：prefill完成后需要把完整的KV Cache传到decode GPU，对于长序列（32K tokens），KV Cache可能有几十GB，传输延迟不能忽视。解决方法是利用GPU-direct RDMA，或者使用CPU共享内存做中转。第二，<strong>负载均衡</strong>：prefill和decode的比例不是固定的，高峰期（更多新请求）prefill压力大，平稳期（持续生成）decode压力大。需要动态调度资源池。第三，<strong>请求亲和性</strong>：decode阶段最好保持请求在同一张GPU上（避免KV Cache反复迁移），需要在调度层做亲和性绑定的。第四，<strong>失败恢复</strong>：如果decode GPU挂了，prefill阶段已经完成的KV Cache怎么恢复？需要做KV Cache的checkpoint。</p>
+
+        <pre><code># PD分离的请求处理流程（简化逻辑）
+class PDDisaggregatedServing:
+    def __init__(self):
+        self.prefill_pool = GPUPool(["prefill-gpu-1", "prefill-gpu-2"], role="prefill")
+        self.decode_pool = GPUPool(["decode-gpu-1", "decode-gpu-2", "decode-gpu-3"], role="decode")
+        self.kv_cache_store = KVStore()  # KV Cache共享存储
+
+    def handle_request(self, request):
+        # Step 1: 分配prefill GPU并执行prefill
+        prefill_gpu = self.prefill_pool.schedule(request)
+        kv_cache = prefill_gpu.prefill(request.prompt_tokens)
+
+        # Step 2: 保存KV Cache到共享存储
+        cache_id = self.kv_cache_store.put(kv_cache)
+
+        # Step 3: 将请求和KV Cache引用发送给decode调度器
+        decode_gpu = self.decode_pool.schedule(request)
+        decode_gpu.decode(request, cache_id)
+
+    def decode_gpu_loop(self, gpu):
+        while True:
+            request, cache_id = self.decode_queue.get()
+            kv_cache = self.kv_cache_store.get(cache_id)
+            # 从prefill结果开始逐token生成
+            for token in gpu.generate_from_kv_cache(kv_cache):
+                yield token</code></pre>
+
+        <h3>25.3 服务架构设计</h3>
+
+        <p>一个生产级的LLM推理服务不只需要推理引擎本身，还需要完整的服务架构支撑。我总结为三个核心组件：请求调度、负载均衡、自动扩缩容。</p>
+
+        <p><strong>请求调度（优先级队列与SLA保障）。</strong>在线推理服务的请求不是平等的。有的请求来自VIP用户，需要在SLA（Service Level Agreement）内完成——比如"P99延迟不超过2秒"。有的请求来自免费用户，延迟要求宽松。推理引擎的调度器需要支持优先级队列：高优先级请求优先调度，甚至可以抢占正在运行的请求资源。具体实现上，vLLM支持<code>--priority</code>模式来配置请求优先级。更高级的做法是引入"SLA感知调度"：每个请求携带一个deadline，调度器用EDF（Earliest Deadline First）算法来排序。一个重要的设计经验是：<strong>不要把CPU侧和GPU侧的调度混在一起</strong>——CPU侧做请求级别的优先级判断和排队，GPU侧只关注batch填充效率。混在一起会互相干扰。</p>
+
+        <p><strong>负载均衡。</strong>多GPU部署时，负载均衡的策略决定了整集群的效率。最简单的策略是"round-robin"——新请求轮流发到不同的GPU。但这不是最优的，因为每个请求的KV Cache大小不同，round-robin不能保证显存利用率均衡。更好的方案是"least-loaded"：调度器维护每个GPU的空闲KV Cache页数量，新请求发到空闲页最多的GPU。在PD分离架构中，负载均衡的策略更复杂：prefill需要尽量把相同前缀的请求聚集到同一张GPU上（提高prefix cache命中率），而decode则需要考虑请求的亲和性和显存容量的均衡。</p>
+
+        <p><strong>自动扩缩容。</strong>LLM推理服务的流量波动很大——白天是工作高峰期，深夜是低谷期。如果全程维持最大容量，GPU资源浪费严重。自动扩缩容（Auto Scaling）基于实时监控指标（QPS、GPU利用率、KV Cache利用率、请求排队长度）来加减GPU实例。核心的扩缩容算法是"HPA-like"的PID控制器，但需要特别注意<strong>冷启动延迟</strong>——一个新实例初始化模型、加载权重、build engine可能需要5-30分钟。这意味着扩缩容需要"提前预测"（predictive scaling），而不是"事后反应"。常见的做法是基于历史流量做时间序列预测（比如用Prophet模型），在流量高峰前15分钟预启动实例。</p>
+
+        <div class="highlight">
+            <p><strong>生产部署经验</strong>：服务架构中最容易被忽略的是<a href="#graceful-shutdown">优雅关闭</a>（Graceful Shutdown）。GPU实例被缩容时，正在进行的推理请求需要被妥善处理——等当前请求完成后再关闭，而不是直接杀死进程。vLLM的<code>vllm serve</code>命令支持SIGTERM信号来处理graceful shutdown。另外，Kubernetes的Pod生命周期管理要和推理引擎的shutdown逻辑配合好，一个常见的坑是K8s的terminationGracePeriodSeconds设得太短（30秒），而长序列生成可能持续几分钟，导致请求被硬中断。建议把这个值设到300秒以上。</p>
+        </div>
+
+        <h3>25.4 RTP-LLM与工业实践</h3>
+
+        <p>RTP-LLM（Real-Time Processing for LLM）是阿里巴巴自研的推理引擎，支撑着通义千问和阿里云百炼平台上超过1亿用户的请求。它虽然不是开源的（至少不是完整版），但它的技术方案在行业中具有标杆意义。</p>
+
+        <p><strong>KV Cache分层管理。</strong>RTP-LLM引入了多级KV Cache架构，这是它最核心的设计。第一层是<strong>GPU HBM</strong>（高带宽内存）：存放当前正在生成请求的KV Cache，响应最快但容量最小。第二层是<strong>CPU DRAM</strong>（系统内存）：存放已完成prefill但等待调度的请求的KV Cache，需要时通过PCIe传输到GPU。第三层是<strong>NVMe SSD</strong>：存放低频访问的KV Cache（比如长尾请求的缓存）。RTP-LLM的调度器会根据请求的延迟敏感度动态决定KV Cache放在哪一层——高优先级请求GPUs HBM直达，低优先级请求逐步提升。</p>
+
+        <p><strong>Burst Handling机制。</strong>互联网服务的流量模式存在明显的"burst"特征——比如双11大促期间，QPS可能瞬间暴涨10倍。RTP-LLM的burst handling机制包括三个层面。在引擎层，通过动态调整batch size和max_num_seqs阈值来应对流量波动。在调度层，维护一个"surge队列"，burst时先把请求排入surge队列排队，等GPU资源释放后再处理。在架构层，预留20%的"Burst Capacity Pool"（突发容量池），平时用作模型实验的预发布环境，burst时秒级切换到生产服务。</p>
+
+        <p><strong>混部调度（Co-location Scheduling）。</strong>在阿里的大规模集群中，不可能每张GPU只跑一个推理模型。RTP-LLM支持多模型共享GPU（multi-model serving）。它的调度器会考虑每个模型的访问模式和时间规律——比如"通义千问"的流量在白天高，"AI编码助手"的流量在上班高峰高。"法律AI助手"的流量在工作日高。通过错峰调度，一张GPU可以在不同时间段跑不同模型，GPU利用率从40%提升到80%以上。这个做法在业界越来越普遍，我们下一节讲成本优化时会再深入。</p>
+
+        <table>
+            <tr>
+                <th>层级</th>
+                <th>存储介质</th>
+                <th>延迟</th>
+                <th>容量</th>
+                <th>用途</th>
+            </tr>
+            <tr>
+                <td>L1</td>
+                <td>GPU HBM</td>
+                <td>纳秒级</td>
+                <td>GB级别</td>
+                <td>正在生成的请求</td>
+            </tr>
+            <tr>
+                <td>L2</td>
+                <td>CPU DRAM</td>
+                <td>微秒级（PCIe）</td>
+                <td>TB级别</td>
+                <td>等待调度的prefill结果</td>
+            </tr>
+            <tr>
+                <td>L3</td>
+                <td>NVMe SSD</td>
+                <td>毫秒级</td>
+                <td>PB级别</td>
+                <td>低频访问的历史缓存</td>
+            </tr>
+        </table>
+
+        <div class="warning">
+            <p><strong>踩坑案例</strong>：一个团队在部署类似的分层KV Cache方案时，遇到了诡异的内存泄漏——GPU显存在运行12小时后被占满，即使没有请求。追查了两天，发现是CPU DRAM层的KV Cache没有正确释放：一个请求的decode完成后，L2 cache里的KV Cache应该被标记为"可回收"，但回收逻辑中有一个off-by-one错误，导致每次都有一个cache entry被遗漏。这个bug积累12小时后，L2层的orphan cache占用了超过200GB CPU内存，迫使操作系统把大量GPU内存通过PCIe回写到CPU内存，造成了死锁。教训是：<strong>分层管理增加了系统的状态空间，每一层的缓存回收逻辑都要格外小心</strong>。写单元测试时，重点覆盖"长时间运行后的缓存回收"场景。</p>
+        </div>
+
+        <h3>25.5 成本优化</h3>
+
+        <p>讲完技术，我们来谈一个现实的问题——钱。大模型推理的成本非常高。一张H100按云厂商价格大约是每小时3-5美元，如果部署100张卡，一个月的成本就要20-30万美元。成本优化不是可选项，是必选项。</p>
+
+        <p><strong>Spot Instance使用。</strong>云厂商提供的spot实例（竞价实例）价格只有按量付费的20-40%。但spot实例有被回收的风险（云厂商可以随时回收）。在LLM推理场景中，spot实例适合两种类型的任务：一是<strong>非实时推理</strong>（比如批量离线推理、embedding生成），中断了重跑即可；二是<strong>无状态推理</strong>（短请求模型，没有long-running KV Cache）。对于实时对话场景，建议用on-demand实例做主服务，spot实例做弹性缓冲——流量波动大时快速拉起spot实例应对，spot被回收时请求自动重试到on-demand实例上。</p>
+
+        <p><strong>Multi-Model Serving。</strong>在同一张GPU上部署多个模型，不仅可以提高GPU利用率，还可以通过"模型分时复用"降低整体成本。常见的做法是"模型热切换"——GPU加载模型A时，把模型B的权重放在CPU内存中，模型A推理完一批请求后，把模型B的权重加载到GPU，卸载模型A。切换时间取决于模型大小和PCIe带宽：对于7B模型（FP16约14GB），切换时间大约1-2秒。对于在线服务来说，这个切换时间需要被"掩盖"——可以在切换时发送一个"保持连接"信号给客户端，或者在两个GPU之间做交替切换（ping-pong）。</p>
+
+        <p><strong>GPU Sharing（MIG/MPS）。</strong>如果模型不需要整张GPU的算力和显存，可以考虑GPU sharing。NVIDIA提供了两个技术。第一，<strong>MIG（Multi-Instance GPU）</strong>：在A100/H100上把一张GPU物理切分成多个独立实例，每个实例有自己的显存、缓存和计算单元。适合多个小模型部署，或者一个模型推理+一个模型实验。MIG的缺点是实例大小是固定的（比如A100可以切成1个40GB + 2个20GB，或者7个10GB），灵活度不够。第二，<strong>MPS（Multi-Process Service）</strong>：多个进程共享GPU，由NVIDIA的驱动层调度计算和显存。MPS的优点是灵活，缺点是进程之间有IO干扰，不适合高负载场景。在实践中，LLM推理推荐用MIG（隔离性好，性能稳定），只有在MIG切分不合适时才考虑MPS。</p>
+
+        <pre><code># GPU Sharing成本对比示例（H100按$4/h计算）
+# 假设我们有3个模型：7B (Q4), 13B (Q4), 70B (Q4)
+
+# 方案1：各用各的卡
+model_7b = 1 × H100 × $4/h = $4/h
+model_13b = 1 × H100 × $4/h = $4/h
+model_70b = 4 × H100 × $16/h = $16/h
+total = $24/h | GPU利用率: 50-70%
+
+# 方案2：MIG切分（1张H100切2个MIG实例）
+model_7b + model_13b = 1 × H100 × $4/h  # 共用1张卡
+model_70b = 4 × H100 × $16/h
+total = $20/h | GPU利用率: 75-85%
+
+# 方案3：热切换（7B和13B时切换）
+model_7b (8-10h) + model_13b (8-10h) = 1 × H100 × $4/h
+model_70b = 4 × H100 × $16/h
+total = $20/h | GPU利用率: 60-90% (时间维度)
+
+# 方案4：PD分离 + MIG + spot混合
+# prefill集群: 2 × spot H100 ($3.2/h × 2 = $6.4/h)
+# decode集群: 4 × on-demand H100 ($4/h × 4 = $16/h)
+# 70B模型 + 7B/13B混部在某一张decode卡上
+total ≈ $22.4/h | 等效吞吐: 方案1的1.8倍</code></pre>
+
+        <p>成本优化没有银弹。我把常见策略按照"性价比"排个序：第一梯队（投入最小、收益最大）是<strong>模型量化</strong>（上一章的内容）和<strong>KV Cache优化</strong>。第二梯队是<strong>Continuous Batching</strong>和<strong>FlashAttention</strong>。第三梯队才是<strong>MIG/MPS</strong>、<strong>PD分离</strong>和<strong>spot instance</strong>。我的建议是：<strong>先把前两梯队的优化做到极致，再考虑第三梯队</strong>。很多团队上来就搞MIG、搞spot，结果发现模型本身还在用FP16慢吞吞地跑，省那点GPU共享的钱还没有量化带来的收益大。</p>
+
+        <div class="highlight">
+            <p><strong>终极建议</strong>：一个中型推理服务的成本优化基准线——<strong>用FP8/INT4量化 + FlashAttention + PagedAttention + Continuous Batching</strong>，你的GPU利用率应该在80-90%，每张H100的吞吐量应该在2,000-5,000 token/s（取决于模型大小）。如果达不到这个基准，先别想成本优化的事，先把技术优化做到位。如果达到了，再考虑PD分离、spot实例和MIG，这时候每张卡省下的20-30%成本才是真金白银。</p>
+        </div>
+
+        <p>好了，第25章的内容就到这儿。这一章我们从推理引擎的选择（vLLM、SGLang、TensorRT-LLM、LMDeploy）讲到了PD分离的设计理念，再到生产级服务架构（请求调度、负载均衡、扩缩容），又深入到阿里巴巴RTP-LLM的工业实践经验，最后谈到了成本优化的多种策略。你会发现，<strong>推理服务架构设计的本质是在延迟、吞吐和成本之间找到一个最适合你业务场景的平衡点</strong>。<strong>第26章「端侧部署与边缘推理」</strong>，我们将从数据中心走向边缘设备——在手机、IoT设备上跑大模型，挑战更大，但也更有意思。咱们下章见。</p>
+
+        <div class="footer-nav">
+            <a href="24.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="26.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

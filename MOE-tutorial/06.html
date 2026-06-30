@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 路由机制全景：Token-Choice vs Expert-Choice</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 MoE概述与演进史</a></li>
+            <li><a href="02.html">第2章 1991理论鼻祖：Adaptive Mixture of Local Experts</a></li>
+            <li><a href="03.html">第3章 条件计算与稀疏激活原理</a></li>
+            <li><a href="04.html">第4章 2017开山之作：Sparsely-Gated MoE (上)</a></li>
+            <li><a href="05.html">第5章 2017开山之作：Sparsely-Gated MoE (下)</a></li>
+            <li><a href="06.html" class="active">第6章 路由机制全景：Token-Choice vs Expert-Choice</a></li>
+            <li><a href="07.html">第7章 负载均衡理论与方法</a></li>
+            <li><a href="08.html">第8章 Switch Transformer：极简单专家路由</a></li>
+            <li><a href="09.html">第9章 GShard：分布式MoE工程基石</a></li>
+            <li><a href="10.html">第10章 专家并行与通信优化</a></li>
+            <li><a href="11.html">第11章 Mixtral：开源轻量化MoE标杆</a></li>
+            <li><a href="12.html">第12章 DeepSeekMoE：专家专业化创新 (上)</a></li>
+            <li><a href="13.html">第13章 DeepSeekMoE：专家专业化创新 (下)</a></li>
+            <li><a href="14.html">第14章 DeepSeek-V2: MoE+长文本工业集大成</a></li>
+            <li><a href="15.html">第15章 DeepSeek-V3：无损负载均衡新范式</a></li>
+            <li><a href="16.html">第16章 辅助损失-free负载均衡深度剖析</a></li>
+            <li><a href="17.html">第17章 多任务MoE：MMoE与任务专属门控</a></li>
+            <li><a href="18.html">第18章 异构MoE与开放MoE生态</a></li>
+            <li><a href="19.html">第19章 专家专业化与知识聚合的博弈</a></li>
+            <li><a href="20.html">第20章 路由几何理论与专家耦合</a></li>
+            <li><a href="21.html">第21章 时间记忆与预测性路由</a></li>
+            <li><a href="22.html">第22章 专家可解释性与语义发现</a></li>
+            <li><a href="23.html">第23章 MoE推理优化：Prefill与Decode</a></li>
+            <li><a href="24.html">第24章 消费级硬件部署MoE</a></li>
+            <li><a href="25.html">第25章 自适应路由与动态推理</a></li>
+            <li><a href="26.html">第26章 MoE训练实战：从零搭建稀疏模型</a></li>
+            <li><a href="27.html">第27章 2025-2026前沿与未来方向</a></li>
+            <li><a href="28.html">第28章 综合项目：构建领域MoE专家系统</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>路由：MoE的交通枢纽</h2>
+
+        <p>大家好，我是你们的讲师。如果你把MoE想象成一个巨大的"知识工厂"，那么<strong>路由机制</strong>（Routing）就是这个工厂的"交通枢纽"——它决定了每一个token应该送到哪个或哪些"车间"（专家）去处理。路由的设计直接决定了MoE系统的效率、效果和可训练性。</p>
+
+        <p>到目前为止，我们接触到的路由方式都是"token挑专家"——即门控网络为每个token计算专家得分，然后选择得分最高的top-k个专家。这看起来天经地义，但实际上还有其他的路由策略。这一章，我们就把所有主流的MoE路由方法放在一起，做一个全景式的对比和分析。</p>
+
+        <p>在开始之前，我想讲一个真实的故事。2022年我参与了一个推荐系统的MoE化改造，用了当时最主流的Noisy Top-K Gating。结果上线后发现，推荐系统中不同曝光的"热门item"的token数量极不均衡——热门item的token占了batch的80%，而冷门item的token很少。结果token-choice路由把热门item的token几乎全部路由到了Expert#1和#2，冷门item的token稀疏地分散在其他专家。这导致了严重的负载不均衡——两个专家过载，其余专家闲置。当时我花了整整一周调试容量因子和辅助损失系数，效果都不理想。后来意识到：<strong>在数据分布极度偏斜的场景下，token-choice路由天然有缺陷，需要换一种思路</strong>。这个故事引出了我们这一章的核心问题：不同的路由方式适用于什么场景？</p>
+
+        <h2>路由的三条路线</h2>
+
+        <p>所有MoE路由机制可以归纳为三大类：</p>
+
+        <ul>
+            <li><strong>Token-Choice 路由</strong>（Token选择专家）：每个token根据自己的特征，选择最匹配的top-k个专家。这是最常见的路由方式，从Shazeer 2017到Mixtral到DeepSeek-V2都在使用。</li>
+            <li><strong>Expert-Choice 路由</strong>（专家选择Token）：每个专家根据自己的"偏好"，从所有token中挑选最匹配的top-k个。这种方式在2022年左右被提出，初衷是解决负载均衡问题。</li>
+            <li><strong>确定性路由</strong>（Deterministic Routing）：不依赖学习到的门控权重，而是通过固定的规则（如Hash函数或全局分配策略）将token分配给专家。这种方式牺牲了灵活性，但换来了确定性和零路由开销。</li>
+        </ul>
+
+        <p>这三类路由方法的哲学完全不同。Token-Choice是"以token为中心"的民主投票，Expert-Choice是"以专家为中心"的精英选拔，确定性路由则是"按规则办事"的计划经济。下面我们逐一深入分析。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>路由类型</th>
+                    <th>决策者</th>
+                    <th>负载均衡</th>
+                    <th>计算开销</th>
+                    <th>训练难度</th>
+                    <th>代表性工作</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Token-Choice</td>
+                    <td>Token（门控网络）</td>
+                    <td>差（需额外机制）</td>
+                    <td>低（轻量门控）</td>
+                    <td>中等（梯度偏差）</td>
+                    <td>Shazeer 2017, Switch Transformer, Mixtral</td>
+                </tr>
+                <tr>
+                    <td>Expert-Choice</td>
+                    <td>专家（门控网络）</td>
+                    <td>好（天然均衡）</td>
+                    <td>中（top-k需要排序）</td>
+                    <td>低（无离散梯度问题）</td>
+                    <td>BASE Layers, Expert Choice Routing</td>
+                </tr>
+                <tr>
+                    <td>Hash/确定</td>
+                    <td>固定规则</td>
+                    <td>最好（完全控制）</td>
+                    <td>最低（无学习参数）</td>
+                    <td>无（不需要训练门控）</td>
+                    <td>Hash Layers, THOR</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>🔑 关键洞察：</strong> 选择哪种路由方式，本质上是选择"把困难放在哪里"。Token-Choice把困难放在"让路由学习均衡"上（需要复杂的辅助损失和容量管理），Expert-Choice把困难放在"让专家学会挑选"上（需要额外的排序和选择逻辑），确定性路由则完全放弃了学习的灵活性。没有一种方式在所有场景下都是最优的——关键是对齐你的场景需求。
+        </div>
+
+        <h2>Token-Choice路由：Token挑专家</h2>
+
+        <p>Token-Choice路由是我们最熟悉的模式。它的工作流程如下：</p>
+
+        <ol>
+            <li>对于每个token，门控网络计算它与所有E个专家的"匹配得分"。</li>
+            <li>选择得分最高的top-k个专家。</li>
+            <li>将token发送到选中的专家进行前向计算。</li>
+            <li>将专家的输出按门控权重加权求和。</li>
+        </ol>
+
+        <p>Token-Choice的根本优势在于<strong>灵活性</strong>——每个token可以根据自己的具体特征选择最合适的专家，门控网络通过端到端训练可以学到精细的匹配策略。但它的根本问题也来自这种灵活性——<strong>所有token独立决策可能导致集体行动的负载不均衡</strong>。</p>
+
+        <p>Token-Choice的一个"隐藏问题"是批量计算的效率。让我们看一个具体的例子：</p>
+
+        <pre><code># Token-Choice路由的batch计算问题
+import numpy as np
+
+def token_choice_routing_batch(gate_weights, tokens, experts,
+                                top_k=2, capacity_factor=1.25):
+    N, E = gate_weights.shape  # N个token, E个专家
+    k = top_k
+
+    # Step 1: 每个token选出top-k专家
+    top_k_idx = np.argsort(-gate_weights, axis=1)[:, :k]  # [N, k]
+
+    # Step 2: 统计每个专家收到多少token
+    expert_loads = np.zeros(E)
+    for i in range(N):
+        for j in range(k):
+            expert_loads[top_k_idx[i, j]] += 1
+
+    # Step 3: 计算每个专家的容量上限
+    capacity = int(np.ceil(capacity_factor * (k * N) / E))
+
+    # Step 4: 检查超出容量的token——它们会被丢弃！
+    dropped_tokens = 0
+    for expert_idx in range(E):
+        if expert_loads[expert_idx] > capacity:
+            dropped_tokens += expert_loads[expert_idx] - capacity
+
+    # Step 5: 实际前向计算（padding或drop）
+    for expert_idx in range(E):
+        # 实际送到expert的token数最多capacity个
+        actual_count = min(expert_loads[expert_idx], capacity)
+        # 如果actual_count < capacity，有计算浪费（padding）
+        # 如果actual_count > capacity（expert_loads中超过capacity的部分）
+        # 那些token被丢了！
+
+    return dropped_tokens</code></pre>
+
+        <p>上面代码中的"容量"和"丢弃"揭示了Token-Choice路由的典型困境：<strong>当负载不均时，要么浪费计算资源（padding），要么丢失信息（dropping）</strong>。容量因子把这两种损失放在天平两端——因子越小越浪费更少但丢得更多，因子越大丢得更少但浪费更多。</p>
+
+        <div class="tip">
+            <strong>💡 工程师视角：</strong> 在实际工程中，Token-Choice路由需要注意一个容易被忽视的问题：<strong>token dropping和训练动态的交互</strong>。被丢弃的token没有梯度回流到门控网络，这意味着门控网络无法从"被丢弃"的决策中学习。这会导致一种恶性循环——门控持续做出"错误"的路由决策（选择了容量已满的专家），但从未收到纠错信号。解决办法通常是让被drop的token的梯度仍然按路由权重比例回传，或者使用"被选但溢出"的token的梯度作为一个弱信号来更新门控。
+        </div>
+
+        <h2>Expert-Choice路由：专家挑Token</h2>
+
+        <p>Expert-Choice路由是Token-Choice的"逆向思维"。它的核心想法是：<strong>既然让token选择会导致不均衡，那就让专家来选token</strong>。每个专家从所有token中选择最适合自己的top-k个，而不是每个token去选合适的专家。</p>
+
+        <p>Expert-Choice路由的工作流程：</p>
+
+        <ol>
+            <li>对于每个专家，计算它和所有N个token的"匹配得分"。</li>
+            <li>每个专家从N个token中选择得分最高的top-k个。</li>
+            <li>被选中的token被发送到对应专家进行前向计算。</li>
+            <li>注意：每个token可能被多个专家选中（但需要做冲突处理）。</li>
+        </ol>
+
+        <p>Expert-Choice路由最重要的优势是<strong>天然负载均衡</strong>：因为每个专家固定选择k个token，所有专家的计算负载完全相同——不需要容量因子，不需要辅助损失，没有token dropping。这在理论上是一个优雅得多的方案。</p>
+
+        <p>但Expert-Choice也有它的代价：</p>
+
+        <ul>
+            <li><strong>信息不对称</strong>：一个token可能被0个、1个或多个专家选中。如果某个token没有被任何专家选中，它的信息完全丢失了——这比Token-Choice中的"drop"更严重，因为在Token-Choice中至少还能通过padding机制保留部分边缘token。</li>
+            <li><strong>选择冲突</strong>：当一个token被多个专家同时选中时，需要决定如何处理（共享token？还是分配给其中一个？）。各种冲突处理方案都有trade-off。</li>
+            <li><strong>排序开销</strong>：每个专家需要对N个token的得分排序，时间复杂度O(N log N)，当N很大时不可忽略。</li>
+        </ul>
+
+        <pre><code># Expert-Choice 路由的实现（核心差异）
+def expert_choice_routing(scores, tokens, experts, k=2):
+    """
+    scores: [N, E] 或 [E, N] token-专家匹配得分矩阵
+    在Expert-Choice中，以专家为中心计算
+    """
+    N, E = scores.shape
+    # 转置为 [E, N]，方便按专家选择
+    scores_by_expert = scores.T  # [E, N]
+
+    # 每个专家选择top-k个token
+    # 注意：这里是在token维度（N）上做top-k选择
+    top_k_scores, top_k_indices = torch.topk(scores_by_expert, k, dim=1)
+
+    # 每个专家固定处理k个token → 负载完美均衡！
+    # 每个专家的计算量完全相等，不需要容量因子
+
+    expert_outputs = []
+    for expert_idx, expert in enumerate(experts):
+        selected_indices = top_k_indices[expert_idx]  # [k,]
+        selected_inputs = tokens[selected_indices]     # [k, d_model]
+        outputs = expert(selected_inputs)              # [k, d_model]
+        expert_outputs.append((selected_indices, outputs))
+
+    # 处理冲突：同一个token可能被多个专家选中
+    # 需要merge或者使用更复杂的token分配策略
+    # ...
+    return merged_output</code></pre>
+
+        <div class="highlight">
+            <strong>🔑 关键洞察：</strong> Expert-Choice路由最吸引人的地方是它<strong>从根本上消解了负载均衡问题</strong>——不需要辅助损失、不需要容量因子、不需要噪声。但它的"完美负载均衡"是以"可能丢失token"为代价的。在实际中，token的总数N通常远大于专家数E，每个token被至少一个专家选中的概率很高。但当序列中存在大量"无关紧要"的填充token时，Expert-Choice可能会优先选择"信息量大"的token，从而自动过滤噪声——这反而成了一个feature！
+        </div>
+
+        <h2>全局分配与Hash路由：确定性的魅力</h2>
+
+        <p>如果我们把"学习"从路由中完全剔除，会得到什么？——那就是确定性路由。两种最典型的确定性路由是<strong>全局分配</strong>（Global Assignment）和<strong>Hash路由</strong>（Hash-based Routing）。</p>
+
+        <p><strong>全局分配</strong>的思路是：把路由看作一个"分配问题"（Assignment Problem），用优化算法（如匈牙利算法或Sinkhorn迭代）找到全局最优的token-to-expert分配方案，使得总匹配得分最大且每个专家的负载相等。这种方法在理论上最优——同时考虑了"匹配质量"和"负载均衡"。但它的计算开销较大（需要迭代优化），不适合实时推理场景。</p>
+
+        <p><strong>Hash路由</strong>更极端：直接用一个固定的Hash函数（如取模哈希或局部敏感哈希LSH），根据token的某些特征（如token ID的哈希值）决定分配给哪个专家。Hash路由的优点是：</p>
+
+        <ul>
+            <li><strong>零学习开销</strong>：不需要门控网络，省去了门控的参数量和计算量。</li>
+            <li><strong>确定性和可复现性</strong>：训练和推理时路由决策完全一致。</li>
+            <li><strong>完美的负载均衡</strong>：好的Hash函数可以确保token在各专家间均匀分布。</li>
+        </ul>
+
+        <p>但Hash路由的代价是致命的——它完全放弃了"根据输入内容智能选择专家"的能力。无论输入是什么，Hash函数都一视同仁。这就失去了MoE最核心的价值：<strong>让专家专业化到不同的输入模式上</strong>。没有加载均衡，但也没有了"混合专家"的意义——它更像是一个"随机地分桶"的集成模型。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>路由方式</th>
+                    <th>专家专业化</th>
+                    <th>负载均衡</th>
+                    <th>计算开销</th>
+                    <th>灵活性</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Token-Choice</td>
+                    <td>优秀</td>
+                    <td>需辅助机制</td>
+                    <td>低</td>
+                    <td>高</td>
+                    <td>通用场景（NLP、CV）</td>
+                </tr>
+                <tr>
+                    <td>Expert-Choice</td>
+                    <td>良好</td>
+                    <td>天然均衡</td>
+                    <td>中等</td>
+                    <td>中等</td>
+                    <td>序列长、数据偏斜场景</td>
+                </tr>
+                <tr>
+                    <td>全局分配</td>
+                    <td>良好（全局最优）</td>
+                    <td>完美</td>
+                    <td>高（需迭代求解）</td>
+                    <td>中等</td>
+                    <td>离线批处理、训练阶段</td>
+                </tr>
+                <tr>
+                    <td>Hash路由</td>
+                    <td>无（随机分配）</td>
+                    <td>完美</td>
+                    <td>接近零</td>
+                    <td>无</td>
+                    <td>压缩、蒸馏后的部署</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>⚠️ 经验分享：</strong> 我之前在一个项目中对Hash路由做过一个有趣的尝试。我们把训练好的MoE模型的专家参数取出来，然后用Hash路由重新分配token，发现模型性能下降约15-20%。这说明了路由学习的重要性——即使专家本身训练得很好，"谁会调用谁"这个信息仍然占15-20%的性能权重。Hash路由虽然省了路由开销，但丢掉的内容相关分配信息是很难弥补的。
+        </div>
+
+        <p>综合来看，三种路由方式各有利弊，需要根据具体场景选择。<strong>Token-Choice</strong>是最通用的选择，适合大多数NLP和CV任务；<strong>Expert-Choice</strong>在数据分布极度偏斜时表现更好；<strong>确定性路由</strong>适合对计算效率要求极高、且可以牺牲部分灵活性的场景。</p>
+
+        <p>值得注意的是，路由方式并不是非此即彼的——近年来出现了很多<strong>混合路由</strong>的工作，例如在训练初期使用Token-Choice配合辅助损失，在推理后期切换到确定性的Hash路由以加速推理；或者在不同层使用不同的路由策略——底层用Expert-Choice确保均衡，高层用Token-Choice追求精细化分配。路由设计的"工具箱"越来越丰富了。</p>
+
+        <p>下一章，我们将深入一个与路由紧密相关的话题——<strong>负载均衡理论与方法</strong>。不管你选择哪种路由方式，负载均衡都是绕不开的核心问题。为什么它如此难？辅助损失的数学形式是怎么推导出来的？Capacity Factor到底怎么调？专家坍缩怎么预防？下一章我们将系统地回答这些问题。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

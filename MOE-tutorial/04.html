@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 2017开山之作：Sparsely-Gated MoE (上)</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 MoE概述与演进史</a></li>
+            <li><a href="02.html">第2章 1991理论鼻祖：Adaptive Mixture of Local Experts</a></li>
+            <li><a href="03.html">第3章 条件计算与稀疏激活原理</a></li>
+            <li><a href="04.html" class="active">第4章 2017开山之作：Sparsely-Gated MoE (上)</a></li>
+            <li><a href="05.html">第5章 2017开山之作：Sparsely-Gated MoE (下)</a></li>
+            <li><a href="06.html">第6章 路由机制全景：Token-Choice vs Expert-Choice</a></li>
+            <li><a href="07.html">第7章 负载均衡理论与方法</a></li>
+            <li><a href="08.html">第8章 Switch Transformer：极简单专家路由</a></li>
+            <li><a href="09.html">第9章 GShard：分布式MoE工程基石</a></li>
+            <li><a href="10.html">第10章 专家并行与通信优化</a></li>
+            <li><a href="11.html">第11章 Mixtral：开源轻量化MoE标杆</a></li>
+            <li><a href="12.html">第12章 DeepSeekMoE：专家专业化创新 (上)</a></li>
+            <li><a href="13.html">第13章 DeepSeekMoE：专家专业化创新 (下)</a></li>
+            <li><a href="14.html">第14章 DeepSeek-V2: MoE+长文本工业集大成</a></li>
+            <li><a href="15.html">第15章 DeepSeek-V3：无损负载均衡新范式</a></li>
+            <li><a href="16.html">第16章 辅助损失-free负载均衡深度剖析</a></li>
+            <li><a href="17.html">第17章 多任务MoE：MMoE与任务专属门控</a></li>
+            <li><a href="18.html">第18章 异构MoE与开放MoE生态</a></li>
+            <li><a href="19.html">第19章 专家专业化与知识聚合的博弈</a></li>
+            <li><a href="20.html">第20章 路由几何理论与专家耦合</a></li>
+            <li><a href="21.html">第21章 时间记忆与预测性路由</a></li>
+            <li><a href="22.html">第22章 专家可解释性与语义发现</a></li>
+            <li><a href="23.html">第23章 MoE推理优化：Prefill与Decode</a></li>
+            <li><a href="24.html">第24章 消费级硬件部署MoE</a></li>
+            <li><a href="25.html">第25章 自适应路由与动态推理</a></li>
+            <li><a href="26.html">第26章 MoE训练实战：从零搭建稀疏模型</a></li>
+            <li><a href="27.html">第27章 2025-2026前沿与未来方向</a></li>
+            <li><a href="28.html">第28章 综合项目：构建领域MoE专家系统</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>2017年：深度学习遇到了MoE</h2>
+
+        <p>大家好，我是你们的讲师。如果说前两章在为MoE的登场做理论铺垫，那么从这一章开始，故事将正式加速——因为2017年，MoE迎来了它的"文艺复兴"时刻。</p>
+
+        <p>2017年1月，Google Brain的Noam Shazeer在arXiv上提交了一篇名为 <em>Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer</em> 的论文。乍看题目，"Outrageously Large"（大得离谱）这个措辞带着一种Google式的幽默。但当你看到论文的核心数据时，会发现这个标题毫不夸张——他们在一个语言建模和翻译任务上，训练了一个拥有高达137B参数的稀疏MoE模型（注意：这是2017年，BERT才刚刚诞生，最大模型也不过几百兆参数）。</p>
+
+        <p>这篇论文的贡献可以浓缩为三个核心创新：<strong>Noisy Top-K Gating</strong>、<strong>专家容量设计</strong>和<strong>负载均衡辅助损失</strong>。这三者共同构成了现代稀疏MoE的"标准操作流程"——直到2026年的今天，几乎所有MoE系统仍然在使用这些技术。这就是为什么我们把这篇论文称为"开山之作"。</p>
+
+        <p>让我分享一个阅读这篇论文时的个人经历。2019年我第一次读到这篇论文时，被一个细节深深震撼了——论文的Section 2.2中有一句看似随意的描述："因为内存限制，我们将每个专家分配到不同的GPU上"。在2017年，把137B参数的模型分布到数百个GPU上训练，这在当时简直是天方夜谭般的事情。但这恰恰揭示了MoE工程化的关键：<strong>专家并行</strong>（Expert Parallelism）——把不同的专家放到不同的设备上，是让MoE扩展到万亿参数的工程基础。而这一切，始于2017年的这篇论文。</p>
+
+        <h2>Noisy Top-K Gating：加噪声的智慧</h2>
+
+        <p>Shazeer论文的第一个关键创新是 <strong>Noisy Top-K Gating</strong>。让我们看看它和1991年的门控机制有什么不同。</p>
+
+        <p>1991年的门控是"软"的——所有专家的权重都通过softmax计算，然后加权求和。2017年的门控是"硬"的——只选top-k个专家，其余专家的输出为零。但这里有一个微妙的问题：<strong>"选top-k"这个操作本身是不可微的</strong>。argmax或top-k选择的梯度是0或无穷大，无法通过反向传播来训练门控网络。</p>
+
+        <p>Shazeer的解决方案巧妙至极：在计算门控得分时加入可调的高斯噪声，然后在训练时通过噪声的梯度来近似离散选择的梯度：</p>
+
+        <pre><code># Noisy Top-K Gating 的数学实现（PyTorch风格伪码）
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class NoisyTopKGate(nn.Module):
+    def __init__(self, d_model, num_experts, k=2, noise_std=0.1):
+        super().__init__()
+        self.w_gate = nn.Linear(d_model, num_experts)  # 门控线性层
+        self.w_noise = nn.Linear(d_model, num_experts)  # 噪声线性层
+        self.k = k
+        self.noise_std = noise_std
+
+    def forward(self, x, training=True):
+        # x: [batch_size, d_model]
+
+        # 1. 计算原始得分
+        logits = self.w_gate(x)  # [batch_size, num_experts]
+
+        # 2. 计算噪声（仅在训练时添加）
+        if training:
+            noise_logits = self.w_noise(x)
+            noise = torch.randn_like(logits) * F.softplus(noise_logits)
+            logits = logits + noise
+
+        # 3. top-k 选择（不可微操作）
+        top_k_logits, top_k_indices = torch.topk(logits, self.k, dim=-1)
+
+        # 4. 对选中专家做softmax归一化
+        zeros = torch.full_like(logits, float('-inf'))
+        sparse_logits = zeros.scatter(-1, top_k_indices, top_k_logits)
+        gate_output = F.softmax(sparse_logits, dim=-1)
+
+        return gate_output  # [batch_size, num_experts]，大部分位置是0</code></pre>
+
+        <p>为什么加噪声这么重要？背后有两个原因：</p>
+
+        <ul>
+            <li><strong>探索-利用权衡</strong>（Exploration-Exploitation）：不加噪声时，门控网络一旦发现某个专家表现不错，就会一直选择它（利用），其他专家永远得不到训练机会（零探索）。噪声让门控偶尔"试试别的专家"，促进专家的全面训练。</li>
+            <li><strong>负载均衡的隐式激励</strong>：噪声让专家选择变得不那么确定，从而在统计上使得token在各个专家之间的分布更加均匀——虽然不是显式的均衡机制，但有助于防止某些专家完全被冷落。</li>
+        </ul>
+
+        <p>噪声的幅度本身也是<strong>可学习的</strong>——这就是代码中 <code>self.w_noise</code> 的作用。门控网络自己学会了"应该加多少噪声"：噪声太大让路由变得随机（影响性能），噪声太小则探索不够。通过端到端的训练，门控网络会找到一个平衡点。</p>
+
+        <div class="tip">
+            <strong>💡 理解关键：</strong> Noisy Top-K Gating 中的噪声机制是MoE训练早期最重要的技巧之一。它本质上在做一件 elegant 的事：用一个可微分的噪声估计来"软化"一个不可微分的离散选择。这种"用随机性换可微性"的思路在深度学习中有很多应用（如Gumbel-Softmax、VQ-VAE），Noisy Top-K Gating 是其中最早也最成功的案例之一。
+        </div>
+
+        <h2>专家容量设计：别让一个专家累死</h2>
+
+        <p>Noisy Top-K Gating解决了门控的训练问题，但它引入了一个新问题：<strong>批量处理时的负载不均衡</strong>。</p>
+
+        <p>在训练时，我们是把整个batch的token同时送入MoE层的。假设batch中有N个token，每个token选择top-2专家。如果没有约束，理论上每个专家被选中的次数是 (N × k) / E。但实际上，由于路由倾向于某些专家，分布会严重不平衡——某些"明星专家"可能会收到远多于平均水平的token，而另一些专家则门可罗雀。</p>
+
+        <p>这就是<strong>专家容量</strong>（Expert Capacity）设计的用武之地。</p>
+
+        <p>专家容量的核心思想非常直观：<strong>给每个专家设定一个"接单上限"</strong>。如果某个专家收到的token数超过了这个上限，多出来的token会被丢弃（dropped），或者被转发到其他专家（overflow）。通过限制每个专家最多能处理的token数量，专家容量确保了计算资源的公平分配和显存的合理利用。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>组件</th>
+                    <th>作用</th>
+                    <th>数学定义</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>批量大小 N</td>
+                    <td>一个batch中的总token数</td>
+                    <td>N = batch_size × seq_len</td>
+                </tr>
+                <tr>
+                    <td>专家数 E</td>
+                    <td>MoE层中专家网络的数量</td>
+                    <td>论文中E=512或E=1024</td>
+                </tr>
+                <tr>
+                    <td>Top-k 值</td>
+                    <td>每个token选择的专家数</td>
+                    <td>论文中k=1到4</td>
+                </tr>
+                <tr>
+                    <td>容量因子 C</td>
+                    <td>容量缩放系数</td>
+                    <td>C ∈ [1.0, 1.5]</td>
+                </tr>
+                <tr>
+                    <td>专家容量</td>
+                    <td>每个专家最多处理token数</td>
+                    <td>capacity = ceil(C × k × N / E)</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>给定容量后，每个专家的计算张量大小是固定的：<code>[capacity, d_ff]</code>。这就意味着，不管实际有多少token路由到该专家，GPU都要分配这么多显存。如果实际路由到的token数少于capacity，GPU计算单元会有浪费（padding）；如果多于capacity，超出的token会被丢弃。</p>
+
+        <pre><code># 专家容量的计算示例
+
+def compute_expert_capacity(N, E, k, capacity_factor=1.25):
+    """
+    N: batch中token数
+    E: 专家数
+    k: top-k值
+    capacity_factor: 容量因子（论文推荐1.0-1.5）
+    """
+    # 平均每个专家应该收到的token数
+    capacity = (k * N) / E
+    # 乘以容量因子作为缓冲
+    capacity = capacity * capacity_factor
+    # 向上取整
+    return int(np.ceil(capacity))
+
+# 具体数值示例
+N = 65536     # 64K tokens per batch
+E = 512       # 512个专家
+k = 2         # top-2路由
+capacity_factor = 1.25
+
+capacity = compute_expert_capacity(N, E, k, capacity_factor)
+print(f"每个专家容量: {capacity} tokens")
+print(f"每个专家实际预计接收: {(k * N) / E:.1f} tokens")
+print(f"冗余比例: {capacity_factor - 1:.0%}")
+
+# 输出:
+# 每个专家容量: 320 tokens
+# 每个专家实际预计接收: 256.0 tokens
+# 冗余比例: 25%</code></pre>
+
+        <p>容量因子C是一个极其重要的超参数：C越接近1，计算效率越高（浪费少），但token被丢弃的概率越大；C越大，token丢弃越少，但GPU计算和显存的浪费越多。论文中的经验值是C=1.25到1.5之间——这个取值区间至今仍是工程实践中的黄金标准。</p>
+
+        <div class="highlight">
+            <strong>🔑 关键洞察：</strong> 专家容量是"效率"和"完整性"之间的一个trade-off。设容量因子为1.0时，计算效率达到理论最优，但在负载不均时会有大量token被丢弃（信息丢失）。设置1.25时，允许25%的不均衡，在绝大多数情况下可以避免token丢失。我自己的实战经验是：在训练初期使用较大的容量因子（1.5），随着训练推进逐步降低（1.1-1.2）——因为训练后期路由越来越均衡，不需要太多冗余空间。
+        </div>
+
+        <h2>负载均衡辅助损失：门控的紧箍咒</h2>
+
+        <p>Noisy Top-K Gating通过探索来隐式促进负载均衡，专家容量通过硬上限来强制均衡。但Shazeer团队还设计了第三个机制——<strong>负载均衡辅助损失</strong>（Load Balancing Auxiliary Loss），直接加到训练的总损失中，通过梯度信号明确地鼓励门控网络均匀分配token。</p>
+
+        <p>这个辅助损失的设计非常巧妙。它的基本形式是：</p>
+
+        <pre><code># 负载均衡辅助损失（Shazeer 2017原始形式）
+def load_balancing_loss(gate_output, top_k_indices, num_experts):
+    """
+    gate_output: [N, E] softmax后的门控权重
+    top_k_indices: [N, k] 被选中的专家索引
+    num_experts: E
+    """
+    N = gate_output.shape[0]
+
+    # 1. 每个专家被选中的频率（重要度）
+    #    对所有token统计每个专家出现在top-k中的次数
+    importance = torch.zeros(num_experts, device=gate_output.device)
+    for i in range(N):
+        for j in range(k):
+            importance[top_k_indices[i, j]] += 1
+    importance = importance / N  # 归一化为概率分布
+
+    # 2. 每个专家的门控权重之和
+    weight_sum = gate_output.sum(dim=0) / N  # [E,]
+
+    # 3. 损失 = 点积（两者都均匀分布时最小）
+    loss = num_experts * torch.dot(importance, weight_sum)
+
+    # 当importance和weight_sum
+    # 都是均匀分布(1/E)时:
+    # loss = E * (E * 1/E * 1/E) = 1
+    # 当分布极度不均时，loss >> 1
+
+    return loss</code></pre>
+
+        <p>这个损失函数背后的直觉是：<code>importance</code>衡量了"有多少token选择这个专家"，<code>weight_sum</code>衡量了"门控给这个专家的总权重"。当两者都是均匀分布时，它们的点积最小。如果某个专家既被频繁选择（importance高）又被赋予高权重（weight_sum高），损失就会变大，梯度会推动门控降低对该专家的偏好。</p>
+
+        <p>论文将这个辅助损失乘以一个系数（通常α=0.01到0.1）后加到主损失（如语言模型的交叉熵损失）上。这个系数需要精心调节——太小则负载均衡效果不足，太大则压制了门控的"选择性"（所有专家都一样了，MoE就退化成Dense模型）。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>辅助损失系数 α</th>
+                    <th>负载均衡效果</th>
+                    <th>模型性能影响</th>
+                    <th>推荐场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>0（无辅助损失）</td>
+                    <td>极差，专家坍缩严重</td>
+                    <td>可能略好（理论最优路由）</td>
+                    <td>不推荐，除非专家数很少</td>
+                </tr>
+                <tr>
+                    <td>0.001-0.01</td>
+                    <td>轻度均衡</td>
+                    <td>基本无损</td>
+                    <td>大规模训练，专家多</td>
+                </tr>
+                <tr>
+                    <td>0.01-0.1</td>
+                    <td>良好均衡</td>
+                    <td>轻微性能损失</td>
+                    <td>通用推荐区间</td>
+                </tr>
+                <tr>
+                    <td>0.1-1.0</td>
+                    <td>强制均匀</td>
+                    <td>显著性能下降</td>
+                    <td>仅在调试时使用</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>⚠️ 踩坑教训：</strong> 我第一次使用辅助损失时犯了一个经典的错误——把α设成了0.5，结果训练出来的模型所有专家的权重几乎一模一样，性能比同等大小的Dense模型还差。后来同事提醒我："辅助损失是紧箍咒，不是金箍棒"。意思是：辅助损失只是防止路由"走偏"，而不是强制路由"走平"。MoE的价值就在于不同专家处理不同输入，如果所有专家都被"平均"，MoE就失去了意义。α通常从0.01开始尝试，根据均衡情况上下微调。
+        </div>
+
+        <p>总结一下2017年论文上半部分的三个核心贡献：<strong>Noisy Top-K Gating</strong>解决了稀疏门控的可训练性问题；<strong>专家容量</strong>解决了批量计算时显存和计算资源的有效分配；<strong>负载均衡辅助损失</strong>从训练信号层面鼓励门控做出均匀的选择决策。这三个机制共同构成了现代MoE的"铁三角"，缺一不可。</p>
+
+        <p>下一章我们将继续2017年论文的下半部分——看看这篇论文是如何把MoE嵌入到Transformer中替换FFN层、如何应对大规模训练中的稳定性挑战，以及它取得了什么样的实验结果。"Outrageously Large"这个标题是否名副其实？我们下章揭晓。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

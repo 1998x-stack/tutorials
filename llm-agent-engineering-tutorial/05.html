@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第5章 工具调用与Function Calling - LLM Agent 工程实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 Agent技术概述</a></li>
+            <li><a href="02.html">第2章 感知-思考-行动循环</a></li>
+            <li><a href="03.html">第3章 开发环境搭建</a></li>
+            <li><a href="04.html">第4章 Prompt工程与指令设计</a></li>
+            <li><a href="05.html" class="active">第5章 工具调用与Function Calling</a></li>
+            <li><a href="06.html">第6章 记忆系统设计</a></li>
+            <li><a href="07.html">第7章 多Agent协作模式</a></li>
+            <li><a href="08.html">第8章 LangChain 1.x 统一API</a></li>
+            <li><a href="09.html">第9章 中间件系统</a></li>
+            <li><a href="10.html">第10章 LangGraph状态图</a></li>
+            <li><a href="11.html">第11章 条件分支与循环</a></li>
+            <li><a href="12.html">第12章 RAG Agent实战</a></li>
+            <li><a href="13.html">第13章 多Agent编排</a></li>
+            <li><a href="14.html">第14章 生产化部署与监控</a></li>
+            <li><a href="15.html">第15章 AutoGen核心架构</a></li>
+            <li><a href="16.html">第16章 GroupChat与协作模式</a></li>
+            <li><a href="17.html">第17章 代码执行与安全沙箱</a></li>
+            <li><a href="18.html">第18章 从AutoGen到MAF</a></li>
+            <li><a href="19.html">第19章 OpenManus分层架构</a></li>
+            <li><a href="20.html">第20章 工具生态与MCP协议</a></li>
+            <li><a href="21.html">第21章 CrewAI角色化开发</a></li>
+            <li><a href="22.html">第22章 厂商原生SDK</a></li>
+            <li><a href="23.html">第23章 测试策略与质量保障</a></li>
+            <li><a href="24.html">第24章 成本优化与性能调优</a></li>
+            <li><a href="25.html">第25章 安全治理与合规</a></li>
+            <li><a href="26.html">第26章 项目：智能客服系统</a></li>
+            <li><a href="27.html">第27章 项目：自动化研究助手</a></li>
+            <li><a href="28.html">第28章 框架选型与趋势展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第5章 工具调用与 Function Calling</h2>
+
+<p>大家好，我是你们的讲师。在前几章中，我们说 Agent 的核心是"感知-思考-行动"循环，而"行动"的关键就是<strong>工具调用</strong>（Tool Calling / Function Calling）。没有工具调用，Agent 就是一个只会说的"嘴炮"；有了工具调用，Agent 才成为能动手的"实干家"。</p>
+
+<p>这一章我们将深入工具调用的全部技术细节——从原理到实践、从单工具调用到并行调度、从简单执行到错误恢复。学完这一章，你将能够为你的 Agent 设计一套健壮、高效、可扩展的工具系统。</p>
+
+<div class="highlight">
+    <strong>核心洞察：</strong> Function Calling 本质上是一种"结构化输出协议"——LLM 不是"调用"函数，而是"输出一个结构化的函数调用请求"。真正的函数执行由你的代码完成。这个"请求-执行"分离的架构，是工具调用体系的基石。
+</div>
+
+<h2>5.1 Function Calling 原理与演进</h2>
+
+<h3>工具调用的发展历程</h3>
+
+<p>工具调用并不是一开始就有的。回顾一下它的演进过程：</p>
+
+<ul>
+    <li><strong>2022 年末：</strong> 人们发现 GPT-3.5 可以通过 Prompt 提示来"假装调用函数"——模型输出类似 <code>get_weather("北京")</code> 的文本，然后通过正则表达式解析。这个方案极其脆弱，模型经常格式出错。</li>
+    <li><strong>2023 年 6 月：</strong> OpenAI 正式发布 Function Calling API，在 API 层面原生支持工具调用格式。模型在生成过程中可以"暂停"文本输出，转而输出结构化的 JSON 工具调用请求。这是一个里程碑——工具调用的可靠性大幅提升。</li>
+    <li><strong>2024 年：</strong> Anthropic 的 Claude 3 和 Google Gemini 也相继支持工具调用。Parallel Tool Calling（并行工具调用）成为主流——模型可以一次请求调用多个工具，大幅减少了迭代次数。</li>
+    <li><strong>2025-2026 年：</strong> 工具调用成为 LLM 的标配能力。MCP（Model Context Protocol）将工具调用标准化，让不同模型可以共享同一套工具。工具调用从"厂商特性"进化为"开放协议"。</li>
+</ul>
+
+<p>短短三年间，工具调用的可靠性从"经常崩"进化到"基本可用"。但即便如此，它仍然有各种"坑"需要你注意。</p>
+
+<h3>工具调用的内部机制</h3>
+
+<p>工具调用的工作流程可以概括为四个步骤：</p>
+
+<ol>
+    <li><strong>注册：</strong> 开发者定义工具 Schema（名称、描述、参数类型），通过 API 的 <code>tools</code> 参数注册给 LLM</li>
+    <li><strong>选择：</strong> LLM 在推理过程中，根据用户的问题和工具描述，决定"要不要用工具"和"用哪个工具"</li>
+    <li><strong>输出：</strong> 如果决定使用工具，LLM 的输出不再是常规文本，而是一个结构化的 JSON 对象，包含 <code>tool_name</code> 和 <code>arguments</code></li>
+    <li><strong>执行：</strong> 你的代码解析这个 JSON，执行对应的函数，将结果返回给 LLM</li>
+</ol>
+
+<div class="tip">
+    <strong>关键认知：</strong> 模型不是"主动去执行"函数——模型只是"提出请求"。你的代码才是真正的执行者。这也意味着你可以对模型的工具调用请求做任何处理：你可以修改参数、拒绝执行、加入审批流程，或者并行执行多个请求。
+</div>
+
+<h2>5.2 Tool 定义规范：OpenAI vs Anthropic 格式对比</h2>
+
+<p>不同模型提供商的工具定义格式略有不同。虽然 MCP 协议正在统一标准，但 2026 年你仍然会遇到多个格式。了解它们的差异很重要。</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>维度</th>
+            <th>OpenAI 格式</th>
+            <th>Anthropic 格式</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>注册方式</strong></td>
+            <td><code>tools</code> 参数（Chat Completions API）</td>
+            <td><code>tools</code> 参数（Messages API）</td>
+        </tr>
+        <tr>
+            <td><strong>Schema 标准</strong></td>
+            <td>JSON Schema（OpenAPI 风格）</td>
+            <td>JSON Schema（同样遵循）</td>
+        </tr>
+        <tr>
+            <td><strong>工具类型字段</strong></td>
+            <td><code>"type": "function"</code> + <code>function</code> 对象</td>
+            <td>直接包含 <code>name</code>, <code>description</code>, <code>input_schema</code></td>
+        </tr>
+        <tr>
+            <td><strong>调用响应</strong></td>
+            <td><code>tool_calls</code> 数组（在 assistant message 中）</td>
+            <td><code>tool_use</code> content block（在消息内容数组中）</td>
+        </tr>
+        <tr>
+            <td><strong>结果返回</strong></td>
+            <td><code>role: "tool"</code> 消息</td>
+            <td><code>tool_result</code> content block</td>
+        </tr>
+        <tr>
+            <td><strong>并行调用</strong></td>
+            <td>原生支持（一个消息中多个 <code>tool_calls</code>）</td>
+            <td>原生支持（一个消息中多个 <code>tool_use</code> block）</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>OpenAI 工具定义示例</h3>
+
+<pre><code>tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_hotels",
+            "description": "搜索指定城市和日期范围内的可用酒店",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "城市名称，如'北京'"
+                    },
+                    "check_in": {
+                        "type": "string",
+                        "description": "入住日期，格式 YYYY-MM-DD"
+                    },
+                    "check_out": {
+                        "type": "string",
+                        "description": "退房日期，格式 YYYY-MM-DD"
+                    },
+                    "max_price": {
+                        "type": "number",
+                        "description": "每晚最高价格（元），可选"
+                    }
+                },
+                "required": ["city", "check_in", "check_out"]
+            }
+        }
+    }
+]
+</code></pre>
+
+<h3>Anthropic 工具定义示例</h3>
+
+<pre><code>tools = [
+    {
+        "name": "search_hotels",
+        "description": "搜索指定城市和日期范围内的可用酒店",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "description": "城市名称，如'北京'"
+                },
+                "check_in": {
+                    "type": "string",
+                    "description": "入住日期，格式 YYYY-MM-DD"
+                },
+                "check_out": {
+                    "type": "string",
+                    "description": "退房日期，格式 YYYY-MM-DD"
+                }
+            },
+            "required": ["city", "check_in", "check_out"]
+        }
+    }
+]
+</code></pre>
+
+<div class="warning">
+    <strong>踩坑实录：</strong> 2024 年我们在多模型切换时遇到了一个隐蔽的 Bug——OpenAI 和 Anthropic 对工具描述的处理方式不同。OpenAI 对工具描述的 Token 消耗和重要性都很高，所以我们在描述中写了非常详细的说明。但到了 Anthropic，同样详细的描述反而让模型在某些场景下产生了混淆。后来我们发现，Anthropic 的模型对工具描述更"敏感"——描述越简洁，模型选择越准确。这提醒我们：<strong>工具定义应该针对不同模型提供商做定制优化，不要盲目复用</strong>。
+</div>
+
+<h2>5.3 @tool 装饰器与类型安全</h2>
+
+<p>手工写 JSON Schema 不仅繁琐，而且容易出错——参数类型写错、缺少必填字段、描述不一致。现代 Agent 框架提供了更好的方式：<strong>通过类型注解自动生成工具 Schema</strong>。</p>
+
+<h3>LangChain @tool 装饰器</h3>
+
+<pre><code>from langchain_core.tools import tool
+from pydantic import Field
+from typing import Optional
+
+@tool
+def search_hotels(
+    city: str = Field(description="城市名称"),
+    check_in: str = Field(description="入住日期 YYYY-MM-DD"),
+    check_out: str = Field(description="退房日期 YYYY-MM-DD"),
+    max_price: Optional[float] = Field(None, description="每晚最高价格")
+) -> str:
+    """搜索指定城市和日期范围内的可用酒店"""
+    # 实际的搜索逻辑
+    results = hotel_db.query(city, check_in, check_out, max_price)
+    return format_results(results)
+
+# @tool 自动生成：
+# 1. 函数名 -> tool name
+# 2. 函数文档字符串 -> tool description
+# 3. 类型注解 + Field 描述 -> parameters schema
+# 4. Optional 类型 -> 自动标记为非必填
+
+# 查看生成的工具定义
+print(search_hotels.tool_call_schema())
+</code></pre>
+
+<h3>AutoGen 的 tool 注册</h3>
+
+<pre><code>from autogen import register_function
+
+@register_function(
+    description="搜索指定城市和日期范围内的可用酒店"
+)
+def search_hotels(
+    city: str,
+    check_in: str,
+    check_out: str,
+    max_price: Optional[float] = None
+) -> str:
+    """搜索可用酒店"""
+    ...
+</code></pre>
+
+<p>这些装饰器的核心价值在于<strong>类型安全</strong>——编译器（或 IDE 的 type checker）可以在你写代码时就发现参数类型错误，而不是等到运行时才知道。同时，Pydantic 的 Field 描述在运行时也会被验证，确保生成的 Tool Schema 是有效的。</p>
+
+<div class="highlight">
+    <strong>推荐做法：</strong> 永远使用 @tool 装饰器或类似机制来定义工具，不要手写 JSON Schema。这样做的三个好处：(1) 类型安全——IDE 自动补全和编译检查；(2) 单一来源——函数的签名就是工具的 Schema，修改一处即可；(3) 可测试——工具本身可以作为普通 Python 函数进行单元测试。
+</div>
+
+<h2>5.4 执行调度引擎设计</h2>
+
+<p>当 Agent 的工具数量从 3-5 个增长到 20-30 个时，需要一个结构化的 <strong>执行调度引擎</strong>（Execution Scheduler）来管理工具的生命周期。</p>
+
+<h3>调度引擎的核心组件</h3>
+
+<pre><code>from typing import Callable, Dict, Any, List
+import asyncio
+import json
+
+class ToolRegistry:
+    """工具注册中心"""
+
+    def __init__(self):
+        self._tools: Dict[str, Callable] = {}
+
+    def register(self, name: str, func: Callable, description: str = ""):
+        self._tools[name] = func
+
+    def get(self, name: str) -> Callable:
+        if name not in self._tools:
+            raise KeyError(f"未知工具: {name}")
+        return self._tools[name]
+
+    def list_tools(self) -> List[Dict[str, Any]]:
+        """生成供 LLM 使用的工具列表"""
+        tools_def = []
+        for name, func in self._tools.items():
+            # 从函数签名自动生成 JSON Schema
+            tools_def.append(build_tool_schema(name, func))
+        return tools_def
+
+
+class ExecutionScheduler:
+    """工具执行调度器"""
+
+    def __init__(self, registry: ToolRegistry):
+        self.registry = registry
+        self.max_retries = 2
+        self.timeout = 30.0  # 秒
+
+    async def execute(self, tool_name: str, args: Dict) -> Dict:
+        """执行单个工具调用，带重试和超时"""
+        func = self.registry.get(tool_name)
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(func, **args),
+                    timeout=self.timeout
+                )
+                return {"success": True, "result": result}
+            except TimeoutError:
+                if attempt < self.max_retries:
+                    continue
+                return {"success": False, "error": f"执行超时 ({self.timeout}s)"}
+            except Exception as e:
+                if attempt < self.max_retries:
+                    continue
+                return {"success": False, "error": str(e)}
+
+    async def execute_parallel(self, calls: List[Dict]) -> List[Dict]:
+        """并行执行多个工具调用"""
+        tasks = [
+            self.execute(call["name"], call["args"])
+            for call in calls
+        ]
+        return await asyncio.gather(*tasks)
+</code></pre>
+
+<h3>调度策略</h3>
+
+<table>
+    <thead>
+        <tr>
+            <th>策略</th>
+            <th>适用场景</th>
+            <th>实现</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>串行执行</strong></td>
+            <td>工具之间有依赖关系（A 的输出是 B 的输入）</td>
+            <td>逐个调用，后一个等待前一个完成</td>
+        </tr>
+        <tr>
+            <td><strong>并行执行</strong></td>
+            <td>工具之间没有依赖关系</td>
+            <td>asyncio.gather 同时发起所有调用</td>
+        </tr>
+        <tr>
+            <td><strong>批量执行</strong></td>
+            <td>大量同类工具调用（如批量搜索）</td>
+            <td>合并为批量 API 请求</td>
+        </tr>
+        <tr>
+            <td><strong>优先级调度</strong></td>
+            <td>工具有不同优先级（紧急 vs 常规）</td>
+            <td>优先级队列 + 抢先式调度</td>
+        </tr>
+    </tbody>
+</table>
+
+<h2>5.5 错误处理与重试策略</h2>
+
+<p>工具调用总会出错——网络超时、API 限流、参数错误、数据为空。一个健壮的 Agent 系统必须能够优雅地处理这些错误，而不是简单崩溃。</p>
+
+<h3>分级错误处理</h3>
+
+<p>推荐<strong>三级错误处理</strong>策略：</p>
+
+<ul>
+    <li><strong>第一级——自动重试：</strong> 对于网络错误、临时性故障（HTTP 500、429 Too Many Requests），自动重试 2-3 次，使用指数退避（Exponential Backoff）。</li>
+    <li><strong>第二级——降级处理：</strong> 如果重试仍然失败，尝试替代方案。比如主搜索引擎挂了，切到备用搜索引擎；或者使用上次缓存的搜索结果。</li>
+    <li><strong>第三级——透明报告：</strong> 如果所有重试和降级都失败了，Agent 应该如实告诉用户"我尝试了获取 XX 数据但失败了"，而不是假装成功或编造数据。</li>
+</ul>
+
+<pre><code>import time
+import random
+
+async def execute_with_retry(func, args, max_retries=3):
+    """带指数退避的重试执行"""
+
+    for attempt in range(max_retries):
+        try:
+            return await func(**args)
+        except (ConnectionError, TimeoutError) as e:
+            # 临时故障，重试
+            if attempt < max_retries - 1:
+                delay = (2 ** attempt) + random.uniform(0, 1)
+                print(f"重试 {attempt + 1}/{max_retries}，等待 {delay:.1f}s...")
+                await asyncio.sleep(delay)
+                continue
+            return {"error": f"服务暂时不可用: {e}"}
+        except ValueError as e:
+            # 参数错误，不需要重试
+            return {"error": f"参数错误: {e}"}
+        except Exception as e:
+            return {"error": f"未知错误: {e}"}
+</code></pre>
+
+<div class="warning">
+    <strong>踩坑实录：</strong> 2025 年我们做了一个金融数据采集 Agent，其中一个数据源 API 经常在下午 2-4 点限流。Agent 在限流时连续重试了 5 次，全部失败，最终报告"数据不可用"。但实际上数据源在 5 分钟后恢复正常。后来我们加入了"延迟重试"——如果遇到限流错误，等待 30 秒后重试一次，成功率从 60% 提升到了 95%。这个教训是：<strong>重试策略的参数（次数、间隔）应该根据具体工具的故障模式来设计</strong>。
+</div>
+
+<h2>5.6 并行工具调用优化</h2>
+
+<p>并行工具调用（Parallel Tool Calling）是 2024 年之后的一个重大改进。早期的 Agent 每步只能调用一个工具，然后在下一步调用另一个。如果任务需要搜索 5 个不同关键词，就得串行执行 5 步，既慢又费 Token。</p>
+
+<p>现在，GPT-4o 和 Claude Sonnet 4 都支持<strong>一次调用多个工具</strong>：</p>
+
+<pre><code># LLM 一次并行发出 3 个工具请求
+response = {
+    "tool_calls": [
+        {"id": "call_1", "function": {"name": "search_web", "arguments": '{"query": "2026 AI trends"}'}},
+        {"id": "call_2", "function": {"name": "search_web", "arguments": '{"query": "LLM Agent 2026"}'}},
+        {"id": "call_3", "function": {"name": "get_weather", "arguments": '{"city": "北京"}'}}
+    ]
+}
+
+# 并行执行
+results = await asyncio.gather(
+    execute_tool("search_web", {"query": "2026 AI trends"}),
+    execute_tool("search_web", {"query": "LLM Agent 2026"}),
+    execute_tool("get_weather", {"city": "北京"})
+)
+</code></pre>
+
+<h3>并行调用的性能收益</h3>
+
+<table>
+    <thead>
+        <tr>
+            <th>指标</th>
+            <th>串行调用</th>
+            <th>并行调用</th>
+            <th>提升</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>5 次搜索总耗时</td>
+            <td>15-25 秒</td>
+            <td>3-5 秒</td>
+            <td>5x</td>
+        </tr>
+        <tr>
+            <td>LLM 调用次数</td>
+            <td>5 次（每步 1 次+结果注入 1 次）</td>
+            <td>2 次（请求 + 汇总）</td>
+            <td>2.5x</td>
+        </tr>
+        <tr>
+            <td>Token 消耗</td>
+            <td>高（每次循环都有消息列表膨胀）</td>
+            <td>低（减少了循环开销）</td>
+            <td>30-50%</td>
+        </tr>
+        <tr>
+            <td>成功率</td>
+            <td>中等（长时间运行易出错）</td>
+            <td>高（减少步骤 = 减少出错机会）</td>
+            <td>10-20%</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="tip">
+    <strong>并行调用技巧：</strong> 并行调用也不是完美无缺。一个常见的问题是"过度并行"——模型试图一次调用 10 个以上的工具，导致执行阶段负载过高。建议在 System Prompt 中限制单次并行调用的最大数量（如 3-5 个），或者在后端做排队控制。另外，如果工具之间有数据依赖关系，串行执行是唯一正确的选择——例如先搜索获得 URL，再根据 URL 读取内容，这两步不能并行。
+</div>
+
+<h2>本章小结</h2>
+
+<p>这一章我们深入探索了工具调用的方方面面——从 Function Calling 的技术原理到 OpenAI/Anthropic 的格式差异，从 @tool 装饰器的类型安全编程到执行调度引擎的设计，从分级错误处理到并行调用优化。工具调用是 Agent"动手"的能力基础，也是 Agent 工程中最具体、最需要精细化设计的部分。</p>
+
+<p>拥有工具调用能力的 Agent 已经能够"做事情"了，但它还有一个重要的短板——<strong>记性不好</strong>。在一轮对话中，Agent 能记住上下文窗口内的信息，但一旦对话结束或者上下文窗口满了，之前的重要信息就丢失了。如何让 Agent 拥有"长期记忆"？下一章我们就来探讨——<strong>记忆系统设计</strong>。</p>
+
+        <div class="footer-nav">
+            <a href="04.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="06.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

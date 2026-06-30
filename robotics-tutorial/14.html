@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 先进控制方法</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 机器人学概述</a></li>
+            <li><a href="02.html">第2章 线性代数基础</a></li>
+            <li><a href="03.html">第3章 微积分与优化基础</a></li>
+            <li><a href="04.html">第4章 概率与状态估计</a></li>
+            <li><a href="05.html">第5章 刚体运动与空间描述</a></li>
+            <li><a href="06.html">第6章 机器人机构学基础</a></li>
+            <li><a href="07.html">第7章 传感器与执行器</a></li>
+            <li><a href="08.html">第8章 正向运动学</a></li>
+            <li><a href="09.html">第9章 逆向运动学</a></li>
+            <li><a href="10.html">第10章 微分运动学与雅可比</a></li>
+            <li><a href="11.html">第11章 刚体动力学</a></li>
+            <li><a href="12.html">第12章 轨迹生成</a></li>
+            <li><a href="13.html">第13章 PID与反馈控制</a></li>
+            <li><a href="14.html" class="active">第14章 先进控制方法</a></li>
+            <li><a href="15.html">第15章 ROS 2核心编程</a></li>
+            <li><a href="16.html">第16章 机器人仿真</a></li>
+            <li><a href="17.html">第17章 MoveIt 2与运动规划</a></li>
+            <li><a href="18.html">第18章 机器人标定与参数辨识</a></li>
+            <li><a href="19.html">第19章 SLAM原理与实践</a></li>
+            <li><a href="20.html">第20章 路径与轨迹规划</a></li>
+            <li><a href="21.html">第21章 机器人视觉</a></li>
+            <li><a href="22.html">第22章 机器人学习</a></li>
+            <li><a href="23.html">第23章 机器人调试与诊断</a></li>
+            <li><a href="24.html">第24章 嵌入式与实时系统</a></li>
+            <li><a href="25.html">第25章 真机部署与集成</a></li>
+            <li><a href="26.html">第26章 人形与四足机器人</a></li>
+            <li><a href="27.html">第27章 具身智能与VLA大模型</a></li>
+            <li><a href="28.html">第28章 综合项目实战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第14章 先进控制方法</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们学习了PID控制——它简单、可靠、被广泛应用。但PID有一个根本假设：<strong>每个关节是独立的</strong>。然而，真实的机器人是多输入多输出（MIMO）的强耦合系统——一个关节的运动会影响其他关节的重力矩、科氏力和惯性耦合。当机器人的速度增加、负载变化或需要与环境交互时，PID的局限性就暴露出来了。</p>
+
+        <p>这就是先进控制方法登场的地方。从计算力矩控制到阻抗控制，从模型预测控制到全身控制——这些方法利用我们前几章建立的运动学和动力学模型，让机器人能够在更复杂的场景中表现出更强的能力和更高的安全性。如果说PID是"骑自行车"，本章的方法就是"开赛车"——更快、更精确、但需要更多的模型知识和计算资源。</p>
+
+        <h3>14.1 计算力矩控制</h3>
+
+        <p>计算力矩控制（Computed Torque Control, CTC）是机器人控制中最经典的"模型-based"方法。其核心思想极为优雅：<strong>用动力学模型精确抵消系统的非线性，将复杂的机器人系统"变成"一个解耦的线性系统</strong>。</p>
+
+        <pre><code>控制律: τ = M(q) · (q̈_d + Kp·e + Kd·ė) + C(q,q̇)·q̇ + G(q)
+
+其中:
+- M·(q̈_d + Kp·e + Kd·ė): 惯性补偿 + PD反馈
+- C·q̇ + G: 科氏力 + 重力补偿
+- e = q_d - q: 位置误差</code></pre>
+
+        <p>如果动力学模型完全精确，代入后得到 <code>M(q)·q̈ = M(q)·(q̈_d + Kp·e + Kd·ė)</code>，即 <code>ë + Kd·ė + Kp·e = 0</code>——一个解耦的线性二阶系统。此时，误差指数收敛到零，收敛速度由Kp和Kd决定（类似"临界阻尼"调参）。这就是"反馈线性化"的魔力。</p>
+
+        <p>用Pinocchio实现计算力矩控制：</p>
+
+        <pre><code>import pinocchio as pin
+import numpy as np
+
+model = pin.buildModelFromUrdf("robot.urdf")
+data = model.createData()
+
+def computed_torque_control(q, vq, q_d, vq_d, aq_d, Kp, Kd):
+    """计算力矩控制主循环"""
+    # 当前状态
+    pin.computeAllTerms(model, data, q, vq)
+    M = data.M      # 质量矩阵
+    C = data.C      # 科氏力矩阵
+    g = data.g      # 重力向量
+
+    # 误差
+    e = q_d - q
+    edot = vq_d - vq
+
+    # 反馈线性化 + PD
+    tau = M @ (aq_d + Kp * e + Kd * edot) + C @ vq + g
+
+    return tau
+
+# 使用：1kHz控制循环
+Kp = np.diag([400.0] * 6)
+Kd = np.diag([40.0] * 6)
+
+for t in range(1000):
+    tau = computed_torque_control(
+        data.qpos, data.qvel,
+        q_traj[t], v_traj[t], a_traj[t],
+        Kp, Kd
+    )
+    # 施加力矩到机器人...</code></pre>
+
+        <p>计算力矩控制的主要局限在于对模型精度的高度依赖。如果质量矩阵M(q)误差超过10%，闭环系统可能失稳。因此，CTC通常与自适应或鲁棒控制结合使用。</p>
+
+        <h3>14.2 阻抗与导纳控制</h3>
+
+        <p>传统的PID和CTC追求的是"精确跟踪"——误差必须为零。但在很多实际场景中，这恰恰是危险的：如果机器人末端在跟踪轨迹时撞到了人或者障碍物，刚性跟踪会输出巨大的力矩试图"硬压过去"，造成伤害或损坏。</p>
+
+        <p>阻抗控制（Impedance Control）的哲学截然不同：<strong>控制力与位置之间的动态关系，而不是力或位置本身</strong>。它把机器人末端建模成一个"虚拟弹簧-阻尼"系统：</p>
+
+        <pre><code>τ_ext = Jᵀ · (K_imp · (x_d - x) + D_imp · (ẋ_d - ẋ))
+
+其中 K_imp 是虚拟刚度，D_imp 是虚拟阻尼。
+τ_ext 是环境施加给末端的力对应的关节力矩。</code></pre>
+
+        <p>这个公式的意义是：当外部推动机器人末端时，机器人表现得像一个弹簧——推得越远，抵抗越大。你可以调节K_imp（刚度）来控制"软硬程度"。精密装配需要高刚度，人机协作需要低刚度。</p>
+
+        <p><strong>导纳控制（Admittance Control）</strong>是阻抗控制的对偶方式：外环用力传感器测量接触力，内环用位置控制器补偿。阻抗控制在关节力矩层面实现柔顺（需要力矩控制能力），导纳控制在位置层面实现柔顺（需要力传感器和位置控制器）。</p>
+
+        <div class="tip">
+            <p><strong>选择原则</strong>：如果你的机器人有力矩/电流控制模式（大多数协作机器人支持），优先使用阻抗控制——响应更快、不需要力传感器。如果你的机器人只有位置控制模式（很多工业机器人），使用导纳控制——通过六维力传感器测量外力，然后修正位置指令。记住一个经验：<strong>阻抗适合"低刚度"场景（人机交互），导纳适合"高刚度"场景（精密装配）</strong>。</p>
+        </div>
+
+        <h3>14.3 模型预测控制（MPC）</h3>
+
+        <p>模型预测控制（Model Predictive Control, MPC）是当前机器人控制领域最前沿的实用技术之一。它的核心思想是：在每个控制周期，<strong>用动力学模型"预测"未来一段时间内的系统行为，求解一个有限时域优化问题，只执行第一个控制量，然后在下一个周期重复</strong>——这被称为"滚动时域优化"（Receding Horizon Control）。</p>
+
+        <p>MPC的数学形式：</p>
+
+        <pre><code>min_{u₀, ..., u_{N-1}}  Σ_{k=0}^{N}  ||x_k - x_ref_k||²_Q + ||u_k||²_R
+
+受限于:
+  x_{k+1} = f(x_k, u_k)   # 动力学约束
+  x_min ≤ x_k ≤ x_max      # 状态约束
+  u_min ≤ u_k ≤ u_max      # 输入约束</code></pre>
+
+        <p>MPC的优势在于它能显式处理约束——这是PID和CTC做不到的。例如，你可以告诉MPC"关节2的力矩不能超过50Nm"、"末端速度不能超过1m/s"——MPC会在优化中保证这些约束不会被违反。</p>
+
+        <p>四足机器人是MPC最成功的应用之一。MIT的Cheetah 3在2018年就实现了MPC + WBC的实时控制框架，在400Hz下求解MPC问题。到了2026年，NVIDIA的Isaac GR00T平台已经原生集成了MPC求解器，将部署门槛大幅降低。</p>
+
+        <div class="highlight">
+            <p><strong>工程现实</strong>：MPC的主要瓶颈是计算量。一个完整的机器人MPC（6轴机械臂，预测时域50步，考虑非线性动力学）需要在<strong>1-2毫秒</strong>内完成求解。这通常需要专用求解器（如ACADOS、HPIPM、OSQP）和代码生成技术。对于大多数项目团队，建议先在仿真中验证MPC，确认稳定性和实时性之后再移植到真机。2026年，随着GPU加速的普及（Isaac GR00T上的CUDA MPC求解器），MPC正走向"开箱即用"阶段。</p>
+        </div>
+
+        <h3>14.4 全身控制（WBC）</h3>
+
+        <p>全身控制（Whole-Body Control, WBC）解决的是人形/四足机器人特有的问题：<strong>多个任务同时竞争有限的控制自由度</strong>。例如，双足机器人需要同时保持平衡、跟踪手臂末端位置、保持躯干水平——任务数量超过了关节数量，必须排定优先级。</p>
+
+        <p>WBC的标准框架是"任务层级 + 零空间投影"（Task Hierarchy + Null-Space Projection）：</p>
+
+        <pre><code>层级1（最高优先级）: 平衡控制 — J₁, ẍ_des₁
+层级2: 躯干姿态 — J₂, ẍ_des₂
+层级3: 末端跟踪 — J₃, ẍ_des₃
+
+每个高层级任务的解投影到低层级任务的零空间中:
+q̈₂ = q̈₁ + N₁ · q̈₂₀
+其中 N₁ = I - J₁⁺·J₁ 是J₁的零空间投影矩阵</code></pre>
+
+        <p>现代WBC通常使用二次规划（Quadratic Programming, QP）来统一求解：</p>
+
+        <pre><code>min_{q̈, τ}  Σᵢ wᵢ · ||Jᵢ·q̈ + J̇ᵢ·q̇ - ẍ_desᵢ||²
+
+受限于:
+  M·q̈ + C·q̇ + G = τ          # 动力学
+  τ_min ≤ τ ≤ τ_max             # 力矩极限
+  q̈_min ≤ q̈ ≤ q̈_max            # 加速度极限
+  摩擦力锥约束（足式机器人）</code></pre>
+
+        <p>第一个全身控制的实际部署可以追溯到2008年——NASA的Robonaut 2在太空中使用了基于QP的WBC。2026年，Unitree H2 Plus的人形机器人全身控制就是基于类似的QP框架。</p>
+
+        <table>
+            <tr>
+                <th>控制方法</th>
+                <th>模型依赖</th>
+                <th>约束处理</th>
+                <th>计算需求</th>
+                <th>适用场景</th>
+            </tr>
+            <tr>
+                <td>PID</td>
+                <td>无</td>
+                <td>不处理</td>
+                <td>极低</td>
+                <td>简单关节控制</td>
+            </tr>
+            <tr>
+                <td>计算力矩(CTC)</td>
+                <td>高</td>
+                <td>不处理</td>
+                <td>低</td>
+                <td>高速高精度跟踪</td>
+            </tr>
+            <tr>
+                <td>阻抗/导纳</td>
+                <td>中</td>
+                <td>不处理</td>
+                <td>低</td>
+                <td>人机交互、装配</td>
+            </tr>
+            <tr>
+                <td>MPC</td>
+                <td>高</td>
+                <td>可处理</td>
+                <td>高</td>
+                <td>动态平衡、带约束轨迹</td>
+            </tr>
+            <tr>
+                <td>WBC</td>
+                <td>高</td>
+                <td>可处理</td>
+                <td>中高</td>
+                <td>人形/四足多任务协调</td>
+            </tr>
+        </table>
+
+        <h3>14.5 2026控制前沿</h3>
+
+        <p>在2026年，机器人控制领域出现了几个值得关注的新方向：</p>
+
+        <ul>
+            <li><strong>RL + MPC混合框架</strong>：用强化学习（RL）在仿真中训练一个"策略网络"为MPC提供初始猜测或调整权重，MPC负责保证约束满足和安全。这种混合方法在Unitree H2 Plus上展现了比纯MPC更优的动态性能。</li>
+            <li><strong>自适应变导纳控制</strong>：导纳参数（刚度、阻尼）不再固定，而是根据估计的环境刚度在线调整。在装配任务中，这种方法可以在接触前后自动切换"柔性搜索"和"刚性插入"两种模式。</li>
+            <li><strong>CRISP框架</strong>：2025年提出的"接触响应隐式安全规划"（Contact-Responsive Implicit Safety Planning），将碰撞检测、安全反应和MPC统一到一个框架中，在协作机器人中实现了1m/s的接近速度下仍能安全制动。</li>
+        </ul>
+
+        <div class="warning">
+            <p><strong>踩坑故事</strong>：在一次四足机器人WBC部署中，我们发现机器人总是莫名其妙地摔倒——明明仿真中一切正常。调试了两周，最终在示波器上找到了元凶：真实机器人的关节力矩在零速附近有一个"死区"（Dead Zone），大约±0.5Nm的力矩指令不会产生任何实际力矩。在仿真中没有这个效应，所以WBC求解器假设了"指令力矩 = 实际力矩"。把死区特性建模到MPC/WBC的动力学约束中后，机器人就稳了。这个教训是：<strong>所有的先进控制算法都受限于执行器的真实特性。在部署MPC或WBC之前，先标定你的执行器</strong>。</p>
+        </div>
+
+        <p>本章我们学习了计算力矩控制的反馈线性化、阻抗与导纳控制的柔顺交互原理、MPC的滚动时域优化、以及WBC的任务层级与QP求解。这些方法从不同角度回答了同一个问题：如何让机器人更好地与物理世界互动——无论是精确跟踪、柔顺接触还是多任务协调。</p>
+
+        <p>理论讲完了——现在让我们进入工程实战。从下一章开始，我们将学习如何使用实际工具构建和部署机器人系统。下一章：<strong>ROS 2核心编程</strong>——机器人领域的"操作系统"标准。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

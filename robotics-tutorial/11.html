@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 刚体动力学</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 机器人学概述</a></li>
+            <li><a href="02.html">第2章 线性代数基础</a></li>
+            <li><a href="03.html">第3章 微积分与优化基础</a></li>
+            <li><a href="04.html">第4章 概率与状态估计</a></li>
+            <li><a href="05.html">第5章 刚体运动与空间描述</a></li>
+            <li><a href="06.html">第6章 机器人机构学基础</a></li>
+            <li><a href="07.html">第7章 传感器与执行器</a></li>
+            <li><a href="08.html">第8章 正向运动学</a></li>
+            <li><a href="09.html">第9章 逆向运动学</a></li>
+            <li><a href="10.html">第10章 微分运动学与雅可比</a></li>
+            <li><a href="11.html" class="active">第11章 刚体动力学</a></li>
+            <li><a href="12.html">第12章 轨迹生成</a></li>
+            <li><a href="13.html">第13章 PID与反馈控制</a></li>
+            <li><a href="14.html">第14章 先进控制方法</a></li>
+            <li><a href="15.html">第15章 ROS 2核心编程</a></li>
+            <li><a href="16.html">第16章 机器人仿真</a></li>
+            <li><a href="17.html">第17章 MoveIt 2与运动规划</a></li>
+            <li><a href="18.html">第18章 机器人标定与参数辨识</a></li>
+            <li><a href="19.html">第19章 SLAM原理与实践</a></li>
+            <li><a href="20.html">第20章 路径与轨迹规划</a></li>
+            <li><a href="21.html">第21章 机器人视觉</a></li>
+            <li><a href="22.html">第22章 机器人学习</a></li>
+            <li><a href="23.html">第23章 机器人调试与诊断</a></li>
+            <li><a href="24.html">第24章 嵌入式与实时系统</a></li>
+            <li><a href="25.html">第25章 真机部署与集成</a></li>
+            <li><a href="26.html">第26章 人形与四足机器人</a></li>
+            <li><a href="27.html">第27章 具身智能与VLA大模型</a></li>
+            <li><a href="28.html">第28章 综合项目实战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第11章 刚体动力学</h2>
+
+        <p>大家好，我是你们的讲师。前面三章我们一直在讨论运动学——位置、速度、以及它们之间的关系。但机器人要真正运动起来，需要力。你需要知道"给关节施加多大的力矩，机器人才会按照期望的方式运动"——这就是动力学（Dynamics）解决的问题。</p>
+
+        <p>打个比方：运动学告诉你"踩下油门，车轮会转"；动力学告诉你"踩多深，车轮会以多快的加速度转动，以及这需要消耗多少燃料"。如果你的机器人控制不考虑动力学，就像你开车只看速度表不看油门——要么动力不足、动作迟缓，要么动力过猛、把机械结构震散架。在高速重载的工业机器人场景中，动力学补偿往往决定了动作的成败。</p>
+
+        <h3>11.1 动力学的两个基本问题</h3>
+
+        <p>机器人动力学有两个核心问题，方向相反：</p>
+
+        <ul>
+            <li><strong>正向动力学（Forward Dynamics）</strong>：已知关节力矩 <code>τ</code>，求关节加速度 <code>q̈</code>。即 <code>τ → q̈</code>。主要用于仿真——MuJoCo、Bullet等物理引擎的核心就是正向动力学。</li>
+            <li><strong>逆向动力学（Inverse Dynamics）</strong>：已知关节位置 <code>q</code>、速度 <code>q̇</code>、加速度 <code>q̈</code>，求所需关节力矩 <code>τ</code>。即 <code>(q, q̇, q̈) → τ</code>。主要用于控制——计算力矩控制、前馈补偿。</li>
+        </ul>
+
+        <p>两者在数学上是互逆关系，但计算复杂度不同。逆向动力学通常更快（O(n)），正向动力学需要求解一个线性系统 <code>τ = M(q)·q̈ + h(q, q̇)</code>，即 <code>q̈ = M⁻¹(q)·(τ - h)</code>，涉及质量矩阵求逆。</p>
+
+        <p>理解这两个方向的区别非常重要——很多工程师搞混了"控制"和"仿真"的角色，在控制器里用正向动力学算力矩，或者反过来在仿真里用逆动力学算加速度，都会得到完全错误的结果。</p>
+
+        <h3>11.2 Euler-Lagrange方法</h3>
+
+        <p>Euler-Lagrange方法从能量角度推导动力学方程。它的步骤是标准化的：</p>
+
+        <pre><code>1. 计算系统的动能 K(q, q̇) = ½ · q̇ᵀ · M(q) · q̇
+2. 计算系统的势能 V(q)（主要是重力势能）
+3. 构造拉格朗日量 L = K - V
+4. 代入 Euler-Lagrange 方程：
+   d/dt(∂L/∂q̇) - ∂L/∂q = τ</code></pre>
+
+        <p>对于一个二连杆平面臂，推导过程大致如下（SymPy自动推导）：</p>
+
+        <pre><code>import sympy as sp
+
+# 符号变量
+q1, q2 = sp.symbols('q1 q2')
+dq1, dq2 = sp.symbols('dq1 dq2')
+l1, l2, m1, m2, g = sp.symbols('l1 l2 m1 m2 g')
+
+# 质心位置（假设在连杆中点）
+x1 = l1/2 * sp.cos(q1)
+y1 = l1/2 * sp.sin(q1)
+x2 = l1*sp.cos(q1) + l2/2*sp.cos(q1+q2)
+y2 = l1*sp.sin(q1) + l2/2*sp.sin(q1+q2)
+
+# 动能 K = ½mv² + ½Iω²
+v1_sq = sp.diff(x1, q1)*dq1 + ...  # 简化略
+K = 0.5*m1*v1_sq + 0.5*m2*v2_sq
+
+# 势能 V = m₁gy₁ + m₂gy₂
+V = m1*g*y1 + m2*g*y2
+
+# 拉格朗日量
+L = K - V
+# 代入Euler-Lagrange方程得到动力学方程
+# 结果形如 M(q)·q̈ + C(q,q̇)·q̇ + G(q) = τ</code></pre>
+
+        <p>Euler-Lagrange方法优雅、系统化，尤其适合学术推导和验证。但它的计算复杂度为O(n⁴)——对于6轴机器人，推导出的质量矩阵中每个元素都是三角函数的多项式组合。这也是为什么在工程中，我们更常使用Newton-Euler递推法。</p>
+
+        <div class="tip">
+            <p><strong>方法选择</strong>：Euler-Lagrange适合小自由度（≤3）的符号推导和教学；对于多自由度机器人，用Newton-Euler递推法更高效。你也可以用SymPy自动化Lagrange推导，然后生成C代码用于实时控制——但需要手动优化掉大量冗余计算。</p>
+        </div>
+
+        <h3>11.3 Newton-Euler递推</h3>
+
+        <p>Recursive Newton-Euler Algorithm（RNEA）是工业机器人中最常用的逆动力学算法。它分为两个阶段：</p>
+
+        <ul>
+            <li><strong>正向递推（Outward Pass）</strong>：从基座到末端，递推每个连杆的角速度、角加速度、线加速度</li>
+            <li><strong>反向递推（Inward Pass）</strong>：从末端到基座，递推每个连杆受到的力和力矩，最终得到关节力矩</li>
+        </ul>
+
+        <p>RNEA的复杂度是O(n)——无论机器人有多少个自由度，计算量都线性增长。对于六轴机器人，一次RNEA计算大约只需要几微秒，足以在1kHz甚至4kHz的控制循环中使用。</p>
+
+        <p>用Pinocchio调用RNEA极其简单：</p>
+
+        <pre><code>import pinocchio as pin
+import numpy as np
+
+model = pin.buildModelFromUrdf("robot.urdf")
+data = model.createData()
+
+# 当前状态
+q = np.array([0.1, -0.5, 0.8, 0.0, 0.5, 0.0])
+vq = np.array([0.2, 0.1, -0.3, 0.0, 0.1, 0.0])   # 关节速度
+aq = np.array([1.0, 0.5, -0.8, 0.0, 0.3, 0.0])   # 关节加速度
+
+# RNEA逆动力学
+tau = pin.rnea(model, data, q, vq, aq)
+
+print("关节力矩:", tau)
+
+# 同时获取质量矩阵、科氏力和重力项
+M = pin.crba(model, data, q)           # 质量矩阵
+C = pin.computeCoriolisMatrix(model, data, q, vq)  # 科氏力矩阵
+g = pin.computeGeneralizedGravity(model, data, q)  # 重力项
+
+# 验证: τ = M·aq + C·vq + g
+tau_reconstructed = M @ aq + C @ vq + g
+print("重构验证误差:", np.linalg.norm(tau - tau_reconstructed))</code></pre>
+
+        <p>细心的读者可能已经注意到，上面的代码不但计算了 <code>τ</code>，还分别提取了质量矩阵、科氏力和重力项。这是因为在控制中，我们经常需要这些项单独使用——比如重力补偿只需要 <code>g(q)</code>，而计算力矩控制需要完整的 <code>M(q)</code> 和 <code>h(q,q̇)</code>。</p>
+
+        <h3>11.4 动力学参数辨识</h3>
+
+        <p>动力学模型的精度取决于惯性参数——质量、质心位置、惯性张量。但问题在于：<strong>这些参数往往不知道</strong>。CAD模型里的惯性参数与实际装配后的机器人在质心位置和惯量上可能有10-20%的误差。这就是动力学参数辨识（Dynamic Identification）的用武之地。</p>
+
+        <p>标准的辨识流程是：</p>
+
+        <ol>
+            <li><strong>激励轨迹设计</strong>：设计一条充分激励所有动力学参数的轨迹（傅里叶级数或样条），保证观测矩阵满秩</li>
+            <li><strong>数据采集</strong>：运行激励轨迹，同步采集关节位置、速度和力矩信号</li>
+            <li><strong>滤波与离线处理</strong>：用Butterworth滤波器做低通滤波，然后数值微分计算速度和加速度</li>
+            <li><strong>最小二乘辨识</strong>：将动力学方程写成 <code>τ = Y(q,q̇,q̈) · π</code> 的形式，其中 <code>π</code> 是待辨识的惯性参数向量，<code>Y</code> 是回归矩阵。然后用最小二乘求解 <code>π = (YᵀY)⁻¹Yᵀτ</code></li>
+        </ol>
+
+        <div class="warning">
+            <p><strong>踩坑故事</strong>：我参与过一个协作机器人项目，动力学参数辨识看起来一切正常——拟合度达到了98%，但一旦应用到重力补偿上，机器人静止时居然有2-3N的残余力误差。排查了两周才发现，问题出在数据采集环节：使用的力矩传感器有零点偏移，而这个偏移被最小二乘"吸收"进了辨识结果。最终在辨识模型中额外加入了偏移参数（在每个关节加上一个常数偏置项），才彻底解决了问题。这个教训是：<strong>辨识结果的精度受限于传感器的精度，辨识模型要包含传感系统的非理想特性</strong>。</p>
+        </div>
+
+        <h3>11.5 Pinocchio动力学实战</h3>
+
+        <p>除了RNEA，Pinocchio还提供了丰富的动力学计算功能。以下是一些常用的操作：</p>
+
+        <pre><code># 正向动力学：计算加速度
+tau_desired = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+aq_computed = pin.aba(model, data, q, vq, tau_desired)
+# ABA = Articulated Body Algorithm，O(n)复杂度
+print("正向动力学加速度:", aq_computed)
+
+# 计算质心动力学
+com_pos = pin.centerOfMass(model, data, q)
+com_vel = pin.centerOfMassVelocity(model, data, q, vq)
+print("质心位置:", com_pos)
+print("质心速度:", com_vel)
+
+# 计算动能和势能
+kinetic = pin.kineticEnergy(model, data, q, vq)
+potential = pin.potentialEnergy(model, data, q)
+print(f"动能={kinetic:.3f}J, 势能={potential:.3f}J")</code></pre>
+
+        <p>这里特别提一下ABA（Articulated Body Algorithm）——它是正向动力学的O(n)算法，在仿真中至关重要。MuJoCo的内部实现就类似于ABA。如果你自己写物理仿真器，ABA是你的首选。</p>
+
+        <table>
+            <tr>
+                <th>特性</th>
+                <th>Euler-Lagrange</th>
+                <th>Newton-Euler (RNEA/ABA)</th>
+            </tr>
+            <tr>
+                <td>复杂度</td>
+                <td>O(n⁴)</td>
+                <td>O(n)</td>
+            </tr>
+            <tr>
+                <td>适用自由度</td>
+                <td>n ≤ 3（符号推导）</td>
+                <td>任意（数值计算）</td>
+            </tr>
+            <tr>
+                <td>正向动力学</td>
+                <td>需要求M⁻¹，O(n³)</td>
+                <td>ABA, O(n)</td>
+            </tr>
+            <tr>
+                <td>物理洞察</td>
+                <td>能量视角，便于分析和证明</td>
+                <td>力/力矩视角，便于工程实现</td>
+            </tr>
+            <tr>
+                <td>典型应用</td>
+                <td>学术研究、小自由度验证</td>
+                <td>实时控制、物理仿真</td>
+            </tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>工程建议</strong>：在2026年的机器人开发中，你几乎不需要手动推导动力学方程——Pinocchio、MuJoCo、iDynTree等工具已经帮你做好了。但你必须理解动力学的概念和接口含义，才能正确使用这些工具。特别要注意的是：<strong>始终验证你的动力学模型</strong>——在零速度零加速度时，RNEA的输出应该等于重力矩。这是最简单的冒烟测试。</p>
+        </div>
+
+        <p>本章我们学习了机器人动力学的两个基本问题、Euler-Lagrange与Newton-Euler两种方法、动力学参数的辨识流程，以及Pinocchio的RNEA/ABA实战。动力学告诉我们运动需要多少力——现在，我们终于可以开始规划机器人应该怎样动了。</p>
+
+        <p>下一章我们将进入一个非常实用的主题：<strong>轨迹生成</strong>——给定起点和终点，如何规划一条平滑、快速、可行的运动路径。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 轨迹生成</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 机器人学概述</a></li>
+            <li><a href="02.html">第2章 线性代数基础</a></li>
+            <li><a href="03.html">第3章 微积分与优化基础</a></li>
+            <li><a href="04.html">第4章 概率与状态估计</a></li>
+            <li><a href="05.html">第5章 刚体运动与空间描述</a></li>
+            <li><a href="06.html">第6章 机器人机构学基础</a></li>
+            <li><a href="07.html">第7章 传感器与执行器</a></li>
+            <li><a href="08.html">第8章 正向运动学</a></li>
+            <li><a href="09.html">第9章 逆向运动学</a></li>
+            <li><a href="10.html">第10章 微分运动学与雅可比</a></li>
+            <li><a href="11.html">第11章 刚体动力学</a></li>
+            <li><a href="12.html" class="active">第12章 轨迹生成</a></li>
+            <li><a href="13.html">第13章 PID与反馈控制</a></li>
+            <li><a href="14.html">第14章 先进控制方法</a></li>
+            <li><a href="15.html">第15章 ROS 2核心编程</a></li>
+            <li><a href="16.html">第16章 机器人仿真</a></li>
+            <li><a href="17.html">第17章 MoveIt 2与运动规划</a></li>
+            <li><a href="18.html">第18章 机器人标定与参数辨识</a></li>
+            <li><a href="19.html">第19章 SLAM原理与实践</a></li>
+            <li><a href="20.html">第20章 路径与轨迹规划</a></li>
+            <li><a href="21.html">第21章 机器人视觉</a></li>
+            <li><a href="22.html">第22章 机器人学习</a></li>
+            <li><a href="23.html">第23章 机器人调试与诊断</a></li>
+            <li><a href="24.html">第24章 嵌入式与实时系统</a></li>
+            <li><a href="25.html">第25章 真机部署与集成</a></li>
+            <li><a href="26.html">第26章 人形与四足机器人</a></li>
+            <li><a href="27.html">第27章 具身智能与VLA大模型</a></li>
+            <li><a href="28.html">第28章 综合项目实战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第12章 轨迹生成</h2>
+
+        <p>大家好，我是你们的讲师。到今天为止，我们已经建立了完整的运动学和动力学基础——我们知道了机器人能做什么（运动学），以及需要多大的力去做（动力学）。但有一个关键问题还没解决：<strong>机器人到底应该怎么动？</strong>起点在哪里、终点在哪里、中间经过哪些点、用多快的速度运动——这就是轨迹生成（Trajectory Generation）。</p>
+
+        <p>你可能觉得这很简单——直接从A点线性插值到B点不就行了？但真实情况远比这复杂：运动太急会激发机械结构的振动模态；加速度过大可能超过电机扭矩极限；末端走直线虽然直观但可能造成关节角度的剧烈跳动。好的轨迹生成算法是"又快又稳又安全"的艺术——它直接影响机器人的节拍时间、定位精度和设备寿命。</p>
+
+        <h3>12.1 关节空间 vs 任务空间规划</h3>
+
+        <p>轨迹规划有两大"战场"：关节空间和任务空间。它们的差异不仅在于坐标系不同，更在于工程实践中的优劣取舍。</p>
+
+        <table>
+            <tr>
+                <th>特性</th>
+                <th>关节空间规划</th>
+                <th>任务空间规划</th>
+            </tr>
+            <tr>
+                <td>规划对象</td>
+                <td>关节角度 q(t)</td>
+                <td>末端位姿 T(t)</td>
+            </tr>
+            <tr>
+                <td>是否需要IK</td>
+                <td>不需要（仅在起终点各做一次IK）</td>
+                <td>每个插值点都要做IK</td>
+            </tr>
+            <tr>
+                <td>末端路径</td>
+                <td>不可预测（可能是曲线）</td>
+                <td>可控（直线、圆弧等）</td>
+            </tr>
+            <tr>
+                <td>执行速度</td>
+                <td>较快（无IK开销）</td>
+                <td>较慢（频繁IK求解）</td>
+            </tr>
+            <tr>
+                <td>典型应用</td>
+                <td>点对点搬运、码垛</td>
+                <td>焊接、涂胶、精密装配</td>
+            </tr>
+        </table>
+
+        <p>在实际项目中，两种规划方式经常混合使用。例如：机器人抓取一个零件后，先在关节空间快速运动到一个过渡点（远离障碍物），然后在任务空间精确逼近目标位置。</p>
+
+        <h3>12.2 梯形与S形速度曲线</h3>
+
+        <p>最基础的轨迹规划方法是梯形速度曲线（Trapezoidal Velocity Profile）。它将运动分成三个阶段：匀加速、匀速、匀减速。三段式的速度曲线在视觉上像一个梯形，因此得名。</p>
+
+        <pre><code>def trapezoidal_profile(t, t_total, v_max, a_max):
+    """生成梯形速度曲线的位置、速度、加速度"""
+    # 计算加速时间和匀速时间
+    t_acc = v_max / a_max
+    # 检查是否能达到最大速度
+    if t_acc * v_max > t_total * v_max / 2:
+        # 三角形profile（达不到最大速度）
+        t_acc = np.sqrt(t_total / a_max)
+        v_peak = a_max * t_acc
+    else:
+        v_peak = v_max
+
+    t_const = t_total - 2 * t_acc
+
+    if t &lt;= t_acc:
+        # 加速段
+        s = 0.5 * a_max * t**2
+        v = a_max * t
+        a = a_max
+    elif t &lt;= t_acc + t_const:
+        # 匀速段
+        s = 0.5 * a_max * t_acc**2 + v_peak * (t - t_acc)
+        v = v_peak
+        a = 0.0
+    elif t &lt;= t_total:
+        # 减速段
+        t_dec = t - (t_acc + t_const)
+        s = (0.5 * a_max * t_acc**2 + v_peak * t_const
+             + v_peak * t_dec - 0.5 * a_max * t_dec**2)
+        v = v_peak - a_max * t_dec
+        a = -a_max
+    else:
+        s, v, a = 0, 0, 0
+
+    return s, v, a</code></pre>
+
+        <p>梯形速度曲线的优点是简单高效，但缺点也很明显——加速度在切换点处不连续（突变），这会导致冲击力（Jerk = ∞），激发机械结构的振动模态。对于高速机器人，这种冲击可能导致末端抖动，影响定位精度。</p>
+
+        <p>S形速度曲线（S-Curve Profile）通过限制加加速度（Jerk）来解决这个问题。它将运动分为七个阶段：加加速、匀加速、减加速、匀速、加减速、匀减速、减减速。S曲线的加速度是连续变化的，因此在高速运动中更加平稳。</p>
+
+        <div class="tip">
+            <p><strong>工程经验</strong>：对于码垛和搬运这类节拍优先的任务，梯形曲线就够用了——节拍可以快5-10%。但对于精密装配、打磨、焊接等对末端稳定性要求高的任务，一定要用S形曲线。另外，如果你发现机器人在加减速切换点有明显振动，一个临时方案是降低加速度设定值——但治本之策是换用S形曲线或B样条插值。</p>
+        </div>
+
+        <h3>12.3 多项式与样条插值</h3>
+
+        <p>当机器人需要经过多个中间点（Via-Point）时，仅靠梯形或S形曲线是不够的——我们需要插值方法让轨迹光滑地穿过所有指定点。</p>
+
+        <p><strong>三次多项式</strong>是最简单的插值方法：<code>q(t) = a₀ + a₁t + a₂t² + a₃t³</code>。四个系数由起点和终点的位置和速度唯一确定。三次多项式保证C1连续（速度连续），但加速度不连续。</p>
+
+        <p><strong>五次多项式</strong>增加了加速度约束：<code>q(t) = a₀ + a₁t + a₂t² + a₃t³ + a₄t⁴ + a₅t⁵</code>。六个系数由起点和终点的位置、速度、加速度唯一确定，保证C2连续。</p>
+
+        <p>对于多个via-point，我们需要样条插值（Spline Interpolation）：</p>
+
+        <pre><code>import numpy as np
+from scipy.interpolate import CubicSpline
+
+# 时间节点和对应的关节角度
+t_points = np.array([0.0, 0.5, 1.2, 2.0, 3.0])
+q_points = np.array([0.0, 0.3, 0.8, 0.4, 0.0])
+
+# 三次样条插值，边界条件为自然样条（二阶导为零）
+cs = CubicSpline(t_points, q_points, bc_type='natural')
+
+# 生成密集的时间点
+t_dense = np.linspace(0, 3.0, 100)
+q_dense = cs(t_dense)
+v_dense = cs(t_dense, nu=1)  # 一阶导 = 速度
+a_dense = cs(t_dense, nu=2)  # 二阶导 = 加速度
+
+# 验证连续性
+print(f"速度是否连续: {np.all(np.isfinite(v_dense))}")
+print(f"加速度是否连续: {np.all(np.isfinite(a_dense))}")</code></pre>
+
+        <p>B样条（B-Spline）进一步提供了局部控制能力——修改一个控制点只影响相邻段，不像CubicSpline那样全局扰动。在路径规划中，B样条经常用于生成平滑的路径基元。</p>
+
+        <div class="highlight">
+            <p><strong>选型建议</strong>：如果你的via-point较少（≤5个），且不需要实时修改，用五次多项式就够了。如果via-point很多（如示教轨迹的回放），用CubicSpline或B样条。如果你需要在实时系统中调整轨迹（如动态避障），B样条是唯一的选择——只有它支持局部调整而不重新计算全局轨迹。</p>
+        </div>
+
+        <h3>12.4 时间最优轨迹</h3>
+
+        <p>前面我们讨论的轨迹规划都是"给定时间，生成轨迹"。但更实际的问题是：<strong>给定机器人运动学/动力学约束，最短需要多少时间完成这条路径？</strong>这就是时间最优轨迹规划（Time-Optimal Path Parameterization, TOPP）。</p>
+
+        <p>TOPP的核心思想是相平面（Phase-Plane）方法：将轨迹参数化为路径长度s，然后在(s, ṡ)相平面上寻找最大化速度同时不违反约束的曲线。约束包括关节速度极限、加速度极限、力矩极限等。</p>
+
+        <pre><code># 概念性示例：TOPP的相平面约束
+def compute_velocity_limits(s, path, model, q_max, tau_max):
+    """计算在路径点s处的速度上限（受关节力矩约束）"""
+    # 路径参数化：s → q(s), q'(s), q''(s)
+    q_s = path.eval(s)
+    q_s_prime = path.eval_d(s)     # dq/ds
+    q_s_dprime = path.eval_dd(s)   # d²q/ds²
+
+    # 动力学约束：M(q)·q̈ + C(q,q̇)·q̇ + g(q) = τ
+    # 转化为 ṡ 的不等式约束
+    # a(s)·ṡ² + b(s)·s̈ + c(s) = τ
+    # 对于给定的 ṡ，需要存在 ṡ̈ 使得 τ 在极限范围内
+
+    # ... 计算 a(s), b(s), c(s) ...
+    # 返回该点的最大可行 ṡ
+
+    return v_max_at_s</code></pre>
+
+        <p>TOPP的学术研究非常成熟——ETH的TOPP-RA算法可以在几毫秒内求解几十个路径点的最优轨迹。ROS MoveIt 2中的时间最优规划就使用了类似的算法。在2026年，TOPP已经集成到了OMPL和MoveIt 2的标准管线中。</p>
+
+        <h3>12.5 实战：Python轨迹生成</h3>
+
+        <p>下面是一个完整的实战示例：使用多项式插值生成关节空间轨迹，并可视化结果。</p>
+
+        <pre><code>import numpy as np
+from scipy.interpolate import CubicSpline
+import matplotlib.pyplot as plt
+
+# 六轴机器人的via-points（每个关节7个点）
+q_via = np.array([
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],      # t=0s
+    [0.2, -0.3, 0.5, 0.1, 0.0, 0.0],     # t=1s
+    [0.5, -0.8, 1.2, 0.3, 0.2, 0.1],     # t=2s
+    [0.3, -0.6, 1.0, 0.5, 0.4, 0.2],     # t=3s
+    [0.0, -0.2, 0.6, 0.6, 0.5, 0.3],     # t=4s
+    [-0.3, 0.1, 0.3, 0.4, 0.3, 0.2],     # t=5s
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],      # t=6s
+])
+
+t_via = np.array([0, 1, 2, 3, 4, 5, 6])
+n_joints = 6
+n_interp = 1000
+t_interp = np.linspace(0, 6, n_interp)
+
+q_traj = np.zeros((n_interp, n_joints))
+v_traj = np.zeros((n_interp, n_joints))
+a_traj = np.zeros((n_interp, n_joints))
+
+for j in range(n_joints):
+    cs = CubicSpline(t_via, q_via[:, j], bc_type='clamped')  # 起终点速度为零
+    q_traj[:, j] = cs(t_interp)
+    v_traj[:, j] = cs(t_interp, nu=1)
+    a_traj[:, j] = cs(t_interp, nu=2)
+
+# 检查关节速度和加速度是否在极限范围内
+v_max_allowed = 3.14  # rad/s
+a_max_allowed = 8.0   # rad/s²
+
+for j in range(n_joints):
+    v_peak = np.max(np.abs(v_traj[:, j]))
+    a_peak = np.max(np.abs(a_traj[:, j]))
+    assert v_peak &lt; v_max_allowed, f"关节{j+1}超速: {v_peak:.2f}"
+    assert a_peak &lt; a_max_allowed, f"关节{j+1}加速度超限: {a_peak:.2f}"
+
+print("轨迹验证通过：速度和加速度均在极限范围内")</code></pre>
+
+        <div class="warning">
+            <p><strong>踩坑故事</strong>：有一次我在调试码垛机器人时，轨迹规划看起来一切正常——仿真中末端走了完美的直线，所有关节速度和加速度都在限幅以内。但一上真机，机器人就开始剧烈抖动，每次加减速时都发出"嗡嗡"的共振声。排查了三天才发现问题：我的轨迹规划频率是100Hz，但伺服驱动器的位置环频率是4kHz。100Hz的轨迹在4kHz的驱动器中产生了"台阶效应"——每个控制周期的微小速度跳变，正好激发了两个结构模态（约12Hz和28Hz）。解决方案是将轨迹插值到1kHz，并使用S形曲线替代梯形曲线，问题彻底消失。教训是：<strong>轨迹的更新频率必须远高于机器人的结构共振频率</strong>。</p>
+        </div>
+
+        <p>本章我们学习了关节空间与任务空间两种规划方式、梯形与S形速度曲线、多项式与样条插值、时间最优轨迹（TOPP）的概念，以及完整的Python轨迹生成实战。轨迹生成是连接"运动学/动力学理论"和"实际控制"之间的桥梁——它告诉机器人"去哪里"和"怎么去"。</p>
+
+        <p>轨迹告诉机器人去哪——但真正保证它去到那里的，是控制。下一章我们将进入机器人控制最核心的话题：<strong>PID与反馈控制</strong>。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 微分运动学与雅可比</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 机器人学概述</a></li>
+            <li><a href="02.html">第2章 线性代数基础</a></li>
+            <li><a href="03.html">第3章 微积分与优化基础</a></li>
+            <li><a href="04.html">第4章 概率与状态估计</a></li>
+            <li><a href="05.html">第5章 刚体运动与空间描述</a></li>
+            <li><a href="06.html">第6章 机器人机构学基础</a></li>
+            <li><a href="07.html">第7章 传感器与执行器</a></li>
+            <li><a href="08.html">第8章 正向运动学</a></li>
+            <li><a href="09.html">第9章 逆向运动学</a></li>
+            <li><a href="10.html" class="active">第10章 微分运动学与雅可比</a></li>
+            <li><a href="11.html">第11章 刚体动力学</a></li>
+            <li><a href="12.html">第12章 轨迹生成</a></li>
+            <li><a href="13.html">第13章 PID与反馈控制</a></li>
+            <li><a href="14.html">第14章 先进控制方法</a></li>
+            <li><a href="15.html">第15章 ROS 2核心编程</a></li>
+            <li><a href="16.html">第16章 机器人仿真</a></li>
+            <li><a href="17.html">第17章 MoveIt 2与运动规划</a></li>
+            <li><a href="18.html">第18章 机器人标定与参数辨识</a></li>
+            <li><a href="19.html">第19章 SLAM原理与实践</a></li>
+            <li><a href="20.html">第20章 路径与轨迹规划</a></li>
+            <li><a href="21.html">第21章 机器人视觉</a></li>
+            <li><a href="22.html">第22章 机器人学习</a></li>
+            <li><a href="23.html">第23章 机器人调试与诊断</a></li>
+            <li><a href="24.html">第24章 嵌入式与实时系统</a></li>
+            <li><a href="25.html">第25章 真机部署与集成</a></li>
+            <li><a href="26.html">第26章 人形与四足机器人</a></li>
+            <li><a href="27.html">第27章 具身智能与VLA大模型</a></li>
+            <li><a href="28.html">第28章 综合项目实战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第10章 微分运动学与雅可比</h2>
+
+        <p>大家好，我是你们的讲师。如果说FK是"机器人的位置"，IK是"位置的反向映射"，那么今天我们要讲的微分运动学（Differential Kinematics）就是"机器人的速度"。而雅可比矩阵（Jacobian Matrix）正是连接关节速度与末端速度的桥梁。</p>
+
+        <p>你可能已经在第9章接触过雅可比伪逆——那是数值IK的核心。但雅可比的意义远不止于IK求解。它告诉你：<strong>哪个关节对末端运动贡献最大？在什么构型下机器人会失去自由度？末端能承受多大的力？</strong>可以说，理解了雅可比，你就理解了机器人在"动"和"受力"两个维度上的全部行为。</p>
+
+        <h3>10.1 雅可比矩阵的物理含义</h3>
+
+        <p>雅可比矩阵 <code>J(q) ∈ ℝ^(6×n)</code> 定义了一种速度映射关系：</p>
+
+        <pre><code>ν = J(q) · q̇
+
+其中 ν = [v; ω] 是末端空间速度（线速度v + 角速度ω），
+q̇ 是关节速度向量。</code></pre>
+
+        <p>从几何上看，雅可比的每一列对应一个关节的"瞬时螺旋轴"（Instantaneous Screw Axis）。第i列 <code>J[:,i]</code> 表示：仅当第i个关节以单位速度运动时，末端产生的空间速度。这就是雅可比的物理含义——它把每个关节的运动"投影"到末端运动上。</p>
+
+        <p>对于旋转关节，第i列的表达式为：</p>
+
+        <pre><code>J[:,i] = | zᵢ₋₁ × (pₑ - pᵢ₋₁) |
+         |        zᵢ₋₁         |</code></pre>
+
+        <p>其中 <code>zᵢ₋₁</code> 是第i-1个坐标系中的Z轴方向（在世界坐标系中表示），<code>pₑ</code> 是末端位置，<code>pᵢ₋₁</code> 是第i-1个关节的位置。这个公式非常直观——它本质上是"力矩 = 力臂 × 力"的刚体运动学版本。</p>
+
+        <pre><code>import pinocchio as pin
+import numpy as np
+
+model = pin.buildModelFromUrdf("robot.urdf")
+data = model.createData()
+
+q = np.array([0.0, -0.5, 0.8, 0.0, 0.5, 0.0])
+
+# 计算雅可比矩阵
+pin.forwardKinematics(model, data, q)
+pin.updateFramePlacements(model, data)
+ee_id = model.getFrameId("tool0")
+
+# 计算局部雅可比（body-fixed frame）
+J = pin.computeFrameJacobian(model, data, q, ee_id, pin.ReferenceFrame.LOCAL)
+
+print("雅可比矩阵形状:", J.shape)  # (6, nq)
+print("线速度部分:\n", J[:3, :])
+print("角速度部分:\n", J[3:, :])</code></pre>
+
+        <h3>10.2 几何雅可比 vs 分析雅可比</h3>
+
+        <p>需要注意的是，雅可比有两种不同的定义方式：</p>
+
+        <ul>
+            <li><strong>几何雅可比（Geometric Jacobian）</strong>：末端速度用 <code>[v; ω]</code> 表示，其中 <code>ω</code> 是瞬时角速度矢量。这是Pinocchio等物理引擎使用的形式。</li>
+            <li><strong>分析雅可比（Analytical Jacobian）</strong>：末端速度用姿态参数的时间导数表示（如欧拉角速率、四元数导数）。形式取决于姿态参数化方式。</li>
+        </ul>
+
+        <p>两者的关系是：<code>J_analytic = E(φ) · J_geometric</code>，其中 <code>E(φ)</code> 是将角速度映射到姿态参数导数的变换矩阵。举一个具体的例子——如果用ZYX欧拉角 <code>(α, β, γ)</code> 表示姿态：</p>
+
+        <pre><code>| α̇ |   | -sinβ·cosγ   cosγ   0 |   | ωₓ |
+| β̇ | = |  sinβ·sinγ  -sinγ   0 | · | ωᵧ |
+| γ̇ |   |     cosβ      0     1 |   | ω_z |</code></pre>
+
+        <div class="tip">
+            <p><strong>何时用哪种？</strong>如果你做的是控制（输出关节力矩），用几何雅可比，因为物理量是矢量。如果你做的是规划（输出末端轨迹），用分析雅可比通常更方便，因为姿态参数的时间导数更直观。不过大多数现代框架（Pinocchio、Kindr）都默认使用几何雅可比——减少姿态参数化带来的奇异性。</p>
+        </div>
+
+        <h3>10.3 奇异性分析</h3>
+
+        <p>雅可比矩阵的秩直接反映了机器人在当前构型下的运动能力。当雅可比不满秩（<code>rank(J) &lt; 6</code>）时，机器人处于奇异位形，此时在某些方向上失去运动能力。</p>
+
+        <p>常见的奇异位形类型：</p>
+
+        <table>
+            <tr>
+                <th>类型</th>
+                <th>物理含义</th>
+                <th>常见场景</th>
+                <th>检测方法</th>
+            </tr>
+            <tr>
+                <td>边界奇异</td>
+                <td>手臂完全伸直或折叠</td>
+                <td>肘关节全伸展</td>
+                <td>检查关节极限</td>
+            </tr>
+            <tr>
+                <td>腕部奇异</td>
+                <td>第4轴和第6轴共线</td>
+                <td>第5轴接近0°</td>
+                <td>检查sin(θ₅) ≈ 0</td>
+            </tr>
+            <tr>
+                <td>肩部奇异</td>
+                <td>腕部中心位于肩关节正上方</td>
+                <td>第1轴和第4轴共线</td>
+                <td>检查条件数</td>
+            </tr>
+        </table>
+
+        <p>最常用的奇异性检测方法是计算雅可比的条件数（Condition Number）：</p>
+
+        <pre><code>cond(J) = σ_max / σ_min
+
+其中 σ_max 和 σ_min 是J的最大和最小奇异值。</code></pre>
+
+        <p>当条件数趋近无穷大时，机器人处于奇异位形。实践中，通常设置一个阈值（如 <code>cond &gt; 1000</code>）来判定接近奇异区域。</p>
+
+        <pre><code># 奇异性检测示例
+def check_singularity(J, threshold=1000):
+    _, s, _ = np.linalg.svd(J)
+    cond_num = s[0] / s[-1]
+    min_sv = s[-1]
+
+    if cond_num > threshold:
+        return True, cond_num, min_sv  # 接近奇异
+    return False, cond_num, min_sv
+
+# 测试不同构型
+for test_name, q_test in [("中立位姿", np.zeros(6)),
+                            ("接近奇异", np.array([0, 0, 0.5, 0, 0.01, 0]))]:
+    pin.forwardKinematics(model, data, q_test)
+    J_test = pin.computeFrameJacobian(model, data, q_test,
+                                       ee_id, pin.ReferenceFrame.LOCAL)
+    is_sing, cond, sv_min = check_singularity(J_test)
+    print(f"{test_name}: cond={cond:.1f}, min_sv={sv_min:.4f}, "
+          f"singular={is_sing}")</code></pre>
+
+        <div class="warning">
+            <p><strong>避坑指南</strong>：我在调试一个焊接机器人时，发现在某个特定焊接路径上机器人总是"卡顿"一下，然后继续运动。用SVD分析后发现，在那个点雅可比的最小奇异值降到了0.02（正常值约2.0），条件数突破了1000。根本原因是焊枪姿态要求导致第5轴几乎为零，进入了腕部奇异。解决方案很简单——在规划阶段绕过奇异区域，而不是指望控制器在奇异点附近"硬撑"。记住：<strong>奇异位形不是控制能解决的问题，它是路径规划阶段就应该回避的</strong>。</p>
+        </div>
+
+        <h3>10.4 可操作度</h3>
+
+        <p>Yoshikawa在1985年提出了可操作度（Manipulability）的概念，用一个标量衡量机器人在当前构型下的"运动灵活性"：</p>
+
+        <pre><code>w = √(det(J · Jᵀ)) = σ₁ · σ₂ · ... · σₘ</code></pre>
+
+        <p>可操作度 <code>w</code> 越大，机器人在各个方向上的运动能力越均衡。可操作度为零意味着处于奇异位形。将这个标量可视化，就得到了可操作度椭球（Manipulability Ellipsoid）——椭球的轴方向由奇异向量决定，轴长由奇异值决定。</p>
+
+        <p>可操作度还有一个有趣的"对偶性"：速度可操作度椭球和力可操作度椭球互为对偶。如果在某个方向上运动速度很快（长轴），那么在同一个方向上能输出的力就很小（短轴）。这就是著名的<strong>速度-力对偶原理</strong>。</p>
+
+        <div class="highlight">
+            <p><strong>直觉理解</strong>：想象你的手臂完全伸直去推一堵墙——你能输出很大的力（力椭球在这个方向上很长），但你的手在这个方向上几乎不能移动（速度椭球在这个方向上很短）。反之，当你的肘部弯曲90°时，手可以快速移动（速度椭球大），但推力很小。这个对偶性在设计机器人操作任务时至关重要——重载搬运需要"力优势"构型，精密装配需要"速度优势"构型。</p>
+        </div>
+
+        <h3>10.5 力域中的雅可比</h3>
+
+        <p>雅可比不仅在速度域中起作用，在力域中同样关键。利用虚功原理（Virtual Work Principle），我们可以建立关节力矩 <code>τ</code> 与末端力 <code>F</code> 之间的关系：</p>
+
+        <pre><code>τ = Jᵀ · F</code></pre>
+
+        <p>这个公式的物理意义极为深刻：<strong>雅可比的转置将末端笛卡尔力映射为关节力矩</strong>。这是力控制、阻抗控制、混合力位控制的数学基础。想象一下：如果你的机器人末端需要施加10N的力，通过 <code>Jᵀ</code> 映射到各个关节上，就得到了每个关节应该输出的力矩。不需要显式计算动力学——只需要雅可比。</p>
+
+        <pre><code># 力域实例：重力补偿
+pin.computeJointJacobians(model, data, q)
+pin.framesForwardKinematics(model, data, q)
+
+# 假设末端受到 5N 的力沿 Z 方向
+F_ee = np.array([0.0, 0.0, -5.0, 0.0, 0.0, 0.0])
+
+# 映射到关节力矩
+J = pin.computeFrameJacobian(model, data, q, ee_id, pin.ReferenceFrame.LOCAL)
+tau_gravity = J.T @ F_ee
+
+print("重力补偿关节力矩:", tau_gravity)</code></pre>
+
+        <p>在实际工程中，当机器人需要与环境交互（如打磨、装配、人机协作）时，<code>Jᵀ</code> 映射是力控制的基础。结合力/力矩传感器，可以实现精确的力位混合控制——这也是第14章的主题之一。</p>
+
+        <p>本章我们学习了雅可比矩阵的物理意义——它是关节空间与任务空间之间速度和力的桥梁。我们探讨了几何雅可比与分析雅可比、奇异性的检测与规避、可操作度的概念，以及 <code>τ = Jᵀ·F</code> 的力映射关系。雅可比是运动学与动力学之间的"转接器"——有了它，我们才能讨论机器人到底需要多大的力才能动起来。</p>
+
+        <p>运动学描述了运动而不问力——现在加入质量和惯性，就进入了动力学。下一章：<strong>刚体动力学</strong>。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 分布式训练实战</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是分布式系统</a></li>
+            <li><a href="02.html">第2章 系统模型与时间</a></li>
+            <li><a href="03.html">第3章 CAP定理与取舍</a></li>
+            <li><a href="04.html">第4章 一致性模型</a></li>
+            <li><a href="05.html">第5章 通信基础</a></li>
+            <li><a href="06.html">第6章 序列化与编解码</a></li>
+            <li><a href="07.html">第7章 分布式系统设计模式</a></li>
+            <li><a href="08.html">第8章 RPC远程过程调用</a></li>
+            <li><a href="09.html">第9章 消息队列与事件驱动</a></li>
+            <li><a href="10.html">第10章 P2P与Gossip协议</a></li>
+            <li><a href="11.html">第11章 服务网格</a></li>
+            <li><a href="12.html">第12章 网络协议栈深度</a></li>
+            <li><a href="13.html">第13章 组通信与广播</a></li>
+            <li><a href="14.html">第14章 2026通信前沿</a></li>
+            <li><a href="15.html">第15章 复制与一致性</a></li>
+            <li><a href="16.html">第16章 分布式事务</a></li>
+            <li><a href="17.html">第17章 Raft共识算法</a></li>
+            <li><a href="18.html">第18章 Paxos与BFT</a></li>
+            <li><a href="19.html">第19章 并行计算模型</a></li>
+            <li><a href="20.html">第20章 数据并行</a></li>
+            <li><a href="21.html">第21章 模型与流水线并行</a></li>
+            <li><a href="22.html" class="active">第22章 分布式训练实战</a></li>
+            <li><a href="23.html">第23章 Docker与K8s编排</a></li>
+            <li><a href="24.html">第24章 可观测性</a></li>
+            <li><a href="25.html">第25章 调试与压测</a></li>
+            <li><a href="26.html">第26章 AI训练基础设施</a></li>
+            <li><a href="27.html">第27章 边缘计算与IoT</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第22章 分布式训练实战</h2>
+
+        <p>前三章我们深入探讨了并行计算模型、数据并行、模型并行和流水线并行的理论。但理论是灰色的，真正的考验在于：<strong>这些知识能不能落地？</strong>当你的模型在单卡上OOM、当你发现8卡训练的加速比只有3倍、当你的NCCL报"不可预知的错误"——光懂理论是不够的。</p>
+
+        <p>这一章的目标非常明确：<strong>用PyTorch写真正的分布式训练代码</strong>。从DDP入手，到FSDP和ZeRO优化器，再到混合精度和梯度累积——每一步都有可运行的代码、配置参数和踩坑指南。</p>
+
+        <h2>22.1 PyTorch DDP入门</h2>
+
+        <p><strong>DistributedDataParallel（DDP）</strong>是PyTorch最成熟、最稳定的数据并行实现。它的核心机制是：每个进程持有一份完整的模型副本，独立计算梯度，然后通过Ring-AllReduce同步梯度。</p>
+
+        <h3>单机多卡示例</h3>
+
+        <pre><code># train_ddp.py - 使用PyTorch DDP的单机多卡训练
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+
+def setup(rank, world_size):
+    """初始化进程组"""
+    dist.init_process_group(
+        backend='nccl',              # NCCL后端是GPU训练的首选
+        init_method='tcp://127.0.0.1:23456',
+        rank=rank,
+        world_size=world_size
+    )
+    torch.cuda.set_device(rank)
+
+def cleanup():
+    dist.destroy_process_group()
+
+def train(rank, world_size):
+    setup(rank, world_size)
+
+    # 模型和数据加载
+    model = MyLargeModel().to(rank)
+    ddp_model = DDP(model, device_ids=[rank])
+
+    # 关键：使用DistributedSampler确保数据不重复
+    dataset = MyDataset()
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
+    loader = DataLoader(dataset, sampler=sampler, batch_size=32)
+
+    optimizer = torch.optim.AdamW(ddp_model.parameters(), lr=3e-4)
+
+    for epoch in range(10):
+        sampler.set_epoch(epoch)  # 每个epoch打乱数据
+        for batch in loader:
+            inputs, labels = batch
+            inputs, labels = inputs.to(rank), labels.to(rank)
+
+            outputs = ddp_model(inputs)
+            loss = criterion(outputs, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+    cleanup()
+
+if __name__ == "__main__":
+    world_size = torch.cuda.device_count()
+    mp.spawn(train, args=(world_size,), nprocs=world_size)</code></pre>
+
+        <div class="tip">
+            <strong>torchrun运行：</strong>推荐使用PyTorch官方推荐的torchrun替代mp.spawn。只需要在命令行执行：<code>torchrun --nproc_per_node=8 train_ddp.py</code>。torchrun会自动设置环境变量RANK、WORLD_SIZE和MASTER_ADDR。
+        </div>
+
+        <h3>多机训练配置</h3>
+
+        <pre><code># 多机训练（2台机器，每台8卡，共16卡）
+# 机器1（master_addr=192.168.1.100）：
+torchrun --nnodes=2 --nproc_per_node=8 \
+         --rdzv_id=my_job --rdzv_backend=c10d \
+         --rdzv_endpoint=192.168.1.100:29500 \
+         train_ddp.py
+
+# 机器2：
+torchrun --nnodes=2 --nproc_per_node=8 \
+         --rdzv_id=my_job --rdzv_backend=c10d \
+         --rdzv_endpoint=192.168.1.100:29500 \
+         train_ddp.py</code></pre>
+
+        <p>多机训练的核心要求：</p>
+        <ul>
+            <li>所有机器的CUDA版本、PyTorch版本必须一致</li>
+            <li>机器之间必须能够通过指定端口通信（防火墙开放端口）</li>
+            <li>最好使用高速网络（InfiniBand或RoCE），否则通信会成为瓶颈</li>
+            <li>设置<code>NCCL_SOCKET_IFNAME</code>环境变量指定通信网卡</li>
+        </ul>
+
+        <h2>22.2 ZeRO优化器三阶段</h2>
+
+        <p>DDP虽然好用，但有一个问题：<strong>每张卡都存了一份完整的模型状态</strong>。对于大模型，优化器状态（momentum、variance等）占用显存往往是参数的2-3倍。一个10B参数的模型，优化器状态就需要80GB+的显存。</p>
+
+        <p><strong>ZeRO（Zero Redundancy Optimizer）</strong>由微软DeepSpeed团队提出，核心思想是将模型状态分片到各个GPU上，而不是每卡都存一份完整副本。</p>
+
+        <h3>三阶段递进</h3>
+
+        <table>
+            <tr>
+                <th>阶段</th>
+                <th>分片内容</th>
+                <th>显存节省</th>
+                <th>通信量</th>
+                <th>适用场景</th>
+            </tr>
+            <tr>
+                <td><strong>ZeRO-1</strong></td>
+                <td>优化器状态（momentum+variance）</td>
+                <td>4×</td>
+                <td>与DDP相同</td>
+                <td>大部分训练</td>
+            </tr>
+            <tr>
+                <td><strong>ZeRO-2</strong></td>
+                <td>优化器状态 + 梯度</td>
+                <td>8×</td>
+                <td>与DDP相同</td>
+                <td>模型较大时</td>
+            </tr>
+            <tr>
+                <td><strong>ZeRO-3</strong></td>
+                <td>优化器状态 + 梯度 + 参数</td>
+                <td>与GPU数线性</td>
+                <td>增加约1.5倍</td>
+                <td>超大模型</td>
+            </tr>
+        </table>
+
+        <p><strong>显存节省的数学推导</strong>：假设模型参数为Ψ，Adam优化器需要存储参数(FP16)+动量(FP32)+方差(FP32)≈16Ψ字节。在N卡上：</p>
+        <pre><code>DDP: 每卡显存 = 16Ψ
+ZeRO-1: 每卡显存 = 16Ψ/N + 2Ψ（参数本身不切）≈ 16Ψ/N + 2Ψ
+        当N=64时，16Ψ/64 + 2Ψ = 2.25Ψ，相比16Ψ节省7倍+
+ZeRO-3: 每卡显存 = 16Ψ/N
+        当N=64时，每卡只需存0.25Ψ的模型状态</code></pre>
+
+        <div class="highlight">
+            <strong>ZeRO vs 模型并行的区别：</strong>ZeRO本质上是"内存优化"而非"计算并行"。ZeRO-3中参数被分片了，计算时要从其他GPU收集参数，这会增加通信量。但ZeRO不改变计算图——同一层的计算仍然在同一张卡上完成，因此不会引入模型并行中的负载不均问题。
+        </div>
+
+        <h2>22.3 FSDP（Fully Sharded Data Parallel）</h2>
+
+        <p><strong>FSDP</strong>是PyTorch团队将ZeRO-3的思想原生集成到PyTorch中的实现。它提供了与DDP几乎相同的API，但在后台自动管理参数的分片和收集。</p>
+
+        <pre><code># FSDP训练示例
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+
+# 自动包装策略（推荐）
+model = MyTransformerModel()
+
+# 对于Transformer模型的关键优化：按Transformer层为单位包装
+from torch.distributed.fsdp.wrap import (
+    transformer_auto_wrap_policy,
+    enable_wrap,
+    wrap,
+)
+
+# FSDP包装
+fsdp_model = FSDP(
+    model,
+    auto_wrap_policy=transformer_auto_wrap_policy,
+    mixed_precision=True,             # 启用混合精度
+    cpu_offload=CPUOffload(offload_params=True),  # 将参数卸载到CPU
+    sharding_strategy="FULL_SHARD",   # 等同于ZeRO-3
+    device_id=torch.cuda.current_device(),
+)
+
+optimizer = torch.optim.AdamW(fsdp_model.parameters(), lr=3e-4)
+
+for epoch in range(num_epochs):
+    for batch in dataloader:
+        outputs = fsdp_model(batch)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()</code></pre>
+
+        <h3>FSDP vs DDP性能对比</h3>
+
+        <table>
+            <tr>
+                <th>指标</th>
+                <th>DDP</th>
+                <th>FSDP（ZeRO-3）</th>
+            </tr>
+            <tr>
+                <td>模型最大规模（8×A100 80GB）</td>
+                <td>~7B参数</td>
+                <td>~30B参数</td>
+            </tr>
+            <tr>
+                <td>训练吞吐量（同模型大小）</td>
+                <td>基准</td>
+                <td>85-95%（通信开销）</td>
+            </tr>
+            <tr>
+                <td>启动内存</td>
+                <td>高（完整副本）</td>
+                <td>低（分片）</td>
+            </tr>
+            <tr>
+                <td>支持ZeRO阶段</td>
+                <td>无</td>
+                <td>ZeRO-1/2/3</td>
+            </tr>
+            <tr>
+                <td>通信量</td>
+                <td>2Ψ</td>
+                <td>~3Ψ（参数收集额外开销）</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <strong>FSDP参数预取：</strong>FSDP支持<code>forward_prefetch</code>和<code>backward_prefetch</code>选项，可以在计算当前层时预取下一层的参数，从而隐藏参数收集的通信开销。在带宽充足的场景下，预取可以将性能从DDP的85%提升到95%以上。
+        </div>
+
+        <h2>22.4 混合精度训练</h2>
+
+        <p>现代GPU对FP16/BF16的计算速度是FP32的2-8倍。混合精度训练的核心是：<strong>用FP16/BF16做前向和反向计算，用FP32维护精确的参数副本</strong>。</p>
+
+        <h3>自动混合精度（AMP）</h3>
+
+        <pre><code>import torch.cuda.amp as amp
+
+# 使用autocast和GradScaler实现AMP
+scaler = amp.GradScaler()  # 损失缩放，防止FP16下溢
+
+model = MyModel().cuda()
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+for batch in dataloader:
+    optimizer.zero_grad()
+
+    # autocast自动选择FP16/BF16
+    with amp.autocast(dtype=torch.float16):
+        outputs = model(batch)
+        loss = outputs.loss
+
+    # 反向传播：使用scaler防止梯度下溢
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()</code></pre>
+
+        <h3>BF16 vs FP16</h3>
+
+        <p>如果你用的是A100/H100/B100等支持BF16的GPU，优先选择BF16：</p>
+        <ul>
+            <li><strong>FP16</strong>：指数位5位，尾数位10位。范围小（容易上溢/下溢），需要Loss Scaling</li>
+            <li><strong>BF16</strong>：指数位8位（同FP32），尾数位7位。范围与FP32相同，不需要Loss Scaling</li>
+            <li>BF16在训练中的精度损失通常比FP16小，且不需要Loss Scaling的调参</li>
+        </ul>
+
+        <h2>22.5 梯度累积与通信频率</h2>
+
+        <p>在分布式训练中，<strong>通信频率</strong>是一个关键的超参数。同步太频繁（每步都AllReduce）导致通信开销过大；同步太少（累积太多步）则梯度陈旧，收敛变差。</p>
+
+        <p><strong>梯度累积</strong>是一种"模拟大batch"的技术，同时能有效减少通信次数：</p>
+
+        <pre><code># 梯度累积实现（accumulation_steps=4）
+model = DDP(MyModel().cuda())
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+accumulation_steps = 4
+
+for i, batch in enumerate(dataloader):
+    outputs = model(batch)
+    loss = criterion(outputs, labels) / accumulation_steps  # 除以累积步数
+    loss.backward()
+
+    if (i + 1) % accumulation_steps == 0:
+        optimizer.step()      # 更新参数
+        optimizer.zero_grad() # 清空梯度
+    # 注意：DDP的梯度同步在loss.backward()时自动触发
+
+# 小技巧：控制同步频率
+# 设置no_sync上下文管理器可以手动控制同步时机
+for i, batch in enumerate(dataloader):
+    if (i + 1) % accumulation_steps == 0:
+        # 正常同步
+        outputs = model(batch)
+        loss.backward()
+        optimizer.step()
+    else:
+        # 暂时关闭梯度同步，累积本地梯度
+        with model.no_sync():
+            outputs = model(batch)
+            loss.backward()
+        # 梯度累积在本地，不触发AllReduce</code></pre>
+
+        <div class="highlight">
+            <strong>大batch模拟：</strong>假设你的单卡batch size=32，accumulation_steps=8，那么每张卡的有效batch=32×8=256。在16张GPU上，全局batch size=256×16=4096。这在数学上等价于单机batch size=4096的训练——但需要配合学习率热身（Linear Scaling Rule）来保证收敛。
+        </div>
+
+        <h2>22.6 踩坑大全</h2>
+
+        <div class="warning">
+            <strong>踩坑1：NCCL死锁</strong>
+        </div>
+
+        <p>某次训练在8卡A100上跑了24小时后突然hang住，所有GPU利用率降到0%。NCCL报错：<code>ncclSystemError: System call (e.g. socket, malloc) or internal error</code>。</p>
+
+        <p>根因：<strong>依赖的CUDA版本不一致</strong>。训练脚本依赖的某个conda包自带旧版CUDA runtime，与系统CUDA 12.1冲突，导致NCCL在运行24小时后遇到一个罕见的竞争条件。</p>
+        <p>解决方案：使用<code>conda list | grep cudatoolkit</code>排查所有CUDA相关包，确保全部升级到兼容版本。设置<code>NCCL_DEBUG=INFO</code>环境变量可以获取更详细的NCCL日志。</p>
+
+        <div class="warning">
+            <strong>踩坑2：CUDA OOM——不是真的显存不够</strong>
+        </div>
+
+        <p>在64卡集群上用FSDP训练时，某些GPU报OOM（Out of Memory），但不是所有GPU——这很奇怪。</p>
+
+        <p>排查发现：</p>
+        <ul>
+            <li>使用<code>torch.cuda.max_memory_allocated()</code>打印每张卡的峰值显存</li>
+            <li>发现OOM的GPU显存分配量是其他卡的2倍</li>
+            <li>原因：FSDP的自动包装策略（auto_wrap_policy）在某些边界条件下没有正确包装所有层，导致部分层的数据没有被分片</li>
+        </ul>
+
+        <p>解决方案：使用<code>torch.distributed.fsdp.wrap.size_based_auto_wrap_policy</code>明确指定包装的最小参数数量阈值，或者手动指定wrap策略确保均匀分片。</p>
+
+        <div class="warning">
+            <strong>踩坑3：通信瓶颈定位</strong>
+        </div>
+
+        <p>8卡DDP训练，加速比只有4.5倍，远低于预期的7.5倍。用了<code>NCCL_DEBUG=INFO</code>后发现：通信的时间占比达到了35%。</p>
+
+        <p>排查步骤：</p>
+        <ul>
+            <li><code>nvidia-smi topo -m</code>检查GPU拓扑——发现GPU 0和GPU 7不在同一个PCIe switch下，跨switch通信走的是慢速路径</li>
+            <li>使用<code>export NCCL_TOPO_FILE=/path/to/custom_topology.xml</code>纠正NCCL的拓扑认知</li>
+            <li>或者使用<code>export NCCL_P2P_DISABLE=1</code>强制使用NVLink（在特定场景下有效）</li>
+            <li>最终通过调整<code>NCCL_NET_GDR_LEVEL</code>参数解决通信瓶颈</li>
+        </ul>
+
+        <div class="warning">
+            <strong>踩坑4：torchrun vs torch.distributed.launch</strong>
+        </div>
+
+        <p>很多旧教程使用<code>python -m torch.distributed.launch</code>启动分布式训练。这个工具在PyTorch 2.0+中已被标记为<strong>废弃（deprecated）</strong>，推荐使用<code>torchrun</code>。</p>
+
+        <p>关键差异：</p>
+        <ul>
+            <li><code>torchrun</code>自动处理失败重启（fault tolerance）</li>
+            <li><code>torchrun</code>支持elastics training（动态增减worker数量）</li>
+            <li><code>torchrun</code>不需要手动设置RANK和WORLD_SIZE环境变量</li>
+            <li>迁移非常简单：把<code>python -m torch.distributed.launch --nproc_per_node=8</code>换成<code>torchrun --nproc_per_node=8</code></li>
+        </ul>
+
+        <h2>总结与展望</h2>
+
+        <p>这一章我们完成了从理论到实践的关键一跃——用PyTorch DDP启动多卡训练、用ZeRO/FSDP突破显存瓶颈、用混合精度榨取GPU算力、用梯度累积平衡通信与计算。写到这里，分布式训练的核心技术栈已经全部铺开了。下一章，我们将把视角从"训练"拉升到"部署"——用Docker和Kubernetes把训练任务编排起来，实现真正的工程化运营。</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

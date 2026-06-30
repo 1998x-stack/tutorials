@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 数据并行</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🌐 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是分布式系统</a></li>
+            <li><a href="02.html">第2章 系统模型与时间</a></li>
+            <li><a href="03.html">第3章 CAP定理与取舍</a></li>
+            <li><a href="04.html">第4章 一致性模型</a></li>
+            <li><a href="05.html">第5章 通信基础</a></li>
+            <li><a href="06.html">第6章 序列化与编解码</a></li>
+            <li><a href="07.html">第7章 分布式系统设计模式</a></li>
+            <li><a href="08.html">第8章 RPC远程过程调用</a></li>
+            <li><a href="09.html">第9章 消息队列与事件驱动</a></li>
+            <li><a href="10.html">第10章 P2P与Gossip协议</a></li>
+            <li><a href="11.html">第11章 服务网格</a></li>
+            <li><a href="12.html">第12章 网络协议栈深度</a></li>
+            <li><a href="13.html">第13章 组通信与广播</a></li>
+            <li><a href="14.html">第14章 2026通信前沿</a></li>
+            <li><a href="15.html">第15章 复制与一致性</a></li>
+            <li><a href="16.html">第16章 分布式事务</a></li>
+            <li><a href="17.html">第17章 Raft共识算法</a></li>
+            <li><a href="18.html">第18章 Paxos与BFT</a></li>
+            <li><a href="19.html">第19章 并行计算模型</a></li>
+            <li><a href="20.html" class="active">第20章 数据并行</a></li>
+            <li><a href="21.html">第21章 模型与流水线并行</a></li>
+            <li><a href="22.html">第22章 分布式训练实战</a></li>
+            <li><a href="23.html">第23章 Docker与K8s编排</a></li>
+            <li><a href="24.html">第24章 可观测性</a></li>
+            <li><a href="25.html">第25章 调试与压测</a></li>
+            <li><a href="26.html">第26章 AI训练基础设施</a></li>
+            <li><a href="27.html">第27章 边缘计算与IoT</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第20章 数据并行</h2>
+
+        <p>假设你有一张GPU（比如NVIDIA A100，80GB显存），想训练一个BERT-Large模型（大约3.4亿参数）。模型本身完全放得下——但你的训练数据有1TB，单卡训练一轮需要整整一周。这时候你自然会想到：<strong>能不能多搞几张卡，每张卡处理一部分数据，大家一起算？</strong></p>
+
+        <p>这就是<strong>数据并行（Data Parallelism）</strong>的核心思想：每张GPU持有完整的模型副本，各自处理不同的数据切片，然后通过梯度同步来保证所有副本的模型参数保持一致。它是最早被大规模采用、也是目前最成熟的分布式训练策略。Google在2012年的DistBelief系统就开始使用数据并行训练百万级参数的神经网络，而今天的大语言模型训练几乎都离不开它。</p>
+
+        <h2>20.1 数据并行的数学原理</h2>
+
+        <p>数据并行的理论基础非常简洁。在单机训练中，我们对一个mini-batch计算梯度：</p>
+
+        <pre><code>单机梯度：   ∇θ = (1/B) × Σᵢ ∇L(xᵢ, yᵢ; θ)
+其中B是batch size，∇L是每个样本的损失梯度</code></pre>
+
+        <p>在数据并行中，我们把B个样本均匀分到K张GPU上，每张卡处理B/K个样本：</p>
+
+        <pre><code>GPU k的局部梯度：   ∇θₖ = (K/B) × Σᵢ₌₁^(B/K) ∇L(xᵢ, yᵢ; θ)
+全局梯度（AllReduce后）：   ∇θ = (1/K) × Σₖ ∇θₖ</code></pre>
+
+        <p>这个公式揭示了一个关键事实：<strong>K张卡的数据并行，等价于用一个K倍大的batch size做训练</strong>。只要AllReduce正确实现了梯度平均，最终的参数更新在数学上与单机大batch训练完全相同。</p>
+
+        <div class="tip">
+            <strong>重要推论：</strong>数据并行不会改变模型的计算图，也不会改变参数更新的数学语义。这意味着已有的单机训练代码可以平滑迁移到分布式环境——这正是PyTorch DDP和Horovod等框架的设计哲学。
+        </div>
+
+        <p>但这只是"数学上等价"。实际训练中，large batch会引入泛化性能问题——这就是为什么数据并行需要配合学习率热身（Linear Scaling Rule）、Layer-wise Adaptive Rate Scaling（LARS）等技术来弥补大batch带来的收敛困难。</p>
+
+        <h2>20.2 AllReduce集合通信</h2>
+
+        <p>数据并行的核心操作是<strong>梯度同步</strong>，这在分布式系统中通过集合通信原语<strong>AllReduce</strong>实现。AllReduce的语义是：所有节点提供自己的数据，经过规约操作（通常是求和或求平均）后，每个节点都得到最终结果。</p>
+
+        <h3>Reduce-Scatter + AllGather</h3>
+
+        <p>最常用的AllReduce实现分为两个阶段：</p>
+
+        <pre><code>阶段1: Reduce-Scatter
+  - 将梯度张量分块，每块分配到不同的节点
+  - 每个节点从其他节点接收对应块的数据并求和
+  - 通信量：每个节点发送 (N - 1/N) × D（D为总数据量）
+
+阶段2: AllGather
+  - 每个节点将自己持有的规约结果广播给所有其他节点
+  - 每个节点发送 D/N 的数据
+  - 通信量：每个节点发送 (N - 1/N) × D
+
+总通信量（每个节点）：2 × (N - 1)/N × D ≈ 2D（当N很大时）</code></pre>
+
+        <p>这意味着无论你有多少张GPU，每张卡在AllReduce中的总通信量大约等于<strong>2倍梯度数据量</strong>。这个结论对理解通信瓶颈至关重要。</p>
+
+        <p>举个具体例子：GPT-3有1750亿参数，每个参数是FP32（4字节），那么梯度总大小就是1750亿 × 4 = 700GB。每次AllReduce要传输约1400GB的数据——在800Gbps InfiniBand下仍需14秒。这解释了为什么巨大的模型不能简单地用数据并行来训练。</p>
+
+        <h2>20.3 Ring-AllReduce</h2>
+
+        <p><strong>Ring-AllReduce</strong>是目前最主流的AllReduce实现方式，被NVIDIA NCCL、Horovod、PyTorch DDP等框架广泛采用。它使用<strong>环形拓扑</strong>：所有GPU排成一个逻辑环，每张卡只跟相邻的两张卡通信。</p>
+
+        <h3>算法流程</h3>
+
+        <pre><code>假设有N张GPU，梯度张量被均匀分成N块：
+
+Reduce-Scatter阶段（N-1步）：
+  第1步：GPU i 发送第(i-1)块给 GPU i-1，同时从 GPU i+1 接收第i块
+  第2步：GPU i 发送第(i-2)块给 GPU i-1，同时从 GPU i+1 接收第(i+1)块
+  ...
+  第N-1步后：GPU i 持有第i块的全局规约结果
+
+AllGather阶段（N-1步）：
+  第1步：GPU i 将第i块发送给 GPU i+1，同时从 GPU i-1 接收第(i-1)块
+  第2步：GPU i 将第(i+1)块发送给 GPU i+1，同时从 GPU i-1 接收第(i-2)块
+  ...
+  第N-1步后：所有GPU持有完整的规约结果</code></pre>
+
+        <div class="highlight">
+            <strong>Ring-AllReduce的优势：</strong>每张卡的总通信量恒定为2×(N-1)/N×D，与GPU数量N无关（当N大时趋近于2D）。这意味着Ring-AllReduce具有完美的可扩展性——加机器不会增加单卡的通信负担。相比之下，传统的"参数服务器"架构中，通信量随N线性增长。
+        </div>
+
+        <h3>实战经验：百度与Xiaomi的Ring-AllReduce</h3>
+
+        <p>百度在2017年将Ring-AllReduce引入PaddlePaddle框架，在64块GPU上训练ResNet-50，实现了近线性的加速比（62倍加速）。关键优化包括：</p>
+        <ul>
+            <li><strong>梯度融合（Gradient Fusion）</strong>：将小张量合并成大块传输，减少通信次数，充分发挥带宽</li>
+            <li><strong>计算-通信重叠</strong>：在反向传播过程中，对已算出的梯度立即启动Reduce-Scatter，不必等全部梯度计算完毕</li>
+        </ul>
+
+        <p>Xiaomi在2020年的MACE框架中将Ring-AllReduce应用于手机端分布式推理，在4台手机上实现了3.2倍的推理加速。他们把Ring-AllReduce的通信量进一步优化为(1 - 1/N)×D（减少了AllGather阶段），在带宽受限的边缘计算场景下效果显著。</p>
+
+        <h2>20.4 参数服务器架构</h2>
+
+        <p>在Ring-AllReduce成为主流之前，<strong>参数服务器（Parameter Server, PS）</strong>架构是分布式训练的主力方案。它的设计更接近"中心化"的直觉：</p>
+
+        <ul>
+            <li><strong>Server节点</strong>：负责维护模型参数的全局版本</li>
+            <li><strong>Worker节点</strong>：从Server拉取参数 → 计算梯度 → 将梯度推送给Server</li>
+            <li><strong>Push/Pull模型</strong>：Worker通过push（推送梯度）和pull（拉取参数）与Server交互</li>
+        </ul>
+
+        <h3>一致性与并行度的权衡</h3>
+
+        <table>
+            <tr>
+                <th>模式</th>
+                <th>一致性</th>
+                <th>收敛速度</th>
+                <th>容错性</th>
+                <th>说明</th>
+            </tr>
+            <tr>
+                <td><strong>同步PS</strong></td>
+                <td>强一致</td>
+                <td>中等</td>
+                <td>低</td>
+                <td>所有worker同步push/pull，等价于BSP</td>
+            </tr>
+            <tr>
+                <td><strong>异步PS</strong></td>
+                <td>弱一致</td>
+                <td>最快</td>
+                <td>高</td>
+                <td>worker各自push/pull，无等待</td>
+            </tr>
+            <tr>
+                <td><strong>有界延迟（SSP）</strong></td>
+                <td>有界陈旧</td>
+                <td>较快</td>
+                <td>中</td>
+                <td>worker最多落后k步，达到阈值后等待</td>
+            </tr>
+        </table>
+
+        <p>参数服务器在稀疏模型场景（如推荐系统、广告CTR预估）中仍然占据优势——因为这些场景的特征向量极度稀疏，每个batch生效的参数只有1%-5%，使用AllReduce全量同步造成了大量无效通信。而PS架构支持<strong>键值对级别的细粒度更新</strong>，可以只同步实际更新的参数。</p>
+
+        <h2>20.5 梯度压缩</h2>
+
+        <p>通信是数据并行最大的瓶颈。如果能<strong>压缩梯度</strong>再传输，就能显著提升训练速度。以下是几种主流的梯度压缩技术：</p>
+
+        <h3>Top-K稀疏化</h3>
+
+        <p>研究发现，梯度张量中绝大部分元素的绝对值接近于零。Top-K稀疏化只传输绝对值最大的K%的梯度元素：</p>
+        <pre><code>def top_k_sparsify(grad, k=0.01):
+    """只保留梯度中绝对值最大的1%"""
+    flat = grad.flatten()
+    threshold = torch.kthvalue(torch.abs(flat), int(k * len(flat))).values
+    mask = torch.abs(flat) > threshold
+    compressed = flat[mask]
+    indices = mask.nonzero().flatten()
+    return compressed, indices  # 只传输这两个小张量</code></pre>
+
+        <h3>梯度量化</h3>
+
+        <p>将FP32的梯度量化为更低精度的表示：</p>
+        <ul>
+            <li><strong>FP32 → INT8</strong>：通信量减少75%，精度损失通常小于0.1%</li>
+            <li><strong>FP32 → 1-bit</strong>：通过误差反馈累积，某些场景下可保持收敛</li>
+        </ul>
+
+        <h3>Deep Gradient Compression (DGC)</h3>
+
+        <p>微软提出的DGC方法，通过以下技术实现<strong>99%的通信压缩</strong>：</p>
+        <ul>
+            <li><strong>动量修正（Momentum Correction）</strong>：补偿被丢弃的小梯度</li>
+            <li><strong>梯度累积</strong>：将多次迭代的残差累积起来再传输</li>
+            <li><strong>热身训练</strong>：训练初期使用更多梯度，逐步过渡到高压缩比</li>
+        </ul>
+
+        <div class="tip">
+            <strong>压缩率参考：</strong>在ResNet-50的ImageNet训练中，DGC在99%压缩率下仍能保持与全精度相当的收敛精度。但注意：极端压缩在Transformer类模型上的效果不如CNN——因为Transformer的梯度更密集，稀疏化空间更小。
+        </div>
+
+        <h2>20.6 踩坑：异步参数服务器的精度灾难</h2>
+
+        <div class="warning">
+            <strong>真实案例：异步更新导致的收敛失败</strong>
+        </div>
+
+        <p>国内某互联网公司使用异步参数服务器训练一个CTR预估模型，部署了200个worker节点。训练初期loss下降很快，团队士气高昂——"看！异步就是快！"</p>
+
+        <p>但诡异的事情发生了：loss降到一定程度后开始剧烈震荡，然后loss曲线突然"起飞"，再也回不去了。模型上线后，AUC从0.78跌到了0.72，直接导致收入下降3%。</p>
+
+        <p>根因分析：</p>
+        <ul>
+            <li>200个worker中的某个worker由于网络抖动，延迟了30秒才push梯度</li>
+            <li>在这30秒内，其他worker已经在"过期"的参数上计算了60轮梯度</li>
+            <li>当这个"迟到"的梯度被应用时，它携带的信息是严重过期的（stale gradient）</li>
+            <li>过期梯度的方向与当前参数位置几乎正交甚至相反，一脚把参数踢出了收敛区域</li>
+        </ul>
+
+        <p>这个案例的教训是深刻的：<strong>异步带来的速度优势，在高并发场景下会被"过期梯度"问题快速侵蚀</strong>。异步参数服务器并不是不能用，而是需要严格的保障措施：</p>
+        <ul>
+            <li>使用有界延迟同步（SSP），限制worker之间的最大步差</li>
+            <li>动态调整学习率，对更新频繁的参数降低学习率</li>
+            <li>定期做一次全局同步检查点（periodic global sync）</li>
+        </ul>
+
+        <p>理解了数据并行中梯度同步的核心机制，接下来的自然问题是：<strong>模型太大，一张GPU放不下怎么办？</strong>这时候就需要模型并行和流水线并行了。下一章，我们就来探讨如何把模型本身切开，分布到多张GPU上。</p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

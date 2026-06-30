@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 完整训练流程 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html" class="active">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第7章 完整训练流程</h2>
+
+<p>大家好，我是你们的讲师。经过前面六章的积累，我们已经掌握了 PyTorch 的全部核心零件：Tensor、Autograd、nn.Module、损失函数、优化器。现在，是时候把这些零件<strong>组装成一条完整的、可运行的训练流水线</strong>了。</p>
+
+<p>这一章的目标非常明确：写一个<strong>可复用的训练模板</strong>——你未来的所有项目都可以基于这个模板来开始。我们还会讨论训练中的各种最佳实践，以及那些不经历踩坑就永远不会知道的细节。</p>
+
+<h2>训练集、验证集、测试集</h2>
+
+<p>在开始写代码之前，先聊聊数据划分。很多初学者会犯一个低级但致命的错误：<strong>只用一份数据既做训练又做评估</strong>。</p>
+
+<p>想象一下，你给学生一份试卷让他做，做完后你拿着同一份试卷来打分——这公平吗？当然不公平，因为他已经"记住"了题目和答案。同样，如果模型在训练数据上评估，它只是把背下来的东西复述出来，根本无法反映真实能力。</p>
+
+<p>规范的做法是把数据分成三份：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>数据集</th>
+            <th>占比（典型）</th>
+            <th>用途</th>
+            <th>注意事项</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>训练集（Train）</td>
+            <td>60-80%</td>
+            <td>模型学习参数（梯度下降更新）</td>
+            <td>必须打乱顺序（shuffle）</td>
+        </tr>
+        <tr>
+            <td>验证集（Validation）</td>
+            <td>10-20%</td>
+            <td>调超参数、早停、模型选择</td>
+            <td>每个 epoch 后评估，不参与梯度更新</td>
+        </tr>
+        <tr>
+            <td>测试集（Test）</td>
+            <td>10-20%</td>
+            <td>最终模型性能的"公证"评估</td>
+            <td>只在最后用一次，绝不用于调参</td>
+        </tr>
+    </tbody>
+</table>
+
+<div class="warning">
+    <strong>关于数据泄露（Data Leakage）的提醒：</strong>
+    <p>在划分数据时，一定要确保验证集和测试集<strong>在训练过程中完全不可见</strong>。如果训练数据有"Noisy student"或者伪标签等半监督方法，验证集绝对不能参与任何训练步骤。更隐蔽的泄漏包括：在划分之前对整个数据集做了归一化（应该先划分，再对训练集算 mean/std，然后应用到验证/测试集），或者在做时间序列预测时用了未来的数据来训练。</p>
+</div>
+
+<h2>模板化的训练循环</h2>
+
+<p>下面我给出一个工业级的训练模板。这个模板可以复用到 90% 以上的训练任务中。</p>
+
+<pre><code>import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+
+def train_one_epoch(model, dataloader, loss_fn, optimizer, device):
+    """
+    训练一个 epoch 的标准函数
+    """
+    model.train()  # ⚠️ 切换到训练模式
+    total_loss = 0.0
+    num_batches = len(dataloader)
+
+    for batch_idx, (inputs, targets) in enumerate(dataloader):
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        # 前向 + 损失
+        outputs = model(inputs)
+        loss = loss_fn(outputs, targets)
+
+        # 反向 + 优化
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    avg_loss = total_loss / num_batches
+    return avg_loss
+
+
+def evaluate(model, dataloader, loss_fn, device):
+    """
+    验证/测试的标准函数
+    """
+    model.eval()  # ⚠️ 切换到评估模式
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    num_batches = len(dataloader)
+
+    with torch.no_grad():  # ⚠️ 禁用梯度追踪
+        for inputs, targets in dataloader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+            loss = loss_fn(outputs, targets)
+
+            total_loss += loss.item()
+
+            # 分类任务计算准确率
+            _, predicted = torch.max(outputs, 1)
+            total += targets.size(0)
+            correct += (predicted == targets).sum().item()
+
+    avg_loss = total_loss / num_batches
+    accuracy = correct / total
+    return avg_loss, accuracy</code></pre>
+
+<div class="highlight">
+    <strong>这个模板的关键设计点：</strong>
+    <ul>
+        <li><code>model.train()</code> 和 <code>model.eval()</code> 明确切换模式 — 绝对不要省略</li>
+        <li>验证/测试用 <code>torch.no_grad()</code> — 节省显存和计算时间</li>
+        <li>数据显式搬到 <code>device</code> — 避免 CPU/GPU 不匹配的 bug</li>
+        <li>返回平均 loss（不是总和）— 便于不同大小的 dataloader 之间比较</li>
+    </ul>
+</div>
+
+<h2>model.train() vs model.eval() 的血泪教训</h2>
+
+<p>现在讲一个我亲眼见过的最经典的 bug 之一。</p>
+
+<p>2021 年，隔壁组的一个同事训练了一个图像分类的 ResNet，在训练集上准确率达到了 98%，在验证集上也有 95%。一切看起来都很完美。他兴高采烈地把模型部署到测试集上——准确率只有 10%。</p>
+
+<p>你没看错：<strong>10%</strong>。对于 10 分类任务，随机猜都有 10%。也就是说模型跟没训练一样。</p>
+
+<p>他花了三天时间排查：模型过拟合？——加了 dropout 和 weight decay，没用。数据分布不一样？——确认过测试集和训练集来自同分布。代码有 bug？——一行行检查了，没发现问题。</p>
+
+<p>最后，他偶然发现问题的根源：测试代码中没有调用 <code>model.eval()</code>。</p>
+
+<p>他的模型使用了 <code>nn.BatchNorm2d</code>。在训练模式下，BatchNorm 会使用当前 batch 的均值和方差来归一化。但在推理时，它应该使用训练阶段累积的<strong>全局 running statistics</strong>。如果没有调 <code>model.eval()</code>，BatchNorm 会继续使用 batch 统计量——而测试时的 batch size 可能很小（甚至为 1），导致每个 batch 的统计量波动极大，输出完全乱掉。</p>
+
+<div class="tip">
+    <strong>哪些层受 train/eval 模式影响？</strong>
+    <ul>
+        <li><code>nn.BatchNorm1d/2d/3d</code> — 训练用 batch stats，推理用 running stats</li>
+        <li><code>nn.Dropout</code> — 训练时随机丢弃，推理时全部保留（且 scaling）</li>
+        <li><code>nn.LayerNorm</code> — <strong>不受影响</strong>（它总是用当前数据的统计量）</li>
+    </ul>
+    所以即使你没有显式用 Dropout 或 BatchNorm，养成调用 <code>model.train()</code> / <code>model.eval()</code> 的习惯是一个很好的防守型编程策略。
+</div>
+
+<h2>过拟合一个小批量（Sanity Check）</h2>
+
+<p>在正式训练之前，有一个非常重要的"冒烟测试"——<strong>过拟合一个小批量数据</strong>。具体做法是：只取少量样本（比如 4-8 个），训练模型让 loss 降到接近 0。如果模型连这几个样本都记不住，那说明代码有 bug，或者模型没有学习能力。</p>
+
+<pre><code># 冒烟测试：过拟合一个小批量
+def sanity_check(model, loss_fn, optimizer, device, num_iterations=50):
+    """
+    在小批量数据上测试模型能否过拟合
+    """
+    # 取 4 个样本
+    sample_inputs = torch.randn(4, 784).to(device)
+    sample_targets = torch.randint(0, 10, (4,)).to(device)
+
+    model.train()
+    for i in range(num_iterations):
+        optimizer.zero_grad()
+        outputs = model(sample_inputs)
+        loss = loss_fn(outputs, sample_targets)
+        loss.backward()
+        optimizer.step()
+
+        if (i + 1) % 10 == 0:
+            _, predicted = torch.max(outputs, 1)
+            acc = (predicted == sample_targets).sum().item() / 4
+            print(f"Iter {i+1}, Loss: {loss.item():.6f}, Acc: {acc:.0%}")
+
+    final_loss = loss.item()
+    if final_loss < 0.01:
+        print("✅ Sanity check passed！模型能记住小批量数据。")
+    else:
+        print("❌ Sanity check failed！loss 没有降到接近 0，检查代码。")
+
+# 使用示例
+model = nn.Sequential(
+    nn.Linear(784, 256),
+    nn.ReLU(),
+    nn.Linear(256, 128),
+    nn.ReLU(),
+    nn.Linear(128, 10),
+)
+loss_fn = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+sanity_check(model, loss_fn, optimizer, device)</code></pre>
+
+<div class="highlight">
+    <strong>我个人的项目管理习惯：</strong>在每个新项目的前几天，我会反复运行这个 sanity check。——在投入大量时间做完整训练之前，先用 2 分钟确认模型和数据通路没问题。这个习惯帮我至少避免了十几次因数据预处理 bug 或模型结构错误而导致的"训练了一天发现 loss 不降"的悲剧。
+</div>
+
+<h2>学习率调度器（Scheduler）</h2>
+
+<p>在训练过程中，通常不会使用固定的学习率。更好的策略是<strong>一开始学习率大一些，快速接近最优区域；然后逐步减小学习率，精细地收敛到最优解</strong>。</p>
+
+<p>PyTorch 提供了多种学习率调度策略：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>调度器</th>
+            <th>策略</th>
+            <th>适用场景</th>
+            <th>优点</th>
+            <th>缺点</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>StepLR</code></td>
+            <td>每隔固定步数乘以 gamma</td>
+            <td>CV 传统任务</td>
+            <td>简单直观</td>
+            <td>需要手动设置 step_size</td>
+        </tr>
+        <tr>
+            <td><code>CosineAnnealingLR</code></td>
+            <td>余弦曲线从 lr 下降到 0</td>
+            <td>大部分现代任务</td>
+            <td>平滑下降，没有"断崖"</td>
+            <td>需要知道总的 epoch 数</td>
+        </tr>
+        <tr>
+            <td><code>ReduceLROnPlateau</code></td>
+            <td>验证 loss 不再下降时降低 lr</td>
+            <td>不确定训练长度的场景</td>
+            <td>自适应，不需要预设步数</td>
+            <td>依赖验证集，多了一个超参数 patience</td>
+        </tr>
+        <tr>
+            <td><code>OneCycleLR</code></td>
+            <td>先升后降的单周期策略</td>
+            <td>快速训练、超收敛</td>
+            <td>可以在更少的 epoch 达到好效果</td>
+            <td>参数较多，需调</td>
+        </tr>
+    </tbody>
+</table>
+
+<pre><code>import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR, ReduceLROnPlateau
+
+model = nn.Linear(10, 2)
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+# StepLR: 每 10 个 epoch 学习率乘以 0.1
+scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+
+# CosineAnnealingLR: 余弦退火（推荐）
+scheduler = CosineAnnealingLR(optimizer, T_max=50)  # T_max = 总的 epoch 数
+
+# ReduceLROnPlateau: 验证 loss 不下降时自动降低（需要 monitor 指标）
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+
+# 在训练循环中使用 scheduler
+for epoch in range(num_epochs):
+    train_loss = train_one_epoch(...)
+    val_loss, val_acc = evaluate(...)
+
+    # StepLR 和 CosineAnnealingLR 在每个 epoch 后 step
+    scheduler.step()
+
+    # ReduceLROnPlateau 需要传入监控指标
+    # scheduler.step(val_loss)
+
+    # 打印当前学习率
+    current_lr = scheduler.get_last_lr()[0]
+    print(f"Epoch {epoch}, LR: {current_lr:.6f}")</code></pre>
+
+<div class="tip">
+    <strong>学习率调度器的最佳实践：</strong>
+    <ul>
+        <li><strong>大部分情况选 CosineAnnealingLR</strong>，它平滑且效果好。把 T_max 设为总的 epoch 数。</li>
+        <li>如果训练中不确定合适的 epoch 数，用 <code>ReduceLROnPlateau</code> 配合 early stopping。</li>
+        <li>最新的 PyTorch 2.x 推荐使用 <code>torch.optim.lr_scheduler.CosineAnnealingLR</code> 配合 <code>torch.optim.lr_scheduler.LinearLR</code> 做 warmup。</li>
+    </ul>
+</div>
+
+<h2>完整的 MNIST 训练示例</h2>
+
+<p>现在，让我们把所有内容整合成一个完整的、端到端的 MNIST 训练脚本：</p>
+
+<pre><code>import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+# ---------- 1. 超参数 ----------
+BATCH_SIZE = 64
+EPOCHS = 10
+LR = 1e-3
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ---------- 2. 数据 ----------
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,)),
+])
+
+train_dataset = datasets.MNIST("./data", train=True, download=True, transform=transform)
+test_dataset = datasets.MNIST("./data", train=False, download=True, transform=transform)
+
+# 从训练集中切出验证集
+train_dataset, val_dataset = torch.utils.data.random_split(
+    train_dataset, [50000, 10000]
+)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+# ---------- 3. 模型 ----------
+class MNISTModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(784, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 10),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+model = MNISTModel().to(DEVICE)
+
+# ---------- 4. 损失和优化器 ----------
+loss_fn = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=LR)
+scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS)
+
+# ---------- 5. 训练循环 ----------
+print(f"设备: {DEVICE}")
+print(f"训练集大小: {len(train_dataset)}")
+print(f"验证集大小: {len(val_dataset)}")
+print(f"测试集大小: {len(test_dataset)}")
+
+for epoch in range(1, EPOCHS + 1):
+    train_loss = train_one_epoch(model, train_loader, loss_fn, optimizer, DEVICE)
+    val_loss, val_acc = evaluate(model, val_loader, loss_fn, DEVICE)
+
+    scheduler.step()
+    current_lr = scheduler.get_last_lr()[0]
+
+    print(f"Epoch {epoch:2d} | "
+          f"Train Loss: {train_loss:.4f} | "
+          f"Val Loss: {val_loss:.4f} | "
+          f"Val Acc: {val_acc:.2%} | "
+          f"LR: {current_lr:.2e}")
+
+# ---------- 6. 最终测试 ----------
+test_loss, test_acc = evaluate(model, test_loader, loss_fn, DEVICE)
+print(f"\n最终测试结果 — Loss: {test_loss:.4f}, Acc: {test_acc:.2%}")</code></pre>
+
+<p>你会看到类似这样的输出：</p>
+
+<pre><code>设备: cuda
+训练集大小: 50000
+验证集大小: 10000
+测试集大小: 10000
+Epoch  1 | Train Loss: 0.3508 | Val Loss: 0.1645 | Val Acc: 95.22% | LR: 1.00e-03
+Epoch  2 | Train Loss: 0.1541 | Val Loss: 0.1138 | Val Acc: 96.58% | LR: 9.76e-04
+Epoch  3 | Train Loss: 0.1099 | Val Loss: 0.0998 | Val Acc: 96.86% | LR: 9.05e-04
+Epoch  4 | Train Loss: 0.0823 | Val Loss: 0.0898 | Val Acc: 97.22% | LR: 7.94e-04
+Epoch  5 | Train Loss: 0.0604 | Val Loss: 0.0873 | Val Acc: 97.28% | LR: 6.55e-04
+Epoch  6 | Train Loss: 0.0458 | Val Loss: 0.0860 | Val Acc: 97.36% | LR: 5.00e-04
+Epoch  7 | Train Loss: 0.0345 | Val Loss: 0.0813 | Val Acc: 97.46% | LR: 3.45e-04
+Epoch  8 | Train Loss: 0.0274 | Val Loss: 0.0828 | Val Acc: 97.49% | LR: 2.06e-04
+Epoch  9 | Train Loss: 0.0208 | Val Loss: 0.0862 | Val Acc: 97.41% | LR: 9.48e-05
+Epoch 10 | Train Loss: 0.0169 | Val Loss: 0.0868 | Val Acc: 97.47% | LR: 2.37e-05
+
+最终测试结果 — Loss: 0.0836, Acc: 97.46%</code></pre>
+
+<p>这个脚本包含了训练一个真实模型所需的全部环节。你可以把它作为模板——替换掉数据集和模型结构，就可以应用到大多数深度学习任务中。</p>
+
+<h2>跟踪训练指标</h2>
+
+<p>上面我们只跟踪了 loss 和准确率。在实际项目中，你可能需要跟踪更多指标来全面监控训练状态：</p>
+
+<pre><code># 一个更完善的指标跟踪方案
+from collections import defaultdict
+
+class MetricsTracker:
+    """跟踪训练过程中的各种指标"""
+    def __init__(self):
+        self.history = defaultdict(list)
+
+    def log(self, phase, **kwargs):
+        """记录一个步骤的指标"""
+        for key, value in kwargs.items():
+            self.history[f"{phase}_{key}"].append(value)
+
+    def get_last(self, phase, key):
+        return self.history[f"{phase}_{key}"][-1]
+
+    def plot(self, metric="loss"):
+        """用 matplotlib 绘制指标曲线（需要安装 matplotlib）"""
+        try:
+            import matplotlib.pyplot as plt
+            train_key = f"train_{metric}"
+            val_key = f"val_{metric}"
+            if train_key in self.history:
+                plt.plot(self.history[train_key], label=f"train_{metric}")
+            if val_key in self.history:
+                plt.plot(self.history[val_key], label=f"val_{metric}")
+            plt.legend()
+            plt.show()
+        except ImportError:
+            print("请安装 matplotlib 以使用绘图功能")
+
+# 使用
+tracker = MetricsTracker()
+tracker.log("train", loss=0.35, accuracy=0.90)
+tracker.log("val", loss=0.16, accuracy=0.95)
+print(tracker.get_last("train", "loss"))  # 0.35</code></pre>
+
+<div class="warning">
+    <strong>跟踪指标时的一个常见错误：</strong>不要在每个 batch 结束时 <code>.item()</code> 提取 loss 存为 Python float，然后在 epoch 结束时取平均——这样确实可以。但要注意：如果你在 <code>loss.backward()</code> 之前就调用了 <code>loss.item()</code>，没问题。但如果你在 <code>loss.backward()</code> 之后还想用 loss 做其他操作（比如打印），一定要先 <code>.item()</code> 再打印，因为 print 也会保持对计算图的引用，可能导致显存泄漏。养成 <code>loss.item()</code> 的习惯。
+</div>
+
+<h2>本章小结</h2>
+
+<p>恭喜你完成了 PyTorch 基础训练的最后一章！这一章我们做了几件重要的事情：</p>
+
+<ul>
+    <li>理解了<strong>训练/验证/测试集</strong>的划分和三者的职责</li>
+    <li>写出了一个<strong>可复用的训练模板</strong>（<code>train_one_epoch</code> + <code>evaluate</code>）</li>
+    <li>理解了 <strong>model.train() vs model.eval()</strong> 的差异和那个经典的 BatchNorm bug</li>
+    <li>学会了 <strong>sanity check</strong> 技巧——在投入大规模训练前先过拟合小批量数据</li>
+    <li>掌握了<strong>学习率调度器</strong>的用法和选型</li>
+    <li>完成了一个<strong>完整的 MNIST 训练</strong>示例</li>
+</ul>
+
+<p>至此，PyTorch 的基础部分已经全部覆盖了。你现在已经可以独立完成一个神经网络的训练——从数据处理到模型定义，从训练循环到评估验证。但我们的旅程才刚刚开始。</p>
+
+<p>下一章我们将进入<strong>数据加载与预处理</strong>的专题——如何使用 DataLoader、Dataset、数据增强等工具来高效地管理和处理数据。在真实项目中，数据准备的时间往往比模型训练还要长，掌握这些技能会让你事半功倍。下一章见！</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

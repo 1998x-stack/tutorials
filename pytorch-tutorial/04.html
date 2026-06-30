@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 自动求导机制 — PyTorch教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html" class="active">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+<h2>第4章 自动求导机制</h2>
+
+<p>大家好，我是你们的讲师。上一章我们学会了各种 Tensor 运算——你可以随意地加、乘、转置、拼接。但有一个问题我们还没回答：<strong>当我们把一堆运算串起来形成一个计算链条后，PyTorch 怎么知道每个中间结果关于输入的梯度？</strong></p>
+
+<p>在深度学习中，训练一个模型本质上就是"用梯度下降法优化参数"。而梯度的计算，如果每次都手写解析导数公式，工作量是不可想象的——尤其是当你有个 100 层的 Transformer 时，链式法则展开能写满几块白板。</p>
+
+<p>PyTorch 的 <strong>Autograd（Automatic Differentiation，自动求导）</strong> 机制解决了这个问题。它会自动追踪你的所有计算操作，构建一张"计算图"，然后在你需要的时候自动算出梯度。这一章我们就来深入理解它的工作原理和正确用法。</p>
+
+<h2>什么是自动求导？</h2>
+
+<p>在自动求导出现之前，人们计算导数主要有两种方式：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>方法</th>
+            <th>原理</th>
+            <th>优点</th>
+            <th>缺点</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>数值求导</strong></td>
+            <td><code>f'(x) ≈ (f(x+h) - f(x-h)) / 2h</code></td>
+            <td>实现简单，不需解析公式</td>
+            <td>计算量大、有截断误差、不精确</td>
+        </tr>
+        <tr>
+            <td><strong>符号求导</strong></td>
+            <td>对表达式进行符号级求导得到闭式解</td>
+            <td>精确</td>
+            <td>表达式爆炸（一个 100 层网络的导数公式会指数级增长）</td>
+        </tr>
+        <tr>
+            <td><strong>自动求导</strong></td>
+            <td>将计算过程分解为基础运算，用链式法则逐步求导</td>
+            <td>精确且高效</td>
+            <td>需要构建计算图（内存开销）</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>自动求导的核心思想是：任何复杂的数学函数都可以分解为一系列基础运算（加减乘除、指数、对数、三角函数等）。你不需要对整个函数求导——只需要对每个基础运算求导，然后通过链式法则把结果串起来。</p>
+
+<h2>计算图的构建：前向传播</h2>
+
+<p>当你执行一个 Tensor 操作时，PyTorch 在幕后做两件事：</p>
+
+<ol>
+    <li>计算出结果 Tensor</li>
+    <li>在内存中记录这个操作，构建一个由 <strong>Function 节点</strong>组成的有向无环图（DAG）</li>
+</ol>
+
+<p>这个图就是<strong>计算图</strong>——每个节点代表一个运算，每条边代表数据的流向。</p>
+
+<pre><code>import torch
+
+# 设置 requires_grad=True 来追踪这个张量的操作
+x = torch.tensor([2.0], requires_grad=True)
+print(x.requires_grad)  # True
+
+# 执行一些运算
+y = x ** 2
+z = y * 3 + 1
+
+print(z)  # tensor([13.], grad_fn=&lt;AddBackward0&gt;)
+print(y)  # tensor([4.], grad_fn=&lt;PowBackward0&gt;)</code></pre>
+
+<p>看到 <code>grad_fn</code> 了吗？这个属性告诉你这个 Tensor 是通过什么运算得到的。<code>y</code> 的 <code>grad_fn</code> 是 <code>PowBackward0</code>（幂运算），<code>z</code> 的 <code>grad_fn</code> 是 <code>AddBackward0</code>（加法）。如果 Tensor 是手动创建的（叶节点），<code>grad_fn</code> 就是 <code>None</code>。</p>
+
+<div class="highlight">
+    <strong>计算图的结构（对应上面的代码）：</strong>
+    <pre><code>x (leaf, grad_fn=None)
+ └─ PowBackward0 → y = x²
+     └─ MulBackward0 → y × 3
+         └─ AddBackward0 → (y×3) + 1 → z</code></pre>
+    这是前向传播时自动构建的。PyTorch 记住的不仅仅是计算结果，还有<strong>计算的方式</strong>。
+</div>
+
+<h2>反向传播：backward() 的工作原理</h2>
+
+<p>当你调用 <code>z.backward()</code> 时，PyTorch 从 <code>z</code> 开始，沿着计算图反向遍历，使用链式法则自动计算梯度：</p>
+
+<pre><code>z.backward()  # 从 z 出发反向传播
+
+# 查看梯度
+print(x.grad)  # tensor([12.]) — dz/dx = 12
+
+# 验证：z = 3x² + 1 → dz/dx = 6x → x=2 时 6*2 = 12 ✓</code></pre>
+
+<p>手动推导验证一下：<code>z = 3x² + 1</code>，对 x 求导得 <code>dz/dx = 6x</code>，当 <code>x = 2</code> 时，梯度为 12。完全正确。</p>
+
+<p>计算图的反向传播逻辑可以形象地理解为：每个运算节点都知道如何计算它自己的输出的梯度（局部梯度），然后通过链式法则，从后往前把梯度逐层传递。</p>
+
+<h2>理解梯度累积：为什么需要 zero_grad</h2>
+
+<p>下面这个知识点特别重要——不理解的后果就是你的模型 loss 会莫名其妙变成 NaN。</p>
+
+<p><strong>PyTorch 中，每次调用 backward() 时，梯度不会自动归零，而是累加到 .grad 属性中。</strong></p>
+
+<p>这是 PyTorch 有意为之的设计——在某些场景下（比如 RNN 训练中的梯度累积），你确实希望累加梯度。但对于最常规的训练流程，你需要<strong>手动清零</strong>。</p>
+
+<p>先讲一个真实的故事。2020 年，我带的实习生小李在训练一个图像分类模型时，遇到了一个诡异的 bug：前几个 batch 的 loss 下降完全正常，但跑到第 10 个 batch 左右，loss 突然变成了 NaN。他以为学习率太大，调小了还是 NaN；以为数据有问题，检查了数据也没问题。折腾了一整天，最后我在他代码里看到了这个：</p>
+
+<pre><code>for batch in dataloader:
+    loss = model(batch)
+    loss.backward()
+    # 忘了 optimizer.zero_grad()！
+    optimizer.step()</code></pre>
+
+<p>少了 <code>zero_grad()</code>，梯度在每个 batch 中不断累加，越来越大，最终数值溢出变成 NaN。这是 PyTorch 初学者最常犯的错误之一，而且它有一个很迷惑人的特点——前几个 batch 看着正常，让你误以为代码没问题。</p>
+
+<div class="warning">
+    <strong>记住这个铁三角：</strong>在每一个训练步骤中，这三个调用的顺序是固定的——
+    <ol>
+        <li><code>optimizer.zero_grad()</code> — 清空上一轮的梯度</li>
+        <li><code>loss.backward()</code> — 计算当前批次的梯度</li>
+        <li><code>optimizer.step()</code> — 用梯度更新参数</li>
+    </ol>
+    顺序写错（比如先 backward 再 zero_grad）等于白做！
+</div>
+
+<h2>梯度模式对比：requires_grad, no_grad, detach, clone</h2>
+
+<p>在编写训练代码时，你会遇到各种需要控制梯度计算的场景。让我们系统地梳理一下：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>操作</th>
+            <th>影响</th>
+            <th>数据是否共享</th>
+            <th>是否保留计算图</th>
+            <th>典型使用场景</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>requires_grad=True</code></td>
+            <td>追踪该张量的所有操作</td>
+            <td>-</td>
+            <td>是</td>
+            <td>模型参数需要梯度来更新</td>
+        </tr>
+        <tr>
+            <td><code>requires_grad=False</code></td>
+            <td>停止追踪该张量的操作</td>
+            <td>-</td>
+            <td>否</td>
+            <td>输入数据、标签（不需要梯度）</td>
+        </tr>
+        <tr>
+            <td><code>torch.no_grad()</code></td>
+            <td>上下文内所有操作不追踪</td>
+            <td>-</td>
+            <td>否</td>
+            <td>推理、模型评估、特征提取</td>
+        </tr>
+        <tr>
+            <td><code>.detach()</code></td>
+            <td>从计算图中分离，返回新张量</td>
+            <td>是（共享内存）</td>
+            <td>否</td>
+            <td>取出数值用于可视化、日志记录</td>
+        </tr>
+        <tr>
+            <td><code>.clone()</code></td>
+            <td>复制数据并保持梯度计算</td>
+            <td>否（独立副本）</td>
+            <td>是</td>
+            <td>需要独立副本但保留梯度传播路径</td>
+        </tr>
+    </tbody>
+</table>
+
+<pre><code>x = torch.tensor([2.0], requires_grad=True)
+
+# 1. torch.no_grad() — 整个上下文不追踪
+with torch.no_grad():
+    y = x * 2
+    print(y.requires_grad)  # False
+    print(y.grad_fn)        # None — 没有记录操作
+
+# 2. .detach() — 从当前计算图分离
+z = (x ** 2).detach()
+print(z.requires_grad)  # False
+print(z.grad_fn)        # None
+
+# 3. .clone() — 保持计算图但数据独立
+w = x.clone()
+print(w.requires_grad)  # True
+print(w.grad_fn)        # None（是叶节点，但与原 x 共享梯度路径）
+
+# 4. 不同模式对内存和速度的影响
+import time
+
+big_tensor = torch.randn(1000, 1000)
+
+# 追踪梯度
+t1 = time.time()
+y1 = big_tensor @ big_tensor
+t2 = time.time()
+print(f"有 grad_fn: {t2-t1:.4f}s")  # 稍慢，需要保存中间结果
+
+# 不追踪梯度
+t1 = time.time()
+with torch.no_grad():
+    y2 = big_tensor @ big_tensor
+t2 = time.time()
+print(f"无 grad_fn: {t2-t1:.4f}s")  # 更快，而且省显存</code></pre>
+
+<div class="tip">
+    <strong>最佳实践：</strong>
+    <ul>
+        <li>推理时一定要用 <code>torch.no_grad()</code> —— 节省显存和计算时间</li>
+        <li>要把 Tensor 转 NumPy 画图或打印时，用 <code>.detach().cpu().numpy()</code> 三连</li>
+        <li>验证集评估时，也建议包在 <code>torch.no_grad()</code> 中</li>
+    </ul>
+</div>
+
+<h2>retain_graph 与高阶梯度</h2>
+
+<p>默认情况下，每次调用 <code>backward()</code> 后，PyTorch 会<strong>释放计算图</strong>以节省内存。这意味着你不能对同一个计算图调用两次 <code>backward()</code>——除非你指定 <code>retain_graph=True</code>。</p>
+
+<pre><code>x = torch.tensor([2.0], requires_grad=True)
+y = x ** 2
+
+# 第一次 backward
+y.backward(retain_graph=True)  # 保留计算图
+print(x.grad)  # tensor([4.])
+
+x.grad.zero_()  # 记得清空梯度！
+
+# 第二次 backward
+y.backward()  # 这次不保留
+print(x.grad)  # tensor([4.])
+
+# 如果不加 retain_graph=True，第二次 backward 会报错
+y = x ** 2
+y.backward()  # 第一次
+# y.backward()  # RuntimeError! 计算图已经被释放了</code></pre>
+
+<p><strong>retain_graph 的使用场景：</strong></p>
+<ul>
+    <li>GAN 训练中需要分别对生成器和判别器计算梯度</li>
+    <li>某些元学习（meta-learning）算法需要二阶梯度</li>
+    <li>分析梯度流时需要在同一个计算图上多次 backward</li>
+</ul>
+
+<div class="warning">
+    <strong>性能警告：</strong><code>retain_graph=True</code> 会<strong>阻止计算图的释放</strong>，显著增加显存占用。只有在确实需要时才使用它。如果你发现显存随着训练步数持续增长（不释放），检查一下是不是某处用了 <code>retain_graph=True</code> 但没有及时释放。
+</div>
+
+<h2>反向传播的细节：grad 在哪个张量上？</h2>
+
+<p>一个常见的困惑是：<code>backward()</code> 之后，梯度到底保存在哪里？</p>
+
+<p>答案是：<strong>梯度只保存在设置了 <code>requires_grad=True</code> 的叶节点（leaf tensor）上</strong>。非叶节点的梯度在反向传播完成后就被释放了——因为不需要再更新非叶节点的值。</p>
+
+<pre><code>x = torch.tensor([2.0], requires_grad=True)  # 叶节点
+y = x ** 2                                     # 非叶节点
+z = y * 3                                      # 非叶节点
+
+z.backward()
+
+print(x.grad)  # tensor([12.]) — 叶节点有 .grad
+print(y.grad)  # None — 非叶节点的梯度默认不保存
+print(z.grad)  # None</code></pre>
+
+<p>如果你想获取非叶节点的梯度，可以使用 <code>.retain_grad()</code>：</p>
+
+<pre><code>x = torch.tensor([2.0], requires_grad=True)
+y = x ** 2
+y.retain_grad()  # 告诉 PyTorch 保留 y 的梯度
+z = y * 3
+
+z.backward()
+
+print(y.grad)  # tensor([3.]) — 现在可以看到了</code></pre>
+
+<p>在调试复杂的网络时，<code>.retain_grad()</code> 是一个有用的工具——比如你可以检查中间层的梯度是否为 NaN，来判断梯度爆炸的位置。</p>
+
+<h2>完整的训练步骤中的 Autograd 流程</h2>
+
+<p>让我们用一个完整的例子把学到的知识串起来：</p>
+
+<pre><code>import torch
+import torch.nn as nn
+
+# 1. 准备数据
+x = torch.tensor([[1.0], [2.0], [3.0]])
+y_true = torch.tensor([[2.0], [4.0], [6.0]])  # y = 2x
+
+# 2. 定义模型（requires_grad=True 参数）
+linear = nn.Linear(1, 1)
+
+# 查看参数梯度初始状态
+print(linear.weight.grad)  # None — 还没计算
+
+# 3. 前向传播
+y_pred = linear(x)
+loss = ((y_pred - y_true) ** 2).mean()
+
+print("计算图:", loss.grad_fn)
+# 输出: MeanBackward0 → ... → AddmmBackward0 → ...
+
+# 4. 反向传播
+loss.backward()
+
+# 5. 查看参数梯度（现在有了！）
+print(linear.weight.grad)  # tensor([[...]]) — 梯度值
+print(linear.bias.grad)    # tensor([[...]])
+
+# 6. 用优化器更新参数（第6章详细讲）
+# optimizer = torch.optim.SGD(linear.parameters(), lr=0.01)
+# optimizer.step()</code></pre>
+
+<p>注意到 <code>backward()</code> 之前参数梯度是 <code>None</code>，之后就有了值——这就是 autograd 的魔力。</p>
+
+<div class="highlight">
+    <strong>Autograd 的工作流（必须记住）：</strong>
+    <ol>
+        <li><strong>前向传播</strong>：执行计算 → 自动构建计算图（记住每步运算）</li>
+        <li><strong>计算 loss</strong>：loss 是计算图的终点</li>
+        <li><strong>backward()</strong>：从 loss 出发反向遍历 → 每个参数得到梯度</li>
+        <li><strong>zero_grad()</strong>：清空梯度（准备下一轮）</li>
+        <li><strong>重复</strong></li>
+    </ol>
+    步骤 1-3 构成了一个完整的"前向-后向"周期。
+</div>
+
+<h2>本章小结</h2>
+
+<p>这一章我们深入学习了 PyTorch 的自动求导机制。来回顾一下核心要点：</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>概念</th>
+            <th>说明</th>
+            <th>代码标识</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>计算图</td>
+            <td>前向传播时自动构建的 DAG，记录所有运算</td>
+            <td><code>grad_fn</code> 属性</td>
+        </tr>
+        <tr>
+            <td>backward()</td>
+            <td>从 loss 出发反向传播，计算梯度</td>
+            <td><code>loss.backward()</code></td>
+        </tr>
+        <tr>
+            <td>梯度累积</td>
+            <td>梯度累加到 .grad，不会自动清零</td>
+            <td>每步需 <code>zero_grad()</code></td>
+        </tr>
+        <tr>
+            <td>no_grad</td>
+            <td>推理时禁用梯度追踪，节省显存</td>
+            <td><code>torch.no_grad()</code></td>
+        </tr>
+        <tr>
+            <td>detach</td>
+            <td>从计算图中分离出无梯度的副本</td>
+            <td><code>tensor.detach()</code></td>
+        </tr>
+        <tr>
+            <td>retain_graph</td>
+            <td>保留计算图供多次 backward</td>
+            <td><code>backward(retain_graph=True)</code></td>
+        </tr>
+    </tbody>
+</table>
+
+<p>理解自动求导是理解 PyTorch 训练流程的钥匙。有了这个基础，下一章我们就可以开始<strong>构建第一个真正的神经网络</strong>了——不再是单独的 Tensor 运算，而是把层（Layer）堆叠成一个完整的模型。下一章见！</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

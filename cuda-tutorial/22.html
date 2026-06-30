@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 Cooperative Groups</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html" class="active">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>Cooperative Groups</h2>
+
+        <p>大家好，我是你们的讲师。在传统CUDA编程模型中，我们只有三个层次的线程组织：<strong>thread → warp（隐式） → block → grid</strong>。block内部的线程可以用 <code>__syncthreads()</code> 同步，warp内部的线程自动同步，但warp之间、block之间的协作就非常困难了。Cooperative Groups（以下简称CG）就是为了打破这些刚性边界而生的——它让你可以定义任意大小的线程组，并在组内进行同步和集体操作。</p>
+
+        <p>你可以把CG理解为一种"线程组织的乐高积木"——不需要拘泥于block这个固定的"颗粒大小"，你可以自由组合线程，形成最适合你算法的分组结构。</p>
+
+        <div class="highlight">
+            <strong>核心思想：</strong> CUDA内置的线程层次（thread/block/grid）是硬件强加的，但<strong>算法需要的是逻辑分组</strong>。CG在这两者之间架起了一座桥——让你在算法的逻辑分组和硬件的物理分组之间灵活映射。
+        </div>
+
+        <h3>Cooperative Groups核心概念</h3>
+
+        <p>Cooperative Groups API 定义在 <code>&lt;cooperative_groups.h&gt;</code> 头文件中，所有类型都在 <code>cooperative_groups</code>（简称 <code>cg</code>）命名空间下。基本用法非常直接——在kernel内部获取当前线程所属的group，然后在这个group上执行集体操作（如同步、归约等）。</p>
+
+        <pre><code>// 基本CG设置：获取线程组并操作
+
+#include &lt;cooperative_groups.h&gt;
+namespace cg = cooperative_groups;
+
+__global__ void cgBasicKernel(float *data, int n) {
+    // 获取当前线程所在的thread_block（等价于整个block）
+    cg::thread_block block = cg::this_thread_block();
+
+    // 获取block的维度信息
+    int tid = block.thread_rank();  // 线程在block内的位置（0到blockSize-1）
+    int total = block.size();       // block中的总线程数
+
+    // 整个block同步（等价于 __syncthreads()）
+    cg::sync(block);
+
+    // 将block按warp大小（32）切分成tile组
+    cg::thread_block_tile&lt;32&gt; tile32 = cg::tiled_partition&lt;32&gt;(block);
+
+    // tile内的归约操作
+    float val = data[tid];
+    if (tid &lt; n) {
+        // 在tile32内做warp级别的归约
+        float sum = cg::reduce(tile32, val, cg::plus&lt;float&gt;());
+    }
+
+    // 或者手动tile内的shuffle操作
+    cg::thread_block_tile&lt;16&gt; tile16 = cg::tiled_partition&lt;16&gt;(block);
+    float shuffled = cg::shfl(tile16, val, 0);  // 从tile中第0个线程获取数据
+}</code></pre>
+
+        <p>看到没有，用CG后，你连 <code>__syncthreads()</code> 和 <code>__shfl()</code> 都不需要直接调用了——全部通过group对象上的方法完成。这种抽象的好处是：代码更具可读性，而且group类型可以根据需要动态变化。</p>
+
+        <h3>Block级别的Groups</h3>
+
+        <p>CG定义了几种不同类型的线程组，每种有不同的同步范围和能力：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Group类型</th>
+                    <th>范围</th>
+                    <th>是否可同步</th>
+                    <th>集体操作支持</th>
+                    <th>典型用途</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>thread_group</code></td>
+                    <td>任意</td>
+                    <td>是</td>
+                    <td>有限</td>
+                    <td>动态大小的线程组基类</td>
+                </tr>
+                <tr>
+                    <td><code>thread_block</code></td>
+                    <td>整个CTA</td>
+                    <td>是</td>
+                    <td>sync</td>
+                    <td>替代 __syncthreads() 的标准block同步</td>
+                </tr>
+                <tr>
+                    <td><code>thread_block_tile&lt;N&gt;</code></td>
+                    <td>N个线程（N=2/4/8/16/32）</td>
+                    <td>隐式</td>
+                    <td>shfl, reduce, inclusive_scan</td>
+                    <td>Warp级别的细粒度协作，替代 __shfl_sync</td>
+                </tr>
+                <tr>
+                    <td><code>coalesced_group</code></td>
+                    <td>同一warp中执行路径相同的线程</td>
+                    <td>隐式</td>
+                    <td>shfl, reduce</td>
+                    <td>处理warp divergence后的活跃线程子集</td>
+                </tr>
+                <tr>
+                    <td><code>grid_group</code></td>
+                    <td>整个grid</td>
+                    <td>是（需特殊launch）</td>
+                    <td>sync</td>
+                    <td>跨block同步——这是真正的突破性特性</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>推荐用法：</strong> 任何时候你需要写 <code>__syncthreads()</code>，都改用 <code>cg::sync(this_thread_block())</code>。它做的事情完全一样，但更安全——因为 <code>cg::sync</code> 会检查你调用它的上下文是否正确，如果试图在一个不能同步的group上调用它，编译期就会报错。相比之下，<code>__syncthreads()</code> 在错误的位置调用时只会产生难以调试的运行时错误。
+        </div>
+
+        <h3>Grid级别的同步</h3>
+
+        <p>传统CUDA编程中，block之间的同步只有一个办法：结束当前kernel，在host端等同步，再启动下一个kernel。这不仅引入了额外的launch开销，还迫使你把算法切成多个kernel——所有block级别的中间状态都必须通过全局内存传递，无法留在寄存器或共享内存中。</p>
+
+        <p><code>cg::grid_group</code> 改变了这一切。通过CG的grid sync，你可以让同一个grid中<strong>所有block的所有线程</strong>同步在一个栅栏上。这意味着单个kernel内可以包含多个"阶段"，每个阶段之间做grid级别的同步。</p>
+
+        <pre><code>// Grid级别的同步——跨block协作
+
+#include &lt;cooperative_groups.h&gt;
+namespace cg = cooperative_groups;
+
+__global__ void gridSyncKernel(float *data, int n) {
+    // 获取grid group
+    cg::grid_group grid = cg::this_grid();
+
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    // Phase 1: 每个线程处理一部分数据
+    if (tid &lt; n) {
+        data[tid] = data[tid] * 2.0f;
+    }
+
+    // 跨block同步——所有block都到达这里才能继续
+    grid.sync();
+
+    // Phase 2: 现在可以安全地读取其他block处理过的数据
+    // 比如做相邻元素的stencil计算
+    if (tid &gt; 0 &amp;&amp; tid &lt; n - 1) {
+        data[tid] = (data[tid - 1] + data[tid] + data[tid + 1]) / 3.0f;
+    }
+
+    grid.sync();
+    // 可以继续更多阶段...
+}
+
+// 特别注意：使用grid_group的kernel必须通过特殊的API启动！
+int main() {
+    float *d_data;
+    cudaMalloc(&amp;d_data, N * sizeof(float));
+    cudaMemcpy(d_data, h_data, N * sizeof(float), cudaMemcpyHostToDevice);
+
+    // 不能用普通的 &lt;&lt;&lt;&gt;&gt;&gt; 语法!!!
+    // 必须使用 cudaLaunchCooperativeKernel
+    void *kernelArgs[] = { (void*)&amp;d_data, (void*)&amp;N };
+    dim3 gridDim((N + 255) / 256);
+    dim3 blockDim(256);
+
+    cudaLaunchCooperativeKernel((void*)gridSyncKernel,
+                                 gridDim, blockDim,
+                                 kernelArgs, 0, NULL);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(h_data, d_data, N * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_data);
+    return 0;
+}</code></pre>
+
+        <div class="warning">
+            <strong>Grid Sync的重要约束：</strong>
+            <ul>
+                <li>必须使用 <code>cudaLaunchCooperativeKernel</code> 而不是普通的 <code>&lt;&lt;&lt;&gt;&gt;&gt;</code> 语法</li>
+                <li>Grid中所有block必须能够同时在GPU上驻留（即block总数不能超过SM数量×每SM最大block数）</li>
+                <li>如果GPU不能同时容纳所有block，<code>cudaLaunchCooperativeKernel</code> 会直接返回错误</li>
+                <li>使用 <code>cudaOccupancyMaxActiveBlocksPerMultiprocessor</code> 计算最大可用block数</li>
+            </ul>
+            这些约束意味着grid sync并不适用于任意规模的grid——它要求你的grid足够小，可以被GPU一次性容纳。
+        </div>
+
+        <h3>Multi-Grid协作</h3>
+
+        <p>除了单张GPU上的grid group，CUDA 11.x及之后的版本还支持跨越<strong>多张GPU</strong>的线程组同步——这就是 <strong>multi-grid groups</strong>。它允许你在同一个kernel启动中协调跨GPU节点的线程。具体来说，它和NCCL的通信功能结合，让程序员可以在多GPU环境下编写单kernel、多设备协作的代码。</p>
+
+        <p>实际使用中，multi-grid group API的核心是 <code>cg::this_multi_grid()</code> 返回的 <code>multi_grid_group</code> 对象，它提供了 <code>grid_rank()</code>（当前GPU的rank）、<code>num_grids()</code>（参与协作的GPU数量）和 <code>sync()</code> 方法。需要配合 <code>cudaLaunchCooperativeKernelMultiDevice</code> 使用。这个特性在大规模分布式训练中相当有用——比如你可以在所有GPU上同步执行梯度all-reduce，而无需退出kernel再启动。</p>
+
+        <h3>CG实战模式</h3>
+
+        <p>理论讲了不少，我们来看两个具体对比——用传统方式和用CG方式实现同样的功能。</p>
+
+        <pre><code>// 对比：Warp级别的归约
+
+// === 传统方式（手工管理mask和同步） ===
+__device__ float warpReduceSum(float val, int lane) {
+    val += __shfl_xor_sync(0xFFFFFFFF, val, 16);
+    val += __shfl_xor_sync(0xFFFFFFFF, val, 8);
+    val += __shfl_xor_sync(0xFFFFFFFF, val, 4);
+    val += __shfl_xor_sync(0xFFFFFFFF, val, 2);
+    val += __shfl_xor_sync(0xFFFFFFFF, val, 1);
+    return val;
+}
+// 注意：0xFFFFFFFF 这个mask需要你手工保证warp中所有线程都在参与
+
+// === CG方式（清晰、安全、可读） ===
+#include &lt;cooperative_groups.h&gt;
+namespace cg = cooperative_groups;
+
+__device__ float cgWarpReduceSum(float val, cg::thread_block_tile&lt;32&gt; tile) {
+    val = cg::reduce(tile, val, cg::plus&lt;float&gt;());
+    return val;
+}
+
+__global__ void cgKernel(float *data, int n) {
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile&lt;32&gt; tile32 = cg::tiled_partition&lt;32&gt;(block);
+
+    int tid = block.thread_rank();
+    float val = (tid &lt; n) ? data[tid] : 0.0f;
+
+    // 一行归约，不需要记shfl mask，不需要操心warp size
+    float sum = cgWarpReduceSum(val, tile32);
+
+    // 线程0写结果
+    if (tile32.thread_rank() == 0) {
+        atomicAdd(&amp;data[0], sum);
+    }
+}</code></pre>
+
+        <p>这段对比清晰地展示了CG的三个核心优势：<strong>可读性更强</strong>（<code>cg::reduce</code> 比5个 <code>__shfl_xor_sync</code> 更容易理解）、<strong>安全性更高</strong>（不需要手工维护warp mask）、<strong>可维护性更好</strong>（如果将来warp size变化，CG代码不需要改）。</p>
+
+        <div class="highlight">
+            <strong>更深远的意义：</strong> CG不仅让你写代码更方便，更重要的是它<strong>改变了你思考并行算法的方式</strong>。不再想"我是block里的第几个线程"，而是想"我属于一个XX人的计算组，我们在共同完成一个任务"。这种思维转变在实现复杂并行算法时非常关键——它让你站在更高的抽象层次上设计算法，而不是纠结于底层的thread indexing。
+        </div>
+
+        <div class="tip">
+            <strong>真实的踩坑故事：</strong> 我曾接手一个老项目，里面大量使用了 <code>__syncthreads()</code> 和 <code>__shfl_sync()</code> 手工管理线程同步。这个代码跑了两年，偶尔出现不可复现的错误结果。我把代码中的同步逻辑全部改成了Cooperative Groups——用 <code>cg::sync(block)</code> 替代 <code>__syncthreads()</code>，用 <code>cg::reduce(tile, val, cg::plus&lt;float&gt;())</code> 替代手工 warp reduce。改完之后，bug消失了。仔细分析后发现，原始代码中有三处隐蔽的数据竞争：
+            <ol>
+                <li>某处 <code>__syncthreads()</code> 放在了条件分支内，导致部分线程跳过了同步——某些block卡住的线程在读取共享内存时读了脏数据</li>
+                <li>一个 warp reduce 的 mask 参数写错了（用了 <code>0x0000FFFF</code> 而不是 <code>0xFFFFFFFF</code>），导致只有16个线程参与归约</li>
+                <li>一处 <code>__threadfence_block()</code> 被遗漏，导致共享内存的写入对其他线程不可见</li>
+            </ol>
+            这三处bug在传统CUDA语法下都<strong>不会报错</strong>——它们只是静默地产生错误结果。而CG版本通过group抽象，要么在编译时就排除了这些错误模式，要么通过更清晰的API让遗漏更容易被发现。这次经历让我从此在所有新项目中全面采用Cooperative Groups。
+        </div>
+
+        <p>好了，Cooperative Groups的内容就到这里。我们从基本的block group讲到了grid sync和multi-grid协作，还对比了传统方式和CG方式的代码差异。CG是CUDA编程模型演进的一个重要里程碑——它让线程组织从"硬件限制"走向了"算法需求驱动"。</p>
+
+        <p>下一章，我们要进入CUDA工具链的深度实战环节——<strong>NVIDIA Nsight 工具深度实战</strong>。有了前面22章的知识积累，是时候学习如何用专业工具真正地分析和优化你的CUDA程序了。第23章见。</p>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

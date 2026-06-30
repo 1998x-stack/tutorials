@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 CUDA Graph</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html" class="active">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>CUDA Graph</h2>
+
+        <p>大家好，我是你们的讲师。如果你已经从第18章了解了CUDA的库生态，那你一定已经注意到一个模式：<strong>几乎所有高性能CUDA编程的优化技巧，最终都在做同一件事——减少CPU和GPU之间的交互开销</strong>。今天我们要讲的 CUDA Graph 就是这条路上的一个里程碑。它从根源上解决了一个长期被忽视的问题：当你的模型推理代码需要重复启动大量小内核时，CPU下发任务的时间可能比GPU真正干活的时间还长。</p>
+
+        <p>那么，CUDA Graph到底是什么？简单说，它允许你把一连串的kernel启动、内存拷贝、同步操作预先"录制"成一个依赖图，然后只需要一条 <code>cudaGraphLaunch</code> 指令就可以让GPU按图索骥地执行全部操作。对于AI推理、迭代求解器等重复性工作负载来说，这效果立竿见影。</p>
+
+        <div class="highlight">
+            <strong>一句话理解：</strong> 传统方式是CPU每次给GPU下达一条指令，等GPU执行完再下一条；CUDA Graph是一次性给GPU一整本"乐高说明书"，GPU自己照着拼，CPU可以去做别的事。
+        </div>
+
+        <h3>为什么需要CUDA Graph——kernel launch overhead</h3>
+
+        <p>你知道启动一个CUDA kernel的开销有多大吗？很多人以为 <code>kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;()</code> 就是一瞬间的事——往寄存器里写几个参数，然后硬件就开始干活了。但实际上，从CPU线程发起一个kernel launch到GPU真正开始执行，中间需要经过驱动栈的层层处理：参数校验、命令缓冲区构建、上下文切换、硬件调度。在CUDA 10.x时代，单次kernel launch的延迟大约在 5-15 微秒。这个数字对大规模kernel来说微不足道——如果内核跑1000微秒，5微秒的开销确实可以忽略。但问题出在推理场景：很多小batch的推理内核执行时间只有几微秒，那么launch overhead就变成了实实在在的瓶颈。</p>
+
+        <p>下面这张表清晰地展示了两者的差异：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>指标</th>
+                    <th>传统独立调度</th>
+                    <th>CUDA Graph</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>单次kernel launch延迟</td>
+                    <td>5-15 微秒（驱动栈开销）</td>
+                    <td>接近零（预处理后免调度）</td>
+                </tr>
+                <tr>
+                    <td>100个小kernel总开销</td>
+                    <td>500-1500 微秒</td>
+                    <td>约10微秒（单次launch）</td>
+                </tr>
+                <tr>
+                    <td>吞吐量（1000 kernels）</td>
+                    <td>受CPU-GPU往返限制</td>
+                    <td>接近纯GPU执行时间</td>
+                </tr>
+                <tr>
+                    <td>CPU参与度</td>
+                    <td>高：每个kernel都要CPU介入</td>
+                    <td>低：CPU只做一次launch</td>
+                </tr>
+                <tr>
+                    <td>灵活性</td>
+                    <td>高：每次可以改变参数和行为</td>
+                    <td>中等：图结构固定，可更新参数</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>图的构建方式</h3>
+
+        <p>CUDA Graph提供了两种构建图的方式：<strong>显式API</strong> 和 <strong>Stream Capture</strong>。先看显式API的方式——顾名思义，你手动创建每个节点，定义节点之间的依赖关系。</p>
+
+        <h4>显式API构建</h4>
+
+        <pre><code>// 显式API构建CUDA Graph
+cudaGraph_t graph;
+cudaGraphCreate(&amp;graph, 0);
+
+// 添加kernel节点
+cudaKernelNodeParams kernelParams = {0};
+kernelParams.func = (void*)myKernel;
+kernelParams.gridDim = grid;
+kernelParams.blockDim = block;
+kernelParams.kernelParams = /* 参数数组 */;
+// ... 填充其他参数
+
+cudaGraphNode_t kernelNode;
+cudaGraphAddKernelNode(&amp;kernelNode, graph, NULL, 0, &amp;kernelParams);
+
+// 添加memcpy节点
+cudaMemcpy3DParms memcpyParams = {0};
+// ... 填充memcpy参数
+
+cudaGraphNode_t memcpyNode;
+cudaGraphAddMemcpyNode(&amp;memcpyNode, graph, &amp;kernelNode, 1, &amp;memcpyParams);
+
+// 显式指定依赖：memcpyNode依赖kernelNode
+// 这样GPU会在kernel执行完后自动执行memcpy</code></pre>
+
+        <p>显式API的好处是你可以精确控制每一个节点和每一条依赖边，适合对图结构有严格要求的场景。但它的缺点是冗长——为一个简单的推理流水线写显式图的代码量可能超过推理逻辑本身。</p>
+
+        <h4>Stream Capture方式</h4>
+
+        <p>这时候Stream Capture的优势就体现出来了。你只需要像往常一样在stream上启动kernels和memcpy操作，然后"包裹"在 <code>cudaStreamBeginCapture</code> 和 <code>cudaStreamEndCapture</code> 之间——CUDA驱动会自动捕获这些操作，构建出等价的图：</p>
+
+        <pre><code>// Stream Capture —— 更优雅的方式
+cudaStream_t stream;
+cudaStreamCreate(&amp;stream);
+
+// 开始捕获
+cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
+// ---- 以下代码正常执行，但"被录制" -----
+kernel_A&lt;&lt;&lt;grid, block, 0, stream&gt;&gt;&gt;(d_in, d_temp);
+kernel_B&lt;&lt;&lt;grid, block, 0, stream&gt;&gt;&gt;(d_temp, d_out);
+cudaMemcpyAsync(h_out, d_out, size, cudaMemcpyDeviceToHost, stream);
+// ---------------------------------------
+
+// 结束捕获，得到图
+cudaGraph_t graph;
+cudaStreamEndCapture(stream, &amp;graph);
+
+// 现在graph中包含了kernel_A → kernel_B → memcpy 的依赖图
+// 每次执行只需launch一次</code></pre>
+
+        <div class="tip">
+            <strong>实践中推荐Stream Capture。</strong> 绝大多数情况下，你只需要把现有的推理循环代码用 <code>BeginCapture</code> / <code>EndCapture</code> 包起来即可。你的代码改动量最小，却可以获得显著的性能提升。显式API通常只在需要动态图结构或特殊节点类型时使用。
+        </div>
+
+        <h3>图的实例化与执行</h3>
+
+        <p>构建完图之后，还不能直接执行。你需要将 <code>cudaGraph_t</code> "编译"成一个可执行实例 <code>cudaGraphExec_t</code>。这个过程叫做<strong>实例化</strong>（instantiation），类似于将源代码编译成可执行文件。实例化过程中，CUDA驱动会做各种优化：移除冗余同步、合并相邻操作、优化依赖顺序等。</p>
+
+        <pre><code>// 完整流程：构建 → 实例化 → 执行 → 销毁
+
+// 1. 构建图（这里用Stream Capture方式）
+cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+for (int i = 0; i &lt; N; i++) {
+    preprocess&lt;&lt;&lt;grid, block, 0, stream&gt;&gt;&gt;(input[i], temp[i]);
+    compute&lt;&lt;&lt;grid, block, 0, stream&gt;&gt;&gt;(temp[i], output[i]);
+    postprocess&lt;&lt;&lt;grid, block, 0, stream&gt;&gt;&gt;(output[i], result[i]);
+}
+cudaStreamEndCapture(stream, &amp;graph);
+
+// 2. 实例化——"编译"成可执行图
+cudaGraphExec_t graphExec;
+cudaGraphInstantiate(&amp;graphExec, graph, NULL, NULL, 0);
+
+// 3. 可以释放原始图了
+cudaGraphDestroy(graph);
+
+// 4. 重复执行——每次只需一条API调用
+for (int batch = 0; batch &lt; numBatches; batch++) {
+    // 更新输入数据指针（如果需要）
+    // ...
+
+    cudaGraphLaunch(graphExec, stream);  // 一次调用 = 上面的整个循环
+    cudaStreamSynchronize(stream);
+}
+
+// 5. 清理
+cudaGraphExecDestroy(graphExec);</code></pre>
+
+        <p>这张图的<strong>生命周期</strong>可以概括为：原始图（cudaGraph_t）→ 实例化（cudaGraphInstantiate）→ 可执行图（cudaGraphExec_t）→ 重复执行（cudaGraphLaunch）→ 销毁。值得注意的是，实例化可能是一个昂贵的过程——对于大图可能需要几十甚至几百毫秒。但这是一次性成本，之后每次执行几乎零开销。</p>
+
+        <div class="highlight">
+            <strong>性能的关键洞察：</strong> 实例化后的可执行图在执行时，CPU只需要向GPU发送一个极简的"启动信号"，不再需要逐个下发每个kernel的描述符和参数。对于包含几十个kernel的推理图来说，launch overhead从几百微秒降到了个位数微秒。如果你的GPU时间利用率（通过Nsight查看"Streaming Multiprocessor Activity"）低于80%，CUDA Graph很可能是你的第一优化选择。
+        </div>
+
+        <h3>图更新与重捕获（CUDA 13.3新特性）</h3>
+
+        <p>传统的CUDA Graph有一个局限性：一旦实例化，图的结构就固定了。如果你需要更改某个kernel的参数（比如动态batch size导致grid dim变化），你必须重新捕获整个图并重新实例化。这在很多动态场景下是不可接受的。</p>
+
+        <p>CUDA 13.3引入了一个非常实用的新特性：<strong>cudaStreamBeginRecaptureToGraph</strong>。它允许你在保持图结构不变的前提下，更新图中节点的参数。比如你的kernel的gridDim变了，你不需要重建整个图：</p>
+
+        <pre><code>// CUDA 13.3+ 新特性：增量更新图
+
+// 首次构建和实例化（同上）
+cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+kernel_A&lt;&lt;&lt;grid_old, block, 0, stream&gt;&gt;&gt;(d_data);
+kernel_B&lt;&lt;&lt;grid_old, block, 0, stream&gt;&gt;&gt;(d_data, d_out);
+cudaStreamEndCapture(stream, &amp;graph);
+cudaGraphInstantiate(&amp;graphExec, graph, NULL, NULL, 0);
+
+// 后来，batch size变了，需要更大的grid
+dim3 grid_new = dim3((n + 255) / 256);
+
+// 重新捕获到已有图上 —— 无需重建整图
+cudaStreamBeginRecaptureToGraph(stream, graphExec, NULL, NULL, 0, 0);
+
+// 只需执行有变化的部分（参数不同但结构相同）
+kernel_A&lt;&lt;&lt;grid_new, block, 0, stream&gt;&gt;&gt;(d_data);
+kernel_B&lt;&lt;&lt;grid_new, block, 0, stream&gt;&gt;&gt;(d_data, d_out);
+
+cudaStreamEndCapture(stream, &amp;graph);  // 图已原地更新
+
+// 此时 graphExec 已更新为新参数，可以直接执行
+cudaGraphLaunch(graphExec, stream);</code></pre>
+
+        <p>这个特性的意义在于：它让CUDA Graph真正适用于动态的生产环境——batch size动态变化、输入尺寸不定、条件分支等场景终于也可以享受Graph的低开销收益了。</p>
+
+        <h3>CUDA Graph适用场景与限制</h3>
+
+        <p>讲了这么多好处，那CUDA Graph是不是万能药呢？当然不是。让我帮你梳理一下，什么时候该用，什么时候不该用。</p>
+
+        <p><strong>CUDA Graph表现极佳的场景：</strong></p>
+        <ul>
+            <li><strong>AI推理流水线</strong>：尤其是小batch推理，preprocess → inference → postprocess 这条流水线稳定且重复</li>
+            <li><strong>迭代求解器</strong>：每个iteration执行相同的kernel序列（如CG求解器、多重网格）</li>
+            <li><strong>固定计算图的训练</strong>：如果模型结构不变，且不需要动态控制流</li>
+            <li><strong>CPU成为瓶颈的系统</strong>：当你的CPU核已经被其他任务占满，减少每一个kernel launch的开销都有意义</li>
+        </ul>
+
+        <p><strong>CUDA Graph不适合的场景：</strong></p>
+        <ul>
+            <li><strong>图结构频繁变化</strong>：如果每次执行kernel的数量或依赖关系都不同，频繁重建图的开销会抵消收益</li>
+            <li><strong>每个kernel都很重</strong>：如果单个kernel执行时间已经超过1毫秒，launch overhead的占比极低，不值得用Graph</li>
+            <li><strong>包含大量条件分支</strong>：如果推理路径严重依赖数据（如某些NLP模型的early exit），捕获所有路径的图会变得非常复杂</li>
+        </ul>
+
+        <div class="warning">
+            <strong>真实的踩坑故事：</strong> 我曾在一个NLP模型的推理服务中尝试用CUDA Graph优化。模型不大——BERT-base，batch size=1。直接用基准测试来看，单次推理（preprocess + 12层Transformer + postprocess）大约耗时500微秒。我兴奋地加上CUDA Graph，满心以为launch overhead从15微秒降到接近0，应该能看到40%以上的提升。结果呢？只提升了5%。为什么？因为我忽略了——这个服务同时跑了16个并发请求，每个请求在不同的stream上执行。虽然每个stream内部launch overhead降低了，但GPU调度器在stream间切换的开销变成了新的瓶颈。最终的解决方案是用CUDA Graph结合<strong>MPS（Multi-Process Service）</strong>，把多个stream合并到同一个上下文，才真正看到了40%的延迟降低。这个故事告诉我们：CUDA Graph不是孤立的优化——你需要在全局视角下分析瓶颈到底在哪里。
+        </div>
+
+        <p>经过这番优化，这个服务的P99延迟从35毫秒降到了21毫秒，SLA达标率从92%提升到了99.7%。如果没有CUDA Graph，光靠逐层逐个kernel优化，我们可能要花三倍的时间才能达到同样的效果。</p>
+
+        <p>好了，CUDA Graph的内容就到这里。下一章，我们要跨越单张GPU的边界，进入<strong>多GPU编程</strong>的世界——当一张H100不够用的时候，你如何让8张、甚至64张GPU协同工作？我们会在第20章深入讨论NVLink、NCCL和多GPU编程模式。</p>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

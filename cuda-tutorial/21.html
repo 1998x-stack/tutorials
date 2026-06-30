@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 动态并行</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html">第20章 多GPU编程</a></li>
+            <li><a href="21.html" class="active">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>动态并行</h2>
+
+        <p>大家好，我是你们的讲师。前几章我们一直在学"如何更高效地从CPU向GPU下发任务"——CUDA Graph减少launch开销，多GPU编程让更多硬件参与计算。但这一章，我们要做一件看起来有些"叛逆"的事情：<strong>让GPU自己决定要不要启动新的内核</strong>。</p>
+
+        <p>动态并行（Dynamic Parallelism）是Kepler架构（2012年）引入的特性。它的核心概念很简单：一个GPU kernel可以启动另一个GPU kernel。也就是说，<code>&lt;&lt;&lt;&gt;&gt;&gt;</code> 语法不仅可以在host代码中使用，也可以出现在 <code>__global__</code> 或 <code>__device__</code> 函数中。这为递归算法、自适应网格、树遍历等场景提供了一种极具表现力的编程模型。</p>
+
+        <h3>动态并行原理</h3>
+
+        <p>动态共行的基本模型就是"内核之内启动内核"——我们称之为<strong>parent kernel</strong>和<strong>child kernel</strong>。parent kernel在GPU上执行的过程中，可以在某些条件下启动child kernel，然后通过 <code>cudaDeviceSynchronize()</code>（注意这是设备端版本）等待child kernel完成。</p>
+
+        <pre><code>// 动态并行：在GPU上启动GPU内核
+
+// 子内核：处理一个数据块
+__global__ void processBlock(float *data, int size) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx &lt; size) {
+        data[idx] = sqrtf(data[idx]);  // 一些计算
+    }
+}
+
+// 父内核：根据数据大小决定是否拆分成更小的任务
+__global__ void recursiveCompute(float *data, int size, int depth) {
+    int tid = threadIdx.x;
+
+    // 在共享内存中判断是否需要继续拆分
+    __shared__ bool needsSplit;
+    if (tid == 0) {
+        needsSplit = (size &gt; 1024 &amp;&amp; depth &lt; 4);
+    }
+    __syncthreads();
+
+    if (needsSplit) {
+        // 拆分成两个子任务，分别启动子内核
+        // 注意：只能在 __global__ 函数中启动 child kernel
+        int halfSize = size / 2;
+
+        // 第一个子内核——处理前半部分
+        recursiveCompute&lt;&lt;&lt;1, 256&gt;&gt;&gt;(data, halfSize, depth + 1);
+        // 第二个子内核——处理后半部分
+        recursiveCompute&lt;&lt;&lt;1, 256&gt;&gt;&gt;(data + halfSize, halfSize, depth + 1);
+
+        // 等待两个子内核都完成
+        cudaDeviceSynchronize();  // device-side sync!
+    } else {
+        // 不再拆分，直接处理
+        processBlock&lt;&lt;&lt;(size + 255) / 256, 256&gt;&gt;&gt;(data, size);
+        cudaDeviceSynchronize();
+    }
+}
+
+// Host端只需启动一次
+int main() {
+    float *d_data;
+    cudaMalloc(&amp;d_data, N * sizeof(float));
+    cudaMemcpy(d_data, h_data, N * sizeof(float), cudaMemcpyHostToDevice);
+
+    // 只需启动父内核——它会自动展开为嵌套计算
+    recursiveCompute&lt;&lt;&lt;1, 32&gt;&gt;&gt;(d_data, N, 0);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(h_data, d_data, N * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_data);
+    return 0;
+}</code></pre>
+
+        <div class="tip">
+            <strong>关键区别：</strong> 在host端，我们用的是 <code>cudaStreamSynchronize</code> / <code>cudaDeviceSynchronize</code>。在设备端（动态并行中），我们用的是 <code>cudaDeviceSynchronize()</code> 的<strong>设备端版本</strong>——它只等待当前CUDA context中由本kernel启动的所有child kernels。每个child kernel有自己的<strong>隐式stream</strong>，相互之间是并发执行的。
+        </div>
+
+        <h3>嵌套并行的适用场景</h3>
+
+        <p>动态并行什么时候真的有用？以下几个场景是最典型的：</p>
+
+        <ul>
+            <li><strong>递归数据结构遍历</strong>：四叉树（quadtree）、八叉树（octree）的遍历是动态并行的"杀手级应用"。树的每个节点可以独立启动其子节点的处理kernel，逻辑非常自然</li>
+            <li><strong>图遍历算法</strong>：图的BFS/DFS中，访问到一个节点后，可以并行处理它的所有邻居。动态并行让这种"碰到新节点就启动新线程"的写法变得优雅</li>
+            <li><strong>自适应网格细化（AMR）</strong>：在计算流体力学中，某些区域需要更细的网格。GPU kernel在运行时发现某区域误差过大，可以动态启动新kernel处理细化后的子网格</li>
+            <li><strong>分治算法</strong>：归并排序、快速排序等分治类算法天然适合动态并行——将问题拆分为子问题，每个子问题启动一个kernel</li>
+        </ul>
+
+        <p>这些场景的共同特征是：<strong>计算负载分布不均匀，且负载分布在执行前不可预知</strong>。如果负载分布是均匀且已知的，那直接在host端做好work distribution就好了，不需要动态并行。</p>
+
+        <h3>动态并行的限制与开销</h3>
+
+        <p>动态并行非常强大，但它也有显著的代价和限制。很多初学者兴奋地把它用在了所有地方，结果发现性能反而下降了——因为没注意到这些局限。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>限制项</th>
+                    <th>具体数值</th>
+                    <th>影响</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>最大嵌套深度</td>
+                    <td>24 层</td>
+                    <td>绝大多数场景够用，但递归超过24层时会静默失败</td>
+                </tr>
+                <tr>
+                    <td>设备端launch延迟</td>
+                    <td>~15-30 微秒（比host端略高）</td>
+                    <td>如果child kernel执行时间很短，launch overhead占比会非常大</td>
+                </tr>
+                <tr>
+                    <td>设备端同步</td>
+                    <td>cudaDeviceSynchronize 是阻塞的</td>
+                    <td>parent kernel必须等待所有children完成才能继续</td>
+                </tr>
+                <tr>
+                    <td>内存限制</td>
+                    <td>每个嵌套层级需要额外的堆栈空间</td>
+                    <td>深层次嵌套可能耗尽设备端的调用栈</td>
+                </tr>
+                <tr>
+                    <td>调试复杂度</td>
+                    <td>极高</td>
+                    <td>cuda-gdb对嵌套kernel的支持有限，出现死锁后难以定位</td>
+                </tr>
+                <tr>
+                    <td>编译器支持</td>
+                    <td>需要 sm_35 及以上架构</td>
+                    <td>较老的GPU不支持，且会增加编译时间</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>动态并行的核心取舍：</strong> 它在<strong>编程表达力</strong>上给了你极大的自由，但在<strong>性能</strong>上要求你付出代价。每次设备端launch都有~15-30微秒的开销，加上同步等待时间。如果你要启动的child kernel执行时间远大于30微秒，那这个代价可以接受；如果child kernel只有几微秒的计算量，那动态并行反而会拖慢整体速度。用动态并行的原则是：<strong>只在真正需要的地方使用，而且确保child kernel有足够的工作量来摊销launch开销</strong>。
+        </div>
+
+        <h3>与Host端启动的对比</h3>
+
+        <p>我们直接给结论：动态并行vs host端启动，没有绝对的好坏，取决于场景。</p>
+
+        <p><strong>动态并行胜出的场景：</strong></p>
+        <ul>
+            <li>计算图在执行前无法预知（如稀疏数据的处理）</li>
+            <li>递归或分治算法，用动态并行实现代码更简洁、更接近算法描述</li>
+            <li>CPU-GPU带宽是瓶颈的场景——减少host-device交互次数</li>
+        </ul>
+
+        <p><strong>Host端启动胜出的场景：</strong></p>
+        <ul>
+            <li>计算图固定且已知（此时CUDA Graph是更好的选择）</li>
+            <li>child kernel很小（微秒级）——host端至少可以和GPU并行工作，而动态并行中parent必须等待</li>
+            <li>需要细粒度的调试和profiling——host端启动的kernel更容易用工具分析</li>
+        </ul>
+
+        <p>实际工程中，有一个不错的经验法则是：如果一个算法能用CUDA Graph或host端循环实现，优先用它们；只有当计算核心是树或图的<strong>自适应遍历</strong>时，才考虑动态并行。</p>
+
+        <div class="warning">
+            <strong>真实的踩坑故事：</strong> 我曾经在一个四叉树粒子模拟项目中试用动态并行。四叉树的遍历和更新是核心算法——每帧需要根据粒子位置重建树结构。我用动态并行实现了kernel内的递归树遍历，代码很美——不到30行，逻辑一目了然。跑出来的结果呢？比CPU上做work scheduling + host端启动kernel的方案<strong>慢了2倍</strong>。瓶颈在哪？Profiling发现，树遍历过程中大量节点只有几十个粒子，对应的child kernel执行时间只有2-3微秒，但每次launch overhead就要15微秒。最终方案反而回到了"CPU遍历树，把足够大的子树打包成任务，一次性launch到GPU"这个土办法。这个故事告诉我们：动态并行虽然"优雅"，但在性能敏感的生产代码中，<strong>CPU端的work scheduling往往更可控、更高效</strong>。GPU最擅长的是"同质化的大规模计算"，而不是"频繁启动微任务"。
+        </div>
+
+        <p>动态并行是一个有趣的特性，但它的使用场景比很多人想象的要窄。在现代CUDA编程中，它的地位逐渐被其他工具（Cooperative Groups、CUDA Graph）所补充甚至取代。不过理解这个模型仍然很重要——它反映了GPU编程从"CPU集权"到"GPU自治"的一种思路演变。</p>
+
+        <p>下一章我们要学习的<strong>Cooperative Groups</strong>，从另一个角度拓展了我们对GPU编程模型的理解——它让你以更灵活的方式组织线程，甚至可以在Grid级别进行同步。第22章见。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

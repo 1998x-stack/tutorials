@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 多GPU编程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 GPU计算的前世今生</a></li>
+            <li><a href="02.html">第2章 CUDA编程环境搭建</a></li>
+            <li><a href="03.html">第3章 GPU硬件架构概览</a></li>
+            <li><a href="04.html">第4章 第一个CUDA内核</a></li>
+            <li><a href="05.html">第5章 线程层次结构</a></li>
+            <li><a href="06.html">第6章 内存模型基础</a></li>
+            <li><a href="07.html">第7章 同步机制入门</a></li>
+            <li><a href="08.html">第8章 共享内存深入</a></li>
+            <li><a href="09.html">第9章 全局内存优化</a></li>
+            <li><a href="10.html">第10章 常量内存与纹理内存</a></li>
+            <li><a href="11.html">第11章 原子操作与并行规约</a></li>
+            <li><a href="12.html">第12章 CUDA流与并发</a></li>
+            <li><a href="13.html">第13章 事件与性能计时</a></li>
+            <li><a href="14.html">第14章 Warp级别编程</a></li>
+            <li><a href="15.html">第15章 性能分析工具</a></li>
+            <li><a href="16.html">第16章 调试与错误处理</a></li>
+            <li><a href="17.html">第17章 性能优化方法论</a></li>
+            <li><a href="18.html">第18章 CUDA库生态</a></li>
+            <li><a href="19.html">第19章 CUDA Graph</a></li>
+            <li><a href="20.html" class="active">第20章 多GPU编程</a></li>
+            <li><a href="21.html">第21章 动态并行</a></li>
+            <li><a href="22.html">第22章 Cooperative Groups</a></li>
+            <li><a href="23.html">第23章 Nsight工具深度实战</a></li>
+            <li><a href="24.html">第24章 踩坑集锦与调试案例</a></li>
+            <li><a href="25.html">第25章 性能调优实战</a></li>
+            <li><a href="26.html">第26章 CUDA 13.x新特性</a></li>
+            <li><a href="27.html">第27章 GPU计算未来趋势</a></li>
+            <li><a href="28.html">第28章 综合项目：手写高性能GEMM</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>多GPU编程</h2>
+
+        <p>大家好，我是你们的讲师。欢迎来到第20章。到目前为止，我们的所有讨论都基于"单张GPU"这个假设。但在真实的生产环境中，一张GPU几乎永远不够用——训练GPT-4需要数万张GPU跑上几个月；即使是一个中等规模的推荐系统推理服务，也常常需要4到8张GPU才能满足延迟和吞吐要求。</p>
+
+        <p>这一章，我们会从硬件拓扑讲起，一步步带你掌握多GPU环境下的核心编程技术：设备管理、Peer-to-Peer访问、NCCL集体通信，以及三种主流的并行策略。学完本章，你会知道"如何让多张GPU不仅不打架，而且高效协作"。</p>
+
+        <h3>多GPU拓扑结构</h3>
+
+        <p>多GPU系统的性能瓶颈往往不是GPU本身，而是GPU之间的<strong>通信</strong>。如果你把两张GPU插在PCIe插槽上，它们之间通过PCIe交换数据，带宽和延迟都远不如通过NVLink直接互联。了解硬件拓扑是写出高效多GPU代码的第一步。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>互连方式</th>
+                    <th>典型带宽</th>
+                    <th>延迟</th>
+                    <th>拓扑</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>PCIe Gen4 x16</td>
+                    <td>~32 GB/s</td>
+                    <td>~1微秒</td>
+                    <td>树状（通过CPU Root Complex）</td>
+                    <td>CPU-GPU通信、低成本多卡</td>
+                </tr>
+                <tr>
+                    <td>PCIe Gen5 x16</td>
+                    <td>~64 GB/s</td>
+                    <td>~0.8微秒</td>
+                    <td>树状</td>
+                    <td>中端多GPU系统</td>
+                </tr>
+                <tr>
+                    <td>NVLink 2.0 (Volta)</td>
+                    <td>~300 GB/s (6 links)</td>
+                    <td>~0.2微秒</td>
+                    <td>混合立方网格</td>
+                    <td>V100集群、P2P频繁访问</td>
+                </tr>
+                <tr>
+                    <td>NVLink 3.0 (Ampere)</td>
+                    <td>~600 GB/s (12 links)</td>
+                    <td>~0.15微秒</td>
+                    <td>全互联（A100 8-GPU）</td>
+                    <td>A100 DGX系统、大模型训练</td>
+                </tr>
+                <tr>
+                    <td>NVLink 4.0 (Hopper)</td>
+                    <td>~900 GB/s (18 links)</td>
+                    <td>~0.1微秒</td>
+                    <td>NVSwitch全互联</td>
+                    <td>H100 DGX、大规模分布式训练</td>
+                </tr>
+                <tr>
+                    <td>NVSwitch</td>
+                    <td>聚合可达 7.2 TB/s</td>
+                    <td>~0.1微秒</td>
+                    <td>全交换（所有GPU任意互联）</td>
+                    <td>DGX Pod、超大规模集群</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这张表的核心信息是：<strong>NVLink比PCIe快一个数量级</strong>。如果你的多GPU工作负载有大量跨卡通信，一定尽量让通信走NVLink。很多人在8卡机器上训练时发现一个GPU的梯度同步比计算还慢，排查到最后的根因是——驱动没有启用P2P访问，数据被迫绕道CPU内存走PCIe，带宽从600 GB/s降到了32 GB/s。这个问题我们马上会讲到如何避免。</p>
+
+        <h3>设备管理与选择</h3>
+
+        <p>多GPU编程的基本操作非常简单——CUDA用整数索引标识每张GPU。核心API就三个：<code>cudaGetDeviceCount</code> 查询设备数量，<code>cudaSetDevice</code> 选择当前设备，<code>cudaGetDevice</code> 获取当前设备ID。每个host线程都有自己当前的device上下文，互不干扰。</p>
+
+        <pre><code>// 多GPU初始化模板
+
+int main() {
+    int deviceCount;
+    cudaGetDeviceCount(&amp;deviceCount);
+    printf("检测到 %d 张GPU\n", deviceCount);
+
+    // 为每张GPU分配独立的内存和stream
+    const int N = 1 &lt;&lt; 20;
+    float **d_data = (float**)malloc(deviceCount * sizeof(float*));
+    cudaStream_t *streams = (cudaStream_t*)malloc(deviceCount * sizeof(cudaStream_t));
+
+    for (int dev = 0; dev &lt; deviceCount; dev++) {
+        cudaSetDevice(dev);  // 切换到第dev张GPU
+
+        // 查询设备属性
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&amp;prop, dev);
+        printf("GPU %d: %s, 显存 %zu MB, SM数量 %d\n",
+               dev, prop.name, prop.totalGlobalMem / (1024*1024), prop.multiProcessorCount);
+
+        // 在当前设备上分配显存和创建stream
+        cudaMalloc(&amp;d_data[dev], N * sizeof(float));
+        cudaStreamCreate(&amp;streams[dev]);
+    }
+
+    // 每个设备上的操作
+    for (int dev = 0; dev &lt; deviceCount; dev++) {
+        cudaSetDevice(dev);
+        myKernel&lt;&lt;&lt;grid, block, 0, streams[dev]&gt;&gt;&gt;(d_data[dev], N);
+    }
+
+    // 同步所有设备
+    for (int dev = 0; dev &lt; deviceCount; dev++) {
+        cudaSetDevice(dev);
+        cudaStreamSynchronize(streams[dev]);
+    }
+
+    // 清理
+    for (int dev = 0; dev &lt; deviceCount; dev++) {
+        cudaSetDevice(dev);
+        cudaStreamDestroy(streams[dev]);
+        cudaFree(d_data[dev]);
+    }
+    free(d_data);
+    free(streams);
+    return 0;
+}</code></pre>
+
+        <div class="tip">
+            <strong>黄金法则：</strong> 在任何cudaMalloc、cudaMemcpy或kernel launch之前，确保已经通过 <code>cudaSetDevice</code> 切换到了正确的GPU。一个常见的习惯是——在每个线程/循环的开头就显式设置device，不要依赖"当前device没变"这种假设。显式总比隐式安全。
+        </div>
+
+        <h3>Peer-to-Peer（P2P）访问</h3>
+
+        <p>多GPU编程中最强大的特性之一就是直接内存访问——让一张GPU直接读写另一张GPU的显存，而不需要经过CPU做中转。启用方式很简单：</p>
+
+        <pre><code>// Peer-to-Peer (P2P) 访问示例
+
+int main() {
+    int devCount;
+    cudaGetDeviceCount(&amp;devCount);
+
+    // 启用所有GPU之间的P2P访问
+    for (int i = 0; i &lt; devCount; i++) {
+        for (int j = 0; j &lt; devCount; j++) {
+            if (i == j) continue;
+
+            int canAccessPeer = 0;
+            cudaDeviceCanAccessPeer(&amp;canAccessPeer, i, j);
+
+            if (canAccessPeer) {
+                cudaSetDevice(i);
+                cudaDeviceEnablePeerAccess(j, 0);
+                printf("GPU %d 与 GPU %d 已建立P2P连接\n", i, j);
+            } else {
+                printf("GPU %d 无法直接访问 GPU %d（通过PCIe绕行）\n", i, j);
+            }
+        }
+    }
+
+    // P2P memcpy —— 直接从GPU 0拷贝到GPU 1，不经过CPU
+    const int N = 1 &lt;&lt; 24;  // 64M floats = 256MB
+    float *d_ptr0, *d_ptr1;
+
+    cudaSetDevice(0);
+    cudaMalloc(&amp;d_ptr0, N * sizeof(float));
+
+    cudaSetDevice(1);
+    cudaMalloc(&amp;d_ptr1, N * sizeof(float));
+
+    // GPU 0 → GPU 1 直接拷贝
+    cudaMemcpyPeer(d_ptr1, 1, d_ptr0, 0, N * sizeof(float));
+    // 等价于不经过CPU的 cudaMemcpy —— 如果P2P已启用
+
+    // 还可以直接在kernel中访问另一张GPU的内存（通过指针）
+    // 在GPU 1的kernel中读写d_ptr0指向的GPU 0的显存
+    cudaSetDevice(1);
+    p2pKernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(d_ptr1, d_ptr0, N);  // 直接读写GPU 0的内存
+
+    cudaDeviceSynchronize();
+
+    cudaSetDevice(0);
+    cudaFree(d_ptr0);
+    cudaSetDevice(1);
+    cudaFree(d_ptr1);
+    return 0;
+}</code></pre>
+
+        <div class="highlight">
+            <strong>重要提醒：</strong> P2P访问不是在所有GPU组合之间都可用的。两个GPU必须属于同一棵PCIe树，或者通过NVLink直接相连。另外，P2P一旦启用，两张GPU的上下文就会被绑定——直到进程退出前，你无法单独销毁其中一个。所以建议在程序初始化时统一启用所有需要的P2P连接，不要在运行中动态开启和关闭。
+        </div>
+
+        <h3>NCCL入门</h3>
+
+        <p>如果说P2P是"点对点"通信的脚手架，那<strong>NCCL（NVIDIA Collective Communications Library）</strong>就是多GPU通信的"预制装配式房屋"。NCCL提供了AllReduce、Broadcast、AllGather、ReduceScatter等集体通信原语，经过深度优化，可以充分利用NVLink和NVSwitch的带宽。当今所有主流深度学习框架（PyTorch DDP、Horovod、DeepSpeed）的多GPU通信底层都依赖NCCL。</p>
+
+        <pre><code>// NCCL AllReduce 示例
+
+#include &lt;nccl.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+int main() {
+    int nDevices = 4;
+    int dataSize = 1 &lt;&lt; 20;  // 1M floats per GPU
+
+    float **d_send = (float**)malloc(nDevices * sizeof(float*));
+    float **d_recv = (float**)malloc(nDevices * sizeof(float*));
+    ncclComm_t *comms = (ncclComm_t*)malloc(nDevices * sizeof(ncclComm_t));
+    cudaStream_t *streams = (cudaStream_t*)malloc(nDevices * sizeof(cudaStream_t));
+
+    // 初始化每张GPU
+    for (int dev = 0; dev &lt; nDevices; dev++) {
+        cudaSetDevice(dev);
+        cudaMalloc(&amp;d_send[dev], dataSize * sizeof(float));
+        cudaMalloc(&amp;d_recv[dev], dataSize * sizeof(float));
+        cudaStreamCreate(&amp;streams[dev]);
+    }
+
+    // 初始化NCCL通信器 —— 所有GPU联合创建
+    ncclCommInitAll(comms, nDevices, NULL);
+
+    // 执行AllReduce：每张GPU发送d_send中的数据，
+    // 所有GPU都收到各卡数据求和后的结果到d_recv
+    for (int dev = 0; dev &lt; nDevices; dev++) {
+        cudaSetDevice(dev);
+        ncclAllReduce((const void*)d_send[dev],
+                      (void*)d_recv[dev],
+                      dataSize,
+                      ncclFloat,
+                      ncclSum,
+                      comms[dev],
+                      streams[dev]);
+    }
+
+    // 同步所有stream和NCCL操作
+    for (int dev = 0; dev &lt; nDevices; dev++) {
+        cudaSetDevice(dev);
+        cudaStreamSynchronize(streams[dev]);
+    }
+
+    // 清理
+    for (int dev = 0; dev &lt; nDevices; dev++) {
+        ncclCommDestroy(comms[dev]);
+        cudaSetDevice(dev);
+        cudaStreamDestroy(streams[dev]);
+        cudaFree(d_send[dev]);
+        cudaFree(d_recv[dev]);
+    }
+    free(d_send); free(d_recv); free(comms); free(streams);
+    return 0;
+}</code></pre>
+
+        <p>注意NCCL的一个关键点：AllReduce是<strong>同步阻塞</strong>的——所有参与卡必须同时调用，否则会出现死锁。这也是为什么NCCL通常和MPI或分布式框架配合使用，确保所有rank同步推进。</p>
+
+        <h3>多GPU编程模式</h3>
+
+        <p>了解了底层通信工具后，我们来谈谈上层策略。多GPU并行编程主要有三种模式，下面这张表总结了它们的核心差异：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>并行模式</th>
+                    <th>核心思想</th>
+                    <th>通信需求</th>
+                    <th>典型场景</th>
+                    <th>扩展性</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>数据并行</td>
+                    <td>每张GPU持完整模型副本，处理不同数据分片，梯度同步</td>
+                    <td>高（每步AllReduce梯度）</td>
+                    <td>大多数深度学习训练</td>
+                    <td>好（近线性加速，但受限于batch size）</td>
+                </tr>
+                <tr>
+                    <td>模型并行</td>
+                    <td>模型的不同层分布在不同的GPU上，数据在层间流水</td>
+                    <td>中（每层之间传递activations）</td>
+                    <td>模型太大放不进一张卡（如GPT-3）</td>
+                    <td>中（存在"短板GPU"问题）</td>
+                </tr>
+                <tr>
+                    <td>流水线并行</td>
+                    <td>模型按层切分到多卡，数据分micro-batch流水线执行</td>
+                    <td>低-中（仅边界传递）</td>
+                    <td>大模型训练，如GPipe、PipeDream</td>
+                    <td>中-好（需平衡各阶段计算量）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p><strong>数据并行</strong>是最简单也最常用的模式。PyTorch的 <code>DistributedDataParallel</code> 就是它的实现——每张GPU上跑一份完整的模型，每个step处理不同的数据，然后用AllReduce同步梯度。它的扩展性极好（8卡接近8倍加速），但如果单张GPU放不下模型，就需要模型并行或流水线并行。</p>
+
+        <p><strong>模型并行</strong>把模型的不同层放在不同GPU上——比如Transformer的前6层在GPU 0，后6层在GPU 1。问题是GPU 0算的时候GPU 1在空等，GPU利用不充分。流水线并行在模型并行的基础上引入了micro-batch——把一个大batch切成多个小batch流水线式地送入。这样每张GPU都在持续工作而不是空闲等待。</p>
+
+        <div class="warning">
+            <strong>真实的踩坑故事：</strong> 我们团队曾经在一台DGX A100（8张GPU）上训练一个推荐模型。训练一直很稳定，但隔几天就会出现一次loss spike，然后模型发散。排查了数据、学习率、梯度裁剪……所有常见的原因都排除了。后来我们加了详细的日志，发现每次loss spike都伴随着cudaSetDevice的调用。最终定位到：代码中有一个预处理线程在某个罕见路径下没有调用cudaSetDevice，导致它默认使用了device 0，而device 0的主训练线程正好在做forward——两个线程同时往同一张GPU上提交kernel，产生了干扰。这个bug的修复只有一行代码：在预处理线程的开头加上 <code>cudaSetDevice(local_rank)</code>。一个无声的bug，两个星期的排查。多GPU编程中，每一行看起来"多余"的设备管理代码，背后都是前人踩过的坑。
+        </div>
+
+        <p>好了，多GPU编程的内容就讲到这里。我们学习了硬件拓扑、P2P访问、NCCL通信和三种并行模式。下一章，我们要讨论一个完全不同的思路——<strong>动态并行（Dynamic Parallelism）</strong>。如果让GPU自己决定什么时候启动新内核，会发生什么有趣的事情呢？第21章见。</p>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+
+    </div>
+</div>
+</div>
+</body>
+</html>

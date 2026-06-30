@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 词法分析器</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html" class="active">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第8章 词法分析器</h1>
+
+        <p>大家好，我是你们的讲师。从这一章开始，我们要正式进入 SQLite 前端编译系统的核心地带。上一章我们了解了调试基础设施，现在我们要回答一个根本问题：<strong>SQL 文本是怎么变成计算机能理解的结构化信息的？</strong></p>
+
+        <p>这一切的第一步，就是<strong>词法分析（Lexical Analysis）</strong>。词法分析器（tokenizer）的任务是把输入的 SQL 字符串——比如 <code>SELECT * FROM t WHERE id=1</code>——拆分成一系列有意义的"单词"，也就是 token。每个 token 是整个编译流水线的"原子单位"，后续的解析器（parser）再依据语法规则把这些 token 组织成语法树。</p>
+
+        <p>SQLite 的词法分析器实现在 <code>src/tokenize.c</code> 中，大约 2000 行代码。它没有使用 flex 或 lex 这样的词法生成器，而是纯手工打造的字符级扫描循环。为什么这么做？一个原因是保持零依赖，另一个原因是 SQL 的语法相对简单，手工编写比引入外部工具更可控。本章我们就来深入这个入口，看看 SQLite 是怎么把字符串"切割"成 token 的。</p>
+
+        <h2>tokenize.c 概览</h2>
+
+        <p>整个词法分析的入口函数是 <code>sqlite3RunParser()</code>，定义在 <code>src/tokenize.c</code> 中。但这个名字可能会让你误解——它实际上是一个"外壳"函数，核心工作是通过 <code>sqlite3GetToken()</code> 来完成的。</p>
+
+        <p>我们先来看一下 <code>sqlite3RunParser()</code> 的简化流程：</p>
+
+        <pre><code>int sqlite3RunParser(Parse *pParse, const char *zSql, char **pzErrMsg){
+    sqlite3 *db = pParse->db;
+    int nErr = 0;
+    void *pEngine;
+    Token sToken;
+    int i;
+
+    /* 初始化 tokenizer */
+    sqlite3TokenInit();
+
+    /* 创建 Lemon 解析器实例 */
+    pEngine = sqlite3ParserAlloc(db->mallocFailed ? 0 : sqlite3Malloc);
+
+    /* 主循环：逐 token 喂给解析器 */
+    while( zSql[0] ){
+        /* 获取下一个 token */
+        i = sqlite3GetToken((unsigned char*)zSql, &sToken);
+        /* 将 token 送入 Lemon 解析器 */
+        sqlite3Parser(pEngine, sToken.tType, sToken, pParse);
+        zSql += i;  /* 前进到下一个位置 */
+    }
+
+    /* 结束解析 */
+    sqlite3ParserFree(pEngine);
+    return nErr;
+}</code></pre>
+
+        <p>这个循环非常直观：<code>sqlite3GetToken()</code> 每次从输入字符串中切出一个 token，然后立刻交给 Lemon 解析器处理。整个过程是"单遍扫描"的——不需要预读、不需要 token 缓冲池。这是 SQLite 词法分析器设计上的一个关键选择：<strong>极简、零缓冲、在线处理</strong>。</p>
+
+        <p><code>sqlite3GetToken()</code> 函数本身是一个大型 switch 语句，根据当前字符的类型决定进入哪个分析分支：</p>
+
+        <table>
+            <thead>
+                <tr><th>字符范围</th><th>Token 类型</th><th>处理逻辑</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>空格 / 换行 / 制表符</code></td><td>TK_SPACE</td><td>直接跳过，不生成 token</td></tr>
+                <tr><td><code>a-z, A-Z, _</code></td><td>TK_ID / TK_xxx</td><td>读取完整标识符，查关键词哈希表</td></tr>
+                <tr><td><code>0-9</code></td><td>TK_INTEGER / TK_FLOAT</td><td>读取数字字面量，判断是否为浮点数</td></tr>
+                <tr><td><code>'</code></td><td>TK_STRING</td><td>读取字符串字面量，处理转义</td></tr>
+                <tr><td><code>"</code></td><td>TK_ID</td><td>读取带引号的标识符</td></tr>
+                <tr><td><code>/*</code></td><td>TK_SPACE</td><td>C 风格注释，跳过至 <code>*/</code></td></tr>
+                <tr><td><code>--</code></td><td>TK_SPACE</td><td>SQL 风格注释，跳过至行尾</td></tr>
+                <tr><td><code>;</code></td><td>TK_SEMI</td><td>语句结束符</td></tr>
+                <tr><td><code>+ - * / = < > !</code></td><td>TK_PLUS / TK_MINUS / ...</td><td>运算符 token</td></tr>
+            </tbody>
+        </table>
+
+        <p>你可能注意到一个有趣的细节——注释被当作 <code>TK_SPACE</code> 处理，意味着它们在词法层面就被丢弃了，解析器永远不会看到注释 token。这与许多其他数据库的实现不同（例如 MySQL 的 parser 在某些模式下需要保留注释），但对 SQLite 来说已经足够。</p>
+
+        <div class="tip">
+            💡 <code>sqlite3RunParser()</code> 实际上并不是你写应用时直接调用的函数。你用的是 <code>sqlite3_prepare_v2()</code> 这个 API，而它内部会调用 <code>sqlite3RunParser()</code>。所以当你逐条 prepare SQL 语句时，每次都会启动一个新的词法分析 + 解析过程。
+        </div>
+
+        <h2>关键词哈希 keywordhash.h</h2>
+
+        <p>SQLite 有一百多个保留关键词——<code>SELECT</code>、<code>FROM</code>、<code>WHERE</code>、<code>INSERT</code>、<code>CREATE</code>、<code>TABLE</code>……当词法分析器读到一个标识符时，它需要快速判断这是一个关键词（keyword）还是一个普通的列名或表名。</p>
+
+        <p>这个问题的标准解法是<strong>哈希表查找</strong>。但 SQLite 在这里做了一个非常精巧的设计——它使用了一个 <strong>完美哈希（Perfect Hash）</strong>，由 <code>tool/mkkeywordhash.c</code> 工具生成，输出到 <code>src/keywordhash.h</code>。</p>
+
+        <p>完美哈希的意思是：对于给定的关键字集合（SQLite 的所有保留词），存在一个哈希函数 H，使得 <strong>任意两个不同的关键词不会产生哈希碰撞</strong>。这意味着查找时不需要处理链表或开放地址法——直接算哈希值，然后比较一次就知道是不是关键词。</p>
+
+        <p>这个哈希函数是基于字符哈希的线性组合：</p>
+
+        <pre><code>/* 来自 keywordhash.h 的完美哈希函数 */
+static int keywordHash(const char *z, int n){
+    unsigned int h = 0;
+    switch( n ){
+        case 2: h = z[0] + z[1]; break;
+        case 3: h = (z[0]<<4) + z[1] + z[2]; break;
+        case 4: h = (z[0]<<8) + (z[1]<<4) + z[2] + z[3]; break;
+        /* ... 更多长度分支 ... */
+        default: h = 0; break;
+    }
+    return h % (sizeof(aHash)/sizeof(aHash[0]));
+}</code></pre>
+
+        <p>关键在于 <code>aHash[]</code> 数组——它是一个精心设计的查找表。给定哈希值 h，<code>aHash[h]</code> 指向 <code>aKeywordTable[]</code> 中的某个条目的索引。完美哈希保证了每个合法的关键词只会映射到唯一的位置，而非关键词则可能映射到空位或通过字符比较被排除。</p>
+
+        <p>为什么 SQLite 要费这个劲做完美哈希？<strong>速度</strong>。SQL 解析中词法分析是最频繁的操作之一，每一个标识符都要过一遍关键词检测。完美哈希让这个检测变成了常数时间的一次比较。而且由于哈希表是静态的（关键词列表在编译时就确定了），没有任何动态分配或初始化开销。</p>
+
+        <div class="highlight">
+            如果你用 <code>git grep</code> 搜索 <code>keywordHash</code> 的调用，会发现它通过 <code>sqlite3KeywordCode()</code> 函数暴露——输入一个标识符字符串，返回对应的 <code>TK_*</code> 值。如果返回 <code>TK_ID</code>，意味着这不是关键词，而是一个普通的标识符。
+        </div>
+
+        <h2>Token 类型系统</h2>
+
+        <p>每个 token 在 SQLite 内部用一个整数常量表示，以 <code>TK_</code> 为前缀。这些枚举定义在 <code>src/token.h</code>（由 <code>parse.y</code> 生成）中。完整的 token 类型超过 200 个，覆盖了 SQL 语法的所有元素。</p>
+
+        <p>我们来看一些核心分类：</p>
+
+        <table>
+            <thead>
+                <tr><th>类别</th><th>Token 示例</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>语句类型</td><td>TK_SELECT, TK_CREATE, TK_INSERT, TK_DROP, TK_ALTER</td><td>标识 SQL 语句的类型</td></tr>
+                <tr><td>子句引导</td><td>TK_FROM, TK_WHERE, TK_GROUP, TK_ORDER, TK_HAVING, TK_LIMIT</td><td>SQL 子句的关键词</td></tr>
+                <tr><td>数据类型</td><td>TK_INTEGER, TK_FLOAT, TK_STRING, TK_BLOB, TK_NULL</td><td>字面量类型</td></tr>
+                <tr><td>运算符</td><td>TK_PLUS, TK_MINUS, TK_STAR, TK_EQ, TK_NE, TK_GT, TK_LT, TK_AND, TK_OR, TK_NOT</td><td>算术和逻辑运算符</td></tr>
+                <tr><td>连接符</td><td>TK_JOIN, TK_LEFT, TK_RIGHT, TK_INNER, TK_CROSS</td><td>JOIN 相关关键词</td></tr>
+                <tr><td>修饰符</td><td>TK_DISTINCT, TK_ALL, TK_UNIQUE, TK_IF, TK_EXISTS, TK_AS</td><td>SQL 修饰词</td></tr>
+                <tr><td>标点符号</td><td>TK_SEMI, TK_COMMA, TK_LP, TK_RP, TK_DOT</td><td>分号、逗号、括号、点号</td></tr>
+            </tbody>
+        </table>
+
+        <p>词法分析器的工作就是把这些 token 从字符串中识别出来，然后 Lemon 解析器再根据文法规约它们。例如，对于输入 <code>SELECT name FROM user</code>，产生如下的 token 序列：<code>TK_SELECT, TK_ID("name"), TK_FROM, TK_ID("user")</code>。</p>
+
+        <h2>词法分析的边界处理</h2>
+
+        <p>字面量看似简单，实则暗藏无数边角情况。SQLite 的词法分析器花了大量篇幅处理这些边界条件。</p>
+
+        <p><strong>字符串字面量</strong>用单引号包裹，内部允许转义。SQL 标准中的转义方式比较特殊——使用两个连续的单引号 <code>''</code> 表示一个字面的单引号字符：</p>
+
+        <pre><code>/* tokenize.c 中的字符串扫描逻辑 */
+case '\'': {
+    /* 扫描字符串字面量，直到找到结束的单引号 */
+    for(i=1; z[i]; i++){
+        if( z[i]=='\'' ){
+            /* 双引号 '' 表示转义 */
+            if( z[i+1]=='\'' ){ i++; continue; }
+            break;  /* 单引号结束 */
+        }
+    }
+    *tokenType = TK_STRING;
+    return i+1;
+}</code></pre>
+
+        <p>也就是说，如果你要表示 <code>It's fine</code> 这个字符串，SQL 写法是 <code>'It''s fine'</code>。</p>
+
+        <p><strong>标识符引用</strong>使用双引号或方括号（SQLite 特有的兼容语法）。<code>"column name"</code> 或 <code>[column name]</code> 允许标识符包含空格或关键词：</p>
+
+        <pre><code>/* 双引号标识符的扫描 */
+case '"': {
+    for(i=1; z[i]; i++){
+        if( z[i]=='"' ){ if( z[i+1]=='"' ){ i++; continue; } break; }
+    }
+    *tokenType = TK_ID;
+    return i+1;  /* 返回一个带引号的标识符 token */
+}</code></pre>
+
+        <p><strong>注释处理</strong>需要处理两种风格：<code>--</code> 到行尾的 SQL 风格，以及 <code>/* ... */</code> 的 C 风格。后者支持嵌套注释吗？不支持——SQLite 的块注释不支持嵌套，这是出于性能和实现简化的考虑。不过嵌套注释在实际 SQL 中极少用到。</p>
+
+        <p><strong>分号</strong>处理也有学问。<code>TK_SEMI</code> 标记一条语句的结束。<code>sqlite3RunParser()</code> 遇到分号时会清空解析器的内部状态，为下一条语句做好准备。在 CLI 中多条语句用分号分隔，但在 <code>sqlite3_prepare_v2()</code> 中只编译第一条语句，剩余输入字符串通过 <code>pzTail</code> 参数返回给调用者。</p>
+
+        <div class="warning">
+            ⚠️ 踩坑实录：我曾经在 SQLite 中处理包含 UTF-8 BOM（字节序标记）的 SQL 文件时踩过坑。SQLite 的词法分析器不会自动跳过 BOM 头（<code>0xEF BB BF</code>），所以第一个 token 会变成一个奇怪的标识符。如果你的应用程序从带有 BOM 的文件中读取 SQL，记得在调用 <code>sqlite3_prepare_v2()</code> 之前去掉 BOM。
+        </div>
+
+        <h2>词法错误恢复</h2>
+
+        <p>词法分析也可能出错——比如字符串没有闭合的引号、数字后面紧跟着奇怪的字符。SQLite 的处理策略是"不在这里死磕，把问题留给解析器"。</p>
+
+        <p><code>sqlite3GetToken()</code> 在遇到无法识别的字符时，会返回一个 <code>TK_ILLEGAL</code> token。但注意：<code>TK_ILLEGAL</code> 不是真正的 token 类型，它实际上是 <code>sqlite3RunParser()</code> 内部用的一种标记。当 Lemon 解析器收到一个它无法理解的 token 时，会触发错误处理。</p>
+
+        <p>更具体地说，<code>sqlite3GetToken()</code> 的返回值（int）包含了两个信息：</p>
+
+        <ul>
+            <li><strong>token 类型</strong>（通过输出参数 <code>Token *</code> 的 <code>tType</code> 字段）</li>
+            <li><strong>token 长度</strong>（作为函数返回值）</li>
+        </ul>
+
+        <p>如果遇到完全无法识别的字符，比如 SQL 中的 <code>@</code> 或 <code>~</code>（在标准 SQL 中不是合法运算符），词法分析器会把当前字符标记为 <code>TK_ILLEGAL</code>，然后移动指针继续扫描。解析器随后会报告语法错误。</p>
+
+        <p><code>sqlite3TokenInit()</code> 函数负责在首次使用前初始化词法分析器所需的数据结构。不过在最新版本中，这个函数已经几乎为空——因为完美哈希表是编译时静态的，不需要运行时初始化。它主要保留是为了向后兼容性。</p>
+
+        <div class="tip">
+            💡 SQLite 的词法错误信息设计得特别用户友好。比如 <code>unrecognized token: "@"</code> 直接告诉你哪个字符有问题。这是因为 <code>sqlite3GetToken()</code> 在返回 <code>TK_ILLEGAL</code> 时，会把出错的字符内容填入 <code>Token</code> 结构体中，供后续的错误报告使用。
+        </div>
+
+        <h2>实战：用 tokenizer 分析 SQL</h2>
+
+        <p>现在我们来做一个实战练习——通过 <code>sqlite3_prepare_v2()</code> 的内部流程，看看一条 SQL 语句是如何被词法分析器一步步拆解的。</p>
+
+        <p>以 <code>SELECT id, name FROM user WHERE age > 18;</code> 为例，内部流程如下：</p>
+
+        <ol>
+            <li><code>sqlite3_prepare_v2()</code> 调用 <code>sqlite3RunParser()</code></li>
+            <li>词法分析器开始扫描：<code>S</code> → 标识符开始 → 读完整 <code>SELECT</code> → 查关键词表 → <strong>TK_SELECT</strong></li>
+            <li>空格跳过 → <code>id</code> → 查关键词表 → 没匹配 → <strong>TK_ID</strong></li>
+            <li><code>,</code> → <strong>TK_COMMA</strong> → 空格跳过</li>
+            <li><code>name</code> → <strong>TK_ID</strong></li>
+            <li><code>FROM</code> → <strong>TK_FROM</strong> → 空格跳过</li>
+            <li><code>user</code> → <strong>TK_ID</strong></li>
+            <li><code>WHERE</code> → <strong>TK_WHERE</strong></li>
+            <li><code>age</code> → <strong>TK_ID</strong> → 空格跳过</li>
+            <li><code>&gt;</code> → <strong>TK_GT</strong> → 空格跳过</li>
+            <li><code>18</code> → 数字开始 → 读完整 → <strong>TK_INTEGER</strong></li>
+            <li><code>;</code> → <strong>TK_SEMI</strong></li>
+            <li>字符串结束 → 调用 <code>sqlite3ParserFree()</code> → 完成</li>
+        </ol>
+
+        <p>每个 token 被识别后，立刻被推入 Lemon 解析器。解析器根据语法规则逐步构建语法树。在整个过程中，词法分析和语法分析是<strong>交错执行</strong>的——不是先完成所有词法分析再开始语法分析，而是"分析一个 token，处理一个 token"的流水线模式。</p>
+
+        <pre><code>/* 你可以通过修改 tokenize.c 来观察 token 流 */
+/* 在 sqlite3GetToken() 返回前添加调试输出 */
+#ifdef SQLITE_DEBUG
+    if( sqlite3GetToken ){
+        TokenTypeName(tType);  /* 伪代码：打印 token 类型 */
+    }
+#endif</code></pre>
+
+        <div class="highlight">
+            <strong>关键洞察：</strong> SQLite 的前端编译是"单通道"的——词法分析、语法分析、语义分析三个阶段紧密耦合。这与其他数据库的"多通道"设计不同，后者通常先把 SQL 完全解析成 AST，再对 AST 做语义检查和类型推导。SQLite 的设计更简单、更省内存，但也意味着某些优化不能做（因为解析到一半时还不知道后续 token 的含义）。
+        </div>
+
+        <p>通过这一章的学习，你应该对 SQLite 的词法分析器有了深入的理解。下一章我们将进入编译链路的第二个关键环节——<strong>Lemon 解析器</strong>，看看这些 token 是如何依据文法规则组合成语法树的。Lemon 是 SQLite 独家的解析器生成器，它的设计理念和 SQLite 本身一样"反潮流而实用"。我们下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

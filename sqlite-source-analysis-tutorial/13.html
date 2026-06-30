@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 Pager与页缓存</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html" class="active">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第13章 Pager与页缓存</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们深入了 B-Tree 存储引擎的内部，看到了数据是怎么在页面中组织和操作的。但有一个关键问题我们跳过了：<strong>页面数据在内存和磁盘之间怎么流转？事务的原子性怎么保证？并发读写怎么协调？</strong></p>
+
+        <p>这些问题全都指向一个核心模块——<strong>Pager（页管理器）</strong>。Pager 是 SQLite 中承上启下的关键层：它的上层是 B-Tree 引擎，下层是 VFS 文件系统抽象。它负责管理所有页面的缓存、脏页追踪、事务边界和并发控制。可以说，没有 Pager，就没有 SQLite 的 ACID 保证。</p>
+
+        <p>Pager 的实现位于 <code>src/pager.c</code>，约 70 KB——虽然比 B-Tree 小得多，但它是 SQLite 中最关键的模块之一，也是 Dr. Hipp 投入心血最多的地方。</p>
+
+        <h2>Pager 的角色</h2>
+
+        <p>用一句话概括 Pager 的职责：<strong>让上层的 B-Tree 以为所有页面操作都是原子的、隔离的、持久的</strong>。</p>
+
+        <p>具体来说，Pager 承担了以下角色：</p>
+
+        <table>
+            <thead>
+                <tr><th>角色</th><th>职责</th><th>关键机制</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>页面缓存</td><td>缓存最近访问的页面，减少磁盘 I/O</td><td>PCache1，hash 查找，LRU 淘汰</td></tr>
+                <tr><td>事务管理器</td><td>确保事务的原子提交和回滚</td><td>回滚日志模式 / WAL 模式</td></tr>
+                <tr><td>写时复制（COW）</td><td>保证未提交的修改不影响数据库文件</td><td><code>sqlite3PagerWrite()</code> 触发的页面复制</td></tr>
+                <tr><td>并发控制器</td><td>协调多连接读写</td><td>锁状态机，读锁/写锁/保留锁/待处理锁</td></tr>
+                <tr><td>I/O 聚合器</td><td>合并小 I/O 为大 I/O，提升吞吐量</td><td>延迟刷写，脏页排序</td></tr>
+            </tbody>
+        </table>
+
+        <p>在源码中，每个数据库连接有一个 <code>Pager</code> 结构体实例。它通过 <code>Btree</code> 结构体间接被上层访问——<code>sqlite3BtreeOpen()</code> 在创建 B-Tree 时会同时初始化对应的 Pager 实例。</p>
+
+        <div class="highlight">
+            Pager 的代码质量极高。它使用了<strong>状态验证宏</strong> <code>assert()</code> 来强制执行状态机转换规则——大约每 10 行代码就有一个 assert。这意味着如果你误用了 Pager API（比如在错误的状态下尝试写操作），在调试版本中会立即触发断言失败，而不是在后续某个莫名其妙的地方崩溃。
+        </div>
+
+        <h2>Pager 状态机</h2>
+
+        <p>Pager 的核心是一个<strong>有限状态机</strong>。理解这个状态机是理解 SQLite 事务机制的关键。</p>
+
+        <pre><code>/* Pager 状态转换 */
+
+    ┌──────────┐
+    │  READER  │ ← 初始状态。可读不可写。
+    └────┬─────┘
+         │ sqlite3PagerBegin() — 请求写锁
+         ▼
+    ┌──────────────┐
+    │ WRITER_LOCKED│ ← 获得保留锁(exclusive)，知道可以写
+    └────┬─────────┘
+         │ sqlite3PagerWrite() — 首次写入缓存页
+         ▼
+    ┌───────────────┐
+    │WRITER_CACHEMOD│ ← 缓存中有脏页但尚未修改数据库文件
+    └────┬──────────┘
+         │ 缓存空间不足或显式 sync
+         ▼
+    ┌──────────────┐
+    │ WRITER_DBMOD │ ← 脏页已写入数据库文件，但在回滚日志中有备份
+    └────┬─────────┘
+         │ sqlite3PagerCommitPhaseOne()
+         ▼
+    ┌─────────────────┐
+    │WRITER_FINISHED  │ ← 回滚日志已 sync，数据库文件已 sync
+    └────────┬────────┘
+              │ sqlite3PagerCommitPhaseTwo()
+              ▼
+          ┌─────────┐
+          │ READER  │ ← 回到读状态，事务完成
+          └─────────┘</code></pre>
+
+        <p>每种状态对应一组允许的操作：</p>
+
+        <table>
+            <thead>
+                <tr><th>状态</th><th>允许操作</th><th>锁类型</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>READER</td><td>仅读取页面（不创建脏页）</td><td>SHARED（共享锁）</td></tr>
+                <tr><td>WRITER_LOCKED</td><td>已获得写权限，但尚未修改任何页面</td><td>RESERVED（保留锁）</td></tr>
+                <tr><td>WRITER_CACHEMOD</td><td>缓存中有脏页，但数据库文件未修改</td><td>RESERVED + 可能 PENDING</td></tr>
+                <tr><td>WRITER_DBMOD</td><td>脏页已写入数据库文件，回滚日志中有原始数据</td><td>EXCLUSIVE（排他锁）</td></tr>
+                <tr><td>WRITER_FINISHED</td><td>日志已同步，等待最终清理</td><td>EXCLUSIVE</td></tr>
+            </tbody>
+        </table>
+
+        <p>状态机转换的关键设计点在于：从 READER 到 WRITER_LOCKED 的转换涉及锁的升级，这<strong>可能失败</strong>（如果其他连接持有 RESERVED 或更高的锁）。而 WRITER_CACHEMOD 到 WRITER_DBMOD 的转换则<strong>必然成功</strong>（因为 WRITER_CACHEMOD 意味着当前连接已经拥有了排他写权限）。</p>
+
+        <div class="tip">
+            💡 理解了这个状态机，你就能理解为什么 SQLite 的 <code>BEGIN IMMEDIATE</code> 和 <code>BEGIN EXCLUSIVE</code> 比简单的 <code>BEGIN</code> 更适合在高并发场景下使用。<code>BEGIN</code> 延迟获取写锁到第一次写操作时，此时如果另一个连接也要写，就会产生"SQLITE_BUSY"错误。<code>BEGIN IMMEDIATE</code> 则在一开始就获取 RESERVED 锁，提前暴露并发冲突，让应用层更容易处理。
+        </div>
+
+        <h2>页面缓存 (PCache)</h2>
+
+        <p>页面缓存在 SQLite 中由 <code>PCache</code> 和 <code>PCache1</code> 实现，代码在 <code>src/pcache1.c</code> 中。它是 Pager 用来管理已加载页面的内存缓存。</p>
+
+        <p>PCache1 是 SQLite 的默认页面缓存实现，它使用<strong>哈希表</strong>进行 O(1) 页面查找，同时维护一个<strong>LRU 链表</strong>进行淘汰：</p>
+
+        <pre><code>/* PCache1 的核心结构 */
+struct PCache1 {
+    /* 哈希表 */
+    unsigned int nHash;       /* 哈希槽数量 */
+    PCache1Page **apHash;    /* 哈希桶数组 */
+
+    /* LRU 链表 */
+    PCache1Page *pLruHead;    /* LRU 链表头（最近使用） */
+    PCache1Page *pLruTail;    /* LRU 链表尾（最久未用） */
+    int nLruPage;             /* LRU 链表长度 */
+
+    /* 统计信息 */
+    int nMax;                 /* 最大缓存页面数（由 cache_size 控制） */
+    int nMin;                 /* 最小缓存页面数 */
+    int nRecyclable;          /* 可回收页面数 */
+
+    /* 页面分配器 */
+    sqlite3_pcache_page *(*xFetch)(sqlite3_pcache*, unsigned, int);
+    void (*xUnpin)(sqlite3_pcache_page*, int);
+    /* ... */
+};</code></pre>
+
+        <p>页面查找流程如下：</p>
+
+        <ol>
+            <li>根据 page number 计算哈希值，在哈希桶中查找</li>
+            <li>如果命中，将页面移动到 LRU 头部（标记为最近使用），直接返回</li>
+            <li>如果未命中，从 VFS 读取页面数据，插入哈希表，加入 LRU 头部</li>
+            <li>如果缓存已满（<code>nCached >= nMax</code>），淘汰 LRU 尾部的一个或多个干净页面</li>
+        </ol>
+
+        <p>PCache1 有一个重要的优化：它使用<strong>页面的 pin/unpin 计数</strong>来避免驱逐正在使用的页面。当 B-Tree 游标正在访问某个页面时，该页面被标记为"pinned"，不会被淘汰。直到所有游标都释放对该页面的引用后，它才可被回收。</p>
+
+        <pre><code>/* 页面查找的核心代码 */
+static sqlite3_pcache_page *pcache1Fetch(PCache1 *pCache, unsigned int pgno){
+    unsigned int h;
+    PCache1Page *pPage;
+
+    /* 1. 哈希查找 */
+    h = pgno % pCache->nHash;
+    for(pPage = pCache->apHash[h]; pPage; pPage = pPage->pNext){
+        if( pPage->pgno==pgno ){
+            /* 命中！移到 LRU 头部 */
+            pcache1PinPage(pPage);
+            return (sqlite3_pcache_page*)pPage;
+        }
+    }
+
+    /* 2. 未命中：分配新页面（必要时淘汰） */
+    pPage = pcache1AllocPage(pCache);
+    if( pPage==0 ){
+        /* 缓存满，尝试淘汰 */
+        pPage = pcache1EvictPage(pCache);
+    }
+    /* ... 初始化并从 VFS 读入数据 ... */
+    return (sqlite3_pcache_page*)pPage;
+}</code></pre>
+
+        <h2>脏页管理与回刷</h2>
+
+        <p>当 B-Tree 要修改一个页面时，它调用 <code>sqlite3PagerWrite()</code>。这个函数实现了<strong>写时复制（Copy-on-Write, COW）</strong>机制——在修改之前，先将页面的原始内容复制到回滚日志中：</p>
+
+        <pre><code>int sqlite3PagerWrite(PgHdr *pPg){
+    Pager *pPager = pPg->pPager;
+    int rc = SQLITE_OK;
+
+    /* 如果页面已经是脏页，无需重复备份 */
+    if( pPg->flags & PGHDR_DIRTY ) return SQLITE_OK;
+
+    /* 状态机转换：READER → WRITER_LOCKED */
+    rc = pagerBeginWrite(pPager);
+
+    /* 将原始页面内容写入回滚日志 */
+    rc = pagerWriteBackupLog(pPager, pPg);
+
+    /* 标记页面为脏页 */
+    pPg->flags |= PGHDR_DIRTY;
+    pPager->nDirty++;
+
+    /* 将页面加入脏页链表 */
+    pPg->pDirty = pPager->pDirtyPage;
+    pPager->pDirtyPage = pPg;
+
+    return rc;
+}</code></pre>
+
+        <p>脏页通过一个<strong>双向链表</strong>管理。Pager 维护着 <code>pDirtyPage</code> 指向链表头，每个脏页通过 <code>pDirtyNext</code> 和 <code>pDirtyPrev</code> 链接。这个链表有两个重要用途：</p>
+
+        <ul>
+            <li><strong>提交时刷写</strong> — 事务提交时，遍历脏页链表将修改写入数据库文件</li>
+            <li><strong>缓存压力淘汰</strong> — 如果新页面请求时缓存空间不足，并且脏页数量超过阈值，先行刷写一部分脏页</li>
+        </ul>
+
+        <p>脏页的回刷策略不是简单的"先脏先刷"。SQLite 会对脏页按 page number 排序后刷写，<strong>减少磁盘寻道时间</strong>。这个优化在机械硬盘时代非常重要——按顺序写比随机写的性能差距可达 10 倍以上。</p>
+
+        <div class="warning">
+            ⚠️ 踩坑实录：SQLite 的 COW 机制在内存极度受限的环境中（如嵌入式设备）有一个陷阱。想象一个场景：你有一个包含 10 万行数据的表，要 <code>UPDATE</code> 所有行。在提交之前，每个被修改的页面原始内容都需要在回滚日志中备份。如果修改覆盖了大量页面，回滚日志会急剧膨胀。如果不小心在事务中累积了太多未提交的修改，甚至可能撑爆磁盘空间。我的建议是：大批量更新时使用 <code>PRAGMA journal_mode=WAL</code>，或者分批提交。
+        </div>
+
+        <h2>I/O 聚合与延迟写</h2>
+
+        <p>Pager 的一个重要优化是<strong>延迟写</strong>。当 B-Tree 调用 <code>sqlite3PagerWrite()</code> 时，页面只被标记为脏页并备份到日志中，但不会立即写回数据库文件。真正的写回发生在：</p>
+
+        <ol>
+            <li>事务提交时（<code>sqlite3PagerCommitPhaseOne()</code>）</li>
+            <li>缓存压力太大，需要腾出空间时</li>
+            <li>检查点操作（WAL 模式）</li>
+        </ol>
+
+        <p>I/O 聚合的核心是 <code>pager_playback()</code> 函数——它在事务回滚时读取回滚日志，将页面恢复。这个过程中有一个重要的批量 I/O 优化：</p>
+
+        <pre><code>/* pager.c 中的批量 I/O 优化: 合并相邻页面为一次大 I/O */
+static void pager_write_changecounter(Pager *pPager, PgHdr *pPg){
+    /* 检查相邻页面是否也脏，如果是则合并写入 */
+    Pgno pgno = pPg->pgno;
+    int nBatch = 1;
+
+    while( pPager->pDirtyCache[pgno + nBatch] ){
+        nBatch++;
+    }
+
+    /* 一次写入 nBatch 个连续页面 */
+    rc = sqlite3OsWrite(pPager->fd,
+                        (u8*)pPg->pData,
+                        nBatch * pPager->pageSize,
+                        (pgno-1) * pPager->pageSize + 100);
+}</code></pre>
+
+        <p>这种"合并写入"策略显著减少了系统调用的次数。例如，如果 10 个连续页面同时被修改，原本需要 10 次独立的 write() 调用，现在只需要一次。这个优化在 SSD 上效果同样显著——虽然 SSD 没有寻道时间，但减少 syscall 次数的收益仍然很大。</p>
+
+        <h2>缓存调优</h2>
+
+        <p>页面缓存的配置直接影响 SQLite 的读写性能。最常用的调优参数是 <code>PRAGMA cache_size</code>：</p>
+
+        <pre><code>-- 将缓存设置为 10000 页（默认页面大小 4096 字节 → 约 40MB）
+PRAGMA cache_size = -10000;
+
+-- 查看当前缓存大小
+PRAGMA cache_size;</code></pre>
+
+        <p>关于缓存调优的关键参数和权衡：</p>
+
+        <table>
+            <thead>
+                <tr><th>参数</th><th>默认值</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>SQLITE_DEFAULT_CACHE_SIZE</code></td><td>2000 页</td><td>编译时默认值，约 8MB（4KB 页面）</td></tr>
+                <tr><td><code>cache_size</code> pragma</td><td>2000 页</td><td>运行时配置，负值表示 KB，正值表示页数</td></tr>
+                <tr><td><code>SQLITE_DEFAULT_PCACHE_INITSZ</code></td><td>20 页</td><td>PCache1 的预分配页面数</td></tr>
+                <tr><td>lookaside 大小</td><td>1200 字节 × 100 个</td><td>每个连接专用的快速分配器，减少 malloc 压力</td></tr>
+            </tbody>
+        </table>
+
+        <p>调优原则：</p>
+        <ul>
+            <li><strong>读多写少</strong> → 加大缓存，让"热数据"常驻内存</li>
+            <li><strong>写多读少</strong> → 减小缓存（减少刷写压力），配合 WAL 模式</li>
+            <li><strong>内存紧张</strong>（嵌入式）→ 使用 <code>PRAGMA cache_size=-2000</code> 甚至更小</li>
+            <li><strong>批量大数据</strong> → 增大缓存以减少 B-Tree 的内部节点 I/O</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>lookaside 与 PCache 的配合：</strong> SQLite 还有一个 lookaside 分配器（我们曾在第 5 章内存管理中介绍过）。当 PCache 频繁分配和释放页面时，lookaside 缓存了小块内存的快速分配路径，减少了 malloc 系统调用的次数。在 OLTP 类型的负载（大量小事务）中，这个优化效果非常明显——实测可以减少约 30% 的 malloc 调用。
+        </div>
+
+        <p>这一章我们深入理解了 Pager 的角色、状态机设计、PCache1 的缓存实现、脏页管理与 COW 机制、I/O 聚合优化以及缓存调优策略。从下一章开始，我们将进一步下沉到 SQLite 的最底层——<strong>VFS 抽象层</strong>。VFS 是 SQLite 的"操作系统接口层"，它把文件读写、锁定、同步等操作封装为可插拔的接口，让 SQLite 在 Unix、Windows、iOS 甚至浏览器中都能完美运行。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

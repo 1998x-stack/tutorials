@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 VDBE虚拟机</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html" class="active">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第11章 VDBE虚拟机</h1>
+
+        <p>大家好，我是你们的讲师。前三章我们走完了前端编译流水线——词法分析器把 SQL 文本切成 token，Lemon 解析器把 token 组建成语法树，表达式编译把 Expr 树翻译成 VDBE 指令序列。现在，我们终于来到了 SQLite 的心脏——<strong>VDBE 虚拟机</strong>。</p>
+
+        <p>VDBE 的全称是 <strong>Virtual DataBase Engine</strong>，它是 SQLite 中所有 SQL 语句的最终执行者。无论是一条简单的 <code>SELECT</code>、一条复杂的多表 <code>JOIN</code>，还是一个 <code>CREATE TABLE</code> 语句，最终都被编译成一段 VDBE 程序，然后由这个虚拟机解释执行。</p>
+
+        <p>这个设计可以说是 SQLite 最具标志性的架构决策。它借鉴了数据库领域"编译执行"的思想，但又和 PostgreSQL 的"表达式树直接求值"、MySQL 的"行处理模式"有着本质区别。这一章我们就来彻底解剖这个虚拟机。</p>
+
+        <h2>VDBE 设计哲学</h2>
+
+        <p>为什么要用虚拟机？为什么不直接执行？这是理解 VDBE 的关键问题。</p>
+
+        <p>最早期的 SQLite（1.x 时代）是没有虚拟机的。SQL 解析后直接调用 B-Tree API 执行操作。这种"直接执行"模式的问题是：<strong>无法缓存编译结果</strong>。每次执行相同的 SQL 语句都要重新解析一遍，每次解析都要重新决定怎么访问 B-Tree。</p>
+
+        <p>VDBE 的引入（SQLite 2.0）解决了这个问题，它带来了四个关键好处：</p>
+
+        <table>
+            <thead>
+                <tr><th>优势</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>可缓存</td><td>VDBE 程序（即编译后的字节码）可以被缓存重用。<code>sqlite3_prepare_v2()</code> 编译后，<code>sqlite3_step()</code> 可以反复执行同一段字节码，无需重新编译。</td></tr>
+                <tr><td>可追踪</td><td>VDBE 程序可以通过 <code>EXPLAIN</code> 输出为人类可读的指令序列，方便调试和优化。</td></tr>
+                <tr><td>可优化</td><td>编译阶段可以对 VDBE 程序做各种优化——死代码消除、常量传播、寄存器分配优化。</td></tr>
+                <tr><td>可移植</td><td>VDBE 指令集是高度抽象的，不依赖底层硬件指令。同样的字节码可以在 ARM、x86、RISC-V 上执行相同的行为。</td></tr>
+            </tbody>
+        </div>
+
+        <div class="highlight">
+            VDBE 的设计哲学可以概括为"<strong>一次编译，多次执行</strong>"。这在现代数据库中已经是最基本的优化策略，但 SQLite 在二十多年前就以极简的方式实现了它。VDBE 的指令集只有约 200 条 opcode，比 x86 指令集简单得多，却足以表达所有 SQL 操作的语义。
+        </div>
+
+        <h2>sqlite3VdbeExec() 主循环</h2>
+
+        <p>VDBE 的执行引擎核心函数是 <code>sqlite3VdbeExec()</code>，定义在 <code>src/vdbe.c</code> 中。这个函数大约 7000 行，是 SQLite 源码中体积最大的单个函数。它的结构是一个<strong>巨大的 switch 语句</strong>，包含所有 opcode 的实现逻辑。</p>
+
+        <pre><code>int sqlite3VdbeExec(Vdbe *p){
+    Op *aOp = p->aOp;        /* 指令数组 */
+    Op *pOp = &aOp[-1];      /* 当前指令（初始在第一条之前） */
+    int rc = SQLITE_OK;
+
+    /* 主执行循环 */
+    for(;;){
+        /* 获取下一条指令 */
+        pOp++;
+
+        /* 检查是否存在 VDBE 程序计数器需要跳转 */
+        /* ... */
+
+        switch( pOp->opcode ){
+            case OP_Goto: {
+                pc = pOp->p2 - 1;  /* 跳转到指定地址（-1 因为循环会 ++） */
+                break;
+            }
+            case OP_Integer: {
+                /* 将整数值存入目标寄存器 */
+                pOut = &aMem[pOp->p3];
+                pOut->u.i = pOp->p1;
+                pOut->flags = MEM_Int;
+                break;
+            }
+            case OP_Column: {
+                /* 从游标/行中读取指定列 */
+                /* ... 约 150 行实现 ... */
+                break;
+            }
+            /* ... 约 200 个类似分支 ... */
+        }
+    }
+}</code></pre>
+
+        <p>注意：每个 opcode 的实现本质上是 C 代码中的一个 case 分支。因为每次循环只有 switch 分发和一次分支预测，VDBE 的执行效率非常高——实测每条 opcode 的平均开销大约只有十几纳秒。这与 JVM 或 CPython 那种"每条指令大量开销量级"的虚拟机完全不同。</p>
+
+        <div class="tip">
+            💡 为了进一步减少函数调用开销，SQLite 使用了一个有意思的技巧——opcode 的 handler 函数被组织为 <code>OP_*</code> case 中直接内联的代码，而不是通过函数指针间接调用。这让编译器可以做更多的优化（寄存器分配、指令流水线等）。代价是 <code>sqlite3VdbeExec()</code> 成为一个几千行的巨型函数，对编译器优化是一个挑战。
+        </div>
+
+        <h2>寄存器模型</h2>
+
+        <p>VDBE 不是基于栈的虚拟机（像 JVM 那样），而是<strong>基于寄存器的</strong>。所有操作的数据都存放在 <code>p->aMem[]</code> 数组中，每个元素是一个 <code>Mem</code> 结构体：</p>
+
+        <pre><code>struct Mem {
+    union {
+        i64 i;         /* 整数值 */
+        double r;      /* 浮点值 */
+        char *z;       /* 字符串指针 */
+        BtCursor *pCur; /* B-Tree 游标 */
+        FuncDef *pDef; /* 函数定义 */
+    } u;
+
+    u32 flags;          /* 类型标志：MEM_Int, MEM_Real, MEM_Str, MEM_Blob, MEM_Null */
+    int n;              /* 字符串或 blob 的长度 */
+    char enc;           /* 字符串编码：SQLITE_UTF8, SQLITE_UTF16LE, SQLITE_UTF16BE */
+    char szMalloc;      /* 已分配内存大小 */
+    sqlite3 *db;        /* 所属数据库连接 */
+};</code></pre>
+
+        <p><code>flags</code> 字段是核心——它指示了 <code>Mem</code> 中存储的是哪种类型的值。一个 Mem 可以同时持有多种表示（比如整数和字符串），<code>flags</code> 标记哪些表示是有效的。这种"多表示"设计使得类型转换非常高效：</p>
+
+        <ul>
+            <li>当需要整数时，检查 <code>MEM_Int</code>，有就直接用；没有就尝试从字符串转换</li>
+            <li>当需要字符串时，检查 <code>MEM_Str</code>，有就直接返回；没有就从整数或浮点转换</li>
+            <li>这种"惰性转换"（lazy conversion）避免了不必要的类型转换开销</li>
+        </ul>
+
+        <p>寄存器数量在编译时确定，记录在 <code>Vdbe->nMem</code> 中。每条 VDBE 指令通过 <code>P1</code>、<code>P2</code>、<code>P3</code> 操作数来引用寄存器：</p>
+
+        <pre><code>/* VDBE 指令结构 */
+struct VdbeOp {
+    u8 opcode;       /* 操作码 */
+    signed char p4type; /* P4 操作数的类型 */
+    int p1;          /* 第一操作数（通常为寄存器或游标编号） */
+    int p2;          /* 第二操作数（通常为跳转目标地址） */
+    int p3;          /* 第三操作数（通常为目标寄存器） */
+    union { ... } p4; /* 第四操作数（指针或字符串） */
+};</code></pre>
+
+        <h2>Cursor 系统</h2>
+
+        <p>VDBE 的 cursor（游标）是访问表的抽象接口。一个 <code>VdbeCursor</code> 结构体代表一个打开的游标，它可以是四种类型之一：</p>
+
+        <table>
+            <thead>
+                <tr><th>游标类型</th><th>枚举值</th><th>用途</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>B-Tree 游标</td><td><code>CURTYPE_BTREE</code></td><td>普通表和索引的游标，封装 <code>BtCursor</code>。最常用的类型。</td></tr>
+                <tr><td>Sorter 游标</td><td><code>CURTYPE_SORTER</code></td><td>排序操作使用的游标，用于 <code>ORDER BY</code> 和 <code>GROUP BY</code>。</td></tr>
+                <tr><td>虚拟表游标</td><td><code>CURTYPE_VTAB</code></td><td>虚拟表（如 FTS、rtree）的游标，通过 VTable 接口操作。</td></tr>
+                <tr><td>伪表游标</td><td><code>CURTYPE_PSEUDO</code></td><td>用于 INSERT/UPDATE 的"单行游标"，包含当前正在插入或更新的行。</td></tr>
+            </tbody>
+        </table>
+
+        <p>游标的操作 opcode 包括：</p>
+
+        <ul>
+            <li><code>OP_OpenRead</code> / <code>OP_OpenWrite</code> — 打开一个游标，关联到指定的 B-Tree 索引</li>
+            <li><code>OP_SeekGT</code> / <code>OP_SeekGE</code> / <code>OP_SeekLT</code> / <code>OP_SeekLE</code> — 定位到满足条件的起始位置</li>
+            <li><code>OP_Rewind</code> — 定位到表的第一行</li>
+            <li><code>OP_Next</code> / <code>OP_Prev</code> — 前进或后退到下一行</li>
+            <li><code>OP_Column</code> — 从当前行读取指定列</li>
+            <li><code>OP_Close</code> — 关闭游标</li>
+        </ul>
+
+        <h2>各类 opcode 详解</h2>
+
+        <p>VDBE 的 opcode 可以分为几个大类，每个类别代表了不同类型的操作：</p>
+
+        <p><strong>控制流 opcode：</strong></p>
+        <ul>
+            <li><code>OP_Goto</code> — 无条件跳转到指定地址（<code>p2</code> 目标）。</li>
+            <li><code>OP_If</code> / <code>OP_IfNot</code> — 条件跳转。检查寄存器中的值是否为真/假。</li>
+            <li><code>OP_Return</code> — 从子程序返回。从栈中弹出返回地址并跳转回去。</li>
+            <li><code>OP_Halt</code> — 停止执行，返回结果码。</li>
+            <li><code>OP_Yield</code> — 协程切换。保存当前程序计数器并切换到另一个协程。</li>
+        </ul>
+
+        <p><strong>数据操作 opcode：</strong></p>
+        <ul>
+            <li><code>OP_Column</code> — 从当前记录中读取指定列到寄存器。</li>
+            <li><code>OP_MakeRecord</code> — 将多个寄存器中的值打包成一条记录（行的序列化格式）。</li>
+            <li><code>OP_ResultRow</code> — 将当前行的值输出给用户（用于 <code>SELECT</code> 的结果集）。</li>
+            <li><code>OP_Insert</code> — 将一条记录插入到 B-Tree 中。</li>
+            <li><code>OP_Delete</code> — 从 B-Tree 中删除当前记录。</li>
+        </ul>
+
+        <p><strong>事务 opcode：</strong></p>
+        <ul>
+            <li><code>OP_Transaction</code> — 开始或继续一个事务。</li>
+            <li><code>OP_Commit</code> — 提交当前事务。</li>
+            <li><code>OP_Rollback</code> — 回滚当前事务。</li>
+            <li><code>OP_AutoCommit</code> — 设置数据库连接的自动提交模式。</li>
+        </ul>
+
+        <p><strong>比较 opcode：</strong></p>
+        <ul>
+            <li><code>OP_Eq</code> / <code>OP_Ne</code> / <code>OP_Lt</code> / <code>OP_Le</code> / <code>OP_Gt</code> / <code>OP_Ge</code> — 比较两个寄存器中的值，根据结果决定是否跳转。</li>
+            <li><code>OP_Comparison</code> — 执行比较并将结果（-1、0、1）存入寄存器。</li>
+        </ul>
+
+        <pre><code>/* OP_Eq 的简化实现 */
+case OP_Eq: {
+    Mem *pIn1 = &aMem[pOp->p1];  /* 左操作数 */
+    Mem *pIn2 = &aMem[pOp->p3];  /* 右操作数 */
+    int res;
+    /* 执行类型转换和比较 */
+    sqlite3MemCompare(pIn1, pIn2, pOp->p4);
+    /* 如果相等，跳转到 p2 地址 */
+    if( res==0 ) pc = pOp->p2 - 1;
+    break;
+}</code></pre>
+
+        <div class="highlight">
+            为什么 VDBE 使用 <code>OP_Eq</code> 这样的<strong>专用比较指令</strong>而不是通用 <code>OP_Cmp</code> + 分支的组合？这是 SQLite 的一个性能优化：比较操作被直接嵌入到跳转语义中，避免了额外的寄存器操作和指令数量。在绝大多数 SQL 中，比较都是"比较后分支"的模式，所以将它们合并为一条指令非常合理。
+        </div>
+
+        <h2>子程序与协程</h2>
+
+        <p>VDBE 支持两种代码复用机制：<strong>子程序（Subroutine）</strong> 和 <strong>协程（Coroutine）</strong>。</p>
+
+        <p><strong>子程序：</strong> 通过 <code>OP_Gosub</code> 调用，<code>OP_Return</code> 返回。调用时当前程序计数器被压入一个内部返回栈，返回时从栈中弹出。子程序主要用于：</p>
+        <ul>
+            <li>公用的表达式计算（比如 <code>ORDER BY</code> 和 <code>GROUP BY</code> 中的聚合表达式）</li>
+            <li>触发器和外键约束的检查代码</li>
+            <li>子查询的多次执行</li>
+        </ul>
+
+        <p><strong>协程：</strong> 用于实现复杂的流式处理场景。例如，<code>UNION</code> 查询需要交替从两个子查询中取数据，这时候就用到了协程：</p>
+
+        <pre><code>/* UNION 的协程实现模式 */
+    OP_InitCoroutine  coroutine1
+    OP_InitCoroutine  coroutine2
+loop:
+    OP_Yield coroutine1   → 切换到协程1，取一行数据
+    OP_Yield coroutine2   → 切换到协程2，取一行数据
+    OP_IfNotFinished goto loop
+    OP_EndCoroutine
+
+coroutine1:
+    /* 执行第一个 SELECT 的代码 */
+    OP_Suspend          → 挂起，返回主循环
+    OP_Goto coroutine1
+
+coroutine2:
+    /* 执行第二个 SELECT 的代码 */
+    OP_Suspend          → 挂起，返回主循环
+    OP_Goto coroutine2</code></pre>
+
+        <p>协程的实现非常轻量——每个协程只有自己独立的程序计数器（PC）和寄存器状态。切换协程就是保存/恢复 PC 的过程，没有复杂的上下文切换开销。</p>
+
+        <h2>实战：EXPLAIN 读懂 VDBE 程序</h2>
+
+        <p>理论讲得够多了，我们来亲手看看真实的 VDBE 程序长什么样。在 <code>sqlite3</code> 命令行中执行 <code>EXPLAIN</code> 可以输出 SQL 语句对应的 VDBE 字节码：</p>
+
+        <pre><code>sqlite&gt; CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, age INTEGER);
+sqlite&gt; EXPLAIN SELECT * FROM t WHERE id=1;
+
+addr  opcode         p1    p2    p3    p4
+----  -------------  ----  ----  ----  ----------------
+0     Init           0     10    0
+1     OpenRead       0     2     0     0
+2     Explain        3     0     0     SEARCH t USING INDEX
+3     Integer        1     1     0
+4     SeekEQ         0     9     1     1
+5     RowData        0     2     0
+6     Column         0     0     3
+7     Column         0     1     4
+8     ResultRow      3     2     0
+9     Close          0     0     0
+10    Halt           0     0     0</code></pre>
+
+        <p>逐条分析这个 VDBE 程序：</p>
+
+        <table>
+            <thead>
+                <tr><th>地址</th><th>指令</th><th>解释</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>0</td><td>Init→10</td><td>跳转到 Halt 指令（程序初始化完成后跳转到结尾）</td></tr>
+                <tr><td>1</td><td>OpenRead(0, 2)</td><td>打开游标 0，关联到 root page=2 的表（t 表的主键索引）</td></tr>
+                <tr><td>3</td><td>Integer(1)→reg1</td><td>将常量 1 加载到寄存器 1</td></tr>
+                <tr><td>4</td><td>SeekEQ(0, 9, reg1)</td><td>在游标 0 中查找值 reg1(=1)，如果找到则继续，否则跳转到 addr 9（Close）</td></tr>
+                <tr><td>5</td><td>RowData(0)→reg2</td><td>读取当前行的完整记录数据到寄存器 2</td></tr>
+                <tr><td>6</td><td>Column(0, 0)→reg3</td><td>从当前行读取列 0（即 id）到寄存器 3</td></tr>
+                <tr><td>7</td><td>Column(0, 1)→reg4</td><td>从当前行读取列 1（即 name）到寄存器 4</td></tr>
+                <tr><td>8</td><td>ResultRow(reg3, 2)</td><td>将寄存器 3 开始的两个值作为一行结果集返回</td></tr>
+                <tr><td>9</td><td>Close(0)</td><td>关闭游标 0</td></tr>
+                <tr><td>10</td><td>Halt(0)</td><td>执行结束，返回 OK</td></tr>
+            </tbody>
+        </table>
+
+        <p>有没有注意到 key 查找是通过主键索引直接定位的（<code>SeekEQ</code>），而不是全表扫描？这是查询规划器的功劳——它识别出 <code>WHERE id=1</code> 是主键等值查找，选择了最优的检索路径。后续章节（第 18 章）我们会专门讲解查询规划器的工作机制。</p>
+
+        <div class="warning">
+            ⚠️ 一个小坑：如果你在 SQLite 中 EXPLAIN 一条参数化的 SQL（比如 <code>SELECT * FROM t WHERE id=?</code>），你会看到 <code>OP_Variable</code> 或 <code>OP_Param</code> 指令而不是 <code>OP_Integer</code>。这是因为参数化查询的参数值在执行时才绑定。这也意味着 VDBE 程序会在 <code>sqlite3_prepare_v2()</code> 时就编译好，然后每次 <code>sqlite3_step()</code> 时只是替换参数值——这解释了为什么参数化查询比拼接 SQL 字符串更快。
+        </div>
+
+        <p>这一章我们深入了 VDBE 虚拟机的内部——从设计哲学到主循环结构、从寄存器模型到游标系统、从各类 opcode 到子程序和协程机制，最后通过 EXPLAIN 实战分析了一段真实的 VDBE 程序。可以说，VDBE 是理解 SQLite 的"枢纽"——它连接了前端编译和后端存储，所有 SQL 语句最终都化为一段段 VDBE 指令来执行。下一章我们将进入 B-Tree 存储引擎，看看 VDBE 中的 <code>OP_OpenRead</code>、<code>OP_Column</code>、<code>OP_SeekEQ</code> 这些指令到底在底层对数据做了些什么。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

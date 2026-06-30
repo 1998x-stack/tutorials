@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 B-Tree存储引擎</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html" class="active">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第12章 B-Tree存储引擎</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们学习了 VDBE 虚拟机是怎么执行字节码的。在 VDBE 的 opcode 清单中，有一批关键的指令——<code>OP_OpenRead</code>、<code>OP_Column</code>、<code>OP_Insert</code>、<code>OP_SeekEQ</code>——它们负责与实际的存储层交互。而这个存储层的核心，就是本章的主题：<strong>B-Tree 引擎</strong>。</p>
+
+        <p>SQLite 的 B-Tree 实现在 <code>src/btree.c</code> 中，约 215 KB，是 SQLite 中最大的源文件（仅次于 <code>vdbe.c</code>）。它实现了一个高度优化的、事务安全的 B-Tree 数据结构，支持并发访问和增量修改。可以说，SQLite 的一切可靠性都建立在这个 B-Tree 实现之上。</p>
+
+        <p>不过需要先澄清一个概念：很多人以为 SQLite 用的是标准的 B-Tree，但实际是<strong>B+Tree 的变体</strong>。它们之间有什么区别呢？</p>
+
+        <h2>B-Tree vs B+Tree</h2>
+
+        <p>在经典的数据库教材中，B+Tree 和 B-Tree 的区别是：B+Tree 的所有数据都存储在叶子节点，非叶子节点只存储键值用于索引；而 B-Tree 的每个节点都可以存储数据。</p>
+
+        <p>SQLite 的实现则更加灵活：</p>
+
+        <ul>
+            <li><strong>表（Table）使用 B+Tree</strong> — 叶子节点存储完整的行数据，内部节点只存储键值和指向子节点的指针。搜索 <code>rowid</code> 时，必须到达叶子节点才能获取实际数据。</li>
+            <li><strong>索引（Index）使用 B-Tree</strong> — 每个节点（无论是内部节点还是叶子节点）都存储完整的键值。对于索引来说，键值就是全部需要的信息，不需要区分内部和叶子的数据存储。</li>
+        </ul>
+
+        <p>这种设计是有意为之的。表的行数据通常比较大，只在叶子节点存储一份能充分利用页面空间；索引的键值通常很小，内部节点也存储索引条目可以加速覆盖索引扫描。</p>
+
+        <table>
+            <thead>
+                <tr><th>特性</th><th>表的 B+Tree</th><th>索引的 B-Tree</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>数据存储</td><td>仅叶子节点</td><td>所有节点</td></tr>
+                <tr><td>内部节点内容</td><td>rowid + 子节点指针</td><td>索引键值 + rowid + 子节点指针</td></tr>
+                <tr><td>叶子节点内容</td><td>完整行记录</td><td>索引键值 + rowid</td></tr>
+                <tr><td>典型深度</td><td>2-3 层（百万级数据）</td><td>2-3 层</td></tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            💡 SQLite 用"B-Tree"这个统称来指代这两种变体。在源码中，你会看到 <code>BTREE_INTKEY</code> 标志来表示"这是一个表的 B+Tree（键是整数 rowid）"，不带此标志的则表示"这是一个索引的 B-Tree（键是任意字节序列）"。实际判断页面类型时通过 <code>pPage->intKey</code> 字段区分。
+        </div>
+
+        <h2>数据库文件格式</h2>
+
+        <p>SQLite 的整个数据库就是一个单一的磁盘文件，它被划分为固定大小的<strong>页面（page）</strong>。每个页面有一个唯一的 <strong>page number</strong>，从 1 开始编号。</p>
+
+        <p>文件的<strong>第 1 页</strong>是<strong>文件头页</strong>，包含一个 100 字节的头部，定义了整个数据库的元信息：</p>
+
+        <pre><code>/* SQLite 数据库文件头 (100 字节) */
+偏移  大小  说明
+─────────────────────────────────────
+0     16   魔数字符串: "SQLite format 3\000"
+16    2    页面大小（大端，512-65536，必须是 2 的幂）
+18    1    文件格式写版本 (1=legacy, 2=WAL)
+19    1    文件格式读版本 (1=legacy, 2=WAL)
+20    1    每页末保留空间字节数（通常为 0）
+21    4    最大嵌入负载比例 (通常 64)
+25    4    最小嵌入负载比例 (通常 32)
+29    4    叶节点嵌入负载比例 (通常 32)
+33    4    文件变更计数器
+37    4    数据库文件中的页面数
+41    4    第一个空闲页面的页号 (0=无空闲页)
+45    4    空闲页面总数
+49    4    schema cookie (标识 schema 版本)
+53    4    schema 格式号
+57    4    默认页面缓存大小
+61    4    自增计数器最大值
+65    8    文本编码 (1=UTF-8, 2=UTF-16le, 3=UTF-16be)
+73    12   用户版本号 (由 user_version pragma 设置)
+85    4    增量 vacuum 模式 (0=关闭, 1=开启)
+89    4    Schema 版本号 (用于事务回滚检测)
+93    4    保留（当前为 0）</code></pre>
+
+        <p>page number 体系：第 1 页是文件头，第 2 页开始是 B-Tree 的 root 页面。每个 B-Tree 有一个 root page number，存储在 <code>sqlite_master</code> 表中。</p>
+
+        <p>页面大小的选择直接影响性能。4KB 是默认值，也是大多数场景的最佳选择——太大了浪费空间（尤其是小数据库），太小了则增加 B-Tree 的深度。</p>
+
+        <h2>页面内部布局</h2>
+
+        <p>每个页面在内存中用 <code>MemPage</code> 结构体表示。页面的内部布局可以分为几个区域：</p>
+
+        <pre><code>/* 页面内部布局（从页首到页尾）*/
+┌──────────────────────────────┐
+│  页面头部 (page header)       │  8-16 字节（取决于页面类型）
+│   - 页面类型标志             │
+│   - 第一个空闲块偏移         │
+│   - 首个 cell 偏移           │
+│   - cell 数量                │
+│   - 内容区域起始偏移         │
+│   - 右兄弟页号（内部节点）   │
+├──────────────────────────────┤
+│  Cell Pointer Array          │  从页首往下生长
+│  ┌─── cell pointer 1 ────┐  │  每个 2 字节，指向 cell 起始位置
+│  │   cell pointer 2       │  │
+│  │   ...                  │  │
+│  └────────────────────────┘  │
+├──────────────────────────────┤
+│  Free Block 链表             │  未使用的碎片空间，由 freeblock 链表管理
+├──────────────────────────────┤
+│  Cell Content Area           │  从页尾往上生长
+│  ┌─── cell N ────────────┐  │
+│  │   cell N-1            │  │
+│  │   ...                 │  │
+│  │   cell 1              │  │
+│  └────────────────────────┘  │
+└──────────────────────────────┘</code></pre>
+
+        <p>关键数据结构：</p>
+
+        <ul>
+            <li><strong>Cell Pointer Array</strong> — 从页面起始偏移后的固定位置开始，每个 cell pointer 占 2 字节（大端），指向该 cell 在页面末尾内容区的位置。Cell 按键值顺序排列，pointer 数组也保持相同的顺序。</li>
+            <li><strong>Cell Content</strong> — 每个 cell 存储一条记录或一个索引条目。Table leaf 页面的 cell 包含完整的行数据；Table interior 页面的 cell 包含 rowid 和子节点页号。</li>
+            <li><strong>Free Block</strong> — 当记录被删除或更新时，页面中会产生碎片化的空闲空间。SQLite 用 free block 链表来管理这些碎片，链表头在页面头部的 <code>freeblock offset</code> 字段。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>空间利用的极致：</strong> SQLite 在页面分裂时不会简单地"对半分"，而是使用一种称为"balance 策略"的算法，计算出使页面空间利用率最大化的分割点。对于最坏情况（所有插入完全随机），平均页面利用率仍能达到约 75%。对于顺序插入，可以达到接近 100%。
+        </div>
+
+        <h2>B-Tree 页面类型</h2>
+
+        <p>SQLite 的 B-Tree 页面分为四种类型，由页面头部的 <code>flags</code> 字节标识：</p>
+
+        <table>
+            <thead>
+                <tr><th>类型</th><th>标志值</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Table Interior（表内部页）</td><td>0x05</td><td>B+Tree 的内部节点。cell 包含子节点页号和 rowid。右指针指向最大的子节点。</td></tr>
+                <tr><td>Table Leaf（表叶子页）</td><td>0x0D</td><td>B+Tree 的叶子节点。cell 包含完整的行数据（payload），以 rowid 作为键。</td></tr>
+                <tr><td>Index Interior（索引内部页）</td><td>0x02</td><td>B-Tree 的内部节点。cell 包含索引键值 + rowid + 子节点页号。</td></tr>
+                <tr><td>Index Leaf（索引叶子页）</td><td>0x0A</td><td>B-Tree 的叶子节点。cell 包含索引键值 + rowid。</td></tr>
+            </tbody>
+        </table>
+
+        <p>在 <code>btree.c</code> 中，这些类型通过宏 <code>ptrmapPageno()</code> 和 <code>get4byte()</code> 等函数来解析。页面的类型决定了 SQLite 如何解释页面上的 cell 内容。</p>
+
+        <h2>搜索与遍历</h2>
+
+        <p>B-Tree 的搜索通过<strong>游标（BtCursor）</strong>进行。游标结构体记录了当前在 B-Tree 中的位置：</p>
+
+        <pre><code>struct BtCursor {
+    Btree *pBtree;          /* 所属 B-Tree 句柄 */
+    CellArray *pCells;      /* 搜索路径上的 cell 数组 */
+    BtShared *pBt;          /* 共享的 B-Tree 状态 */
+    int pgnoRoot;           /* 根页面号 */
+    int iPage;              /* 当前在栈中的深度 */
+
+    /* 页面栈——记录从根到当前节点的路径 */
+    struct BtCursorStack {
+        MemPage *pPage;     /* 路径上的页面 */
+        int iCell;          /* 在该页面中的 cell 索引 */
+    } aStack[BT_STACK_MAX];
+
+    int eState;             /* 游标状态：有效/无效/跳过 */
+    u8 hints;               /* 查询提示 */
+    u8 curFlags;            /* 游标标志 */
+};</code></pre>
+
+        <p><code>sqlite3BtreeMoveto()</code> 是搜索的入口函数。它将一个键值定位到 B-Tree 中：</p>
+
+        <pre><code>int sqlite3BtreeMoveto(
+    BtCursor *pCur,     /* 游标 */
+    const void *pKey,   /* 要搜索的键 */
+    i64 nKey,           /* 键大小（若 nKey>=0 则为键长；若为负数则为 rowid） */
+    int bias,           /* 偏向策略 */
+    int *pRes           /* 结果：负数=在左侧，0=精确匹配，正数=在右侧 */
+){
+    /* 从根页面开始 */
+    int rc;
+    MemPage *pPage = pCur->aStack[0].pPage;
+
+    while( !pPage->leaf ){
+        /* 在内部节点中查找合适的子节点 */
+        int idx = sqlite3BtreeSearchCell(pPage, pKey, nKey, bias);
+        /* 下降到子节点 */
+        pCur->aStack[pCur->iPage].iCell = idx;
+        pCur->iPage++;
+        pPage = sqlite3PageLookup(pCur->pBt, get4byte(&pPage->aCell[idx]));
+    }
+
+    /* 到达叶子节点后执行精确查找 */
+    return sqlite3BtreeSearchCell(pPage, pKey, nKey, pRes);
+}</code></pre>
+
+        <p>这个过程是典型的 B-Tree 搜索——顶层循环"下降"到叶子节点，每次下降都通过二分查找在当前页面的 cell pointer array 中找到正确的分支。</p>
+
+        <p>遍历通过 <code>sqlite3BtreeNext()</code> 和 <code>sqlite3BtreePrevious()</code> 实现。前者用于按行号顺序（或索引顺序）前进到下一个条目。如果当前页面的 cell 遍历完了，它会通过父节点页面栈回溯到上层，找到下一个子节点继续遍历。</p>
+
+        <h2>插入与分裂</h2>
+
+        <p><code>sqlite3BtreeInsert()</code> 的完整流程是 B-Tree 实现中最复杂的部分。它的核心是"先找到位置，再插入，满了就分裂"：</p>
+
+        <pre><code>int sqlite3BtreeInsert(BtCursor *pCur, const void *pKey, i64 nKey, ...){
+    int rc;
+    MemPage *pPage;
+
+    /* 1. 定位到要插入的叶子页面 */
+    rc = sqlite3BtreeMoveto(pCur, pKey, nKey, 0, &res);
+
+    /* 2. 检查是否需要覆盖已有条目（主键冲突或 UPSERT） */
+    if( res==0 ){
+        /* 精确匹配：如果是 REPLACE 或 UPSERT 则更新，否则返回约束错误 */
+        if( ... ) rc = sqlite3BtreeUpdate(pCur, ...);
+        else       return SQLITE_CONSTRAINT;
+    }
+
+    /* 3. 尝试在当前页面中插入 cell */
+    rc = insertCell(pPage, pCur->aStack[pCur->iPage].iCell, ...);
+
+    /* 4. 如果页面已满，触发分裂 */
+    if( rc==SQLITE_FULL ){
+        rc = balance(pPage);
+        /* balance 函数负责：选择一个 cell 提升到父节点，
+         * 当前页面分裂成两个，更新父节点指针 */
+    }
+
+    return rc;
+}</code></pre>
+
+        <p><strong>节点分裂（balance）</strong> 是 B-Tree 中最复杂的过程。SQLite 的 <code>balance()</code> 函数（约 600 行）会执行以下步骤：</p>
+
+        <ol>
+            <li>确定分裂点——不一定是中间位置，而是使两个页面空间利用率最优的切割点</li>
+            <li>分配一个新页面（从空闲页列表或文件末尾分配）</li>
+            <li>将原始页面的一半 cell 移动到新页面</li>
+            <li>将一个"分隔键"提升到父节点（如果是 root 节点分裂，需要创建新的 root）</li>
+            <li>如果父节点因此溢出，则递归向上分裂</li>
+        </ol>
+
+        <div class="warning">
+            ⚠️ 踩坑实录：节点分裂是 B-Tree 中最容易出 bug 的地方。SQLite 在 3.8.x 版本中修过一个经典的"分裂 bug"——当插入的 cell 恰好需要分裂，且父节点也满了需要递归分裂时，<code>balance()</code> 函数在某些条件下会错误地计算新页面数量，导致 cell 丢失。这个 bug 在特定数据分布下触发，非常难以复现。Dr. Hipp 在修复时感叹："在 B-Tree 代码中改一行，你就要准备好面对 10000 个测试用例。"
+        </div>
+
+        <h2>删除与合并</h2>
+
+        <p>删除操作通过 <code>sqlite3BtreeDelete()</code> 实现。删除后如果页面变得"太空"（cell 数量低于某个阈值），会触发<strong>节点合并</strong>。</p>
+
+        <p>SQLite 的合并策略与分裂对称：</p>
+
+        <ul>
+            <li><strong>合并阈值</strong>：当一个页面的 cell 使用量低于总容量的约 40% 时，尝试与兄弟节点合并</li>
+            <li><strong>合并操作</strong>：将当前页面和相邻兄弟页面的所有 cell 合并到一个页面中，释放另一个页面</li>
+            <li><strong>重新分配</strong>：如果合并后页面仍然太满（超过 80%），则重新进行一次平衡分裂</li>
+            <li><strong>递归向上</strong>：合并可能导致父节点 cell 减少，如果父节点也因此太空，则递归合并</li>
+        </ul>
+
+        <p>这个过程叫做"平衡"——在分裂和合并之间保持权衠。SQLite 的平衡算法经过精心设计，能够保证在最坏情况下（完全逆序删除），B-Tree 的高度不会超过 <code>log_{fillFactor}(N)</code>。</p>
+
+        <div class="highlight">
+            删除和插入会影响页面上的 <strong>free block</strong> 链表。每次更新记录时，旧的 cell 空间被释放到 free block 链表中，新的 cell 从链表或页面末尾分配空间。如果 free block 碎片化严重到无法容纳新 cell，则触发页面级的碎片整理（defragmentation）。这种"延迟回收"策略让 UPDATE 操作在大多数情况下避免了额外的页面 I/O。
+        </div>
+
+        <h2>实战：代码走读 sqlite3BtreeInsert()</h2>
+
+        <p>最后，让我们串起整个流程，走读 <code>sqlite3BtreeInsert()</code> 从 VDBE 到底层存储的完整调用链。</p>
+
+        <p>当 VDBE 执行 <code>OP_Insert</code> 指令时：</p>
+
+        <ol>
+            <li><code>sqlite3VdbeExec()</code> 中的 <code>case OP_Insert:</code> 获得目标记录的寄存器值和表游标</li>
+            <li>调用 <code>sqlite3BtreeInsert()</code>，传入游标、记录数据（串行化后的 payload）和 rowid</li>
+            <li><code>sqlite3BtreeInsert()</code> 通过 <code>sqlite3BtreeMoveto()</code> 定位到正确的叶子页面</li>
+            <li>使用 <code>insertCell()</code> 在当前页面上找到插入位置并加入 cell</li>
+            <li>如果 page 满了，调用 <code>balance_nonroot()</code> 进行分裂</li>
+            <li>分裂过程中可能需要 <code>allocatePage()</code> 分配新页面（底层调用 Pager 的 <code>sqlite3PagerWrite()</code>）</li>
+            <li>分裂完成后，如果需要继续向上分裂，递归调用 <code>balance()</code></li>
+        </ol>
+
+        <p>这个调用链从 VDBE 到 B-Tree 到 Pager，最终落到 VFS 的文件读写操作。每一层都各司其职，构成了 SQLite 的存储栈：</p>
+
+        <pre><code>VDBE (sqlite3VdbeExec)
+  └→ OP_Insert
+      └→ sqlite3BtreeInsert (btree.c)
+          ├→ sqlite3BtreeMoveto (二分查找定位)
+          ├→ insertCell (页面内插入)
+          ├→ balance (节点分裂)
+          │   ├→ allocatePage (从 Pager 分配页面)
+          │   └→ sqlite3PagerWrite (触发写时复制)
+          └→ 递归向上平衡</code></pre>
+
+        <p>这就是 SQLite "插入一行数据"背后的完整故事。理解了这个链条，你就理解了 SQLite 存储引擎的核心。</p>
+
+        <p>这一章我们深入学习了 B-Tree 的页面布局、四种页面类型、搜索遍历、插入分裂和删除合并机制。从下一章开始，我们要下探到 B-Tree 下面的一层——<strong>Pager 与页缓存</strong>。它是 SQLite 实现 ACID 事务的核心，也是连接 B-Tree 存储引擎和 VFS 文件系统的桥梁。在 B-Tree 看来，页面是持久化存储的基本单位；而在 Pager 看来，页面只是一个需要被缓存、加锁和同步的内存块。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

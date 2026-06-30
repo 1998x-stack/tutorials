@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 表达式编译</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html" class="active">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第10章 表达式编译</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们学习了 Lemon 解析器如何把 token 序列归约为语法结构。这一章我们要沿着编译链路继续前进，看看其中最重要也最复杂的部分——<strong>表达式编译</strong>。</p>
+
+        <p>在 SQL 中，表达式无处不在：<code>WHERE age > 18</code> 中的 <code>age > 18</code> 是一个布尔表达式，<code>SELECT name || '!'</code> 中的 <code>name || '!'</code> 是字符串连接表达式，<code>ORDER BY score + bonus</code> 中的 <code>score + bonus</code> 是算术表达式。所有这些表达式都需要从解析器构建的抽象语法树翻译成 VDBE 字节码。</p>
+
+        <p>这项工作主要在 <code>src/expr.c</code> 中完成，约 65 KB 代码，是 SQLite 源码中最大的文件之一。核心函数 <code>sqlite3ExprCode()</code> 负责将 Expr 树递归地编译为 opcode 序列。这一章我们就来深入理解这个递归编译过程。</p>
+
+        <h2>Expr 树的构建</h2>
+
+        <p>当 Lemon 解析器执行一条文法规则的 reduce action 时，它会调用 <code>sqlite3ExprAlloc()</code> 或 <code>sqlite3Expr()</code> 来创建 Expr 节点。这些节点组织成一棵二叉树，即<strong>表达式树（Expr tree）</strong>。</p>
+
+        <p>Expr 结构体定义在 <code>src/sqliteInt.h</code> 中，其核心字段如下：</p>
+
+        <pre><code>struct Expr {
+    u8 op;                  /* 操作类型，如 TK_PLUS, TK_EQ, TK_COLUMN */
+    char affinity;          /* 类型亲和性 */
+    u32 flags;              /* 表达式属性标志位 */
+    Expr *pLeft, *pRight;  /* 左右子节点（二叉树结构） */
+    ExprList *x.pList;     /* 表达式列表（如 IN 的右侧列表） */
+    Token token;            /* 原始 token 文本 */
+    Token span;            /* 表达式对应的原始 SQL 文本范围 */
+    int iTable;            /* TK_COLUMN: 对应的表编号 */
+    int iColumn;           /* TK_COLUMN: 对应的列编号 */
+    Select *pSelect;       /* TK_SELECT, TK_EXISTS: 子查询 */
+    AggInfo *pAggInfo;     /* 聚合函数信息 */
+    union {
+        FuncDef *pFunc;    /* TK_FUNCTION: 函数定义 */
+        Expr *pAgg;        /* 聚合函数包装 */
+        int iValue;        /* TK_INTEGER: 整数值 */
+        double rValue;     /* TK_FLOAT: 浮点值 */
+    };
+};</code></pre>
+
+        <p>例如，表达式 <code>age > 18</code> 对应的 Expr 树结构是：</p>
+
+        <ul>
+            <li>根节点：<code>op = TK_GT</code>（大于比较），<code>pLeft = column expr</code>，<code>pRight = integer expr</code></li>
+            <li>左子节点：<code>op = TK_COLUMN</code>，<code>iTable = 0</code>（第一个表），<code>iColumn = 2</code>（第三列，假设 age 是第三列）</li>
+            <li>右子节点：<code>op = TK_INTEGER</code>，<code>iValue = 18</code></li>
+        </ul>
+
+        <p>而对于 <code>a + b * c</code>，解析器会根据优先级生成如下树：</p>
+        <ul>
+            <li>根节点：<code>TK_PLUS</code>，左为 <code>TK_COLUMN(a)</code>，右为 <code>TK_STAR</code>（乘法的优先级高于加法，所以乘法在树的更低层）</li>
+            <li>右子节点 <code>TK_STAR</code>：左为 <code>TK_COLUMN(b)</code>，右为 <code>TK_COLUMN(c)</code></li>
+        </ul>
+
+        <div class="tip">
+            💡 Expr 树本身不包含类型信息——在解析阶段，SQLite 还不知道列的类型。类型信息是在稍后的"类型推导"阶段通过 affinity 机制决定的。这是 SQLite "动态类型"设计的直接体现。
+        </div>
+
+        <h2>sqlite3ExprCode() 递归代码生成</h2>
+
+        <p><code>sqlite3ExprCode()</code> 是表达式编译的核心入口。它的签名为：</p>
+
+        <pre><code>void sqlite3ExprCode(Parse *pParse, Expr *pExpr, int target){
+    /* pParse: 编译上下文
+     * pExpr:  要编译的表达式树
+     * target: 结果存放的目标寄存器编号
+     */
+}</code></pre>
+
+        <p>这个函数的工作方式是递归遍历 Expr 树，根据每个节点的 <code>op</code> 类型生成对应的 VDBE 指令。代码生成的核心逻辑是一个巨大的 switch 语句：</p>
+
+        <pre><code>switch( pExpr->op ){
+    case TK_PLUS:
+    case TK_MINUS:
+    case TK_STAR:
+    case TK_REM:
+    case TK_BITAND:
+    case TK_BITOR:
+    case TK_SLASH: {
+        /* 算术运算：先递归编译左右子表达式，再生成算术 opcode */
+        sqlite3ExprCode(pParse, pExpr->pLeft, target);
+        sqlite3ExprCode(pParse, pExpr->pRight, regRight);
+        sqlite3VdbeAddOp3(v, arithOp, target, regRight, target);
+        break;
+    }
+    case TK_INTEGER: {
+        /* 整数常量：生成 OP_Integer 指令将值加载到寄存器 */
+        sqlite3VdbeAddOp2(v, OP_Integer, pExpr->iValue, target);
+        break;
+    }
+    case TK_COLUMN: {
+        /* 列引用：生成 OP_Column 指令从游标中读取列值 */
+        sqlite3VdbeAddOp3(v, OP_Column, pExpr->iTable, pExpr->iColumn, target);
+        break;
+    }
+    case TK_STRING: {
+        /* 字符串常量：加载字符串到寄存器 */
+        sqlite3VdbeAddOp4(v, OP_String8, 0, target, 0, pExpr->token.z, pExpr->token.n);
+        break;
+    }
+    /* ... 数百种 case ... */
+}</code></pre>
+
+        <p>这个 switch 覆盖了所有 <code>TK_*</code> 类型，从最简单的字面量到最复杂的子查询表达式。每次递归调用都会产生几条到几十条不等的 VDBE 指令。</p>
+
+        <p>值得注意的是，<code>sqlite3ExprCode()</code> 并不是唯一的表达式编译入口。SQLite 还有一系列针对特定场景的辅助函数：</p>
+
+        <table>
+            <thead>
+                <tr><th>函数</th><th>用途</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>sqlite3ExprCode()</code></td><td>通用表达式编译，结果存到指定寄存器</td></tr>
+                <tr><td><code>sqlite3ExprCodeAndCache()</code></td><td>编译并缓存结果，用于需要多次读取的表达式</td></tr>
+                <tr><td><code>sqlite3ExprIfTrue()</code></td><td>编译为跳转指令——如果表达式为真则跳转</td></tr>
+                <tr><td><code>sqlite3ExprIfFalse()</code></td><td>编译为跳转指令——如果表达式为假则跳转</td></tr>
+                <tr><td><code>sqlite3ExprCodeTemp()</code></td><td>编译到临时寄存器，返回寄存器编号</td></tr>
+            </tbody>
+        </table>
+
+        <p><code>sqlite3ExprIfTrue()</code> 和 <code>sqlite3ExprIfFalse()</code> 是实现 <code>WHERE</code> 子句短路求值的关键——它们不是把表达式的结果算出来放到寄存器里，而是直接生成条件跳转指令。这样 <code>WHERE a=1 AND b=2</code> 就可以在 <code>a=1</code> 为假时直接跳过 <code>b=2</code> 的计算。</p>
+
+        <h2>不同类型表达式的编译策略</h2>
+
+        <p>SQLite 对不同类别的表达式采用不同的编译策略：</p>
+
+        <p><strong>常量折叠：</strong> 像 <code>1 + 2</code> 这样的纯常量表达式，在编译时就被求值优化掉了。这个优化在 <code>src/expr.c</code> 的 <code>sqlite3ExprCode()</code> 之前就已经完成了——在 <code>sqlite3ExprAnalyze()</code> 阶段，常量子表达式会被替换为计算结果。所以 <code>SELECT 1 + 2</code> 编译后只有一个 <code>OP_Integer 3</code>，没有加法指令。</p>
+
+        <p><strong>列引用：</strong> <code>TK_COLUMN</code> 节点编译为 <code>OP_Column</code> 指令。注意这里列名已经被解析器转换为表编号和列编号了。列编号是用的 logical column index（逻辑列序号），而不是 storage column index（存储列序号），这两者在某些情况下（比如使用了 WITHOUT ROWID 表）可能不同。</p>
+
+        <p><strong>函数调用：</strong> 内置函数（如 <code>length()</code>、<code>substr()</code>）和用户自定义函数都走同一个路径：</p>
+
+        <pre><code>case TK_FUNCTION: {
+    /* 为每个函数参数递归生成代码 */
+    sqlite3ExprCodeExprList(pParse, pExpr->x.pList, 0, SQLITE_ECEL_DUP);
+    /* 生成 OP_Function 指令 */
+    sqlite3VdbeAddOp4(v, OP_Function, 0, target, nFarg,
+                      (void*)pDef, P4_FUNCDEF);
+    break;
+}</code></pre>
+
+        <p><strong>子查询：</strong> TK_SELECT、TK_EXISTS、TK_IN 等涉及到子查询的表达式，编译策略完全不同。它们会在当前 VDBE 程序中嵌入一个<strong>子程序</strong>，通过 <code>OP_Once</code> 或 <code>OP_OpenRead</code> 来执行子查询。子查询的结果被放入一个临时表中，然后外层表达式通过 <code>OP_Found</code>、<code>OP_NotFound</code>、<code>OP_Column</code> 等指令来使用这些结果。</p>
+
+        <div class="highlight">
+            <strong>设计亮点：</strong> SQLite 没有独立的"表达式优化器"。表达式的优化（如常量折叠、短路求值、子查询扁平化）分散在代码生成的过程中，由 <code>expr.c</code> 中的各个函数各自完成。这种设计虽然不如独立优化器那么系统化，但胜在简单直接——每一步代码生成都可以根据上下文做出最优的本地决策。
+        </div>
+
+        <h2>类型推导与 Affinity</h2>
+
+        <p>SQLite 是<strong>动态类型</strong>的数据库——列没有固定的类型约束，任何行都可以存入任意类型的值。但 SQLite 又有一个叫做 <strong>Affinity（类型亲和性）</strong> 的机制，用于指导类型转换。</p>
+
+        <p><code>sqlite3ExprAffinity()</code> 函数负责确定一个表达式的类型亲和性。它的规则是：</p>
+
+        <ul>
+            <li><strong>列引用</strong> — 返回该列声明的 affinity（BLOB、TEXT、NUMERIC、INTEGER、REAL 之一）</li>
+            <li><strong>字面量</strong> — 返回 <code>SQLITE_AFF_NONE</code></li>
+            <li><strong>二元运算</strong> — 默认 <code>SQLITE_AFF_NUMERIC</code>，因为算术运算期望数值操作数</li>
+            <li><strong>函数返回值</strong> — 由函数定义指定（通过 <code>sqlite3CreateFunc()</code> 注册）</li>
+            <li><strong>CASE / CAST</strong> — CAST 显式指定 affinity，CASE 的结果类型与第一个 THEN 相同</li>
+        </ul>
+
+        <p>在代码生成时，SQLite 会在适当的位置插入 <code>OP_ApplyAffinity</code> 或 <code>OP_Cast</code> 指令来实现类型转换。例如：</p>
+
+        <pre><code>/* 对于 WHERE int_col = '123'，自动插入类型转换 OP_Cast */
+sqlite3VdbeAddOp2(v, OP_Cast, regRight, SQLITE_AFF_INTEGER);</code></pre>
+
+        <p>这就是为什么 <code>SELECT * FROM t WHERE id = '42'</code> 能正确匹配 id=42 的行——尽管 <code>'42'</code> 是字符串字面量，但 affinty 机制告诉 SQLite 应该把它当作整数来比较。</p>
+
+        <div class="warning">
+            ⚠️ 踩坑实录：Affinity 机制有时会带来令人惊讶的行为。比如 <code>SELECT '5' > 10</code>，按照字符串比较 <code>'5'</code> &gt; <code>'10'</code> 为 true（因为 '5' &gt; '1' 的字典序），但 SQLite 由于 affinity 机制，会将字符串 <code>'5'</code> 转换为数字 5，结果为 false。这个"隐式类型转换"曾经让很多从 MySQL 迁移过来的开发者感到困惑——MySQL 的行为不同。SQLite 的行为实际上是符合 SQL 标准的。
+        </div>
+
+        <h2>IN、CASE、CAST 的编译实现</h2>
+
+        <p>几个特殊表达式的编译模式值得专门讲解。</p>
+
+        <p><strong>IN 表达式：</strong> <code>expr IN (v1, v2, ..., vN)</code> 的编译有三种策略：</p>
+
+        <ul>
+            <li><strong>小列表（N &le; 10）：</strong> 直接生成 N 个 <code>OP_Eq</code> 比较指令，用 OR 连接起来</li>
+            <li><strong>大列表（N &gt; 10）：</strong> 将列表值构建成一个内存表（<code>OP_MakeRecord</code>），然后用 <code>OP_Found</code> 进行二分查找</li>
+            <li><strong>子查询：</strong> <code>expr IN (SELECT ...)</code> 编译为打开子查询的游标，然后对每一行做 <code>OP_NotFound</code> 检查</li>
+        </ul>
+
+        <p><strong>CASE 表达式：</strong> <code>CASE x WHEN v1 THEN r1 ELSE rD</code> 的编译生成以下结构的 VDBE 代码：</p>
+
+        <pre><code>    OP_Eq          x, v1 → 不相等跳转到 L1
+    OP_ResultRow   r1 → 返回结果
+    OP_Goto        L2 → 跳过其他分支
+L1: OP_Eq          x, v2 → 不相等跳转到 L3
+    OP_ResultRow   r2
+    OP_Goto        L2
+L3: OP_ResultRow   rD → 默认值
+L2: ...</code></pre>
+
+        <p><strong>CAST 表达式：</strong> <code>CAST(expr AS type)</code> 编译为 <code>OP_Cast</code> 指令，它会将寄存器中的值转换为目标类型。具体的转换规则非常复杂——比如从浮点数转换为整数时，SQLite 会截断小数部分，而非四舍五入；将字符串转换为 NUMERIC 时，会尝试解析前缀数字。</p>
+
+        <h2>实战：追踪一条 WHERE 表达式的编译过程</h2>
+
+        <p>让我们追踪 <code>SELECT * FROM t WHERE age > 18 AND city = 'Beijing'</code> 中的 WHERE 子句编译过程来结束本章。</p>
+
+        <p>首先，解析器为条件表达式 <code>age > 18 AND city = 'Beijing'</code> 构建 Expr 树：</p>
+        <ul>
+            <li><code>TK_AND</code>（根节点）</li>
+            <li>&emsp;├── <code>TK_GT</code>：<code>age > 18</code></li>
+            <li>&emsp;│&emsp;├── <code>TK_COLUMN</code>（age 列，iTable=0, iColumn=1）</li>
+            <li>&emsp;│&emsp;└── <code>TK_INTEGER</code>（18）</li>
+            <li>&emsp;└── <code>TK_EQ</code>：<code>city = 'Beijing'</code></li>
+            <li>&emsp;&emsp;&emsp;├── <code>TK_COLUMN</code>（city 列，iTable=0, iColumn=2）</li>
+            <li>&emsp;&emsp;&emsp;└── <code>TK_STRING</code>（"Beijing"）</li>
+        </ul>
+
+        <p>接下来，<code>sqlite3ExprIfFalse()</code> 被调用来编译这个条件（因为 WHERE 子句的语义是：条件为假时跳过该行，为真时保留）：</p>
+
+        <pre><code>/* 这是生成的 VDBE 指令序列（经过简化和标注） */
+addr1: OP_Column     0 1 reg1    ← 读取 age 到 reg1
+addr2: OP_Integer    18 reg2     ← 加载常量 18 到 reg2
+addr3: OP_Ge         reg2 reg1 addr7  ← 如果 reg1 &lt; reg2（即 age ≤ 18），跳转到跳过该行
+addr4: OP_Column     0 2 reg3    ← 读取 city 到 reg3
+addr5: OP_String8    "Beijing" reg4  ← 加载字符串到 reg4
+addr6: OP_Eq         reg4 reg3 addr9  ← 如果不相等，继续（未匹配），跳转到 skip 标签
+addr7: OP_Goto       0 0 addr8   ← 条件不满足，跳到下一行
+addr8: OP_Next       0 0 addr1   ← 读取下一行
+addr9: OP_ResultRow  ...         ← 条件满足，输出该行</code></pre>
+
+        <p>注意这里 <code>AND</code> 的短路求值效果：如果 <code>age > 18</code> 为假（即 <code>age ≤ 18</code>），直接跳转到下一行（addr3 的跳转），根本不会去检查 <code>city</code> 条件。这正是 <code>sqlite3ExprIfFalse()</code> 的巧妙之处——它为 <code>AND</code> 编译出 <code>if false then jump</code> 的级联结构。</p>
+
+        <div class="highlight">
+            <strong>从 SQL 到 opcode：</strong> 你看，一条简单的 WHERE 子句背后涉及到 Expr 树的构建、类型亲和性的推导、递归代码生成、短路求值的实现——每一个环节都是精细的工程权衡。表达式编译是 SQLite 前端中最复杂、最密集的逻辑，理解它你就理解了 SQL 查询的"前半生"。
+        </div>
+
+        <p>这一章我们深入探讨了 Expr 树的结构、<code>sqlite3ExprCode()</code> 的递归代码生成、不同类型表达式的编译策略、Affinity 类型推导以及 IN/CASE/CAST 的特殊实现。下一章我们将进入 VDBE 虚拟机的世界——它是所有这些 opcode 的"执行舞台"。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

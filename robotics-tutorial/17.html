@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 MoveIt 2与运动规划</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 机器人学概述</a></li>
+            <li><a href="02.html">第2章 线性代数基础</a></li>
+            <li><a href="03.html">第3章 微积分与优化基础</a></li>
+            <li><a href="04.html">第4章 概率与状态估计</a></li>
+            <li><a href="05.html">第5章 刚体运动与空间描述</a></li>
+            <li><a href="06.html">第6章 机器人机构学基础</a></li>
+            <li><a href="07.html">第7章 传感器与执行器</a></li>
+            <li><a href="08.html">第8章 正向运动学</a></li>
+            <li><a href="09.html">第9章 逆向运动学</a></li>
+            <li><a href="10.html">第10章 微分运动学与雅可比</a></li>
+            <li><a href="11.html">第11章 刚体动力学</a></li>
+            <li><a href="12.html">第12章 轨迹生成</a></li>
+            <li><a href="13.html">第13章 PID与反馈控制</a></li>
+            <li><a href="14.html">第14章 先进控制方法</a></li>
+            <li><a href="15.html">第15章 ROS 2核心编程</a></li>
+            <li><a href="16.html">第16章 机器人仿真</a></li>
+            <li><a href="17.html" class="active">第17章 MoveIt 2与运动规划</a></li>
+            <li><a href="18.html">第18章 机器人标定与参数辨识</a></li>
+            <li><a href="19.html">第19章 SLAM原理与实践</a></li>
+            <li><a href="20.html">第20章 路径与轨迹规划</a></li>
+            <li><a href="21.html">第21章 机器人视觉</a></li>
+            <li><a href="22.html">第22章 机器人学习</a></li>
+            <li><a href="23.html">第23章 机器人调试与诊断</a></li>
+            <li><a href="24.html">第24章 嵌入式与实时系统</a></li>
+            <li><a href="25.html">第25章 真机部署与集成</a></li>
+            <li><a href="26.html">第26章 人形与四足机器人</a></li>
+            <li><a href="27.html">第27章 具身智能与VLA大模型</a></li>
+            <li><a href="28.html">第28章 综合项目实战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第17章 MoveIt 2与运动规划</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们学会了在仿真中验证机器人算法——这是安全的前提。但仿真中规划出来的路径真的能用吗？机械臂能否在真实环境中避开障碍物，从A点运动到B点？这个问题看起来简单，但在一个包含6个自由度、周围有各种障碍物的空间中，关节空间的可行路径几乎是无穷无尽的——寻找一条无碰撞的路径就像在数亿维度的高维空间中穿针引线。而MoveIt 2，就是目前工业界最成熟的高维运动规划框架。</p>
+
+        <p>MoveIt 2是ROS 2生态中用于运动规划（Motion Planning）、碰撞检测（Collision Checking）、运动学求解（Kinematics）和抓取规划（Grasp Planning）的"瑞士军刀"。2026年的MoveIt 2已经进化到支持GPU加速的碰撞检测、OMPL 2.x的高速采样规划器和基于学习的规划器。不管你是做简单的"点到点运动"，还是复杂的"避障抓取"，MoveIt 2都是你绕不开的工具。</p>
+
+        <h3>17.1 MoveIt 2架构</h3>
+
+        <p>理解MoveIt 2的架构是有效使用它的前提。MoveIt 2的核心组件围绕一个概念展开：<strong>MoveGroup</strong>——即一组被联合规划的关节和连杆。</p>
+
+        <p><strong>MoveGroupInterface（C++）与moveit_py（Python）</strong>：这是MoveIt 2的两大门面。C++接口<code>MoveGroupInterface</code>提供完整的API控制，包括设置目标位姿、规划路径、执行轨迹、添加/移除障碍物等。Python接口<code>moveit_py</code>是从MoveIt 2 Jazzy开始成为一等公民的——之前ROS 1时代的<code>moveit_commander</code>是间接调用C++ API的Python wrapper，性能较差且功能不全。2026年的<code>moveit_py</code>是原生Python绑定，性能接近C++。</p>
+
+        <p><strong>PlanningScene</strong>：PlanningScene是MoveIt 2对"环境"的建模——它包括了机器人自身（URDF/SDF模型）、环境障碍物（通过Collision Objects API添加）和允许/禁止的碰撞矩阵。每次运动规划都是在PlanningScene的上下文中执行的。PlanningScene支持差分更新（<code>PlanningSceneDiff</code>），你可以在线添加/移除障碍物而不需要重建整个场景。</p>
+
+        <p><strong>运动学插件</strong>：MoveIt 2通过插件机制支持多种运动学求解器。常用插件包括：<code>KDLKinematicsPlugin</code>（基于Orocos KDL的数值迭代求解）、<code>TRACK_IK</code>（跟踪逆向运动学，适合连续轨迹）、<code>MGIKSolver</code>（BioIK进化算法求解器，适合有额外约束的任务）。对于有封闭解的机器人（如PUMA 560），也可以编写自定义求解器以提升效率。</p>
+
+        <p><strong>碰撞检测管道</strong>：碰撞检测是运动规划中最消耗计算资源的部分。MoveIt 2默认使用FCL（Flexible Collision Library）进行几何碰撞检测——它基于AABB层次包围盒树（BVH）加速查询。从MoveIt 2 Jazzy开始，可选的CUDA加速FCL可以将碰撞检测时间从5-10ms降低到1ms以内。</p>
+
+        <div class="highlight">
+            <p><strong>重要规范</strong>：ISO/TS 15066（协作机器人安全标准）要求机器人的碰撞检测响应时间不超过5ms。也就是说，从传感器检测到可能碰撞到触发安全停止的整个链路必须在5ms内完成。这是MoveIt 2碰撞检测性能的关键考核指标——如果你的系统碰撞检测耗时超过5ms，它将无法通过工业安全认证。</p>
+        </div>
+
+        <h3>17.2 碰撞检测</h3>
+
+        <p>碰撞检测是运动规划的"守门员"——每条候选路径都必须经过碰撞检测的验证才能执行。MoveIt 2的碰撞检测体系分为三个层次。</p>
+
+        <p><strong>第一层：自碰撞检测（Self-Collision）</strong>——机器人自身的连杆之间是否发生碰撞？比如，当肘关节弯曲到一定程度时，前臂是否会碰到上臂？MoveIt 2在初始化时会自动生成<code>Self-Collision Matrix</code>，记录哪些连杆对永远不可能碰撞（比如相邻连杆通过关节连接），从而减少检测量。</p>
+
+        <p><strong>第二层：环境碰撞检测（Environment Collision）</strong>——机器人与环境中的障碍物是否发生碰撞？环境障碍物通过<code>planning_scene.add_collision_object()</code>添加到场景中。障碍物可以是基本几何体（盒子、球体、圆柱体）或Mesh模型（通过STL/OBJ导入）。</p>
+
+        <p><strong>第三层：人体碰撞检测（Human-Robot Collision）</strong>——对于协作机器人，需要实时检测与人体是否会发生碰撞。2026年，许多系统使用深度相机+人体姿态估计（如OpenPose或MediaPipe）实时构建人体碰撞模型，并注入PlanningScene。这要求碰撞检测速度足够快——通常使用GPU加速的SDF（Signed Distance Field）来实现亚毫秒级的检测。</p>
+
+        <p><strong>加速技术</strong>：FCL库使用BVH（Bounding Volume Hierarchy）加速碰撞查询。对于复杂Mesh模型，MoveIt 2支持在加载时生成离散的有符号距离场（Discrete SDF），将碰撞检测从几何相交测试简化为签名距离查询——效率提升10-50倍。此外，使用<code>Allowed Collision Matrix (ACM)</code>标记那些可以安全忽略的碰撞对（比如被气动夹具夹住的工件），可以进一步减少不必要的检测。</p>
+
+        <h3>17.3 OMPL运动规划器</h3>
+
+        <p>OMPL（Open Motion Planning Library）是MoveIt 2默认的运动规划引擎。它包含了30多种采样规划算法，涵盖了从最简单的点到点规划到复杂的约束规划。</p>
+
+        <p>采样规划（Sampling-Based Planning）的基本思想很简单：在C-Space（配置空间）中随机采样关节角度，然后将这些采样点连接起来形成一条从起点到目标点的无碰撞路径。这种方法避免了显式构建C-Space障碍物（那在高维空间中是不现实的），而是通过碰撞检测来判断每个采样点是否可行。</p>
+
+        <p><strong>RRT-Connect（双向快速探索随机树）</strong>：最常用也是默认的规划器。它同时从起点和目标点生长两棵随机树，直到它们相遇。RRT-Connect速度快（通常10-100ms搞定一条路径），但不保证最优性（路径可能非常曲折）。适合：抓取任务、点到点运动、任何需要快速找到可行路径的场景。</p>
+
+        <p><strong>RRT*（最优RRT）</strong>：在RRT的基础上增加了"重连"（Rewiring）步骤——每次新增一个采样点后，检查附近的节点是否能通过新点获得更短的路径。RRT*保证随着采样数量趋向无穷，路径长度趋向最优。缺点是收敛速度慢，需要数千甚至数万次采样。适合：对路径质量有要求、时间充足的场景（如离线规划）。</p>
+
+        <p><strong>PRM*（概率路图）</strong>：在C-Space中预先采样并构建一个"道路图"（Roadmap），然后在需要规划时用A*在这个图上搜索路径。PRM*适合需要频繁规划的静态场景——Roadmap可以复用，每次查询只需几毫秒。缺点是Roadmap的构建需要时间，且对环境变化敏感。</p>
+
+        <table>
+            <tr>
+                <th>规划器</th>
+                <th>策略</th>
+                <th>最优性</th>
+                <th>速度</th>
+                <th>适合场景</th>
+            </tr>
+            <tr>
+                <td>RRT-Connect</td>
+                <td>双向随机树</td>
+                <td>无保证</td>
+                <td>极快（<100ms）</td>
+                <td>在线规划、抓取、临时避障</td>
+            </tr>
+            <tr>
+                <td>RRT*</td>
+                <td>随机树 + 重连</td>
+                <td>渐进最优</td>
+                <td>慢（数秒-数分钟）</td>
+                <td>离线规划、需要最优路径</td>
+            </tr>
+            <tr>
+                <td>PRM*</td>
+                <td>概率路图 + 图搜索</td>
+                <td>渐进最优</td>
+                <td>慢构建/快查询</td>
+                <td>静态场景、高频重复规划</td>
+            </tr>
+            <tr>
+                <td>EST</td>
+                <td>可扩展空间采样</td>
+                <td>无保证</td>
+                <td>中</td>
+                <td>狭小空间逃逸</td>
+            </tr>
+            <tr>
+                <td>KPIECE</td>
+                <td>Kinematic Planning by Interior-Cell Exclusion</td>
+                <td>无保证</td>
+                <td>快</td>
+                <td>高自由度机器人（>7轴）</td>
+            </tr>
+        </table>
+
+        <div class="tip">
+            <p><strong>规划器选择流程</strong>：第一次使用MoveIt 2时，我建议你从RRT-Connect开始——它够快、够可靠。如果发现规划出的路径太曲折（末端执行器在空间中绕远路），尝试增加<code>goal_bias</code>参数（默认0.05，可以调整到0.1-0.3），让树向目标方向生长得更积极。如果需要最优路径，先用RRT-Connect快速找一条可行路径，然后以此为初始解进行路径平滑（Shortcutting或B-Spline Smoothing），而不是直接上RRT*——后者太慢了。</p>
+        </div>
+
+        <h3>17.4 抓取规划</h3>
+
+        <p>抓取是机械臂最常见的任务之一。MoveIt 2提供了完整的抓取规划工具链，从抓取点生成到抓取质量评估。</p>
+
+        <p><strong>Grasp Generation（抓取生成）</strong>：给定一个目标物体，抓取规划器会围绕物体的几何模型生成一组候选抓取位姿。对于长方体，典型的抓取是对向夹爪从长边方向接近；对于圆柱体，是从径向方向接近。MoveIt 2的<code>GraspGenerator</code>会根据物体Mesh自动采样接近方向（Approach Direction）和闭合位置（Pre-Grasp Position），生成数百个候选抓取。</p>
+
+        <p><strong>抓取质量指标</strong>：不是所有生成的抓取都是好的。MoveIt 2根据以下指标对候选抓取进行排序——Force Closure（力封闭性，是否能在任意外力作用下保持抓取）、Ferrari-Canny度量（接触点的分布均匀性）、Grasp Wrench Space体积（抓取可抵抗的外力范围）。只有力封闭抓取才会被保留。</p>
+
+        <p><strong>Pre-Grasp与Post-Grasp</strong>：一个完整的抓取动作分为三个阶段——Pre-Grasp（夹爪张开，在物体前方安全位置）、Grasp（沿接近方向移动并闭合夹爪）、Post-Grasp（夹紧工件并抬升）。在抓取规划中，Pre-Grasp阶段的路径需要保证全程无碰撞——如果机器人在接近物体时碰到桌子边缘，哪怕最终抓取点是对的，整个动作也是无效的。</p>
+
+        <p><strong>夹爪的选择</strong>：2026年工业界最主流的夹爪类型是真空吸盘（适合光滑平面和轻载，如玻璃面板、纸箱）和二指平行夹爪（适合通用抓取，如螺丝刀、工件）。对于复杂物体，三指自适应夹爪（如Robotiq 3-Finger）和多指灵巧手（如Shadow Hand）也在快速普及。在MoveIt 2中，夹爪URDF模型需要包含完整的<code>&lt;joint type="prismatic"&gt;</code>定义，夹爪的开启/闭合通过关节位置控制。</p>
+
+        <h3>17.5 实战：MoveIt 2配置与使用</h3>
+
+        <p>让我们通过一个完整的Python例子来体验MoveIt 2的使用流程。假设我们已经通过MoveIt Setup Assistant配置了一个六轴机器人，生成了<code>config/</code>目录下的所有配置项。</p>
+
+        <pre><code># ============================================
+# MoveIt 2 Python API — 运动规划示例
+# ============================================
+import rclpy
+from moveit_py import MoveItPy
+from moveit_py.planning_component import MoveGroupComponent
+
+def main():
+    rclpy.init()
+    # 1. 初始化MoveIt 2（加载URDF、SRDF和规划器配置）
+    moveit = MoveItPy(node_name="demo_planning")
+
+    # 2. 获取"arm"运动组（在SRDF中定义）
+    arm = moveit.get_planning_component("arm")
+
+    # 3. 设置目标位姿（末端执行器在基座坐标系下的位置和姿态）
+    arm.set_goal_state(
+        position=[0.4, 0.0, 0.3],      # 目标位置 (m)
+        orientation=[0.0, 0.707, 0.0, 0.707],  # 目标姿态 (四元数)
+        reference_frame="base_link",
+        end_effector="tool0",
+    )
+
+    # 4. 规划：默认使用RRT-Connect
+    result = arm.plan()
+    if not result:
+        print("规划失败——目标不可达或存在碰撞！")
+        return
+
+    # 5. 执行轨迹
+    arm.execute(result.trajectory)
+    print(f"运动规划成功：{len(result.trajectory.waypoints)} 个路径点")
+
+    rclpy.shutdown()
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+        <p><strong>C++等价实现</strong>：</p>
+
+        <pre><code>// ============================================
+// MoveIt 2 C++ API — 运动规划示例
+// ============================================
+#include &lt;moveit/move_group_interface/move_group_interface.hpp&gt;
+#include &lt;rclcpp/rclcpp.hpp&gt;
+
+int main(int argc, char** argv)
+{
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared&lt;rclcpp::Node&gt;("moveit_demo");
+    auto logger = node->get_logger();
+
+    // 使用MoveGroupInterface
+    moveit::planning_interface::MoveGroupInterface move_group(
+        node, "arm");
+
+    // 设置目标位姿（使用geometry_msgs::Pose）
+    geometry_msgs::msg::Pose target_pose;
+    target_pose.position.x = 0.4;
+    target_pose.position.y = 0.0;
+    target_pose.position.z = 0.3;
+    target_pose.orientation.x = 0.0;
+    target_pose.orientation.y = 0.707;
+    target_pose.orientation.z = 0.0;
+    target_pose.orientation.w = 0.707;
+    move_group.setPoseTarget(target_pose);
+
+    // 规划并执行
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    bool success = (move_group.plan(plan) == moveit::core::MoveItErrorCode::SUCCESS);
+    if (success) {
+        move_group.execute(plan);
+        RCLCPP_INFO(logger, "规划成功！轨迹包含 %zu 个路径点",
+            plan.trajectory_.joint_trajectory.points.size());
+    } else {
+        RCLCPP_ERROR(logger, "规划失败！");
+    }
+
+    rclcpp::shutdown();
+    return 0;
+}</code></pre>
+
+        <p>注意C++例子中<code>plan()</code>返回的是<code>MoveItErrorCode</code>而不是布尔值——这在调试时非常有用。常见的错误码包括：<code>SUCCESS</code>（规划成功）、<code>PLANNING_FAILED</code>（找不到可行路径）、<code>INVALID_MOTION_PLAN</code>（轨迹有效性验证失败）、<code>MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE</code>（规划完成后环境发生变化，路径不再安全）。</p>
+
+        <div class="warning">
+            <p><strong>踩坑实录</strong>：在一次汽车零部件焊接项目中，MoveIt 2总是规划出一条"神奇"的路径——机器人绕过工件、穿过夹具缝隙、从一个完全不可能的角度接近焊点。路径确实是无碰撞的，但运动时间长达12秒，而工艺要求是3秒。后来我翻出了之前的项目日志才发现：每次规划时RRT-Connect的求解时间限制（<code>allowed_planning_time</code>）设置的是5秒——规划器用足了这5秒找了一条"尽量短但绕远路的路径"。解决方案：将规划时间限制改为1秒，并设置<code>goal_joint_tolerance</code>为0.05弧度（而不是默认的0.01），这样规划器会快速收敛到一条"足够好"的路径。最终运动时间从12秒降到了2.8秒，满足了工艺节拍。<strong>规划器的超时设置直接决定了路径的质量</strong>——时间长不等于好路径，通常找到一条"足够好"的路径只需要0.5-1秒。</p>
+        </div>
+
+        <p>本章我们全面学习了MoveIt 2的运动规划体系——从核心架构（MoveGroupInterface、PlanningScene、运动学插件、碰撞检测管道）、到碰撞检测的三个层次（自碰撞、环境碰撞、人体碰撞）、到OMPL规划器的选择与对比（RRT-Connect、RRT*、PRM*），再到抓取规划（抓取生成、质量评估、Pre/Post-Grasp），最后通过Python和C++的实际代码示范了MoveIt 2的使用流程。MoveIt帮你规划路径——但如果机器人模型不准，所有规划都是纸上谈兵。下一章我们要解决的问题正是这个工程中的"地基"问题——<strong>机器人标定与参数辨识</strong>。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

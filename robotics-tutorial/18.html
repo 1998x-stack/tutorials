@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 机器人标定与参数辨识</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 机器人学概述</a></li>
+            <li><a href="02.html">第2章 线性代数基础</a></li>
+            <li><a href="03.html">第3章 微积分与优化基础</a></li>
+            <li><a href="04.html">第4章 概率与状态估计</a></li>
+            <li><a href="05.html">第5章 刚体运动与空间描述</a></li>
+            <li><a href="06.html">第6章 机器人机构学基础</a></li>
+            <li><a href="07.html">第7章 传感器与执行器</a></li>
+            <li><a href="08.html">第8章 正向运动学</a></li>
+            <li><a href="09.html">第9章 逆向运动学</a></li>
+            <li><a href="10.html">第10章 微分运动学与雅可比</a></li>
+            <li><a href="11.html">第11章 刚体动力学</a></li>
+            <li><a href="12.html">第12章 轨迹生成</a></li>
+            <li><a href="13.html">第13章 PID与反馈控制</a></li>
+            <li><a href="14.html">第14章 先进控制方法</a></li>
+            <li><a href="15.html">第15章 ROS 2核心编程</a></li>
+            <li><a href="16.html">第16章 机器人仿真</a></li>
+            <li><a href="17.html">第17章 MoveIt 2与运动规划</a></li>
+            <li><a href="18.html" class="active">第18章 机器人标定与参数辨识</a></li>
+            <li><a href="19.html">第19章 SLAM原理与实践</a></li>
+            <li><a href="20.html">第20章 路径与轨迹规划</a></li>
+            <li><a href="21.html">第21章 机器人视觉</a></li>
+            <li><a href="22.html">第22章 机器人学习</a></li>
+            <li><a href="23.html">第23章 机器人调试与诊断</a></li>
+            <li><a href="24.html">第24章 嵌入式与实时系统</a></li>
+            <li><a href="25.html">第25章 真机部署与集成</a></li>
+            <li><a href="26.html">第26章 人形与四足机器人</a></li>
+            <li><a href="27.html">第27章 具身智能与VLA大模型</a></li>
+            <li><a href="28.html">第28章 综合项目实战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第18章 机器人标定与参数辨识</h2>
+
+        <p>大家好，我是你们的讲师。在上一章我们用了MoveIt 2规划出了完美的运动路径——至少仿真中看起来是完美的。但如果你把同样的代码部署到真机上，你会发现一件令人沮丧的事：末端执行器到达的位置与规划位置总是有几毫米甚至几厘米的偏差。是运动学算错了吗？不是。是控制算法有问题吗？也不是。问题出在哪里？出在"模型与现实之间的差异"——你告诉MoveIt 2机器人的连杆长度是0.3米，但实际制造的连杆可能是0.302米；你告诉控制器关节的零点位置是某个角度，但实际装配时零点偏移了0.1度。这就是机器人标定要解决的根本问题。</p>
+
+        <p>标定（Calibration）和参数辨识（Parameter Identification）是机器人从"仿真玩具"走向"精密生产工具"的最后一道门槛。一台未经标定的工业机器人重复定位精度可能在±0.5mm左右，但经过完整的运动学标定后可以提升到±0.02mm——这25倍的精度的提升，对于芯片封装、航空部件装配等场景来说就是合格与不合格的区别。本章我们从运动学标定、动力学参数辨识、手眼标定、相机与IMU标定这几个方面展开，最后分享我在实战中踩过的几个坑。</p>
+
+        <h3>18.1 运动学标定</h3>
+
+        <p>运动学标定的目的是精确测量机器人的实际运动学参数（DH参数或旋量参数），从而缩小名义模型与实际物理模型之间的差异。</p>
+
+        <p><strong>标定问题的数学形式</strong>：名义上的正向运动学函数为 <code>T_nominal(q, θ_nominal)</code>，其中q是关节角度，θ_nominal是名义运动学参数。实际的运动学函数为 <code>T_actual(q, θ_actual)</code>。标定的目标就是找到 <code>Δθ = θ_actual - θ_nominal</code>，使得在整个工作空间中 <code>||T_nominal(q, θ_nominal + Δθ) - T_measured||</code> 最小化。这是一个典型的非线性最小二乘问题，通常使用Levenberg-Marquardt算法求解。</p>
+
+        <p><strong>测量手段</strong>：标定的精度取决于测量设备的精度。目前工业界常用的测量手段包括：激光跟踪仪（Leica AT960，精度±0.01mm——但价格在$50K以上）、光学三坐标测量机（CMM，精度±0.001mm，但需要拆卸机器人送到计量室）、球杆仪（Ballbar，精度±0.1μm，适合六轴工业机器人的检测标准ISO 9283）、以及成本较低的方案——相机+ArUco码（精度±0.3mm，适合入门级标定）。</p>
+
+        <p><strong>开环标定 vs 闭环标定</strong>：开环标定（Open-Loop Calibration）指直接用外部测量设备测量末端位姿，与名义模型比较。闭环标定（Closed-Loop Calibration）则不需要外部测量设备——通过将末端执行器约束到固定点（如锥孔约束），利用关节编码器读数之间的约束关系来辨识参数。闭环标定成本低但精度也低（约±0.5mm），适合快速现场标定；开环标定精度高但需要昂贵的测量设备。</p>
+
+        <div class="highlight">
+            <p><strong>关键数据</strong>：一台KUKA KR 160机器人的经验表明，未经标定时的重复定位精度为±0.3mm，绝对定位精度为±2.5mm。经过激光跟踪仪标定后，重复定位精度提升到±0.06mm，绝对定位精度提升到±0.15mm。也就是说，标定改善的主要是绝对定位精度——机器人的"肌肉记忆"（重复精度）是机械设计决定的，但"对世界的理解"（绝对精度）是标定赋予的。</p>
+        </div>
+
+        <h3>18.2 动力学参数辨识</h3>
+
+        <p>如果你的机器人需要做高速运动、力控或者拖拽示教——仅仅标定运动学是不够的，你还需要精确的动力学模型。动力学参数辨识就是确定每个连杆的质量、质心位置、惯性张量和关节摩擦系数。</p>
+
+        <p><strong>辨识原理</strong>：动力学参数辨识基于机器人的逆动力学模型 τ = ID(q, q_dot, q_ddot, Φ)，其中Φ是待辨识的动力学参数向量（每个连杆有10个惯性参数 + 2-5个摩擦参数）。这是一个线性函数——τ = Y(q, q_dot, q_ddot) · Φ，其中Y是回归矩阵。因此，动力学参数辨识本质上是一个线性最小二乘问题：Φ_hat = (Y^T Y)^{-1} Y^T τ_m。</p>
+
+        <p><strong>激励轨迹设计</strong>：Y矩阵的"质量"直接决定了辨识的精度和可辨识性。如果激励轨迹不够丰富（所有关节匀速运动，没有加速度），Y矩阵可能列秩不足，某些参数无法辨识。标准做法是设计傅里叶级数形式的激励轨迹（Swept-Sine或Finite Fourier Series），使每个关节在指定频率范围内充分激励。2026年的常见做法是用贝塞尔曲线参数化的激励轨迹替代传统傅里叶级数，因为贝塞尔曲线在起点和终点的速度和加速度为零，对机器人更友好。</p>
+
+        <p><strong>摩擦模型</strong>：关节摩擦是动力学模型中最难建模的部分。最简单的模型是<strong>库仑+粘性摩擦</strong>：τ_f = f_c · sign(q_dot) + f_v · q_dot。更精确的模型会加入Stribeck效应（低速时的负阻尼现象）和温度依赖性。对于协作机器人（通常使用谐波减速器），摩擦的滞后效应（Hysteresis）非常显著——上升和下降时的摩擦曲线不重合，需要Hysteresis摩擦模型才能准确描述。</p>
+
+        <pre><code># ============================================
+# 动力学参数辨识 — 最小二乘示例
+# ============================================
+import numpy as np
+
+def identify_dynamics(Y_regressor, torque_measurements):
+    """
+    使用加权最小二乘法辨识动力学参数
+
+    参数:
+    Y_regressor: (N_samples × N_params) 回归矩阵
+    torque_measurements: (N_samples,) 实测关节力矩
+
+    返回:
+    phi_hat: (N_params,) 辨识得到的动力学参数
+    """
+    # 加权最小二乘：给低速段的测量值更高权重
+    # （因为高速段信噪比较低）
+    W = np.eye(Y_regressor.shape[0])
+
+    # 标准最小二乘解：Φ = (Y^T W Y)^{-1} Y^T W τ
+    YtW = Y_regressor.T @ W
+    phi_hat = np.linalg.inv(YtW @ Y_regressor) @ YtW @ torque_measurements
+
+    # 计算残差
+    residuals = torque_measurements - Y_regressor @ phi_hat
+    rmse = np.sqrt(np.mean(residuals**2))
+
+    print(f"辨识完成: RMSE = {rmse:.4f} Nm")
+    return phi_hat
+
+# 验证：用RNEA（递归牛顿-欧拉算法）计算力矩并比较
+# 经过辨识后，计算力矩与实测力矩的均方根误差应小于0.1 Nm</code></pre>
+
+        <p>辨识完成后，一定要用验证轨迹（独立于激励轨迹的数据）来验证辨识结果。常用的验证方法是：用RNEA（Recursive Newton-Euler Algorithm，递归牛顿-欧拉算法）计算力矩并与实测力矩比较。如果验证轨迹上的预测力矩与实测力矩的RMS误差小于0.1Nm（对于中型工业机器人），说明辨识成功。</p>
+
+        <h3>18.3 手眼标定</h3>
+
+        <p>手眼标定（Hand-Eye Calibration）解决的是"相机坐标系与机器人坐标系之间的变换关系"。相机装在机械臂末端（Eye-in-Hand，眼在手上）或者固定在工作空间上方（Eye-to-Hand，眼在手外），两种配置的标定方法不同。</p>
+
+        <p><strong>AX = XB 问题</strong>：手眼标定的数学本质是求解矩阵方程 AX = XB。其中A是机器人末端在两次运动之间的变换（从正向运动学得到），B是相机检测到的标定板在两次运动之间的变换（从视觉得到），X是待求的手眼变换矩阵。这是一个经典的Sylvester方程问题。</p>
+
+        <p><strong>Tsai-Lenz方法</strong>：1989年提出的两步法——先求解旋转部分（通过四元数或轴角表示），再求解平移部分（通过线性最小二乘）。Tsai-Lenz方法要求至少3次非共面旋转运动（即A和B的旋转轴不能平行）。实际上建议使用15-20个姿态来做标定，并通过RANSAC剔除异常值。</p>
+
+        <p><strong>OpenCV实现</strong>：OpenCV提供了现成的<code>calibrateHandEye()</code>函数，支持共四种求解方法（Tsai-Lenz、Park、Horaud、Andreff）。只需传入机器人末端位姿序列和标定板位姿序列即可。</p>
+
+        <pre><code>import cv2
+import numpy as np
+
+# 机器人末端在基座坐标系下的变换矩阵列表 (4×4)
+T_base_to_end = [...]  # 从正向运动学获得
+
+# 标定板在相机坐标系下的变换矩阵列表 (4×4)
+T_cam_to_target = [...]  # 从solvePnP获得
+
+# 求解手眼变换 X (相机在末端坐标系下的位姿)
+R_end2cam, t_end2cam = cv2.calibrateHandEye(
+    [T_base_to_end[i][:3,:3] for i in range(len(T_base_to_end))],
+    [T_base_to_end[i][:3,3]  for i in range(len(T_base_to_end))],
+    [T_cam_to_target[i][:3,:3] for i in range(len(T_cam_to_target))],
+    [T_cam_to_target[i][:3,3]  for i in range(len(T_cam_to_target))],
+    method=cv2.CALIB_HAND_EYE_TSAI  # Tsai-Lenz方法
+)
+
+# 构建4×4变换矩阵
+X = np.eye(4)
+X[:3, :3] = R_end2cam
+X[:3, 3] = t_end2cam.flatten()
+print(f"手眼变换矩阵:\n{X}")
+
+# 验证：对每个标定姿态计算重投影误差
+for i in range(len(T_base_to_end)):
+    T_pred = T_base_to_end[i] @ X
+    error = np.linalg.norm(T_pred[:3, 3] - T_cam_to_target[i][:3, 3])
+    print(f"姿态 {i}: 重投影误差 = {error*1000:.2f}mm")</code></pre>
+
+        <div class="tip">
+            <p><strong>实操建议</strong>：做手眼标定时最容易犯的错误是"运动范围太小"——如果你只让机器人末端在一个小范围内平移和旋转，A和B的变换矩阵高度相关，AX=XB的解会很差。正确的做法是：让末端在相机视野的各个角落做不同方向的旋转（绕X/Y/Z轴至少旋转±30°），覆盖整个工作空间的80%以上。标定后务必用"未见过的姿态"验证重投影误差——如果误差大于2mm，说明标定质量不达标。</p>
+        </div>
+
+        <h3>18.4 相机与IMU标定</h3>
+
+        <p>除了机器人的本体标定和外参标定，传感器的自身标定也同样重要。</p>
+
+        <p><strong>相机内参标定</strong>：张正友平面标定法是目前最广泛使用的相机内参标定方法。你需要打印一张棋盘格标定板（建议使用10×7格、格子边长30mm的A3纸），从不同角度拍摄15-20张照片，利用OpencCV的<code>calibrateCamera()</code>函数计算内参矩阵K（焦距、主点、畸变系数）。注意：现代广角镜头有一阶到三阶的径向畸变参数（k1, k2, k3）和切向畸变参数（p1, p2），这些都会影响视觉SLAM和3D重建的精度。</p>
+
+        <p><strong>双目立体标定</strong>：对于双目相机，除了两个相机的内参外，还需要标定左右相机之间的旋转和平移关系（即Stereo Rectification）。OpenCV的<code>stereoCalibrate()</code>完成此任务。标定完成后，需要用<code>stereoRectify()</code>生成校正映射（Rectification Map），将左右图像校正到同一极线上——这是匹配的基础。</p>
+
+        <p><strong>IMU标定</strong>：IMU（惯性测量单元）包含三轴加速度计和三轴陀螺仪，其测量值受多种误差源影响——零偏（Bias）、尺度因子（Scale Factor）和交轴耦合（Misalignment）。标准的IMU标定流程包括：静止标定（采集静止状态下的加速度计和陀螺仪的零偏和噪声密度）、六位置法（将IMU分别对准六个方向采集加速度计尺度因子）和温箱标定（在-40°C到85°C范围内测量零偏随温度的变化曲线）。对于消费级IMU（如BMI088，零偏稳定性约0.1°/s），其标定可以在室温下用手动方法完成；但对于工业级IMU（如ADIS16470，零偏稳定性0.01°/s），需要精密的转台设备。</p>
+
+        <p><strong>Kalibr工具箱</strong>：ETH Zurich开发的Kalibr是业界最流行的多传感器标定工具箱。它可以同时完成：相机内参标定、多相机之间的外参标定（包括多目）、相机与IMU之间的时间偏移和空间变换标定（Camera-IMU Calibration）。Kalibr使用B-Spline参数化IMU轨迹，并在非线性优化框架中联合优化所有参数。2026年，Kalibr仍然是多传感器融合项目的标配工具。</p>
+
+        <table>
+            <tr>
+                <th>标定类型</th>
+                <th>所需设备</th>
+                <th>精度级别</th>
+                <th>难度</th>
+                <th>典型工具</th>
+            </tr>
+            <tr>
+                <td>运动学标定（闭环）</td>
+                <td>锥孔约束或球杆仪</td>
+                <td>±0.3-0.5mm</td>
+                <td>中</td>
+                <td>自定义MATLAB/Python脚本</td>
+            </tr>
+            <tr>
+                <td>运动学标定（开环）</td>
+                <td>激光跟踪仪（Leica AT960）</td>
+                <td>±0.02-0.05mm</td>
+                <td>高</td>
+                <td>RobotMaster、SpatialAnalyzer</td>
+            </tr>
+            <tr>
+                <td>动力学参数辨识</td>
+                <td>关节力矩传感器</td>
+                <td>RMSE &lt; 0.1 Nm</td>
+                <td>中</td>
+                <td>自定义Python（最小二乘）</td>
+            </tr>
+            <tr>
+                <td>手眼标定</td>
+                <td>标定板 + 相机 + 机器人</td>
+                <td>±1-3mm重投影</td>
+                <td>低</td>
+                <td>OpenCV calibrateHandEye</td>
+            </tr>
+            <tr>
+                <td>相机内参标定</td>
+                <td>棋盘格标定板</td>
+                <td>±0.1像素</td>
+                <td>低</td>
+                <td>OpenCV、Kalibr</td>
+            </tr>
+            <tr>
+                <td>相机-IMU联合标定</td>
+                <td>棋盘格 + IMU + 转台或手持</td>
+                <td>±0.1°旋转、±0.5mm平移</td>
+                <td>高</td>
+                <td>Kalibr（ETH Zurich）</td>
+            </tr>
+        </table>
+
+        <h3>18.5 实战踩坑经验</h3>
+
+        <p>标定是一个"看起来简单、做起来全是坑"的事情。在多年的机器人部署中，我踩过不少坑，挑三个最有代表性的分享给你。</p>
+
+        <p><strong>坑一：忘了关节偏移，3mm残差</strong></p>
+
+        <p>在一次协作机器人的标定项目中，我用激光跟踪仪测量了40个位姿，优化之后残差仍然有3mm——远远超过预期。我反复检查了DH参数的定义、测量数据的质量、优化算法的收敛性，全都查不出问题。直到我无意中翻开了机器人的出厂手册——上面写着"关节2的零位偏移量出厂设置为2.3°"。原来这台机器人的关节编码器零点在装配时存在一个固定的偏移，而这个偏移从未被计入运动学模型。我把这个关节偏移作为一个额外参数加入标定优化后，残差从3mm降到了0.08mm。教训：<strong>任何固定偏移（Joint Offset）都是标定中必须辨识的变量</strong>——永远不要假设编码器的物理零点和数学零点重合。</p>
+
+        <p><strong>坑二：激励轨迹撞到了关节限位</strong></p>
+
+        <p>在做六轴机器人的动力学参数辨识时，我设计了一组傅里叶级数的激励轨迹。结果第三个关节的振幅计算过大——在运行时关节3直接撞到了机械硬限位，发出了一声令人心碎的金属撞击声。幸运的是硬限位缓冲器吸收了冲击，没有造成损坏。从此我学乖了：在设计激励轨迹时必须做"可行性预检"——在仿真中跑一遍轨迹，确认所有关节位置、速度、加速度都在设计范围内。我写了一个约束检查函数，在轨迹执行前自动验证所有关机的安全约束。每次新的激励轨迹生成后，先仿真再上真机，这个习惯再也没让我出过事故。</p>
+
+        <p><strong>坑三：IMU温度漂移</strong></p>
+
+        <p>一个室外机器人项目启动十分钟后IMU的偏航角就开始缓慢漂移——我以为是算法的问题，花了一周时间反复调Visual-Inertial SLAM的参数。最后发现是IMU芯片（BMI088）在工作时自发热导致的温度漂移：芯片从上电时的25°C升到稳定工作时的55°C，导致陀螺仪的零偏从0.1°/s漂移到了0.5°/s。解决方案是在IMU标定中增加了温度补偿模型（零偏作为温度的函数），并在代码中根据IMU的温度输出实时修正。这个问题暴露之后，我们对所有传感器都增加了"上电预热5分钟再开始标定"的流程要求。</p>
+
+        <div class="warning">
+            <p><strong>标定工作的核心原则</strong>：标定不是一次性的——机器人的参数会随着时间和使用而漂移。磨损、碰撞、温度变化、更换部件都会改变运动学和动力学参数。工业上的标准做法是"周期性标定"：对于高精度产线，每3个月做一次运动学标定；对于一般精度要求，每6-12个月标定一次。每次更换末端工具、夹爪或传感器后，必须重新做手眼标定和工具中心点（TCP）标定。</p>
+        </div>
+
+        <p>本章我们系统学习了机器人标定与参数辨识的完整体系——运动学标定（DH参数误差辨识，使用激光跟踪仪或闭环约束）、动力学参数辨识（激励轨迹设计、最小二乘辨识、RNEA验证）、手眼标定（AX=XB问题、Tsai-Lenz方法、OpenCV实现）、相机与IMU标定（张正友标定、Kalibr工具箱），以及在实战中多次让我"被抓"的踩坑经验。传感器标定好了，眼睛睁开了——从下一章开始，我们让机器人真正"看懂"周围的世界，并建立起对环境的理解。这就是<strong>SLAM原理与实践</strong>。</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

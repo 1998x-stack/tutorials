@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 Item：数据存储的基本单元</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html" class="active">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第10章 Item：数据存储的基本单元</h1>
+
+        <p>大家好，我是你们的讲师。过去两章我们从 slab allocator 的视角看了内存管理——那是从"分配器"的视角看待内存。现在让我们切换到"用户"视角：当你执行 <code>set mykey 0 3600 5</code> 并发送 "hello" 时，这段数据在 Memcached 内部到底长什么样？</p>
+
+        <p>答案就是 <strong>item</strong> 结构体。item 是 Memcached 中最核心的数据结构——它既是 LRU 链表上的节点，也是哈希表中的元素，同时也是 slab allocator 中 chunk 的使用者。可以说，理解了 item，就理解了 Memcached 数据管理的另一半。</p>
+
+        <h2>item 结构体：逐字段解析</h2>
+
+        <p><code>item</code> 结构体定义在 <code>memcached.h</code> 中。虽然它的字段看起来不少，但每个字段都有明确且不可替代的用途。</p>
+
+        <pre><code>typedef struct _stritem {
+    // LRU 链表指针：双向链表
+    struct _stritem *next;
+    struct _stritem *prev;
+
+    // 哈希表冲突链：单向链表
+    struct _stritem *h_next;
+
+    // 时间相关
+    rel_time_t       time;       // item 最后一次访问时间（相对时间）
+    rel_time_t       exptime;    // 过期时间戳（0 表示永不过期）
+
+    // 数据长度字段
+    int              nbytes;     // value 的字节长度
+    unsigned short   refcount;   // 引用计数
+    uint8_t          nsuffix;    // suffix 字符串长度（如 " 0 5\r\n"）
+
+    // 标志位
+    uint8_t          it_flags;   // item 状态标志（见下文）
+    uint8_t          slabs_clsid; // 所属 slab class ID
+
+    // key 相关
+    uint8_t          nkey;       // key 的长度（最长 250 字节）
+    unsigned int     cas;        // CAS 版本号（64 位中的低 32 位？见下文）
+
+    // 实际数据紧跟在结构体后面
+    /* 然后是 key + suffix + value 的连续内存 */
+} item;</code></pre>
+
+        <p>下面我们来逐一解读每个字段的设计意图：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>字段</th>
+                    <th>类型</th>
+                    <th>用途</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>next</code>, <code>prev</code></td>
+                    <td><code>item*</code></td>
+                    <td>LRU 双向链表</td>
+                    <td>当 item 被访问时，在 LRU 链表中移动位置</td>
+                </tr>
+                <tr>
+                    <td><code>h_next</code></td>
+                    <td><code>item*</code></td>
+                    <td>哈希表冲突链</td>
+                    <td>同一 bucket 中的下一个 item（单向链）</td>
+                </tr>
+                <tr>
+                    <td><code>time</code></td>
+                    <td><code>rel_time_t</code></td>
+                    <td>最近访问时间</td>
+                    <td>用于 LRU 排序，不是绝对时间戳而是启动后的秒数</td>
+                </tr>
+                <tr>
+                    <td><code>exptime</code></td>
+                    <td><code>rel_time_t</code></td>
+                    <td>过期时间</td>
+                    <td>0 表示永不过期，当前时间 &gt; exptime 时视为过期</td>
+                </tr>
+                <tr>
+                    <td><code>nbytes</code></td>
+                    <td><code>int</code></td>
+                    <td>Value 长度</td>
+                    <td>不包括 key、suffix 等元数据的纯 value 长度</td>
+                </tr>
+                <tr>
+                    <td><code>refcount</code></td>
+                    <td><code>unsigned short</code></td>
+                    <td>引用计数</td>
+                    <td>防止 item 在使用过程中被释放</td>
+                </tr>
+                <tr>
+                    <td><code>it_flags</code></td>
+                    <td><code>uint8_t</code></td>
+                    <td>状态标志</td>
+                    <td>ITEM_LINKED, ITEM_SLABBED 等位标志</td>
+                </tr>
+                <tr>
+                    <td><code>slabs_clsid</code></td>
+                    <td><code>uint8_t</code></td>
+                    <td>Slab class ID</td>
+                    <td>方便快速定位 chunk 所属的 slab class</td>
+                </tr>
+                <tr>
+                    <td><code>nkey</code></td>
+                    <td><code>uint8_t</code></td>
+                    <td>Key 长度</td>
+                    <td>单字节，所以 key 最长 255 字节（协议限制 250）</td>
+                </tr>
+                <tr>
+                    <td><code>cas</code></td>
+                    <td><code>unsigned int</code></td>
+                    <td>CAS token（高 32 位）</td>
+                    <td>64 位 CAS 值的高 32 位（低 32 位在 ITEM_suffix() 中）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>有一个你可能注意到的"反常"设计：<code>cas</code> 字段为什么不直接声明为 <code>uint64_t</code>？这是历史原因——在早期的 C 标准中，<code>uint64_t</code> 的跨平台支持不完善，而且 64 位整数的对齐要求可能导致结构体中插入 padding。Memcached 选择将 CAS 拆成两个 32 位值分别存储在 <code>item</code> 头部和 suffix 区域，以保证结构体的紧凑性。</p>
+
+        <h2>ITEM_key() / ITEM_suffix() / ITEM_data()：访问数据的宏</h2>
+
+        <p>item 结构体本身并不包含 key、suffix、value 的存储空间——这些数据紧跟在 item 结构体之后，存放在同一个 chunk 中。通过几个精巧的宏来访问：</p>
+
+        <pre><code>// key 紧跟在 item 头部之后
+#define ITEM_key(item)  (((char *)&amp;((item)->next)) \
+                         + sizeof(((item)->next)) \
+                         + sizeof(((item)->prev)) \
+                         + sizeof(((item)->h_next)) \
+                         + sizeof(((item)->time)) \
+                         + sizeof(((item)->exptime)) \
+                         + sizeof(((item)->nbytes)) \
+                         + sizeof(((item)->refcount)) \
+                         + sizeof(((item)->nsuffix)) \
+                         + sizeof(((item)->it_flags)) \
+                         + sizeof(((item)->slabs_clsid)) \
+                         + sizeof(((item)->nkey)) \
+                         + sizeof(((item)->cas))
+
+// suffix 在 key 之后
+#define ITEM_suffix(item) (ITEM_key(item) + (item)->nkey + 1)
+// 注意：suffix 的最后存放了 CAS 的低 32 位！
+
+// data（value）在 suffix 之后
+#define ITEM_data(item)   (ITEM_suffix(item) + (item)->nsuffix + 1)
+
+// 计算 item 占用的总字节数
+#define ITEM_ntotal(item) (sizeof(item) + \
+                           (item)->nkey + 1 + \
+                           (item)->nsuffix + 1 + \
+                           (item)->nbytes)</code></pre>
+
+        <p>等一下——<code>ITEM_key()</code 的定义看起来有点奇怪。为什么不直接用指针偏移量？因为 C 标准不允许在结构体成员之间做指针运算的假设（可能有 padding），所以 Memcached 用一种"安全但繁琐"的方式来计算 key 的偏移量——实际上是通过 <code>&amp;((item)->next)</code> 加上所有之前字段的总大小，去除 <code>next/prev/h_next</code> 这些指针字段的偏移。</p>
+
+        <p>不过在实际的现代版本中，<code>ITEM_key</code> 的实现已经优化为：</p>
+
+        <pre><code>#define ITEM_key(item) (((char *)&amp;((item)->cas)) + sizeof((item)->cas))</code></pre>
+
+        <p>因为 <code>cas</code> 是 item 头部的最后一个字段，它的地址加上 sizeof(cas) 就是 key 的起始地址。这种方式简洁得多，前提是编译器没有在 <code>cas</code> 之后插入 padding（C 标准允许，但在常用架构上不会）。</p>
+
+        <p>无论哪种实现，核心思想是一样的：<strong>item 头部和它的数据存储在连续内存中，共同占据一个 slab chunk</strong>。这比存储指针指向外部缓冲区的方式在缓存局部性上要好得多。</p>
+
+        <h2>item 在 chunk 中的内存布局</h2>
+
+        <p>下面用 ASCII 图来展示一个 item 在 chunk 中的实际内存布局：</p>
+
+        <pre><code>+-------------------+  ← chunk 起始地址（也是 item* 指针）
+| item.next         |  8 bytes  (LRU 双向链表指针)
+| item.prev         |  8 bytes
+| item.h_next       |  8 bytes  (哈希表冲突链)
+| item.time         |  4 bytes
+| item.exptime      |  4 bytes
+| item.nbytes       |  4 bytes
+| item.refcount     |  2 bytes
+| item.nsuffix      |  1 byte
+| item.it_flags     |  1 byte
+| item.slabs_clsid  |  1 byte
+| item.nkey         |  1 byte
+| item.cas          |  4 bytes  (CAS 高 32 位)
++---+---------------+           (item 头部共 ~46 字节，实际 ~56 因对齐)
+    ↓
++-------------------+  ← ITEM_key() = item + sizeof(item)
+| key               |  nkey 字节 + 1 字节 '\0'
++-------------------+
+| suffix            |  nsuffix 字节 + 1 字节 '\0'
+| (包含 CAS 低32位) |
++-------------------+
+| value 数据        |  nbytes 字节
+| (不做任何转换)    |
++-------------------+  ← chunk 结束
+
+chunk 总大小 = slabclass[slabs_clsid].size
+              (由 slab allocator 按 class 固定)</code></pre>
+
+        <p>这张图清楚地说明了：为什么 <code>ITEM_ntotal()</code> 可能会超过 <code>slabclass[id].size</code>——当 item 头部 + key + suffix + value 的总大小超过 chunk size 时，item 就无法放入这个 slab class。这正是 Memcached 选择"最合适的 slab class"的依据——分配时从 class 1 开始向上查找，找到第一个 chunk size >= ITEM_ntotal() 的 class。</p>
+
+        <div class="tip">
+            <strong>关于 suffix 的冷知识：</strong>suffix 区域存储的是 <code>" &lt;flags&gt; &lt;nbytes&gt;\r\n"</code> 这样的协议元数据。注意 suffix 的最后 4 个字节实际上存放的是 CAS 值的低 32 位！这是 Memcached 中的一个"内存复用"技巧——当 item 被 link 到哈希表后，它的 CAS 值才被赋值，此时 suffix 的最后 4 字节（原本是 <code>\r\n</code> 前面的空格区域）被覆盖为 CAS 低 32 位。返回给客户端时，CAS 高 32 位从 <code>item.cas</code> 读取，低 32 位从 suffix 中解析。
+        </div>
+
+        <h2>it_flags：item 的状态标志</h2>
+
+        <p><code>it_flags</code> 是一个 8 位的位掩码字段，每个位代表 item 的一个状态：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>标志</th>
+                    <th>值</th>
+                    <th>含义</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td><code>ITEM_LINKED</code></td><td>1</td><td>item 已加入哈希表和 LRU 链表，对客户端可见</td></tr>
+                <tr><td><code>ITEM_SLABBED</code></td><td>2</td><td>item 所在的 chunk 在空闲链表中（未被使用）</td></tr>
+                <tr><td><code>ITEM_HDR</code></td><td>4</td><td>用于扩展存储（extstore）的 header 标记</td></tr>
+                <tr><td><code>ITEM_ACTIVE</code></td><td>8</td><td>item 在最近访问窗口中被访问过（用于 LRU 提升）</td></tr>
+                <tr><td><code>ITEM_FETCHED</code></td><td>16</td><td>item 曾被客户端读取过（用于统计"有用"的缓存）</td></tr>
+                <tr><td><code>ITEM_INVALID</code></td><td>32</td><td>item 已失效但尚未从 LRU 中移除</td></tr>
+                <tr><td><code>ITEM_SKIP</code></td><td>64</td><td>Lru crawler 跳过此 item</td></tr>
+            </tbody>
+        </table>
+
+        <p>当一个 item 刚通过 <code>do_slabs_alloc()</code> 分配时，它的 <code>it_flags</code> 初始为 0。随后在 <code>do_item_link()</code> 中被设置为 <code>ITEM_LINKED</code>（可能还包含 <code>ITEM_ACTIVE</code> 和 <code>ITEM_FETCHED</code>）。当 item 过期被删除时，如果它的 chunk 被放回空闲链表，标志位变为 <code>ITEM_SLABBED</code>。</p>
+
+        <p>这些标志位在整个 item 生命周期中起到了"状态机"的作用——每当一个函数需要判断 item 当前处于什么状态时，就会检查 <code>it_flags</code>。</p>
+
+        <h2>计算题：给定 key 和 value，item 占多少字节？</h2>
+
+        <p>现在我们来做一个实战练习。假设你执行：</p>
+
+        <pre><code>set user:123 0 3600 5
+hello</code></pre>
+
+        <p>请计算这个 item 占用的总字节数，以及它会被放入哪个 slab class。</p>
+
+        <p><strong>第一步：计算 item 头部大小</strong></p>
+
+        <p>在 64 位系统上，<code>sizeof(item)</code> 为 56 字节（3 个指针 × 8 + 其他字段，包含 padding）。</p>
+
+        <p><strong>第二步：计算 key 部分</strong></p>
+        <p><code>nkey = 8</code>（"user:123"），加上结尾 '\0'，key 区域共 9 字节。</p>
+
+        <p><strong>第三步：计算 suffix 部分</strong></p>
+        <p><code>nsuffix</code> 的值是 flags 和 nbytes 的格式化表示。在这个例子中，suffix 是 <code>" 0 5\r\n"</code>，共 6 字节（flags=0, 空格, nbytes=5, \r\n），加上结尾 '\0' 共 7 字节。但实际上 suffix 区域还包含了 CAS 低 32 位的存储空间（额外的 4 字节）。所以 suffix 总占 7 + 4 = 11 字节？不是的——CAS 低 32 位是复用了 suffix 的尾部空间，不额外计算。</p>
+
+        <p><strong>第四步：计算 value</strong></p>
+        <p><code>nbytes = 5</code>，即 "hello" 的长度。</p>
+
+        <p><strong>总大小：</strong>56 + 9 + 7 + 5 = <strong>77 字节</strong></p>
+
+        <p>查上一章的 slab class 表，class 1 的 chunk size 是 96 字节，77 &lt; 96，所以这个 item 会放入 <strong>slab class 1</strong>，每个 chunk 浪费 96 - 77 = 19 字节（内部碎片）。</p>
+
+        <div class="highlight">
+            <strong>思考题：</strong>如果 value 增大到 48 字节（比如存储一个 JSON 对象），<code>ITEM_ntotal()</code> 变为 56 + 9 + 7 + 48 = 120 字节。此时 class 1（96B）放不下，Memcached 会尝试 class 2（120B），120 == 120，正好放入 class 2，无内部碎片。这正是 factor=1.25 的奇妙之处——特定尺寸的 item 恰好能填满某些 slab class 的 chunk。
+        </div>
+
+        <p>这一章我们把 item 结构体拆解到了"每一个字节都有明确用途"的程度。有了这个基础，下一章我们就可以讨论 item 的完整生命周期——从出生到死亡，item 经历了哪些函数调用、状态转换、以及常见的问题。我们第 11 章见。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

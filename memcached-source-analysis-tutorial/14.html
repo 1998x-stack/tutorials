@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 哈希表扩容：渐进式rehash</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html" class="active">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第14章 哈希表扩容：渐进式 Rehash</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们探讨了哈希表的基本操作——查找、插入、删除。但哈希表面临一个根本性的问题：随着数据量增长，负载因子（item 数 / 桶数）不断升高，碰撞越来越频繁，查找效率从 O(1) 逐渐退化到 O(n)。</p>
+
+        <p>解决办法是扩容——增加桶的数量，将已有 item 重新分布到更多的桶中。但问题是，在服务百万 QPS 的线上环境，如果扩容需要一次性 rehash 所有的 key，这个过程可能需要几百毫秒甚至几秒钟——对于延迟敏感的业务来说，这是一场灾难。Memcached 采用了一种优雅的解决方案：<strong>渐进式 rehash</strong>（incremental rehash），将扩容的代价分摊到每一次查询中。本章我们一文打尽。</p>
+
+        <h2>扩容触发条件</h2>
+
+        <p>Memcached 在什么时候触发哈希表扩容？答案在 <code>assoc.c</code> 的 <code>assoc_insert()</code> 函数中：</p>
+
+        <pre><code>int assoc_insert(item *it) {
+    // ... 执行插入 ...
+
+    // 插入后检查是否需要扩容
+    if (hash_items &gt; (hashsize(hashpower) * 1.5)) {
+        // 负载因子超过 1.5，触发扩容
+        assoc_expand();
+    }
+
+    return 1;
+}</code></pre>
+
+        <p>触发条件是：<code>hash_items > hashsize(hashpower) * 1.5</code>。</p>
+
+        <p>用表格来看更直观：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>hashpower</th>
+                    <th>桶数</th>
+                    <th>扩容触发阈值（item 数）</th>
+                    <th>扩容后桶数</th>
+                    <th>扩容后负载因子</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>16</td><td>65,536</td><td>98,304</td><td>131,072</td><td>0.75</td></tr>
+                <tr><td>17</td><td>131,072</td><td>196,608</td><td>262,144</td><td>0.75</td></tr>
+                <tr><td>18</td><td>262,144</td><td>393,216</td><td>524,288</td><td>0.75</td></tr>
+                <tr><td>19</td><td>524,288</td><td>786,432</td><td>1,048,576</td><td>0.75</td></tr>
+                <tr><td>20</td><td>1,048,576</td><td>1,572,864</td><td>2,097,152</td><td>0.75</td></tr>
+                <tr><td>21</td><td>2,097,152</td><td>3,145,728</td><td>4,194,304</td><td>0.75</td></tr>
+                <tr><td>22</td><td>4,194,304</td><td>6,291,456</td><td>8,388,608</td><td>0.75</td></tr>
+                <tr><td>23</td><td>8,388,608</td><td>12,582,912</td><td>16,777,216</td><td>0.75</td></tr>
+                <tr><td>24</td><td>16,777,216</td><td>25,165,824</td><td>33,554,432</td><td>0.75</td></tr>
+                <tr><td>25</td><td>33,554,432</td><td>50,331,648</td><td>67,108,864</td><td>0.75</td></tr>
+            </tbody>
+        </table>
+
+        <p>注意一个有趣的特性：每次扩容后，负载因子会回落到大约 0.75（扩容阈值 1.5 的一半）。这意味着扩容后哈希表的性能会"焕然一新"——平均每个桶只有 0.75 个 item，链表长度几乎等于 1。随着 item 继续增加，负载因子逐渐回升到 1.5，再次触发扩容。这是一个"锯齿形"的增长曲线。</p>
+
+        <div class="tip">
+            <strong>初始 hashpower 配置：</strong>如果你的服务启动后很快就会存储大量 item（比如 100 万以上），可以通过 <code>-o hashpower_init=19</code> 将初始桶数从 65536 增加到 524288。这样可以减少扩容次数，因为每次扩容虽然渐进，但仍然有一定开销。不过这个参数需要在 Memcached 启动时设置，无法运行时修改。
+        </div>
+
+        <h2>assoc_expand()：创建双倍大小的新表</h2>
+
+        <p>当触发扩容时，<code>assoc_expand()</code> 被调用。它的工作非常简单——只分配内存，不做数据迁移：</p>
+
+        <pre><code>static void assoc_expand(void) {
+    // 新表的大小是旧表的两倍
+    old_hashtable = primary_hashtable;
+    old_hashpower = hashpower;
+
+    hashpower++;
+
+    primary_hashtable = calloc(hashsize(hashpower), sizeof(void *));
+    if (primary_hashtable == NULL) {
+        // 内存不足，回退
+        hashpower--;
+        primary_hashtable = old_hashtable;
+        return;
+    }
+
+    // 设置扩容进行中的标志
+    expanding = true;
+    expand_bucket = 0;
+}</code></pre>
+
+        <p>此时，系统处于一个"双表共存"的状态：</p>
+
+        <ul>
+            <li><code>primary_hashtable</code> 指向新表（更大）</li>
+            <li><code>old_hashtable</code> 指向旧表（将被逐步迁移）</li>
+            <li><code>expanding = true</code>，表示扩容正在进行</li>
+            <li><code>expand_bucket = 0</code>，从第 0 个桶开始迁移</li>
+        </ul>
+
+        <p>注意新表是用 <code>calloc</code> 分配的，所有桶指针初始化为 NULL。旧表的数据还全部在旧表中。接下来的迁移工作，由一个专门的后台线程完成。</p>
+
+        <h2>assoc_maintenance_thread：逐桶迁移</h2>
+
+        <p><code>assoc_maintenance_thread</code> 是负责渐进式 rehash 的后台线程。它的循环逻辑是：</p>
+
+        <pre><code>static void *assoc_maintenance_thread(void *arg) {
+    while (1) {
+        // 每迁移一批 bucket 就休眠一下
+        pthread_mutex_lock(&amp;cache_lock);
+
+        if (!expanding) {
+            // 没有扩容进行中，等待信号
+            pthread_cond_wait(&amp;maintenance_cond, &amp;cache_lock);
+        }
+
+        // 迁移：每次处理 hash_bulk_move 个 bucket
+        int moved = 0;
+        while (expanding &amp;&amp; moved &lt; hash_bulk_move) {
+            item *it, *next;
+
+            // 遍历 expand_bucket 指向的旧表桶
+            for (it = old_hashtable[expand_bucket]; it != NULL; it = next) {
+                next = it->h_next;
+
+                // 重新计算在新表中的位置
+                uint32_t hv = hash(ITEM_key(it), it->nkey);
+                unsigned int new_bucket = hv &amp; hashmask(hashpower);
+
+                // 头插法插入新表
+                it->h_next = primary_hashtable[new_bucket];
+                primary_hashtable[new_bucket] = it;
+            }
+
+            // 清空旧表当前桶
+            old_hashtable[expand_bucket] = NULL;
+            expand_bucket++;
+            moved++;
+
+            // 如果所有桶都迁移完了
+            if (expand_bucket == hashsize(old_hashpower)) {
+                // 扩容完成！
+                expanding = false;
+                free(old_hashtable);
+                old_hashtable = NULL;
+            }
+        }
+
+        pthread_mutex_unlock(&amp;cache_lock);
+
+        // 休眠一定时间后继续下一批
+        usleep(1000);  // 1ms
+    }
+}</code></pre>
+
+        <p>关键参数和变量：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>变量/参数</th>
+                    <th>含义</th>
+                    <th>默认值</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>hash_bulk_move</code></td>
+                    <td>每轮迁移的桶数</td>
+                    <td>256（硬编码在 assoc.c 中）</td>
+                </tr>
+                <tr>
+                    <td><code>expand_bucket</code></td>
+                    <td>当前迁移到的桶索引</td>
+                    <td>0（扩容开始时）</td>
+                </tr>
+                <tr>
+                    <td><code>expanding</code></td>
+                    <td>是否正在扩容</td>
+                    <td>false</td>
+                </tr>
+                <tr>
+                    <td><code>hashsize(n)</code></td>
+                    <td>2^n 个桶</td>
+                    <td>依赖于 <code>hashpower</code></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>每轮迁移 256 个桶（约 256 次链表遍历和重插入操作），然后休眠 1ms，释放 <code>cache_lock</code>，让 worker 线程有机会处理请求。通过这种"短脉冲"的方式，扩容操作完全不会阻塞正常的服务。</p>
+
+        <h2>双表期间的查找/插入/删除逻辑</h2>
+
+        <p>在双表共存期间，每个操作都需要知道"数据在哪张表里"。核心判断依据是 <code>expand_bucket</code>：</p>
+
+        <pre><code>// 查找时
+uint32_t hv = hash(key, nkey);
+unsigned int bucket = hv &amp; hashmask(hashpower);  // 新表索引
+
+item *it;
+if (expanding &amp;&amp; bucket &lt; expand_bucket) {
+    // 这个桶已经迁移到新表了，查新表
+    it = primary_hashtable[bucket];
+    // 注意：需要用新表的索引直接查
+    // 已经迁移的桶在旧表中被清空，所以只查新表就够了
+} else {
+    // 尚未迁移，查旧表
+    unsigned int old_bucket = hv &amp; hashmask(old_hashpower);
+    it = old_hashtable[old_bucket];
+}</code></pre>
+
+        <p>这个逻辑用一张图来总结：</p>
+
+        <pre><code>                     expand_bucket
+                           │
+               ┌───────────┴───────────┐
+               │       已迁移           │       未迁移
+               │   (查新表)            │    (查旧表)
+               ▼                       ▼
+    新表:  [bucket 0..N]          [空]
+    旧表:  [空]                   [bucket N+1..M-1]
+
+    判断公式: 新表索引 &lt; expand_bucket ? 新表 : 旧表</code></pre>
+
+        <p>插入和删除操作的判断逻辑与查找类似——都是通过比较 <code>expand_bucket</code> 和计算出的新表桶索引来决定操作哪张表。</p>
+
+        <p>一个重要的限制：<strong>在扩容期间，不能再次触发扩容</strong>。所以当 <code>expanding = true</code> 时，即使 <code>hash_items > hashsize(hashpower) * 1.5</code>，也不会调用 <code>assoc_expand()</code>。扩容过程中的负载因子可以暂时超过 1.5，直到当前扩容完成。</p>
+
+        <div class="highlight">
+            <strong>对比 Redis 的 rehash 设计：</strong>Redis 的 rehash 采用了类似的双表机制（ht[0] → ht[1]），但有以下主要区别：<br>
+            1) Redis 采用"条件触发"——在每次增删改查操作中顺带迁移 1-2 个 bucket，不做专门的维护线程<br>
+            2) Redis 支持"rehash 暂停/恢复"（用于持久化 fork 场景）<br>
+            3) Redis 有"rehash 不成功"的回滚机制（内存不足时保持双表）<br>
+            两种设计各有利弊：Memcached 的维护线程方式更"积极"，确保扩容尽快完成；Redis 的"顺手牵羊"方式更"保守"，对正常请求的影响更小。
+        </div>
+
+        <h2>实际扩展示例：从 16 到 25 的演进</h2>
+
+        <p>我们来看一个实际场景。假设你的 Memcached 实例从 0 开始接收数据：</p>
+
+        <ol>
+            <li><strong>初始状态</strong>：<code>hashpower = 16</code>，65536 个桶</li>
+            <li><strong>item 数达到 98,304</strong>：触发第一次扩容，<code>hashpower → 17</code>，桶数 → 131,072。后台线程开始逐桶迁移。</li>
+            <li><strong>item 数达到 196,608</strong>：触发第二次扩容，<code>hashpower → 18</code>。此时前一次扩容可能还没完成！但前文提到过"扩容期间不能再次触发扩容"——所以第二次扩容会等到第一次完成后才开始。在扩容期间，item 会继续增长，但负载因子可能暂时超过 1.5。</li>
+            <li>以此类推，每增加约 1.5 倍的 item 就会触发一次扩容。</li>
+        </ol>
+
+        <p>对于一个存储 5000 万 item 的生产实例，<code>hashpower</code> 最终会增长到大约 25（2^25 = 33,554,432 个桶，负载因子 ~1.5）。新表的大小是 33,554,432 × 8 字节（指针大小）≈ 256 MB。这是哈希表本身的内存开销——对于 5000 万 item 的数据来说，这是可以接受的。</p>
+
+        <p>扩容的持续时间取决于 item 数量和系统负载。在正常负载下，从 hashpower=16 到 17 的迁移（~65536 个桶）大约需要 1-2 秒（每轮 256 个桶 × 1ms 休眠 ≈ 256ms 的纯迁移时间 + 锁竞争等待）。如果系统 QPS 很高，<code>cache_lock</code> 竞争激烈，迁移线程可能每次拿锁的时间更短，扩容完成时间会相应延长。</p>
+
+        <h2>踩坑：扩容期间 CPU 飙升导致服务抖动</h2>
+
+        <p>最后，分享一个和 rehash 相关的生产事故。有一次，我们的一个 Memcached 实例每隔几小时就会出现一次 p99 延迟抖动——从 1ms 跳到 100ms，持续大约 3-5 秒，然后自己恢复。</p>
+
+        <p>经过大量数据采集和关联分析，发现抖动时间点与 <code>stats</code> 中 <code>hash_is_expanding</code> 标志位为 true 的时间段高度重合。进一步分析火焰图，发现抖动期间 <code>assoc_find()</code> 中出现了大量的 cache miss——原因是双表查询的"额外间接跳转"。</p>
+
+        <p>但等等——正常情况下双表查询应该只是多一个条件判断，不至于导致 100 倍的延迟增加吧？</p>
+
+        <p>真正的问题出在：<strong>扩容期间，旧表中的 item 正在被逐个迁移到新表</strong>。这意味着在同一个 bucket 中，一部分 item 已经在旧表中、另一部分已经在新表中。查找时，如果 item 已经被迁移走了，在旧表中找不到，还要再到新表中再查一次——等等，不对，查找逻辑是先判断桶是否已迁移，然后只查一张表。但仔细想想，这里确实有一个微妙的问题。</p>
+
+        <p>实际上，真正的 bug 是这样的：在旧版本的 Memcached（1.4.x）中，双表查询是在旧表中遍历一遍，如果没找到再到新表中遍历一遍。这种"双倍查找"在迁移过程中会导致一些本来 O(1) 的查找退化为 O(1 + bucket 长度) ——也就是多了一次完整的链表遍历。对于某些 bucket 来说，这个链表可能有 10-20 个元素，所以查找时间会增加一倍。但还不至于到 100 倍。</p>
+
+        <div class="warning">
+            <strong>真正的根因：</strong>经过更深入的排查，发现问题的关键是<strong>cache_lock 竞争</strong>。rehash 线程在迁移每个 bucket 时都会持有 <code>cache_lock</code>，虽然每次只持有很短的时间（256 个 bucket 的迁移），但在高并发下，这个锁的竞争会导致大量 worker 线程排队等待。尤其是当 <code>item_size_max</code> 设置较大时，每个 bucket 的链表中有大量 item，单次迁移时间更长，锁持有时间更长。最终，我们通过以下措施解决了问题：<br><br>
+            1) 将 <code>hash_bulk_move</code> 从默认值调整为更小的值（128），减少每次持锁时间<br>
+            2) 设置 <code>-o hashpower_init=18</code>，从一开始就使用更大的哈希表，减少扩容次数<br>
+            3) 升级到 1.6.x 版本，该版本优化了 rehash 线程的锁竞争策略
+        </div>
+
+        <p>另外，如果你的场景是"实例启动后 item 数快速从 0 增长到数千万"，你会经历连续多次的哈希表扩容。建议通过设置 <code>hashpower_init</code> 来"跳跃"到合适的初始大小，避免"扩容 → 完成 → 立刻又扩容"的频繁触发。</p>
+
+        <h2>第 7-14 章总结</h2>
+
+        <p>到这里，我们完成了整个"内存管理核心"部分的学习。这是全课程最长、也最重要的一半内容。我们来快速回顾一下这 8 章的内在逻辑：</p>
+
+        <ul>
+            <li><strong>第 7-9 章 (Slab Allocator)</strong>：回答了"内存从哪里来"——slab allocator 从 OS 预申请大块内存，按固定大小切分成 chunk，通过 slots 链表做 O(1) 分配和回收，通过 slab rebalance 做跨 class 的平衡。</li>
+            <li><strong>第 10-11 章 (Item)</strong>：回答了"数据长什么样"——item 是一个紧凑的内存结构体，key/suffix/value 紧跟在头部之后。它的生命周期涉及分配、链接、访问、删除，通过 refcount 保证安全，通过 lazy expiration 淘汰过期数据。</li>
+            <li><strong>第 12 章 (LRU)</strong>：回答了"内存不够时淘汰谁"——三级 LRU 队列（HOT/WARM/COLD/TEMP）解决了扫描型流量污染的问题，lru_bump 实现队列间升降级，LRU crawler 负责后台清理和队列间迁移。</li>
+            <li><strong>第 13-14 章 (哈希表)</strong>：回答了"怎么找到数据"——链地址法哈希表，通过 <code>h_next</code> 指针串联冲突元素，通过渐进式 rehash 在不中断服务的情况下扩容。</li>
+        </ul>
+
+        <p>这四个模块之间环环相扣：slab allocator <strong>分配内存</strong>，item <strong>使用内存</strong>，LRU <strong>回收内存</strong>，哈希表 <strong>定位内存中的 item</strong>。少了任何一个，Memcached 的核心功能都无法工作。</p>
+
+        <p>下一章，我们将离开内存管理，进入一个全新的主题——网络与并发。我们会从 libevent 的集成开始，看看 Memcached 是如何处理成千上万的并发连接的。我们第 15 章见。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

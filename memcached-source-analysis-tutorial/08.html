@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 Slab Allocator初始化与分配</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html" class="active">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第8章 Slab Allocator初始化与分配</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们从设计哲学层面理解了 slab allocator 为什么选择"预分配+固定 chunk size"这条路——避免内存碎片、分配效率高、可预测性强。但纸上得来终觉浅，哲学层面的理解终究是空中楼阁。今天我们就直接打开 <code>slabs.c</code>，从 <code>slabs_init()</code> 出发，一行一行追踪 slab allocator 从出生到第一次分配内存的全过程。</p>
+
+        <p>slabs.c 总共大约 700 行，是 Memcached 源码中最核心也最精巧的模块之一。这一章我们会把 slabs.c 的前半部分讲透——初始化、page 分配、chunk 切割。第 9 章再讲回收和 rebalance。好，我们直接开始读代码。</p>
+
+        <h2>slabs_init()：启动的起点</h2>
+
+        <p><code>slabs_init()</code> 是整个 slab allocator 的入口。它在 <code>memcached.c</code> 的 <code>main()</code> 函数中早期被调用，在参数解析之后、网络连接打开之前。它的函数签名如下：</p>
+
+        <pre><code>void slabs_init(const size_t limit, const double factor, const bool prealloc)</code></pre>
+
+        <p>三个参数的含义非常清晰：</p>
+
+        <ul>
+            <li><strong>limit</strong>：最大内存上限（bytes），对应命令行 <code>-m</code> 参数，默认 64MB</li>
+            <li><strong>factor</strong>：chunk 增长因子，对应命令行 <code>-f</code> 参数，默认 1.25</li>
+            <li><strong>prealloc</strong>：是否预分配所有内存，对应 <code>-L</code> 参数，默认 false</li>
+        </ul>
+
+        <p>函数的核心是一个循环，从 slab class 1（<code>POWER_SMALLEST</code>）初始化到 slab class 最大编号（<code>POWER_LARGEST</code>），直到 chunk size 超过 <code>item_size_max / factor</code> 为止。我们来看简化后的代码：</p>
+
+        <pre><code>void slabs_init(const size_t limit, const double factor, const bool prealloc) {
+    int i = POWER_SMALLEST - 1;
+    unsigned int size = sizeof(item) + CHUNK_ALIGN_BYTES;
+
+    memset(slabclass, 0, sizeof(slabclass));
+
+    while (++i &lt; POWER_LARGEST &amp;&amp; size &lt;= settings.item_size_max / factor) {
+        if (size % CHUNK_ALIGN_BYTES)
+            size += CHUNK_ALIGN_BYTES - (size % CHUNK_ALIGN_BYTES);
+
+        slabclass[i].size = size;
+        slabclass[i].perslab = settings.item_size_max / size;
+
+        // 更新 size 为下一个 class 的 chunk 大小
+        size *= factor;
+    }
+
+    if (prealloc) {
+        // 预分配全部内存，每个 slab class 分配一个 page
+        for (i = POWER_SMALLEST; i &lt; slabclass_max; i++) {
+            do_slabs_newslab(i);
+        }
+    }
+}</code></pre>
+
+        <p>这段代码虽然不长，但有几个关键细节值得反复品味。我们逐个来看。</p>
+
+        <h3>起始大小的确定</h3>
+
+        <p>第一个 slab class 的 chunk size 是 <code>sizeof(item) + CHUNK_ALIGN_BYTES</code>。<code>sizeof(item)</code> 在 64 位系统上通常是 56 字节，加上 8 字节对齐余量得到 64 字节，再经过 8 字节对齐后，实际是第一级 slab class 的 chunk size —— 在经典配置下最终对齐到 96 字节。这个大小刚好可以存放一个很小的 key-value 对（key 最长 250 字节，但 value 可以很短）。</p>
+
+        <p>为什么从 96 字节而不是更小开始？因为 <code>item</code> 结构体本身需要占用大约 56 字节，再加上 key、flags、CAS 等元数据，小于 96 字节的 chunk 几乎放不下任何有用的数据。从 96 起步是一个工程上的折中。</p>
+
+        <h2>chunk_size × factor：增长算法的数学</h2>
+
+        <p>这是 slab allocator 最精妙的地方之一。每次循环结束后，<code>size *= factor</code>，下一级 slab class 的 chunk 大小是上一级的 factor 倍。默认 factor=1.25，我们来算一算前几级 slab class 的实际大小：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Slab Class</th>
+                    <th>chunk size（对齐后）</th>
+                    <th>perslab（每 page 多少 chunk）</th>
+                    <th>chunk 增长倍数</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>1</td><td>96 B</td><td>10922</td><td>—</td></tr>
+                <tr><td>2</td><td>120 B</td><td>8738</td><td>1.25</td></tr>
+                <tr><td>3</td><td>152 B</td><td>6898</td><td>1.27</td></tr>
+                <tr><td>4</td><td>192 B</td><td>5461</td><td>1.26</td></tr>
+                <tr><td>5</td><td>240 B</td><td>4369</td><td>1.25</td></tr>
+                <tr><td>6</td><td>304 B</td><td>3449</td><td>1.27</td></tr>
+                <tr><td>7</td><td>384 B</td><td>2730</td><td>1.26</td></tr>
+                <tr><td>8</td><td>480 B</td><td>2184</td><td>1.25</td></tr>
+                <tr><td>9</td><td>600 B</td><td>1747</td><td>1.25</td></tr>
+                <tr><td>10</td><td>752 B</td><td>1394</td><td>1.25</td></tr>
+                <tr><td>...</td><td>...</td><td>...</td><td>...</td></tr>
+                <tr><td>48</td><td>512 KB</td><td>2</td><td>1.25</td></tr>
+                <tr><td>49</td><td>640 KB</td><td>1</td><td>1.25</td></tr>
+            </tbody>
+        </table>
+
+        <p>注意到两个有意思的现象：</p>
+
+        <p>第一，实际倍数不是精确的 1.25——因为每次都要做 <code>CHUNK_ALIGN_BYTES</code>（8 字节）对齐，导致一些 slab class 的倍数有微小波动。比如 class 3 是 152 / 120 ≈ 1.267，class 4 是 192 / 152 ≈ 1.263。这是因为 120 × 1.25 = 150，对齐到 8 变成 152。这个波动是正常现象，不影响整体设计。</p>
+
+        <p>第二，<code>perslab</code> 从一万多在 class 1 急剧下降到 class 49 的 1。这意味着大 slab class 的每个 page 只能切出很少的 chunk，甚至只有 1 个。道理很简单：一个 page 固定 1MB，一个 chunk 就占 640KB，那一个 page 只能放 1 个 chunk（实际上还会剩不少空间，但不会跨 page 使用）。</p>
+
+        <div class="tip">
+            <strong>关键理解：</strong>factor=1.25 时，从 96B 到 1MB 大约会生成 49 个 slab class。如果你调大 factor（比如 2.0），slab class 数量减少（大约 21 个），但每个 class 内部的 chunk 大小增长更快，内存浪费会增加。反之，调小 factor（比如 1.1）会增加 slab class 数量到上百个，每个 class 获得的内存页面更少，但内存利用率更高。默认值 1.25 是经过大量生产验证的"甜点"。
+        </div>
+
+        <h2>CHUNK_ALIGN_BYTES：8 字节对齐的秘密</h2>
+
+        <p>你可能觉得内存对齐是一个低级到不值得关注的问题。但在高性能场景下，不对齐的内存访问会导致额外的 cache line 访问、甚至在某些架构上触发 SIGBUS。Memcached 的做法是：每个 chunk 的起始地址和大小都按照 8 字节对齐。</p>
+
+        <pre><code>#define CHUNK_ALIGN_BYTES 8
+
+// 对齐宏：将 size 向上对齐到 8 的倍数
+if (size % CHUNK_ALIGN_BYTES)
+    size += CHUNK_ALIGN_BYTES - (size % CHUNK_ALIGN_BYTES);</code></pre>
+
+        <p>为什么是 8 字节而不是 4 字节或 16 字节？</p>
+
+        <ul>
+            <li><strong>4 字节</strong>：现代 CPU 的 cache line 通常是 64 字节，4 字节对齐对 cache 性能帮助不大</li>
+            <li><strong>8 字节</strong>：正好对齐到 64 位 CPU 的原生字长。大多数指针和 64 位整数在 8 字节对齐时访问效率最高</li>
+            <li><strong>16 字节</strong>：SSE/AVX 指令集偏好 16 字节对齐，但 Memcached 并不使用 SIMD 指令处理 item 数据，16 字节对齐反而会浪费更多空间</li>
+        </ul>
+
+        <p>所以 8 字节是对齐收益和空间浪费之间的最优解。别忘了 slab allocator 本身就是为减少内存碎片设计的，如果对齐粒度过大，反而会制造"内部碎片"。</p>
+
+        <h2>do_slabs_newslab()：申请新的 Page</h2>
+
+        <p>初始化完成后，slab class 有了配置信息但还没有实际内存。真正的内存分配发生在 <code>do_slabs_newslab()</code> 中：</p>
+
+        <pre><code>static int do_slabs_newslab(const unsigned int id) {
+    slabclass_t *p = &amp;slabclass[id];
+    int len = settings.slab_page_size;  // 默认 1MB
+    unsigned int count;
+
+    // 从 OS 申请一个 page 大小的内存
+    void *ptr = memory_allocate((size_t)len);
+    if (ptr == NULL) return 0;
+
+    // 将这个 page 切分成 chunk，串入空闲链表
+    count = split_slab_page_into_freelist(ptr, id);
+
+    // 更新统计
+    p->slabs++;           // 已使用的 page 数 +1
+    p->total_pages++;     // 总 page 数 +1
+    p->free_chunks += count;
+    p->free_chunks_total += count;
+
+    return 1;
+}</code></pre>
+
+        <p>这个函数做了三件清晰的事情：</p>
+
+        <ol>
+            <li>从操作系统申请 1MB 连续内存（对应 <code>settings.slab_page_size</code>）</li>
+            <li>把这一整块内存切分成固定大小的 chunk</li>
+            <li>更新 slab class 的统计信息</li>
+        </ol>
+
+        <p><code>memory_allocate()</code> 内部使用 <code>mmap()</code>（Linux）或 <code>VirtualAlloc()</code>（Windows）进行大块内存分配。当 <code>-L</code> 启用预分配时，这个过程在 <code>slabs_init()</code> 中一次性完成全部 slab class 的 page 分配。否则，page 是懒分配的——只有当一个 slab class 的 free list 用尽时，才调用 <code>do_slabs_newslab()</code>。</p>
+
+        <h2>split_slab_page_into_freelist()：将 Page 切割成 Chunk</h2>
+
+        <p>这是最底层的内存整理函数。它把一整块 1MB 的连续内存，按 <code>slabclass[id].size</code> 切成等大小的块，并将这些块的起始地址串成一条"隐式空闲链表"：</p>
+
+        <pre><code>static int split_slab_page_into_freelist(void *ptr, const unsigned int id) {
+    slabclass_t *p = &amp;slabclass[id];
+    int count = 0;
+
+    for (int i = 0; i &lt; p->perslab; i++) {
+        // 将当前 chunk 的起始地址通过指针强制转换
+        // 把 chunk 当作 item 来看，用它的 next 指针串成链表
+        item *it = (item *)((char *)ptr + i * p->size);
+        it->slabs_clsid = (uint8_t)id;
+
+        // 头插法：新 chunk 指向当前空闲链表头
+        it->next = p->slots;
+        p->slots = it;
+        count++;
+    }
+
+    return count;
+}</code></pre>
+
+        <p>这里有一个非常精巧的设计：<strong>空闲内存块不需要额外的空闲链表节点</strong>。因为每个 chunk 都是"空闲"的，我们直接借用 <code>item</code> 结构体的 <code>next</code> 指针字段来形成链表。当这个 chunk 被分配出去时，<code>next</code> 指针会被 <code>item</code> 的正常使用覆盖——但没关系，因为那时它已经不在空闲链表里了。</p>
+
+        <p>这种"内存即元数据"的设计在操作系统内核中很常见（比如 Linux slab allocator），但在用户态程序中并不普遍。Memcached 把它运用到了极致。</p>
+
+        <div class="highlight">
+            <strong>设计精髓：</strong>slab allocator 的 slots 空闲链表是一个"隐式链表"——它不额外占用任何内存。每个空闲 chunk 的头部几个字节（恰好是 item->next 指针的位置）被重用来指向下一个空闲 chunk。分配时 O(1) 出栈，释放时 O(1) 入栈。这正是 slab allocator 比通用 malloc 快得多的根本原因之一。
+        </div>
+
+        <h2>do_slabs_alloc()：分配的核心入口</h2>
+
+        <p>当 Memcached 需要存储一个新 item 时，最终会调用 <code>do_slabs_alloc()</code>：</p>
+
+        <pre><code>void *do_slabs_alloc(const unsigned int id) {
+    slabclass_t *p = &amp;slabclass[id];
+
+    // 1. 先尝试从空闲链表拿
+    if (p->slots != NULL) {
+        p->slots_cur--;
+        item *it = p->slots;
+        p->slots = it->next;  // slots 指针移到下一个空闲 chunk
+        it->next = NULL;      // 清空 next，交给上层使用
+        return it;
+    }
+
+    // 2. slots 空了，尝试申请新 page
+    if (p->slab_current != NULL || do_slabs_newslab(id) != 0) {
+        if (p->slab_current != NULL) {
+            // 从当前正在使用的 page 中切一块
+            // ...
+        }
+    }
+
+    // 3. 内存用尽，返回 NULL（触发 LRU 淘汰）
+    return NULL;
+}</code></pre>
+
+        <p>分配策略的分层非常清晰：</p>
+
+        <ol>
+            <li><strong>第一优先：空闲链表（slots）</strong>——这是最快路径，O(1) 出栈，无任何系统调用</li>
+            <li><strong>第二优先：当前 page 的未使用空间</strong>——从 <code>slab_current</code> 指向的 page 中切出下一个 chunk</li>
+            <li><strong>第三优先：申请新 page</strong>——调用 <code>do_slabs_newslab()</code> 从操作系统（或预分配池）中获取 1MB 内存</li>
+            <li><strong>最后手段：返回 NULL</strong>——触发上层调用 LRU 淘汰，腾出空间</li>
+        </ol>
+
+        <p>注意一个细节：步骤 1 中，<code>p->slots_cur--</code> 的递减发生在取出 chunk 之前。这是因为 <code>slots_cur</code> 在初始化时就已经等于 <code>free_chunks</code> 的总数。如果先取 chunk 再递减，在并发场景下可能会有短暂的不一致——不过从 1.6 版本的代码来看，这里已经是单线程访问（有全局锁保护），所以没有问题。</p>
+
+        <h2>踩坑：factor=1.25 引发的 OOM 血案</h2>
+
+        <p>到这里，我想分享一个我在生产环境中亲身经历的教训。有一次，我们有一个 Memcached 集群运行在 256MB 的容器中，所有配置看起来都很正常——默认 factor=1.25，默认 item_size_max=1MB。上线后运行平稳了几个月，直到某天突然开始 OOM，容器被 kill 重启。</p>
+
+        <p>排查过程是这样的：我们用 <code>stats slabs</code> 查看 slab class 分布，惊讶地发现竟然创建了 49 个 slab class。每个 slab class 至少要分配 1 个 page（1MB）。也就是说，仅仅是 slab allocator 初始化阶段，就已经占用了 49MB 内存。加上每个 slab class 在运行时按需分配更多的 page，实际内存占用了 200+ MB——已经逼近了 256MB 的限制。</p>
+
+        <p>真正致命的是什么呢？是"踩踏效应"：当某个 slab class 内存耗尽时，它会触发 LRU 淘汰，但淘汰的 item 可能属于另一个 slab class，导致那个 class 的 page 被释放、重新分配——这个过程中额外分配了新的 page，踩过了内存上限。</p>
+
+        <div class="warning">
+            <strong>教训总结：</strong>factor=1.25 在大多数场景下是最优选择，但它在内存受限的环境中会产生 49 个 slab class，每个至少占 1 个 page。如果你的 -m 设置得很小（比如 256MB），建议调大 factor（比如 1.5 甚至 2.0）来减少 slab class 数量，或者降低 item_size_max（比如 512KB）来减少每个 page 的浪费。不要天真地以为 -m 64 就只占用 64MB——slab allocator 的最小"启动成本"可能比你以为的要高得多。
+        </div>
+
+        <p>另外，还有一个相关的坑：<code>slab_automove</code>（我们下一章会详细讲）在低内存环境中可能频繁触发 page 迁移，进一步加剧内存压力。如果你的容器内存真的很紧张，建议显式设置 <code>-o slab_automove=0</code> 禁用自动迁移。</p>
+
+        <h2>小结与动手实验</h2>
+
+        <p>到现在为止，我们完成了 slab allocator 从初始化到分配的全链路分析。你可以打开源码，对照着 <code>slabs_init()</code> → <code>do_slabs_newslab()</code> → <code>split_slab_page_into_freelist()</code> → <code>do_slabs_alloc()</code> 这条路径，一行一行地读，每一步都对应到我们的讲解。</p>
+
+        <p>建议你在 GDB 中给 <code>slabs_init()</code> 设一个断点，启动后单步跟踪：</p>
+
+        <pre><code>cgdb memcached
+(gdb) b slabs_init
+(gdb) r -m 64 -f 1.25 -vv
+(gdb) n  # 逐行观察 slabclass 数组的填充过程</code></pre>
+
+        <p>观察每执行一行循环后，<code>slabclass[i].size</code> 和 <code>slabclass[i].perslab</code> 的值变化，这会让你对 slab class 的增长规律建立直观感受。</p>
+
+        <p>下一章，我们会继续攻克 slabs.c 的剩下部分——当 chunk 被释放时会发生什么，以及整个 slab 体系中最复杂、也最容易出问题的 slab rebalance 和 automove 机制。到时候你会看到，slab allocator 的"回收"比"分配"要复杂得多。我们第 9 章见。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

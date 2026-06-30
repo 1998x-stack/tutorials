@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 Slab Allocator回收与平衡</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html" class="active">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第9章 Slab Allocator回收与平衡</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们学会了怎么从 slab allocator 里"拿"内存——从 slots 空闲链表取，从当前 page 切，或者向操作系统申请新的 page。但拿出去的内存终究要还回来——当一个 item 过期被删除时，它占用的 chunk 必须回到空闲链表中，否则内存很快会被耗尽。</p>
+
+        <p>不过事情并没有这么简单。真正棘手的问题是：每个 slab class 的 chunk size 不同，不同尺寸的数据会落在不同的 slab class 中。如果流量模式发生变化——比如之前存了大量的 200 字节 item，后来流量全部变成了 500 字节——就会出现一个 slab class 内存吃紧而另一个大量空闲的不平衡状态。本章我们就来聊"还"和"平衡"这两件事。</p>
+
+        <h2>do_slabs_free()：最简单的回收路径</h2>
+
+        <p>回收的入口是 <code>do_slabs_free()</code>。它的代码非常简短，但背后的设计思想却非常深刻：</p>
+
+        <pre><code>void do_slabs_free(void *ptr, const unsigned int id, const unsigned int total) {
+    slabclass_t *p = &amp;slabclass[id];
+
+    // 将释放的 chunk 当作 item 指针处理
+    item *it = (item *)ptr;
+    it->slabs_clsid = 0;  // 清除 class id 标记
+    it->it_flags = ITEM_SLABBED;  // 标记为"已回收"
+
+    // 头插法入栈
+    it->next = p->slots;
+    p->slots = it;
+
+    p->slots_cur++;
+    p->free_chunks++;
+}</code></pre>
+
+        <p>这就是一个纯粹的"入栈"操作——把 chunk 的地址推回到 slots 链表的头部。不做内存清零、不做内存合并、不归还给操作系统。这就是 slab allocator 的核心哲学：<strong>分配和释放都是 O(1)</strong>，不做任何不必要的操作。</p>
+
+        <p>但这里有一个值得注意的细节：<code>it->slabs_clsid = 0</code> 和 <code>it->it_flags = ITEM_SLABBED</code>。这两个赋值既是标识——告诉其他代码"这个 chunk 现在是空闲的"——也是安全检查。如果某个 bug 导致已经释放的 chunk 被再次访问，<code>slabs_clsid == 0</code> 和 <code>ITEM_SLABBED</code> 标志可以作为"野指针检测"的依据。</p>
+
+        <h2>slots 空闲链表：指针构成的栈</h2>
+
+        <p>上一章我们已经提到，slots 空闲链表实际上是一个"隐式链表"——它不额外占用任何内存，而是复用了每个 chunk 中 item 结构体的 <code>next</code> 指针字段。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>概念</th>
+                    <th>含义</th>
+                    <th>底层实现</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>p->slots</td>
+                    <td>栈顶指针，指向第一个空闲 chunk</td>
+                    <td>类型为 <code>void *</code>，实际指向一个 <code>item</code> 结构体</td>
+                </tr>
+                <tr>
+                    <td>it->next（空闲时）</td>
+                    <td>指向下一个空闲 chunk 的指针</td>
+                    <td>即这个 <code>item</code> 结构体本身的 <code>next</code> 字段</td>
+                </tr>
+                <tr>
+                    <td>p->slots_cur</td>
+                    <td>当前空闲 chunk 数量</td>
+                    <td>用于快速判断是否有可用 chunk</td>
+                </tr>
+                <tr>
+                    <td>p->free_chunks</td>
+                    <td>累计回收次数统计</td>
+                    <td>仅用于统计信息（stats slabs 命令可见）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这种设计的巧妙之处在于：<strong>空闲链表自己"活"在它管理的内存中</strong>。不需要单独的链表节点分配器，不需要额外的内存开销。当 chunk 被分配出去后，<code>next</code> 字段被 item 的正常使用覆盖——但那时 chunk 已经不在链表里了，所以也不存在冲突。</p>
+
+        <p>用类比的思路来理解：这就像一个图书馆的座位管理系统。座位本身不需要额外的"空闲/占用"标牌——当座位上没人时，这个座位"本身"就是空闲标记；当有人坐下时，人就自然占据了座位。slots 链表也是同样的道理。</p>
+
+        <h2>slab_rebalancer：后台迁移线程</h2>
+
+        <p>现在我们要进入 slabs.c 中最复杂的部分。当一个 slab class 的内存紧缺而另一个有很多空闲 page 时，Memcached 可以通过 <code>slab_rebalance</code> 机制将 page 从一个 class 迁移到另一个 class。</p>
+
+        <p>这个机制由一个后台线程驱动，叫做 <code>slab_rebalancer</code>（或者更准确地说，<code>slab_rebalance_thread</code>）。它的核心流程是：</p>
+
+        <pre><code>static void *slab_rebalance_thread(void *arg) {
+    while (1) {
+        // 等待重新平衡的触发信号
+        pthread_cond_wait(&amp;slab_rebalance_cond, &amp;slab_rebalance_lock);
+
+        // 步骤 1：锁定所有内存操作
+        pthread_mutex_lock(&amp;cache_lock);
+
+        // 步骤 2：从源 slab class 中找一个 page 来迁移
+        // 选择标准：该 page 上所有 item 都必须已被释放或过期
+        // 如果 page 上还有活跃 item，需要先"驱逐"它们
+        slabclass_t *src = &amp;slabclass[slab_rebalance_src_clsid];
+        slabclass_t *dst = &amp;slabclass[slab_rebalance_dst_clsid];
+
+        // 步骤 3：遍历 page 上的所有 chunk
+        // 对于仍然活跃的 item，将它们移动到 LRU 的尾部（标记为即将淘汰）
+        // 或者直接 LRU 淘汰掉
+
+        // 步骤 4：将整个 page 从源 class 移到目标 class
+        // 更新 page 指针、重新计算 chunk 分配
+        src->slabs--;
+        dst->slabs++;
+
+        // 步骤 5：重新初始化这个 page，按目标 class 的 chunk size 切割
+        split_slab_page_into_freelist(page, slab_rebalance_dst_clsid);
+
+        pthread_mutex_unlock(&amp;cache_lock);
+    }
+}</code></pre>
+
+        <p>这个流程的难点在于步骤 3——"驱逐活跃 item"。如果一个 chunk 上还有数据没有被删除或过期，我们不能直接把它覆盖掉。Memcached 的策略是：</p>
+
+        <ol>
+            <li>将 page 上所有活跃的 item 标记为"即将迁移"（通过设置 <code>ITEM_SLABBED</code> 或主动 LRU 淘汰）</li>
+            <li>等待这些 item 被正常访问流程发现并处理</li>
+            <li>定期重试，直到 page 上所有 chunk 都变为空闲</li>
+        </ol>
+
+        <p>这个过程可能导致短暂的访问延迟增加——我们会在后面的踩坑故事中详细展开。</p>
+
+        <div class="tip">
+            <strong>为什么需要后台线程？</strong>因为 slab rebalance 是一个慢操作——它可能需要遍历整个 page（1MB）上的所有 chunk，逐个检查状态。如果在 worker 线程中同步完成，会阻塞所有请求处理。所以 Memcached 用一个独立的后台线程来做这件事，通过 <code>pthread_cond_wait</code> 等待触发信号。
+        </div>
+
+        <h2>slab_automove：三种策略详解</h2>
+
+        <p>slab_rebalancer 负责"怎么做"，而 <code>slab_automove</code> 负责"什么时候做"以及"迁哪个 class 到哪个 class"。这是在 1.5.x 版本引入的自动决策模块。</p>
+
+        <p><code>slab_automove</code> 有三种模式，通过 <code>-o slab_automove=N</code> 设置：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>模式</th>
+                    <th>名称</th>
+                    <th>行为</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>0</td>
+                    <td>完全禁用</td>
+                    <td>不进行任何自动 page 迁移。管理员必须手动调用 <code>slabs reassign</code> 命令</td>
+                    <td>流量模式稳定的场景，或需要完全手动控制</td>
+                </tr>
+                <tr>
+                    <td>1</td>
+                    <td>默认模式</td>
+                    <td>周期性检查各 slab class 的 <code>free_chunks</code> 比例。如果某个 class 的空闲率低于阈值（默认 10%），尝试从空闲率最高的 class 借一个 page</td>
+                    <td>大多数生产环境（默认值）</td>
+                </tr>
+                <tr>
+                    <td>2</td>
+                    <td>激进模式</td>
+                    <td>类似模式 1，但评估周期更短（每 5 秒 vs 默认 30 秒），且迁移更积极。即使空闲率较高，也尝试把 page 从冷 class 迁到热 class</td>
+                    <td>流量模式剧烈波动的场景</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>我们来看模式 1 的核心决策逻辑（简化版）：</p>
+
+        <pre><code>static void slab_automove_decision(void) {
+    for (int i = POWER_SMALLEST; i &lt; slabclass_max; i++) {
+        int free_ratio = slabclass[i].free_chunks_total
+                       / (slabclass[i].slabs * settings.slab_page_size
+                          / slabclass[i].size);
+
+        // 记录每个 class 的空闲比例
+        if (free_ratio &gt; window_max) {
+            // 候选源 class：空闲 page 最多的
+            src_id = i;
+            window_max = free_ratio;
+        }
+        if (free_ratio &lt; window_min &amp;&amp; slabclass[i].slabs &gt; 1) {
+            // 候选目标 class：空闲最少的（但至少要有一个 page 保留）
+            dst_id = i;
+            window_min = free_ratio;
+        }
+    }
+
+    // 如果源和目标不是同一个 class，且空闲比例差异足够大，触发迁移
+    if (src_id != dst_id &amp;&amp; (window_max - window_min) &gt; threshold) {
+        slabs_reassign(src_id, dst_id);
+    }
+}</code></pre>
+
+        <p>这个决策逻辑的要点：</p>
+        <ul>
+            <li><strong>源 class 的选择标准</strong>：不是看空闲 chunk 的绝对数量，而是看空闲比例。一个只有 2 个 page 但有 50% 空闲的 class，比一个有 100 个 page 但只有 10% 空闲的 class 更可能被选为"源"。</li>
+            <li><strong>目标 class 的选择标准</strong>：空闲比例最低、且至少拥有 1 个以上 page 的 class（永远不会把一个 class 的所有 page 都搬空，否则它的当前数据会立即丢失）。</li>
+            <li><strong>阈值保护</strong>：只有源和目标的空闲比例差异超过阈值时，才触发迁移。这防止了"频繁震荡"——在稳定状态下，小幅波动不应该触发 page 迁移。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>设计哲学：</strong>slab_automove 的设计目标不是"最优平衡"，而是"防止极端不平衡"。因为每次迁移都有代价——锁定全局锁、遍历 page 上的所有 chunk、可能导致部分请求延迟增加。频繁迁移对性能的损害比轻微不平衡更大。"少移动，移动对了"比"频繁移动"要好得多。
+        </div>
+
+        <h2>ALLOW_SLABS_REASSIGN 编译选项</h2>
+
+        <p>slab rebalance 功能是不是默认开启的？答案是：<strong>是的，在 1.6+ 版本中默认开启</strong>。但它在编译时有一个保护宏：<code>ALLOW_SLABS_REASSIGN</code>。</p>
+
+        <p>这个宏在 <code>slabs.c</code> 顶部定义：</p>
+
+        <pre><code>/* 如果注释掉下面这一行，slab reassign 功能将被完全移除 */
+#define ALLOW_SLABS_REASSIGN 1</code></pre>
+
+        <p>把这一行注释掉，slab rebalance 的整个机制——包括后台线程、automove、手动 reassign 命令——都不会被编译进二进制文件。这在某些极端场景下有用：</p>
+
+        <ul>
+            <li><strong>嵌入式或内存极度受限的环境</strong>：不想要后台线程占用任何资源</li>
+            <li><strong>安全性要求极高的场景</strong>：完全禁用"运行时重新配置内存"的能力</li>
+            <li><strong>与外部管理工具配合</strong>：外部编排系统负责管理每个实例的内存配置，不需要内部 automove</li>
+        </ul>
+
+        <p>但在编译你自己的版本时，除非有明确理由，否则强烈建议保留这个选项。</p>
+
+        <h2>踩坑：自动迁移导致 p99 延迟飙升</h2>
+
+        <p>现在讲一个我亲身经历的生产事故。有一次，我们的 Memcached 集群在下午 3 点准时迎来一波 p99 延迟飙升——从稳定的 800μs 跳到了 30ms。</p>
+
+        <p>第一反应是"流量突增"——但查看 QPS 曲线，完全没有变化。CPU 也没有明显升高。网络延迟也正常。这个现象持续了大约 2-3 分钟，然后自动恢复。第二天同一时间又出现了。</p>
+
+        <p>我们用 <code>stats slabs</code> 命令定时采集 slab class 分布，发现在延迟飙升的时间段，正好发生了 slab page 迁移——slab class 12 的一个 page 被迁移到了 class 18。迁移持续了大约 2 分钟，正好与延迟异常的时间窗口重合。</p>
+
+        <div class="warning">
+            <strong>根因分析：</strong>问题出在我们的业务模式——下午 3 点是"Cron Job 高峰期"。大量批处理任务同时启动，导致 key 的尺寸分布发生剧烈变化：平时占主导的 200-300 字节 key 瞬间减少，而 800 字节左右的 key 大量涌入。slab_automove 检测到 class 12（chunk size ~480B）空闲率升高，而 class 18（chunk size ~1.5KB）紧张，于是触发了 page 迁移。迁移过程中，class 18 需要从 class 12 借一个 page，但这个 page 上有大量活跃 item 需要驱逐——驱逐过程需要遍历整个 page，并且在这个过程中持有 <code>cache_lock</code>。正是这个全局锁导致所有写操作被暂停，p99 延迟飙升。
+        </div>
+
+        <p>解决方案是什么呢？我们做了三件事：</p>
+
+        <ol>
+            <li>将 <code>slab_automove</code> 从模式 1（默认）暂时切换到模式 0（禁用），在 cron job 期间不进行自动迁移</li>
+            <li>分析业务流量，给 Memcached 分配更多的内存（从 1GB 增加到 2GB），降低内存压力</li>
+            <li>在下个版本中，将 <code>slab_reassign_chunk_size</code> 调整得更小，减少单次迁移的"影响面"</li>
+        </ol>
+
+        <p>最终，通过增加内存容量（最直接的方式）和调整 cron job 的执行时间（让流量变化更平缓），彻底解决了这个问题。</p>
+
+        <p>这个事故告诉我们：<strong>slab rebalance 是一个强大的功能，但它不是免费的</strong>。在流量模式剧烈变化的场景下，自动迁移可能带来比不平衡本身更大的伤害。理解它的工作原理——尤其是全局锁的持有时间——对于运维 Memcached 集群至关重要。</p>
+
+        <h2>小结</h2>
+
+        <p>本章我们完成了 slabs.c 的收尾部分：从 <code>do_slabs_free()</code> 的 O(1) 出栈回收，到 slab_rebalancer 的后台 page 迁移，再到 slab_automove 的智能决策。你现在对整个 slab allocator 的理解已经达到了"能读完整份代码"的程度。</p>
+
+        <p>但是从 slab allocator 的视角切换到"用户"视角——也就是 item——还有一些重要的桥梁需要搭建。slab allocator 分配出来的 chunk 是"原始内存块"，而 item 是"有语义的数据块"。下一章，我们终于要打开 <code>item.h</code> 和 <code>memcached.h</code>，看看 item 这个核心数据结构到底长什么样。我们第 10 章见。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

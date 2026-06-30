@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 哈希表：assoc模块详解</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html" class="active">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第13章 哈希表：assoc模块详解</h1>
+
+        <p>大家好，我是你们的讲师。过去几章我们花了大量精力在内存管理上——从 slab allocator 到 item 结构体再到 LRU 淘汰。但 Memcached 作为 KV 缓存，最核心的操作是：<strong>通过 key 找到 value</strong>。这个"查找"的功能就是由 <code>assoc</code>（association）模块实现的。</p>
+
+        <p>assoc 模块是 Memcached 代码中最精简、最优雅的模块之一——它的全部代码不到 400 行，却实现了一个功能完整的、支持渐进式扩容的哈希表。本章我们聚焦哈希表的基础操作，下一章再看扩容和 rehash。好，我们开始。</p>
+
+        <h2>数据结构：item** primary_hashtable</h2>
+
+        <p>Memcached 的哈希表本质上是一个<strong>桶数组 + 链地址法</strong>的经典实现。核心数据结构极其简洁：</p>
+
+        <pre><code>// assoc.c 中的全局变量
+static item **primary_hashtable = NULL;  // 桶数组
+static unsigned int hashpower = HASHPOWER_DEFAULT;  // 2^hashpower 个桶
+static unsigned int hash_items = 0;  // 当前哈希表中的 item 数量
+
+// hashsize(n) = 1 << n
+#define hashsize(n)       ((unsigned long int)1 << (n))
+#define hashmask(n)       (hashsize(n) - 1)</code></pre>
+
+        <p><code>primary_hashtable</code> 是一个指向指针数组的指针，每个数组元素是一个 <code>item *</code> 指针，指向该 bucket 链表的第一个 item。默认 <code>hashpower = 16</code>，即初始有 2^16 = 65536 个桶。</p>
+
+        <p>当客户端 <code>set</code> 一个 key 时，流程是：</p>
+
+        <ol>
+            <li>用 hash 函数将 key 映射为一个 32 位整数</li>
+            <li>取低 <code>hashpower</code> 位作为桶索引（<code>hash &amp; hashmask(hashpower)</code>）</li>
+            <li>在对应的 bucket 链表中查找（链地址法）</li>
+        </ol>
+
+        <p>桶数组本身是用 <code>calloc</code> 分配的连续内存，初始化为 NULL（空链表）。</p>
+
+        <h2>链地址法：item → h_next 单向链表</h2>
+
+        <p>每个桶内部是一个单向链表，通过 item 结构体的 <code>h_next</code> 字段串联：</p>
+
+        <pre><code>// memcached.h 中的 item 结构体
+typedef struct _stritem {
+    struct _stritem *next;    // LRU 双向链表
+    struct _stritem *prev;
+    struct _stritem *h_next;  // 哈希表冲突链（单向）
+    // ... 其他字段
+} item;</code></pre>
+
+        <p>注意，<code>h_next</code> 和 <code>next</code> / <code>prev</code> 是独立的指针——item 同时活在两个数据结构中：</p>
+
+        <ul>
+            <li><strong>哈希表</strong>：通过 <code>h_next</code> 串成单向链表，用于 key 的快速查找</li>
+            <li><strong>LRU 链表</strong>：通过 <code>next</code> / <code>prev</code> 串成双向链表，用于淘汰决策</li>
+        </ul>
+
+        <p>这种"双重存在"的设计是 Memcached 中的一个重要思想：item 不"属于"任何一个数据结构，而是同时参与了多个数据结构。有点像数据库中的"多索引"概念——一条记录可以同时被 B+ 树索引和哈希索引引用。item 的 <code>next</code>/<code>prev</code> 是 LRU 索引，<code>h_next</code> 是哈希索引。</p>
+
+        <h2>assoc_find()：逐行解析</h2>
+
+        <p>查找操作是 assoc 模块最频繁的调用路径（每次 get / set / delete 都需要查找）。代码非常精简：</p>
+
+        <pre><code>item *assoc_find(const char *key, const size_t nkey) {
+    // 1. 计算哈希值
+    uint32_t hv = hash(key, nkey);
+
+    // 2. 找到桶索引
+    unsigned int oldbucket = hv &amp; hashmask(hashpower);
+
+    // 3. 遍历链表（rehash 时的双表处理，下一章展开）
+    if (expanding &amp;&amp; oldbucket &lt; expand_bucket) {
+        // rehash 过程中，此 bucket 已迁移到新表，需查新表
+        oldbucket = hv &amp; hashmask(hashpower + 1);
+    }
+
+    // 4. 遍历链表
+    item *it = primary_hashtable[oldbucket];
+    while (it) {
+        if (nkey == it->nkey &amp;&amp; memcmp(key, ITEM_key(it), nkey) == 0) {
+            return it;  // 找到了！
+        }
+        it = it->h_next;
+    }
+
+    return NULL;  // 没找到
+}</code></pre>
+
+        <p>查找的时间复杂度：</p>
+        <ul>
+            <li><strong>最优</strong>：O(1)——key 刚好是桶中的第一个元素</li>
+            <li><strong>平均</strong>：O(1 + α)，其中 α = hash_items / hashsize(hashpower) 是负载因子</li>
+            <li><strong>最差</strong>：O(n)——所有 key 都落在同一个桶里（哈希碰撞攻击）</li>
+        </ul>
+
+        <p>在默认配置下，<code>hashpower=16</code> 有 65536 个桶。当存了 10 万个 item 时，平均负载因子约为 1.5，每个桶的链表平均长度不到 2。这个查找效率是非常高的。</p>
+
+        <div class="tip">
+            <strong>优化的比较策略：</strong>注意 <code>assoc_find</code> 先比较 <code>nkey</code>（长度），再调用 <code>memcmp</code>。这是一个常见的优化——key 长度不同肯定不是同一个 key，所以可以在 memcmp 之前快速排除。key 长度相同的概率远小于长度不同的概率，所以这个"先比长度"的策略在统计学上能节省大量 memcmp 调用。
+        </div>
+
+        <h2>assoc_insert()：头插法</h2>
+
+        <p>插入操作同样简洁——使用<strong>头插法</strong>将新 item 插入到对应桶的链表头部：</p>
+
+        <pre><code>int assoc_insert(item *it) {
+    uint32_t hv = hash(ITEM_key(it), it->nkey);
+    unsigned int oldbucket = hv &amp; hashmask(hashpower);
+
+    // rehash 期间，可能插入到新表
+    if (expanding &amp;&amp; oldbucket &lt; expand_bucket) {
+        oldbucket = hv &amp; hashmask(hashpower + 1);
+        it->h_next = primary_hashtable[oldbucket];
+        primary_hashtable[oldbucket] = it;
+    } else {
+        // 正常插入
+        it->h_next = primary_hashtable[oldbucket];
+        primary_hashtable[oldbucket] = it;
+    }
+
+    hash_items++;
+    return 1;
+}</code></pre>
+
+        <p>为什么用头插法而不是尾插法？因为 O(1)。尾插法需要遍历到链表尾部，时间复杂度 O(n)。头插法直接插到头部，永远 O(1)。</p>
+
+        <p>你可能会担心：头插法会导致"后插入的 item 先被找到"——但这对功能没有影响，因为 key 是唯一的，找到任何一个匹配的就是对的。而最近插入的 item 恰恰更有可能被立即访问（局部性原理），所以头插法的查找效率反而可能更好。</p>
+
+        <p>插入后的链表结构：</p>
+
+        <pre><code>bucket[hv] ──→ item_C (新插入) ──→ item_B ──→ item_A ──→ NULL
+                    h_next          h_next      h_next</code></pre>
+
+        <h2>assoc_delete()：二级指针遍历删除</h2>
+
+        <p>删除操作需要处理链表节点的移除。Memcached 使用了一种"二级指针"的技巧来避免特殊处理头节点删除的情况：</p>
+
+        <pre><code>void assoc_delete(const char *key, const size_t nkey) {
+    uint32_t hv = hash(key, nkey);
+    unsigned int oldbucket = hv &amp; hashmask(hashpower);
+
+    // rehash 期间可能涉及双表
+    if (expanding &amp;&amp; oldbucket &lt; expand_bucket) {
+        oldbucket = hv &amp; hashmask(hashpower + 1);
+    }
+
+    // 二级指针遍历
+    item **prev = &amp;primary_hashtable[oldbucket];
+    item *it = *prev;
+
+    while (it) {
+        if (nkey == it->nkey &amp;&amp; memcmp(key, ITEM_key(it), nkey) == 0) {
+            // 找到了！通过 prev 指针修改前一个节点的 h_next
+            *prev = it->h_next;
+            hash_items--;
+            return;
+        }
+        prev = &amp;it->h_next;
+        it = it->h_next;
+    }
+}</code></pre>
+
+        <p>二级指针的技巧：<code>prev</code> 指向"当前节点的前一个节点的 h_next 字段"（或者头指针本身）。当找到要删除的节点时，<code>*prev = it->h_next</code> 直接修改前一个节点的 h_next（或者桶的头指针），将当前节点从链表中摘除。这个写法避免了"如果删除的是头节点，需要单独处理"的分支逻辑——比经典的双指针 prev/curr 遍历更简洁。</p>
+
+        <h2>Hash 函数：从 Jenkins 到 MurmurHash3</h2>
+
+        <p>哈希函数的质量直接决定了哈希表的性能。Memcached 使用了一个可插拔的 hash 函数体系：</p>
+
+        <pre><code>// hash.c 中的函数指针
+static uint32_t (*hash_fn)(const void *key, size_t length) = NULL;</code></pre>
+
+        <p>支持的 hash 函数：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Hash 函数</th>
+                    <th>启用方式</th>
+                    <th>质量</th>
+                    <th>速度</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Jenkins lookup3</td>
+                    <td>默认（无需配置）</td>
+                    <td>优秀</td>
+                    <td>快（纯 C 实现）</td>
+                </tr>
+                <tr>
+                    <td>MurmurHash3</td>
+                    <td><code>-o modern</code> 或 <code>-o hash_algorithm=murmur3</code></td>
+                    <td>更均匀</td>
+                    <td>更快（利用现代 CPU 特性）</td>
+                </tr>
+                <tr>
+                    <td>CRC32</td>
+                    <td><code>-o hash_algorithm=crc32</code></td>
+                    <td>中等</td>
+                    <td>很慢（仅用于兼容旧版本）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>在最新的 1.6.41 版本中，使用 <code>-o modern</code> 开关会启用 MurmurHash3，同时也会开启其他"现代化"特性（如二进制协议全文支持）。这是推荐的做法。</p>
+
+        <p>为什么 hash 函数的质量很重要？考虑一个极端的反例：假设 hash 函数把所有 key 都映射到第 0 个桶。那么 assoc_find() 的性能会退化为 O(n)——每次 get 都要遍历 10 万个 item 的链表。这就是所谓的 <strong>hash 碰撞攻击</strong>。Jenkins hash 和 MurmurHash3 都经过了严格的随机性测试，能够抵抗这种攻击。</p>
+
+        <div class="highlight">
+            <strong>对比 Redis：</strong>Redis 使用 MurmurHash2 和基于大小写的 <code>dictGenHashFunction</code>。两者都选用了高质量的非加密哈希函数——不在安全上有保障，但在分布均匀性和速度之间取得了很好的平衡。如果你对哈希函数感兴趣，Bob Jenkins 的 <code>lookup3.c</code> 注释本身就值得一读——它包含了哈希函数设计的很多精妙思路。
+        </div>
+
+        <h2>踩坑：Hash Collision 导致单 bucket 链表过长</h2>
+
+        <p>哈希碰撞在某些情况下会导致严重的性能问题。让我分享一个实际 case：</p>
+
+        <p>有一次，我们的 Memcached 实例在 QPS 没有明显变化的情况下，CPU 使用率从 20% 飙升到了 80%。火焰图显示 <code>assoc_find()</code> 的占比从正常的 3% 飙升到了 35%。</p>
+
+        <p>用 <code>stats buckets</code> 查看各 bucket 的 item 分布，发现有一个 bucket 链表中竟然有 200 多个 item！而其他 bucket 平均只有 2-3 个。这意味着 hash 函数对这个特定模式的前缀产生了"聚集"。</p>
+
+        <p>经过排查，发现我们的 key 模式是 <code>user:{user_id}:profile</code>，user_id 是递增的数字。在默认的 Jenkins hash 下，这个模式的 key 在低 16 位上有明显的"聚集"——因为数字的二进制表示中，低 16 位的分布不够均匀。</p>
+
+        <p>解决方案有两个：</p>
+
+        <ol>
+            <li>立即修复：通过 <code>-o hash_algorithm=murmur3</code> 切换到 MurmurHash3，这个函数对数字 key 模式有更好的均匀性</li>
+            <li>长期方案：增大初始 <code>hashpower</code>（通过 <code>-o hashpower_init=18</code>），让桶的数量从 65536 增加到 262144，降低碰撞概率</li>
+        </ol>
+
+        <div class="warning">
+            <strong>教训总结：</strong>默认的 Jenkins hash 在大多数情况下表现良好，但在特定的 key 模式下可能产生严重的碰撞。如果你的 key 是可预测的（比如递增 ID + 固定前缀），强烈建议使用 <code>-o modern</code> 启用 MurmurHash3。另外，通过 <code>stats buckets</code> 命令定期检查哈希分布也是一个好习惯——如果发现某个 bucket 的 item 数量远超平均值（比如超过平均值的 10 倍），说明 hash 函数可能不适合你的 key 模式。
+        </div>
+
+        <p>另外，如果你的业务面临潜在的"哈希碰撞攻击"风险（比如用户提供的 key 没有经过任何限制），可以考虑在 Memcached 前面加一层网关，对 key 做二次哈希。</p>
+
+        <p>好了，本章我们完整地分析了 assoc 模块的基础操作——查找、插入、删除。你可能会注意到，我们在讨论 <code>assoc_find()</code> 和 <code>assoc_insert()</code> 时都提到了"rehash 期间的双表处理"——这到底是怎样一种机制？哈希表如何在不中断服务的情况下扩容？下一章我们将深入这个主题。我们第 14 章见。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

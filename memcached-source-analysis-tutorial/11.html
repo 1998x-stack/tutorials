@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 Item生命周期：分配、访问与删除</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html" class="active">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第11章 Item生命周期：分配、访问与删除</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们解剖了 item 结构体——这具"尸体"的每个字段我们都看清楚了。但结构体本身是静态的，真正让系统活起来的是 item 在内存中经历的生老病死。这一章我们就追踪一个 item 的完整生命周期：从 <code>set</code> 命令触发的分配，到 <code>get</code> 命令触发的访问，再到过期或淘汰导致的删除。</p>
+
+        <p>item 的生命周期涉及三个核心模块的协作：<strong>slab allocator</strong>（提供物理内存）、<strong>assoc</strong>（哈希表——提供 key 到 item 的映射）、<strong>LRU</strong>（提供淘汰策略）。我们已经在第 7-9 章详细讨论了 slab allocator，本章会简要涉及 assoc 和 LRU 的部分接口，但它们的内部实现要留到第 12、13 章再深入展开。</p>
+
+        <h2>do_item_alloc()：item 的"出生"</h2>
+
+        <p>当客户端发送 <code>set</code> 命令时，协议解析完成后会调用 <code>do_item_alloc()</code>。这个函数是 item 生命周期的起点，包含三条"备降路径"：</p>
+
+        <pre><code>item *do_item_alloc(const char *key, const size_t nkey,
+                    const unsigned int flags, const rel_time_t exptime,
+                    const int nbytes) {
+    uint8_t clsid;
+    item *it = NULL;
+
+    // 第一步：计算 item 总大小，找到合适的 slab class
+    const size_t ntotal = ITEM_ntotal(nkey, nbytes);
+    clsid = slabs_clsid(ntotal);
+    if (clsid == 0) return NULL;  // item 太大，超过 item_size_max
+
+    // 路径一：尝试从 slab allocator 直接分配
+    it = (item *)do_slabs_alloc(clsid, 0, 0);
+
+    if (it == NULL) {
+        // 路径二：尝试 LRU 淘汰后重试
+        it = do_item_alloc_pull(ntotal, clsid);
+    }
+
+    if (it != NULL) {
+        // 初始化 item 的各个字段
+        ITEM_key(it) = key;
+        it->nkey = nkey;
+        it->exptime = exptime;
+        it->nbytes = nbytes;
+        it->it_flags = 0;       // 尚未 link
+        it->refcount = 1;       // 初始引用计数为 1
+        it->slabs_clsid = clsid;
+        it->next = it->prev = it->h_next = NULL;
+        // ... 复制 flags 到 suffix 等
+    }
+
+    return it;
+}</code></pre>
+
+        <p>三条路径的优先级很清晰：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>路径</th>
+                    <th>条件</th>
+                    <th>代价</th>
+                    <th>成功概率</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>1. <code>do_slabs_alloc()</code> 直接分配</td>
+                    <td>slots 空闲链表不为空</td>
+                    <td>O(1)，无锁或轻量锁</td>
+                    <td>通常 &gt; 99%（正常负载下）</td>
+                </tr>
+                <tr>
+                    <td>2. LRU 淘汰后重试</td>
+                    <td>slots 为空但内存未超限</td>
+                    <td>需要驱逐一个旧 item，涉及哈希表删除 + slab free</td>
+                    <td>中等（取决于内存压力）</td>
+                </tr>
+                <tr>
+                    <td>3. 返回 NULL</td>
+                    <td>所有路径都失败</td>
+                    <td>客户端看到 SERVER_ERROR out of memory</td>
+                    <td>极少发生</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p><code>do_item_alloc_pull()</code> 是路径二的入口。它的逻辑是：从 LRU 尾部淘汰一个 item，释放其 chunk，然后重新尝试 <code>do_slabs_alloc()</code>。如果一次不够，它会循环淘汰直到成功或确认没有可淘汰的 item。</p>
+
+        <h2>item_link() 与 do_item_unlink()：连接与断开</h2>
+
+        <p>分配后 item 还只是一块"初始化过的内存"，对客户端不可见。需要调用 <code>item_link()</code> 将 item 加入哈希表和 LRU 链表，客户端才能通过 <code>get</code> 找到它。</p>
+
+        <pre><code>int item_link(item *it) {
+    // 1. 加入哈希表，使其可通过 key 被查找
+    assoc_insert(it);
+
+    // 2. 加入 LRU 链表（具体插入逻辑下一章详解）
+    item_link_q(it);  // 将 item 插入到 HOT LRU 头部
+
+    // 3. 更新统计
+    stats.curr_items++;
+    stats.total_items++;
+
+    // 4. 设置 LINKED 标志
+    it->it_flags |= ITEM_LINKED;
+    it->it_flags &= ~ITEM_SLABBED;
+
+    return 1;
+}</code></pre>
+
+        <p>与 <code>item_link()</code> 对称的是 <code>do_item_unlink()</code>，在删除 item 时调用：</p>
+
+        <pre><code>void do_item_unlink(item *it) {
+    // 1. 从 LRU 链表中移除
+    item_unlink_q(it);
+
+    // 2. 从哈希表中移除
+    assoc_delete(ITEM_key(it), it->nkey);
+
+    // 3. 更新统计
+    stats.curr_items--;
+
+    // 4. 清除 LINKED 标志
+    it->it_flags &= ~ITEM_LINKED;
+
+    // 5. 引用计数减 1，如果归零则释放内存
+    item_free_or_reuse(it);
+}</code></pre>
+
+        <p>注意 <code>do_item_unlink()</code> 的最后一步：<code>item_free_or_reuse(it)</code>。这里触发了引用计数的递减和可能的内存释放——但释放不一定发生，因为可能还有其他代码在引用这个 item（比如正在响应 <code>get</code> 命令）。</p>
+
+        <h2>refcount 引用计数：为什么不能直接释放</h2>
+
+        <p>引用计数是 item 生命周期中最重要的安全机制。基本规则是：</p>
+
+        <ul>
+            <li><strong>计数 &gt; 0</strong>：item 正在被使用，不能释放</li>
+            <li><strong>计数 == 0</strong>：没有人在使用，可以归还给 slab allocator</li>
+        </ul>
+
+        <p>引用计数的变化场景：</p>
+
+        <pre><code>// do_item_alloc() 之后：refcount = 1（刚刚分配）
+// do_item_link() 之后：refcount = 2（分配 + 哈希表引用）
+// 客户端 get 命中时：refcount++（正在被读取，防止释放）
+// do_item_get() 返回后：refcount--（读取完毕）
+// 客户端 delete 时：do_item_unlink() → refcount--（去掉哈希表引用）
+//                    如果 refcount 归零 → 释放 chunk</code></pre>
+
+        <p>为什么需要这个机制？考虑一个并发场景：客户端 A 正在 <code>get</code> 一个 item（已经在响应中读取这个 item 的数据），同时客户端 B <code>delete</code> 了这个 key。如果没有引用计数，B 的 delete 操作会直接把 item 的 chunk 释放回 slab allocator，然后 slab allocator 可能立即把这个 chunk 分配给另一个新 item——A 继续读取的就是"别人的数据"。这就是经典的 <strong>use-after-free</strong> bug。</p>
+
+        <p>有了引用计数后，<code>do_item_unlink()</code> 会在 B 请求时把 item 从哈希表和 LRU 中移除（所以新的 get 请求不会再找到它），但真正的内存释放要等到 A 完成读取（refcount 归零）后才进行。</p>
+
+        <div class="tip">
+            <strong>设计哲学：</strong>Memcached 的引用计数是一种"乐观锁"——它不阻止并发访问，但在访问期间保证内存不会被回收。这与 Redis 的"单线程事件循环"（天然不需要引用计数）形成了有趣的对比。Memcached 选择多线程 + 引用计数，Redis 选择单线程 + 无锁。两种策略各有优劣，但都保证了数据一致性。
+        </div>
+
+        <h2>do_item_get()：查找并更新访问时间</h2>
+
+        <p>当客户端执行 <code>get mykey</code> 命令时，<code>do_item_get()</code> 被调用：</p>
+
+        <pre><code>item *do_item_get(const char *key, const size_t nkey) {
+    item *it;
+
+    // 1. 在哈希表中查找
+    it = assoc_find(key, nkey);
+
+    if (it != NULL) {
+        // 2. 检查是否过期
+        if (it->exptime != 0 &amp;&amp; current_time &gt; it->exptime) {
+            // 过期了！不返回，但也不在这里删除——交给 LRU crawler
+            do_item_unlink(it);
+            it = NULL;
+        } else {
+            // 3. 未过期：更新访问时间 + LRU 提升
+            it->refcount++;
+            it->time = current_time;
+            it->it_flags |= ITEM_ACTIVE;
+            // LRU bump：将 item 在 LRU 队列中前移
+            // （下一章详细讲）
+        }
+    }
+
+    return it;
+}</code></pre>
+
+        <p>这里有一个关键设计：<strong>lazy expiration（惰性过期）</strong>。Memcached 不设专门的后台线程扫描过期 item，而是在 <code>do_item_get()</code> 中"碰巧"发现某个 item 过期了，才把它删除。这种策略的好处是不需要定时扫描的开销——如果 99% 的过期 item 在被访问之前就已经被 LRU 淘汰掉了，那专门做一遍过期扫描就是浪费 CPU。</p>
+
+        <p>当然，纯惰性过期也有问题：如果大量 item 设置了 TTL 但再也没有被访问过，它们会一直占据内存直到 LRU 链表的尾部被淘汰。为了解决这个问题，Memcached 引入了 <strong>LRU crawler</strong> 后台线程（下一章会详细讲），它会周期性地扫描 LRU 链表，回收那些已过期但未被访问的 item。</p>
+
+        <h2>踩坑：refcount 泄漏导致的内存不可回收</h2>
+
+        <p>现在来分享一个我在 debug 过程中遇到的经典 case。有一次我们的 Memcached 实例 stats 显示 <code>curr_items</code> 只有 50 万，但 RSS（实际物理内存占用）已经达到 8GB，远超理论估算值——每个 item 平均 200 字节，50 万 × 200B ≈ 100MB，就算加上 slab allocator 的预分配，也不应该到 8GB。</p>
+
+        <p>用 <code>stats slabs</code> 一看，free_chunks 几乎为零，但很多 item 的 refcount 异常偏高——有三四千个 item 的 refcount 一直在 3-5 之间，从未降回 0。这意味着这些 item 的 chunk 永远无法释放。</p>
+
+        <p>经过漫长的代码审查，最终发现是在我们定制的一个统计分析模块中，有一段代码在 <code>do_item_get()</code> 返回 item 后做了额外的处理，但在处理完成后忘记调用 <code>item_remove()</code> 来递减 refcount。这样就造成了"引用泄漏"——每次 get 命中，refcount 就 +1 但不 -1，日积月累，refcount 永远无法归零。</p>
+
+        <div class="warning">
+            <strong>教训总结：</strong>引用计数机制虽然安全，但它要求调用链上的每一个环节都严格遵守"配对"规则——<code>item_get()</code> 必须配对 <code>item_remove()</code>，<code>do_item_link()</code> 必须配对 <code>do_item_unlink()</code>。任何一处的泄漏都会导致 item 变成"僵尸"——明明已经不可见了（哈希表中已删除），但 chunk 无法被回收。建议在开发扩展功能时，用 <code>stats items</code> 命令定期检查 refcount 分布，如果发现大量 item 的 refcount > 2，需要警惕。
+        </div>
+
+        <p>另外，Memcached 源码本身也提供了一个"应急"手段：<code>lru_crawler</code> 在 <code>meta</code> 模式下会报告 refcount 异常的 item。在 1.6.41 版本中，甚至可以设置 <code>expirezero_old</code> 强制回收 refcount 为正但 <code>ITEM_LINKED</code> 标志已清除的 item。</p>
+
+        <h2>生命周期全景图</h2>
+
+        <p>现在用一张图来总结 item 的生命周期：</p>
+
+        <pre><code>  客户端 set 命令
+        │
+        ▼
+  do_item_alloc()      ──→ 从 slab allocator 获取 chunk
+        │                     （先查 slots → 再 LRU 淘汰 → 最后 new page）
+        ▼
+  item_link()           ──→ assoc_insert() + item_link_q()
+        │                     （插入哈希表 + 插入 LRU HOT 队列）
+        ▼
+  ┌──────────────┐
+  │   活跃状态     │   ←── 客户端可 get/gets 命中
+  │ ITEM_LINKED   │
+  │ refcount >= 1 │
+  └──────┬───────┘
+         │
+    ┌────┴────┐
+    │         │
+ 过期      删除 / 淘汰
+    │         │
+    ▼         ▼
+  惰性过期    do_item_unlink()
+  (get 时)     │
+    │         ├── assoc_delete() 从哈希表移除
+    │         ├── item_unlink_q() 从 LRU 移除
+    │         └── item_free_or_reuse()
+    │                 │
+    ▼                 ▼
+  LRU crawler    refcount == 0?
+  扫描回收           │
+                是     否
+                 │      │
+                 ▼     ┌┘
+           do_slabs_free()   等待 refcount 归零
+                 │
+                 ▼
+           chunk 回到 slots 链表
+           （等待下一次 do_item_alloc）</code></pre>
+
+        <p>这张图反映了我们在本章讨论的所有内容：从分配、到链接、到访问、再到回收的完整闭环。</p>
+
+        <p>下一章，我们将深入 item 生命周期的"后半段"——LRU 淘汰机制。为什么 Memcached 设计了 HOT/WARM/COLD 三级 LRU 队列？为什么新的 item 会先放到 HOT 队列而不是直接到 COLD？lru_bump 和 LRU crawler 分别在做什么？这些问题将在第 12 章得到解答。我们第 12 章见。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 LRU淘汰机制：三级队列</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html" class="active">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第12章 LRU淘汰机制：三级队列</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们追踪了一个 item 从分配到被访问再到被删除的完整生命周期。在这个过程中，有一个关键环节我们刻意说得比较含糊——"将 item 插入 LRU 链表"。为什么不直接说"插到链表头部"？</p>
+
+        <p>因为在 Memcached 1.5 版本之后，LRU 已经不是一条链表，而是<strong>四条</strong>：HOT、WARM、COLD、TEMP。这套三级队列（加上 TEMP 实际上是四级）的设计，是 Memcached 十多年来最重大的一次内存管理革新。它的目的是解决传统 LRU 在面对"扫描型流量"时的一个致命弱点。本章我们就来彻底搞懂这套机制。</p>
+
+        <h2>传统 LRU 的缺陷：扫描型流量的灾难</h2>
+
+        <p>先来理解一个经典问题：什么是"扫描型流量"？假设你的应用有一个「批量导出全部用户」的后台任务，它会遍历所有 key，逐一 get。在传统 LRU 中，每 get 一个 key，这个 key 就会被提升到 LRU 链表的头部（或者至少向前移动）。</p>
+
+        <p>问题来了：如果这批扫描涉及 100 万个 key，而这 100 万个 key 的热度（访问频率）本不相同。经过一轮扫描后，所有被扫描过的 key 都变成了"看起来是热数据"——它们全被提升到了 LRU 头部。真正热门的 key（比如每秒被访问 1000 次的首页数据）可能因为扫描的干扰而被挤到了 LRU 尾部，进而被错误地淘汰。</p>
+
+        <p>一句话概括：传统 LRU 无法区分"被高频访问的热数据"和"被低频批量扫描的冷数据"。</p>
+
+        <div class="highlight">
+            <strong>核心洞察：</strong>传统 LRU 的"最近被访问"假设在扫描型流量下失效了。一个 key 被访问并不代表它"热"——可能只是恰好被某个批处理任务扫到了。Memcached 的三级 LRU 队列正是为此而设计的：它通过"观察期"来区分真正的热数据和"一次性的偶发访问"。
+        </div>
+
+        <h2>三级 LRU 的设计动机</h2>
+
+        <p>Memcached 的解决方案是将 LRU 拆分为多个队列，每个队列代表不同的"热度等级"：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>队列</th>
+                    <th>名称</th>
+                    <th>角色</th>
+                    <th>淘汰优先级</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>HOT_LRU</code></td>
+                    <td>热队列</td>
+                    <td>存放新 item 和最近频繁访问的 item</td>
+                    <td>低</td>
+                </tr>
+                <tr>
+                    <td><code>WARM_LRU</code></td>
+                    <td>温队列</td>
+                    <td>从 HOT 提升而来，被重复访问的 item</td>
+                    <td>中</td>
+                </tr>
+                <tr>
+                    <td><code>COLD_LRU</code></td>
+                    <td>冷队列</td>
+                    <td>从 WARM/HOT 降级而来，即将被淘汰</td>
+                    <td>高</td>
+                </tr>
+                <tr>
+                    <td><code>TEMP_LRU</code></td>
+                    <td>临时队列</td>
+                    <td>TTL 很短的 item（≤ 61 秒），不退不升级</td>
+                    <td>一次性使用</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>每个 slab class 都独立维护这四条 LRU 链表。也就是说，一个 slab allocator 的 49 个 class × 4 条队列 = 196 条 LRU 链表同时工作。这使得不同大小的 item 在各自的尺寸范围内独立进行淘汰决策，互不干扰。</p>
+
+        <p>TEMP_LRU 是一个特殊的优化：如果你设置的 TTL ≤ 61 秒，item 会直接进入 TEMP_LRU。这个队列中的 item 不做升降级操作——它们到期自动过期或被淘汰。因为短 TTL 的 item"不值得"做热度分析——它们很快就会被淘汰，不值得为了"是否应该升温"而消耗 CPU。</p>
+
+        <h2>do_item_link_q()：新 item 进入 HOT</h2>
+
+        <p>当一个新 item 被 link 时，它进入哪个队列？答案是 <strong>HOT_LRU</strong>（除非 TTL ≤ 61 秒，此时进入 TEMP_LRU）。</p>
+
+        <pre><code>void do_item_link_q(item *it) {
+    int lru_id = it->slabs_clsid;
+
+    // 根据 exptime 判断进入哪个队列
+    if (it->exptime &amp;&amp; it->exptime - current_time &lt;= 61) {
+        // TTL <= 61 秒 → TEMP_LRU
+        lru_id |= TEMP_LRU;
+    } else {
+        // 默认进入 HOT_LRU
+        lru_id |= HOT_LRU;
+    }
+
+    it->slabs_clsid = lru_id;  // 保存 LRU 队列 ID
+
+    // 头插法插入对应队列
+    it->prev = 0;
+    it->next = LRU_head(lru_id);
+    if (LRU_head(lru_id)) LRU_head(lru_id)->prev = it;
+    LRU_head(lru_id) = it;
+
+    LRU_size(lru_id)++;
+}</code></pre>
+
+        <p>注意这里的关键决策：<strong>新 item 默认进入 HOT_LRU</strong>。这意味着即使用户的扫描任务一次性 set 了大量 item，这些 item 也不会直接污染 COLD_LRU 或 WARM_LRU。它们需要等待"考验"——如果被再次访问，它们才有机会升入 WARM_LRU；如果一直不被访问，它们会自然地流向 COLD_LRU 并被淘汰。</p>
+
+        <h2>lru_bump()：升级流程的状态机</h2>
+
+        <p>当 item 被 <code>get</code> 命中时，不仅 refcount 会增加，还会触发 LRU 队列间的升级。这个升级逻辑是三级 LRU 的核心：</p>
+
+        <pre><code>int lru_bump(item *it) {
+    int old_lru = it->slabs_clsid &amp; LRU_TYPE_MASK;
+    int new_lru = old_lru;
+
+    switch (old_lru) {
+        case HOT_LRU:
+            // HOT 中的 item 再次被访问时，升级到 WARM
+            new_lru = WARM_LRU;
+            break;
+
+        case WARM_LRU:
+            // WARM 中的 item 再次被访问时：
+            // 如果它已经在 WARM 队列尾部附近（即将流向 COLD）
+            // 则把它拉回到 WARM 头部，否则不动
+            if (it->time + ITEM_UPDATE_INTERVAL &lt; current_time) {
+                // 移回 WARM 头部
+                do_item_unlink_q(it);
+                it->slabs_clsid = (it->slabs_clsid &amp; ~LRU_TYPE_MASK) | WARM_LRU;
+                do_item_link_q(it);
+            }
+            return 0;  // 已处理，不需要默认的移动
+
+        case COLD_LRU:
+            // COLD 中的 item 被重新访问时——这意味着之前判断错了
+            // 它不应该在 COLD 中！把它提升到 WARM
+            new_lru = WARM_LRU;
+            break;
+
+        default:
+            // TEMP_LRU：不做升降级
+            return 0;
+    }
+
+    // 执行升级：从旧队列移除，插入新队列头部
+    if (new_lru != old_lru) {
+        do_item_unlink_q(it);
+        it->slabs_clsid = (it->slabs_clsid &amp; ~LRU_TYPE_MASK) | new_lru;
+        do_item_link_q(it);
+    }
+
+    return 1;
+}</code></pre>
+
+        <p>这个状态机的核心规则可以归纳为一张表：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>当前队列</th>
+                    <th>被访问后的行为</th>
+                    <th>含义</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>TEMP</td>
+                    <td>不动</td>
+                    <td>短 TTL 不值得升降级</td>
+                </tr>
+                <tr>
+                    <td>HOT</td>
+                    <td>→ WARM</td>
+                    <td>"
+第一次被重新访问，证明你有点热"</td>
+                </tr>
+                <tr>
+                    <td>WARM</td>
+                    <td>保持 WARM，可能移到头部</td>
+                    <td>"持续访问，保持热度"</td>
+                </tr>
+                <tr>
+                    <td>COLD</td>
+                    <td>→ WARM</td>
+                    <td>"抱歉之前把你放冷了，现在拉回来"</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>几个值得注意的设计细节：</p>
+
+        <ul>
+            <li><strong>HOT → WARM 是单向的</strong>：一旦升到 WARM 就不会再回到 HOT。HOT 是一个"等待区"——新 item 在 HOT 中等待第一次被重新访问，如果一直没有被访问，它就会流入 COLD。</li>
+            <li><strong>COLD → WARM 的"复活"路径</strong>：如果某个在 COLD 中等待淘汰的 item 恰好被再次访问，它会被"抢救"回 WARM。这给了"冷数据但还没冷透"的 item 一个翻身的机会。</li>
+            <li><strong>WARM 内部的"延迟提升"</strong>：WARM 中的 item 不会每次被访问都移到头部——这会产生过多的链表操作。Memcached 使用 <code>ITEM_UPDATE_INTERVAL</code>（默认 60 秒）来控制最小提升间隔。如果上次提升到现在不足 60 秒，即使被访问了也不移动。</li>
+        </ul>
+
+        <h2>HOT → COLD 的自然流动</h2>
+
+        <p>你可能会问：HOT 中的 item 如果不被访问，它是怎么到 COLD 的？答案是：<strong>通过 LRU 的自然淘汰</strong>。</p>
+
+        <p>每条 LRU 链表本质上都是一个双向链表。HOT_LRU 和 COLD_LRU 之间没有"自动迁移"的机制——item 不会自己在队列间移动。真正的流程是：</p>
+
+        <ol>
+            <li>新 item 不断被插入 HOT_LRU 头部</li>
+            <li>HOT_LRU 尾部（最老的 item）在需要淘汰时被选中</li>
+            <li>如果 HOT_LRU 尾部的 item 没有被访问过（即没有触发 HOT→WARM 升级），它会被直接从 HOT_LRU 中淘汰</li>
+            <li>淘汰的 item 如果是活跃的（refcount > 0），会被写到 COLD_LRU 的尾部——但如果 refcount == 0（没有被引用），它就直接被释放了</li>
+        </ol>
+
+        <p>等等，"如果活跃就写到 COLD_LRU 尾部"——这个操作是谁做的？答案是 <strong>LRU crawler 后台线程</strong>。</p>
+
+        <h2>LRU crawler：后台清扫线程</h2>
+
+        <p>LRU crawler 是 Memcached 1.4.13 引入的一个后台线程，它在 1.5 版本的三级 LRU 中变得更加重要。它的工作有两个：</p>
+
+        <ol>
+            <li><strong>回收过期 item</strong>：扫描 LRU 链表，释放已经过期但尚未被访问发现的 item（惰性过期的补充）</li>
+            <li><strong>队列间迁移</strong>：将 HOT_LRU 尾部未被频繁访问的 item 迁移到 COLD_LRU</li>
+        </ol>
+
+        <p>crawler 的工作方式是通过 <code>lru_crawler.crawl()</code> 函数进行的：</p>
+
+        <pre><code>static void lru_crawler_crawl(void) {
+    for (int cls = 0; cls &lt; MAX_NUMBER_OF_SLAB_CLASSES; cls++) {
+        for (int lru = 0; lru &lt; MAX_LRU_COLORS; lru++) {
+            int lru_id = cls | lru;
+
+            // 遍历当前 LRU 链表
+            item *it = LRU_tail(lru_id);
+            while (it) {
+                item *next = it->prev;
+
+                // 检查是否过期
+                if (it->exptime != 0 &amp;&amp; current_time &gt; it->exptime) {
+                    do_item_unlink(it);  // 过期，直接删除
+                }
+                // 检查是否在 HOT 队列尾部太久
+                else if (lru == HOT_LRU &amp;&amp; should_move_to_cold(it)) {
+                    // 从 HOT 中移除，插入到 COLD 尾部
+                    do_item_unlink_q(it);
+                    it->slabs_clsid = (it->slabs_clsid &amp; ~LRU_TYPE_MASK) | COLD_LRU;
+                    do_item_link_q(it);
+                }
+
+                it = next;
+            }
+        }
+    }
+}</code></pre>
+
+        <p>crawler 的扫描周期默认是 3 秒一次（可通过 <code>-o lru_crawler_sleep=</code> 调整）。每轮扫描最多处理 1000 个 item，防止长时间持有 <code>cache_lock</code>。</p>
+
+        <div class="tip">
+            <strong>关于 TEMP_LRU 的特殊性：</strong>TEMP_LRU 中的 item 既不参与升降级，也几乎不会被 crawler 处理。它们的处理方式非常简单——当需要从 TEMP_LRU 淘汰时，直接从尾部取出即可。因为 TTL ≤ 61 秒，它们存活时间很短，不值得做任何复杂的 LRU 分析。据维护者 Dormando 的说法，在 Facebook 的生产环境中，大约 40% 的 item 属于 TEMP_LRU——这说明短 TTL 是一个非常常见的模式。
+        </div>
+
+        <h2>每个 slabclass 独立的 4 条 LRU 链表</h2>
+
+        <p>前面提到过，每个 slab class 都有自己独立的 4 条 LRU 链表。在代码中，LRU 链表的头指针存储在一个全局数组中：</p>
+
+        <pre><code>// LRU 头指针数组：每个 slab class × 4 种 LRU 类型
+static item *heads[LARGEST_ID + 1];
+static item *tails[LARGEST_ID + 1];
+static unsigned int sizes[LARGEST_ID + 1];
+
+// 访问宏
+#define LRU_head(id) (heads[id])
+#define LRU_tail(id) (tails[id])
+#define LRU_size(id) (sizes[id])</code></pre>
+
+        <p>这里的 <code>id</code> 是 slab class ID 和 LRU 类型的组合。比如 <code>id = 3 | HOT_LRU</code> 表示"slab class 3 的 HOT 链表"。这种通过位运算组合 ID 的方式避免了多维数组的复杂性，同时也保持了 O(1) 的访问效率。</p>
+
+        <p><code>LARGEST_ID</code> 的计算方式是 <code>MAX_NUMBER_OF_SLAB_CLASSES * MAX_LRU_COLORS</code>，其中 <code>MAX_LRU_COLORS = 4</code>（HOT / WARM / COLD / TEMP）。因此最多有 200 × 4 = 800 条 LRU 链表——但实际上 slab class 通常只有 49 个左右，所以实际活跃的 LRU 链表大约是 196 条。</p>
+
+        <h2>踩坑：大 key 扫描导致热数据被错误淘汰</h2>
+
+        <p>现在来分享一个真实的生产案例。有一次我们上线了一个数据分析功能，它需要每天凌晨扫描大约 500 万个 key（每个 key 的 value 大约 2-5KB，属于比较大的 item）。扫描方式是对每个 key 执行 <code>get</code> 操作。</p>
+
+        <p>结果发现，扫描期间真正热门的 key（比如首页推荐数据、用户会话信息）的命中率从 99.9% 降到了 92%。虽然三级 LRU 已经比传统 LRU 好很多了——因为扫描访问会触发 item 从 HOT → WARM 升级，但它们不会一直占据 HOT 头部。但问题出在：</p>
+
+        <p>这些大 key 的 <code>ITEM_ACTIVE</code> 标志导致它们在 LRU crawler 扫描 HOT 队列时被认为"最近被访问过"，从而没有被及时迁移到 COLD。然后它们占用了 WARM 队列的大量空间，导致真正的热数据在 WARM 队列中没有位置——最终被迫流入 COLD 并被淘汰。</p>
+
+        <div class="warning">
+            <strong>教训总结：</strong>三级 LRU 确实能够抵御扫描型流量，但抵抗不是无限的。当扫描的 key 数量巨大且 value 也很大时，WARM 队列仍然会被"伪热点"填满。我们的解决方案是：<strong>对扫描任务限流</strong>，将扫描速度控制在每秒不超过 10000 个 key，并且关闭扫描的 LRU 提升（在 <code>get</code> 时使用 <code>NOREAD</code> 模式，它只返回数据不更新访问时间）。此外，通过 <code>stats lru</code> 命令监控各队列的大小和流动速率，可以及早发现异常。
+        </div>
+
+        <p>另外值得一提的是，Memcached 1.6 版本引入了 <code>lru_bump_chunk_time</code> 参数，可以控制 item 在 HOT/WARM 队列中的最小驻留时间。增加这个时间可以更有效地过滤掉"一次性扫描"造成的伪热点。</p>
+
+        <p>好了，到现在为止，我们已经完整地覆盖了 slab allocator、item 结构体、以及 LRU 淘汰机制——这是 Memcached 内存管理的全部核心。下一章，我们将把目光转向另一个重要的数据结构：哈希表。哈希表负责将 key 映射到 item，是所有查找操作的基础。我们第 13 章见。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

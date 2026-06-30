@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 实现四件套工具</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html" class="active">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>🔨 第6章 实现四件套工具</h2>
+
+        <p>大家好，我是你们的讲师。第 3 章我们实现了一个只有 bash 工具的 v0 Agent，当时我们说它的最大局限是工具太少。这一章我们来把这个短板彻底补上——实现一个完整的"四件套"工具系统：Bash、Read、Write、Edit。</p>
+
+        <p>为什么是这四个工具？因为它们是 AI Coding Agent 的<strong>最小可行工具集</strong>。有了它们，Agent 可以自主地探索代码库（Bash + Read）、修改代码（Write + Edit）、验证修改结果（Bash）——这不正是一个初级工程师的日常工作吗？事实上，Claude Code、Codex CLI、Gemini CLI 的核心工具集，本质就是这四件套的增强版。多出来的三四十个工具（搜索、Git、MCP 等）都是锦上添花。</p>
+
+        <p>值得一提的是，这些工具虽然看起来简单，但每个都有大量的工程细节需要考虑。比如 Write 工具需要考虑原子写入，Edit 工具需要处理"唯一匹配"问题，Read 工具需要处理大文件截断。每一步踩过的坑，我都会在这一章分享出来。</p>
+
+        <h2>工具系统设计</h2>
+
+        <p>在写具体工具之前，先设计一个统一的工具系统架构。所有工具共享以下接口约定：</p>
+
+        <pre><code># 每个工具是一个 dict 包含以下结构
+{
+    "name": "工具名",           # 唯一的英文动词
+    "description": "描述",       # 告诉模型何时用、怎么用
+    "input_schema": {            # JSON Schema 参数定义
+        "type": "object",
+        "properties": {...},
+        "required": [...]
+    },
+    "handler": callable          # 工具执行函数 (input_dict) -> str
+}</code></pre>
+
+        <p>我们需要一个工具注册表来管理所有工具：</p>
+
+        <pre><code>class ToolRegistry:
+    """工具注册表——管理工具的注册、查找和分派"""
+
+    def __init__(self):
+        self._tools = {}      # name -> tool 定义
+        self._handlers = {}   # name -> handler 函数
+
+    def register(self, name, description, input_schema, handler):
+        """注册一个新工具"""
+        self._tools[name] = {
+            "name": name,
+            "description": description,
+            "input_schema": input_schema
+        }
+        self._handlers[name] = handler
+
+    def get_api_tools(self):
+        """返回 Anthropic API 格式的工具定义列表"""
+        return list(self._tools.values())
+
+    def dispatch(self, name, input_data):
+        """根据工具名调度执行"""
+        if name not in self._handlers:
+            raise ValueError(f"未知工具: {name}，可用工具: {list(self._tools.keys())}")
+        return self._handlers[name](input_data)</code></pre>
+
+        <p>这个注册表模式有几个好处：工具的定义和执行是分离的，便于测试和替换；新增一个工具只需要调用 <code>register()</code>；所有工具共享同一套调度逻辑，<code>dispatch()</code> 是唯一的入口点——这意味着我们可以在这里统一加权限检查、日志记录、超时管理等横切关注点。</p>
+
+        <h2>Bash 工具实现</h2>
+
+        <p>从 v0 升级过来的 Bash 工具需要增加一些重要的工程细节：</p>
+
+        <pre><code>import subprocess
+import os
+import shlex
+
+def bash_handler(input_data):
+    """执行 bash 命令，返回标准输出和错误"""
+    command = input_data["description"]  # 由模型填写的自然语言描述
+    command_str = input_data["command"]  # 实际要执行的命令
+    timeout = input_data.get("timeout", 30)
+    workdir = input_data.get("workdir", os.getcwd())
+
+    # 安全检查：禁止阻塞式交互命令
+    forbidden = ["vim", "nano", "less", "more", "tail -f"]
+    for cmd in forbidden:
+        if cmd in command_str:
+            return f"Error: 禁止执行交互式命令 '{cmd}'，请使用非交互式替代方案"
+
+    try:
+        result = subprocess.run(
+            command_str,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=workdir
+        )
+
+        output_parts = []
+        if result.stdout:
+            output_parts.append(result.stdout)
+        if result.stderr:
+            output_parts.append(f"[stderr]\n{result.stderr}")
+        if result.returncode != 0:
+            output_parts.append(f"[exit code: {result.returncode}]")
+
+        output = "".join(output_parts)
+
+        # 输出截断：防止 tool_result 过大
+        max_output = 100 * 1024  # 100KB
+        if len(output) > max_output:
+            output = output[:max_output] + \
+                     f"\n... [输出截断: 原始 {len(output)} bytes, 仅显示前 {max_output} bytes]"
+
+        return output if output else "(命令执行成功，无输出)"
+
+    except subprocess.TimeoutExpired:
+        return f"Error: 命令执行超时 (超过 {timeout} 秒)"
+    except Exception as e:
+        return f"Error: 命令执行失败: {str(e)}"</code></pre>
+
+        <p>关键改进点：</p>
+        <ul>
+            <li><strong>超时控制</strong>：防止 <code>tail -f</code> 或编译任务无限挂起</li>
+            <li><strong>命令过滤</strong>：拦截交互式命令（vim、nano 等），这些命令在非 TTY 环境下只会挂死</li>
+            <li><strong>输出截断</strong>：100KB 硬限制，防止 tool_result 过大</li>
+            <li><strong>工作目录</strong>：支持指定执行目录</li>
+        </ul>
+
+        <h2>Read 工具实现</h2>
+
+        <p>Read 工具是 Agent 理解代码的主要方式。关键在于大文件处理和二进制文件检测：</p>
+
+        <pre><code>import os
+
+def read_handler(input_data):
+    """读取文件内容，支持行范围和大文件截断"""
+    file_path = input_data["file_path"]
+    offset = input_data.get("offset", 0)      # 从第几行开始
+    limit = input_data.get("limit", None)     # 读多少行
+
+    # 路径规范化
+    file_path = os.path.abspath(file_path)
+
+    if not os.path.exists(file_path):
+        return f"Error: 文件不存在: {file_path}"
+    if not os.path.isfile(file_path):
+        return f"Error: 路径不是文件: {file_path}"
+
+    # 二进制文件检测
+    try:
+        with open(file_path, 'rb') as f:
+            chunk = f.read(1024)
+            if b'\x00' in chunk:
+                return f"提示: 文件 '{file_path}' 似乎是二进制文件。" \
+                       f"文件大小: {os.path.getsize(file_path)} bytes。" \
+                       f"Read 工具仅支持文本文件。"
+    except Exception as e:
+        return f"Error: 无法读取文件: {str(e)}"
+
+    # 读取文本文件
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except UnicodeDecodeError:
+        # 尝试其他编码
+        for enc in ['gbk', 'latin-1', 'shift-jis']:
+            try:
+                with open(file_path, 'r', encoding=enc) as f:
+                    lines = f.readlines()
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            return f"Error: 无法用 UTF-8 编码读取文件 '{file_path}'. 请手动指定编码."
+
+    total_lines = len(lines)
+
+    # 行范围切片
+    if limit is not None:
+        selected = lines[offset:offset + limit]
+    else:
+        selected = lines[offset:]
+
+    output = "".join(selected)
+
+    # 大文件截断警告
+    if total_lines > 2000 and limit is None:
+        output = output[:50 * 1024]  # 最多 50KB
+        output += f"\n... [文件较大: 共 {total_lines} 行, 仅显示前 {50*1024} bytes]"
+
+    # 在输出中附加行号信息
+    header = f"文件: {file_path} ({total_lines} 行)"
+    if offset > 0 or limit is not None:
+        header += f" [显示行 {offset + 1}-{min(offset + (limit or total_lines), total_lines)}]"
+    else:
+        header += " [全部]"
+
+    return header + "\n" + output</code></pre>
+
+        <p>编码处理是一个容易忽视的细节。在中文项目中，你经常会遇到 GBK 编码的文件（比如 Windows 上的旧 SQL 脚本）、Latin-1 编码的日志文件。Read 工具必须能够优雅地 fallback 到不同编码，而不是直接抛 UnicodeDecodeError。</p>
+
+        <h2>Write 工具实现</h2>
+
+        <p>Write 工具需要保证写入的<strong>原子性</strong>——要么全写入，要么不写入。如果写入过程中程序崩溃，我们不希望留下一个半截文件：</p>
+
+        <pre><code>import tempfile
+import shutil
+
+def write_handler(input_data):
+    """原子写入文件内容"""
+    file_path = input_data["file_path"]
+    content = input_data["content"]
+    file_path = os.path.abspath(file_path)
+
+    # 目录自动创建
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+    # 原子写入：先写临时文件，再重命名
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(file_path),
+            prefix='.tmp_',
+            suffix='.write'
+        )
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(content)
+        # 原子重命名（POSIX 保证 rename 是原子的）
+        shutil.move(tmp_path, file_path)
+    except Exception as e:
+        return f"Error: 写入文件失败: {str(e)}"
+
+    return f"成功写入 {len(content)} bytes 到 {file_path}"</code></pre>
+
+        <p>原子写入的原理：先写入一个<strong>临时文件</strong>（在同一个目录下），写入成功后通过 <code>shutil.move</code>（底层是 POSIX <code>rename</code> 系统调用）原子性地替换目标文件。如果写入过程中进程崩溃，临时文件会被系统清理，目标文件要么是原来的旧内容，要么是完整的新内容——不会出现"写到一半"的状态。</p>
+
+        <h2>Edit 工具实现</h2>
+
+        <p>Edit 工具是所有工具中最微妙的一个。它不像 Write 那样全量替换，而是做<strong>精确的局部替换</strong>——找到 <code>old_string</code>，替换成 <code>new_string</code>。这种"找替换"的逻辑在理论上很简单，但在实际操作中充满了边缘情况：</p>
+
+        <pre><code>def edit_handler(input_data):
+    """精确替换文件中的文本"""
+    file_path = input_data["file_path"]
+    old_string = input_data["old_string"]
+    new_string = input_data["new_string"]
+    file_path = os.path.abspath(file_path)
+
+    if not os.path.exists(file_path):
+        return f"Error: 文件不存在: {file_path}"
+
+    # 读取文件
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # 检查 old_string 出现次数
+    count = content.count(old_string)
+
+    if count == 0:
+        return (
+            f"Error: 未在文件中找到匹配的文本。\n"
+            f"请检查 old_string 是否完全匹配（包括空格和缩进）。\n"
+            f"提示：old_string 对空白字符敏感，请确保复制了准确的原文。"
+        )
+    elif count > 1:
+        return (
+            f"Error: 找到 {count} 处匹配，old_string 必须唯一。\n"
+            f"请使用更多上下文来唯一标识要替换的位置，\n"
+            f"例如包含前后各一行的内容。"
+        )
+
+    # 精确替换
+    new_content = content.replace(old_string, new_string, 1)
+
+    # 原子写入
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(file_path),
+        prefix='.tmp_',
+        suffix='.edit'
+    )
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(new_content)
+    shutil.move(tmp_path, file_path)
+
+    return f"编辑成功。替换了 {len(old_string)} bytes -> {len(new_string)} bytes。"</code></pre>
+
+        <div class="tip">
+            <strong>"Edit 工具唯一性问题"：</strong>这是 Edit 工具最核心的挑战。如果 old_string 不唯一（代码中出现了两次以上），工具必须拒绝执行——修改错误的地方可能引入 bug。Claude Code 的解决方案是鼓励模型在 <code>old_string</code> 中包含更多上下文（比如前后各一行代码），让它变得唯一。在极端情况下，如果代码高度重复，模型会退而使用 Write 工具全量重写文件。<br><br>
+            <strong>实战建议</strong>：如果你发现 Edit 频繁报"不唯一"错误，不要只给<strong>被替换行本身</strong>，而是把被替换行<strong>上下各多包一两行</strong>作为 old_string。上下文越多，唯一性越高。
+        </div>
+
+        <h2>集成：v1 Agent 完整实现</h2>
+
+        <p>现在我们把所有工具和注册表组合起来，得到一个完整的 v1 Agent。它的代码大约 200 行，是目前我们最完整的版本：</p>
+
+        <pre><code>"""v1_agent.py — 四件套 Agent 完整实现"""
+
+import os
+import subprocess
+import json
+import tempfile
+import shutil
+from dotenv import load_dotenv
+from anthropic import Anthropic
+
+load_dotenv()
+client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+# ===== ToolRegistry =====
+class ToolRegistry:
+    def __init__(self):
+        self._tools = {}
+        self._handlers = {}
+
+    def register(self, name, description, input_schema, handler):
+        self._tools[name] = {
+            "name": name, "description": description,
+            "input_schema": input_schema
+        }
+        self._handlers[name] = handler
+
+    def get_api_tools(self):
+        return list(self._tools.values())
+
+    def dispatch(self, name, input_data):
+        if name not in self._handlers:
+            return f"Error: 未知工具 '{name}'"
+        try:
+            return self._handlers[name](input_data)
+        except Exception as e:
+            return f"Error: 工具 '{name}' 执行异常: {str(e)}"
+
+registry = ToolRegistry()
+
+# ===== Bash Tool =====
+def bash_handler(input_data):
+    command = input_data["command"]
+    timeout = input_data.get("timeout", 30)
+    try:
+        result = subprocess.run(
+            command, shell=True, capture_output=True,
+            text=True, timeout=timeout
+        )
+        output = result.stdout
+        if result.stderr:
+            output += f"[stderr]\n{result.stderr}"
+        if result.returncode != 0:
+            output += f"\n[exit code: {result.returncode}]"
+        if len(output) > 100 * 1024:
+            output = output[:100 * 1024] + "\n[截断]"
+        return output or "(命令成功，无输出)"
+    except subprocess.TimeoutExpired:
+        return f"Error: 超时 ({timeout}s)"
+
+registry.register(
+    "bash", "执行 shell 命令。支持编译、运行、调试等操作。",
+    {"type": "object", "properties": {
+        "command": {"type": "string", "description": "要执行的 bash 命令"},
+        "timeout": {"type": "number", "description": "超时秒数，默认 30"}
+    }, "required": ["command"]},
+    bash_handler
+)
+
+# ===== Read Tool =====
+def read_handler(input_data):
+    file_path = os.path.abspath(input_data["file_path"])
+    if not os.path.isfile(file_path):
+        return f"Error: 文件不存在 '{file_path}'"
+    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+        content = f.read()
+    if len(content) > 100 * 1024:
+        content = content[:100 * 1024] + f"\n[截断]"
+    return content
+
+registry.register(
+    "read", "读取文件内容。用于查看源码、配置、日志等。支持绝对路径和相对路径。",
+    {"type": "object", "properties": {
+        "file_path": {"type": "string", "description": "文件路径"}
+    }, "required": ["file_path"]},
+    read_handler
+)
+
+# ===== Write Tool =====
+def write_handler(input_data):
+    file_path = os.path.abspath(input_data["file_path"])
+    content = input_data["content"]
+    os.makedirs(os.path.dirname(file_path) or '.', exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(file_path) or '.')
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(content)
+    shutil.move(tmp, file_path)
+    return f"已写入 {len(content)} bytes 到 {file_path}"
+
+registry.register(
+    "write", "创建新文件或覆盖已有文件。用于创建新文件或完全重写现有文件。",
+    {"type": "object", "properties": {
+        "file_path": {"type": "string", "description": "文件路径"},
+        "content": {"type": "string", "description": "写入的内容"}
+    }, "required": ["file_path", "content"]},
+    write_handler
+)
+
+# ===== Edit Tool =====
+def edit_handler(input_data):
+    file_path = os.path.abspath(input_data["file_path"])
+    old_string = input_data["old_string"]
+    new_string = input_data["new_string"]
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    count = content.count(old_string)
+    if count == 0:
+        return f"Error: 未找到匹配的文本（注意空格和缩进必须完全一致）"
+    if count > 1:
+        return f"Error: 找到 {count} 处匹配，old_string 必须唯一。请包含更多上下文。"
+    new_content = content.replace(old_string, new_string, 1)
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(new_content)
+    return f"编辑成功: 替换 1 处，{len(old_string)} -> {len(new_string)} bytes"
+
+registry.register(
+    "edit", "精确替换文件中的文本。用于局部修改。old_string 必须唯一匹配。",
+    {"type": "object", "properties": {
+        "file_path": {"type": "string"},
+        "old_string": {"type": "string", "description": "要替换的原文（精确匹配，含空格缩进）"},
+        "new_string": {"type": "string", "description": "替换后的新文本"}
+    }, "required": ["file_path", "old_string", "new_string"]},
+    edit_handler
+)
+
+# ===== Agent Loop =====
+def v1_agent_loop(task, max_turns=20):
+    messages = [{"role": "user", "content": task}]
+    tools_api = registry.get_api_tools()
+
+    for turn in range(max_turns):
+        print(f"\n--- Turn {turn + 1} ---")
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            system="你是一个 AI Coding Agent。你有 bash/read/write/edit 四个工具。"
+                   "通过组合使用这些工具，你可以在项目中进行探索、阅读、修改和验证。"
+                   "每次调用工具后观察结果，决定下一步。完成后给出总结。",
+            messages=messages,
+            tools=tools_api
+        )
+
+        if response.stop_reason == "tool_use":
+            tool_blocks = [b for b in response.content if b.type == "tool_use"]
+            for block in tool_blocks:
+                print(f"🧰 {block.name}({json.dumps(block.input)[:100]}...)")
+                result = registry.dispatch(block.name, block.input)
+                print(f"📋 {result[:200]}")
+            # 回填完整消息
+            messages.append({
+                "role": "assistant", "content": [
+                    b.model_dump() for b in response.content
+                ]
+            })
+            messages.append({
+                "role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": b.id,
+                     "content": registry.dispatch(b.name, b.input)}
+                    for b in tool_blocks
+                ]
+            })
+        else:
+            for block in response.content:
+                if block.type == "text":
+                    print(f"🤖 {block.text}")
+            break
+    else:
+        print("⚠️ 达到最大对话轮次")
+
+if __name__ == "__main__":
+    task = input("请输入任务: ")
+    v1_agent_loop(task)</code></pre>
+
+        <p>这个 v1 Agent 已经可以独立完成很多任务了。比如现在你可以说：</p>
+        <ul>
+            <li>"在 src/utils.py 中找到一个叫 parse_config 的函数，把它改成支持 YAML 格式"</li>
+            <li>"读一下 README.md，帮我补全缺失的安装步骤"</li>
+            <li>"项目跑不起来，帮我检查依赖和编译错误"</li>
+        </ul>
+
+        <p>Agent 会自行决定先用哪个工具、按什么顺序使用。比如改函数它会先 Read 找到函数位置，然后用 Edit 替换内容，最后用 Bash 跑测试验证。</p>
+
+        <h2>四件套对比总结</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>工具</th>
+                    <th>输入参数</th>
+                    <th>输出格式</th>
+                    <th>主要错误模式</th>
+                    <th>安全考量</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>bash</td>
+                    <td>command, timeout, workdir</td>
+                    <td>stdout + stderr 文本</td>
+                    <td>超时、命令不存在、交互命令挂起</td>
+                    <td>高危——可执行任意命令，需要权限审查</td>
+                </tr>
+                <tr>
+                    <td>read</td>
+                    <td>file_path, offset, limit</td>
+                    <td>文件内容文本（带行号信息）</td>
+                    <td>文件不存在、二进制文件、编码错误</td>
+                    <td>低风险——只读操作</td>
+                </tr>
+                <tr>
+                    <td>write</td>
+                    <td>file_path, content</td>
+                    <td>操作确认消息</td>
+                    <td>目录不存在、权限不足、磁盘满</td>
+                    <td>中等——可能覆盖重要文件，需要确认</td>
+                </tr>
+                <tr>
+                    <td>edit</td>
+                    <td>file_path, old_string, new_string</td>
+                    <td>操作确认消息 + 替换统计</td>
+                    <td>old_string 不唯一、未找到匹配</td>
+                    <td>中等——精确修改，误匹配风险低但需注意</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>核心观点：</strong>这四件套工具就是 AI Coding Agent 的最小可行工具集。有了它们，Agent 就能像一个初级工程师一样工作了——探索代码、阅读文档、修改文件、运行验证。Claude Code 的 54 个内置工具当然更强大，但在学习阶段，先把这四件套做扎实，比拥有 50 个半吊子工具重要得多。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>这一章我们从零实现了完整的四件套工具系统——Bash（命令执行）、Read（文件读取）、Write（原子写入）、Edit（精确替换）。每个工具都考虑了工程化的边界情况（超时、编码、原子性、唯一性），并通过 ToolRegistry 统一管理。最终我们将四个工具与 v1 Agent 的主循环集成，得到了一个可以独立探索、阅读、修改和验证代码的 AI Coding Agent。</p>
+
+        <p>但是，一个 Agent 不仅仅需要工具——它还需要知道自己"是谁"、"该以什么风格行事"、"项目有哪些约定"。这就是 System Prompt 的职责。下一章我们将深入 Claude Code 的 System Prompt 工程，看看它是如何通过分层结构和 Prompt Cache 优化来构建 Agent 的"人设"的。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

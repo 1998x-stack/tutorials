@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 System Prompt 工程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html" class="active">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第7章 System Prompt 工程</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们实现了四件套工具，现在 Agent 已经能干活了。但你有没有发现一个问题：我们 v1 Agent 的 System Prompt 只有一句话——"你是一个 AI Coding Agent。你有 bash/read/write/edit 四个工具……"——就这么一句话，Agent 的表现就已经相当不错了。那 Claude Code 的 System Prompt 到底写了多少？</p>
+
+        <p>答案是：<strong>上万 tokens</strong>。这不是因为他们喜欢写长篇大论，而是因为 System Prompt 承载了海量的关键信息：工具的详细行为规范、输出格式约定、安全规则、代码风格指南、项目特定的约定……每一段文字都在塑造 Agent 的行为方式。System Prompt 的质量直接决定了 Agent 的表现天花板——给定再好的工具集，如果 System Prompt 写得不好，Agent 就像一个不知道自己在哪、该做什么的实习生。</p>
+
+        <p>这一章我们拆解 Claude Code 的 System Prompt 工程——它的分层架构、每一层的作用、Prompt Cache 的优化策略、以及 SKILL.md 的懒加载机制。学完这一章，你将能够为自己的 Agent 设计出专业级别的 System Prompt。</p>
+
+        <h2>System Prompt 的分层架构</h2>
+
+        <p>Claude Code 的 System Prompt 不是一块"铁板"，而是由多个独立的部分<strong>按顺序拼接</strong>而成的。每一部分都有自己的来源、内容和缓存策略。整个拼接过程在启动时和运行时动态完成。</p>
+
+        <p>五层结构从底到顶依次是：</p>
+
+        <pre><code>┌───────────────────────────────────────────────┐
+│  Layer 5: Session Memory (运行时动态注入)       │
+│  内容: 当前对话的摘要、正在进行的任务状态        │
+│  缓存策略: 不缓存（每轮变化）                    │
+├───────────────────────────────────────────────┤
+│  Layer 4: Skills (按需加载)                     │
+│  内容: SKILL.md 文件中定义的领域知识            │
+│  缓存策略: 按需加载，加载后缓存                 │
+├───────────────────────────────────────────────┤
+│  Layer 3: Project Knowledge                     │
+│  内容: CLAUDE.md 项目级指南                     │
+│  缓存策略: Prompt Cache 断点                    │
+├───────────────────────────────────────────────┤
+│  Layer 2: CLI Context                           │
+│  内容: --model 等参数、当前工作目录信息         │
+│  缓存策略: Prompt Cache 断点                    │
+├───────────────────────────────────────────────┤
+│  Layer 1: Base System Prompt (硬编码)           │
+│  内容: Claude Code 的"人设"、通用规则           │
+│  缓存策略: Prompt Cache 断点（高命中率）        │
+└───────────────────────────────────────────────┘</code></pre>
+
+        <p>每一层的加载时机和缓存策略不同。Base Layer 几乎永远是相同的（除非 Claude Code 版本更新），所以它的缓存命中率极高。Project Layer 和 CLI Context 随项目变化，但同一个 session 内不变。Skills 按需加载。Session Memory 每轮都变，根本不适合缓存。</p>
+
+        <p>这样设计的根本原因是<strong>经济性</strong>——把静态内容放在 Prompt Cache 的前端，让每次 API 调用只需要传输很少的新 token，大幅降低成本。Anthropic 官方数据显示，这种分层设计达到了约 92% 的 prefix 缓存命中率。</p>
+
+        <h2>逐层拆解与示例</h2>
+
+        <p>下面我们一层层来看每一部分实际长什么样（注：以下内容是简化示例，Claude Code 的真实 Prompt 远为复杂且持续更新）：</p>
+
+        <h4>Layer 1：Base System Prompt（硬编码人设）</h4>
+        <p>这是 Claude Code 的"出厂设置"——定义 Agent 的基础身份、能力和行为准则。它写死在代码中，不在任何配置文件中暴露：</p>
+
+        <pre><code>你是 Claude Code，Anthropic 官方出品的 AI 编程助手。
+你的核心能力：
+
+1. 工具使用：你可以调用 bash、read、write、edit、grep 等工具来探索和修改代码库。
+   每次工具调用后，仔细观察结果，决定下一步操作。
+
+2. 安全准则：
+   - 在修改重要文件前，先读取确认内容
+   - 执行危险命令（rm -rf、sudo 等）前征求用户同意
+   - 不要安装未经验证的第三方包
+   - 不要在不理解的情况下修改生产环境配置
+
+3. 输出规范：
+   - 中文回答使用口语化表达，保持专业但友好
+   - 解释你的思考过程，让用户理解你的每一步
+   - 遇到不确定的情况，诚实地承认，不要编造
+
+4. 任务完成：
+   - 不要过早宣称"已完成"，验证你的修改确实生效
+   - 在确认任务完成后，给出清晰的总结</code></pre>
+
+        <h4>Layer 2：CLI Context（运行时上下文）</h4>
+        <p>用户通过命令行参数和环境变量提供的上下文。不是通过 System Prompt 字符串拼接——而是通过 API 参数传递：</p>
+
+        <pre><code># 通过 CLI 参数隐式传递的上下文
+# --model claude-sonnet-4-20250514
+# --max-tokens 8192
+# 当前工作目录: /home/user/projects/my-app
+# 操作系统: Linux x86_64
+# Git 仓库: my-app (main 分支, 最新 commit: a1b2c3d)</code></pre>
+
+        <h4>Layer 3：Project Knowledge（CLAUDE.md）</h4>
+        <p>存放在项目根目录或 <code>.claude/</code> 目录下的 <code>CLAUDE.md</code> 文件。这是项目团队为 Agent 写的"入职手册"——告诉 Agent 这个项目用什么语言、什么框架、代码风格是什么、目录结构如何。它会被完整注入到 System Prompt 中：</p>
+
+        <pre><code># CLAUDE.md (项目级知识)
+## 项目概述
+my-app 是一个基于 FastAPI 的 RESTful 后端服务。
+
+## 技术栈
+- Python 3.12, FastAPI, SQLAlchemy 2.0, PostgreSQL
+- 前端: React 18 + TypeScript (在 frontend/ 目录)
+
+## 代码规范
+- Python: 使用 Black 格式化, 行长度 88
+- TypeScript: 使用 Prettier, 单引号, 尾逗号
+- 所有 API 端点必须有单元测试 (pytest)
+
+## 目录结构
+- backend/src/ — Python 源码
+- frontend/src/ — TypeScript 前端
+- tests/ — 测试文件 (镜像 backend/src 结构)
+- docker/ — Docker Compose 配置
+
+## 常见操作
+- 启动后端: cd backend && uvicorn src.main:app --reload
+- 运行测试: pytest tests/
+- 数据库迁移: alembic upgrade head</code></pre>
+
+        <h4>Layer 4：Skills（领域知识按需注入）</h4>
+        <p>SKILL.md 文件定义了 Agent 在特定场景下需要的专业知识。比如 Django 技能、Rust 编译器错误诊断技能。这部分不会在启动时加载，而是在检测到相关上下文时才注入。</p>
+
+        <h4>Layer 5：Session Memory（对话动态摘要）</h4>
+        <p>随着对话进行，Agent 需要对已经完成的工作做摘要，压缩进上下文。这部分不是传统意义上的"System Prompt"——它是通过上下文压缩机制在运行时动态生成的。我们会在第 10 章详细展开。</p>
+
+        <h2>Prompt Cache 断点策略</h2>
+
+        <p>理解完分层结构后，最关键的问题来了：<strong>Anthropic 的 Prompt Cache 是如何在这些层之间设置断点的？</strong></p>
+
+        <p>Prompt Cache 的工作原理是：API 服务器会缓存 API 请求的开头部分（prefix）。如果下一个请求的开头与缓存中的内容匹配，服务器只需处理有变化的那部分，大幅降低成本并减少延迟。</p>
+
+        <p>Claude Code 利用了这个特性，在 System Prompt 的每一层边界设置了 <code>cache_control</code> 断点：</p>
+
+        <pre><code># Python 示例：分层组装 System Prompt 并设置缓存断点
+import anthropic
+from anthropic.types import TextBlockParam, CacheControlEphemeralParam
+
+system_prompt = []
+
+# Layer 1: Base System Prompt (缓存，几乎永久命中)
+system_prompt.append(TextBlockParam(
+    type="text",
+    text=BASE_PROMPT,
+    cache_control=CacheControlEphemeralParam(type="ephemeral")
+))
+
+# Layer 2: CLI Context (缓存，session 内稳定)
+system_prompt.append(TextBlockParam(
+    type="text",
+    text=f"当前工作目录: {cwd}\nGit 信息: {git_info}",
+    cache_control=CacheControlEphemeralParam(type="ephemeral")
+))
+
+# Layer 3: Project Knowledge (缓存，项目不变则稳定)
+if claude_md_content:
+    system_prompt.append(TextBlockParam(
+        type="text",
+        text=f"## 项目知识\n{claude_md_content}",
+        cache_control=CacheControlEphemeralParam(type="ephemeral")
+    ))
+
+# Layer 4: Skills (缓存，加载后稳定)
+for skill in active_skills:
+    system_prompt.append(TextBlockParam(
+        type="text",
+        text=f"## {skill.name}\n{skill.content}",
+        cache_control=CacheControlEphemeralParam(type="ephemeral")
+    ))
+
+# Layer 5: Session Memory (不缓存，每轮变化)
+system_prompt.append(TextBlockParam(
+    type="text",
+    text=f"## 会话状态\n{session_summary}"
+    # 没有 cache_control —— 每轮都变，缓存无意义
+))
+
+response = client.messages.create(
+    model="claude-sonnet-4-20250514",
+    system=system_prompt,  # 传入数组而不是字符串
+    messages=messages,
+    tools=tools
+)</code></pre>
+
+        <p>断点的位置选择是一门学问。Anthropic 官方透露，Claude Code 在生产中的缓存命中率达到了约 <strong>92%</strong>。这意味着每次 API 调用中，只有约 8% 的 system prompt token 需要重新计算——大部分都命中了缓存。这个比例是精心选择断点位置的结果。</p>
+
+        <p>来看实际的成本影响。假设 System Prompt 总长度为 6000 tokens（这是一个合理的估计），不缓存的话每次请求都要传输和处理这 6000 tokens。缓存命中率 92% 意味着每次请求只有 6000 × 8% = 480 tokens 需要重新处理。以 Claude Sonnet 4 的定价计算，一个 20 轮的 session 可以节省大约 6000 × 20 × 0.92 ≈ 110K tokens 的处理量——这不是小数目。</p>
+
+        <div class="tip">
+            <strong>Prompt Cache 使用技巧：</strong>在开发自己的 Agent 时，记住缓存断点的三个黄金法则：<br>
+            1. <strong>静态内容放前面</strong>：越少变化的内容越靠前，缓存命中概率越高<br>
+            2. <strong>断点不要太多</strong>：Anthropic 的 API 最多支持 4 个 <code>cache_control</code> 断点。超过这个数量后面的会失效<br>
+            3. <strong>变化的内容放最后</strong>：比如 Session Memory 放最后且不加 cache_control，确保它不会"污染"前面的缓存
+        </div>
+
+        <h2>SKILL.md 注入时机与懒加载</h2>
+
+        <p>Skills 是 Claude Code 中一个非常巧妙的设计。Claude Code 内置了 20+ 个预定义技能，覆盖了最常见的开发场景（React、Django、Docker、Git 等）。但注意一个关键事实：<strong>Skills 不是在启动时全部加载的——而是懒加载的</strong>。</p>
+
+        <p>触发技能加载的三种方式：</p>
+        <ul>
+            <li><strong>关键词匹配</strong>：用户的 Prompt 中包含技能相关的关键词（如 "docker" 触发 Docker 技能）</li>
+            <li><strong>工具调用关联</strong>：模型调用了与某个技能相关的工具</li>
+            <li><strong>用户显式引用</strong>：用户直接提到某个技能的名称</li>
+        </ul>
+
+        <p>Slash Command 是技能的一个特殊形式——比如你现在正在使用的 <code>/tutorial-publisher</code> 就是一个通过 Slash Command 触发的技能。它的加载时机是在用户输入 <code>/</code> 后触发自动补全时。</p>
+
+        <p>为什么 Skills 必须懒加载？原因很简单：<strong>上下文预算</strong>。Claude Code 的 System Prompt 如果一次性加载所有 20+ 个 Skill 的内容，至少会增加 5000-10000 tokens。考虑到大多数 session 只用到其中 1-3 个 Skill，提前加载所有内容纯粹是在浪费宝贵的上下文空间。懒加载让 Agent 可以把更多 token 预算留给实际的代码分析。</p>
+
+        <p>Skills 的懒加载机制由 <code>SkillTool</code> 管理，它本身是一个特殊的工具——当条件触发时，SkillTool 会向 System Prompt 中注入对应的技能内容。注入后的内容会通过 Prompt Cache 缓存，后续调用不再重复加载。</p>
+
+        <h2>Prompt 工程中的踩坑教训</h2>
+
+        <p>Claude Code 的 System Prompt 工程并非一帆风顺。以下是一些真实发生过的问题：</p>
+
+        <p><strong>坑 1：注入顺序导致的行为冲突</strong></p>
+        <p>如果 CLAUDE.md 中定义了一条"项目不使用 Docker"，而 Skills 层加载了 Docker 技能并告诉 Agent"使用 Docker 容器运行应用"，Agent 就会产生矛盾行为。Claude Code 的解决办法是高的层覆盖低的层——CLAUDE.md 的优先级高于自动加载的 Skills——但如果有多个 Skills 互相冲突，行为就不可预测了。</p>
+
+        <p><strong>坑 2：Cache 断点位置错误导致缓存命中率暴跌</strong></p>
+        <p>早期版本的 Claude Code 在 Session Memory 之前也设置了 <code>cache_control</code> 断点。这意味着一旦 Session Memory 变化（每轮对话都会变），整个前缀缓存就失效了——缓存命中率直接掉到个位数。Anthropic 花了一个版本才修复这个问题：Session Memory 不加缓存断点，让它成为"缓存屏障"之后的动态部分。</p>
+
+        <p><strong>坑 3：CLAUDE.md 内容过于冗长</strong></p>
+        <p>有些项目在 CLAUDE.md 中写了大量的设计文档、架构决策记录（ADR）甚至周报。这些内容对 Agent 编码没有帮助，但白白占用了上下文预算。我的建议是：CLAUDE.md 应该只包含 Agent 完成任务<strong>真正需要知道的</strong>信息——技术栈、代码规范、目录结构、常用命令。其他的内容放 README 就好。</p>
+
+        <div class="warning">
+            <strong>安全警告：SKILL.md 是 Prompt 注入攻击向量</strong><br><br>
+            如果第三方代码库包含恶意的 SKILL.md 或 CLAUDE.md 文件，这些文件的内容会被注入到 System Prompt 中——这是一个潜在的 Prompt 注入攻击面。恶意内容可以尝试让 Agent 执行危险命令、泄露敏感信息、或被 Social Engineering 引导做出不安全行为。<br><br>
+            <strong>防御措施：</strong>在运行来自不可信来源的项目时，手动检查 .claude/ 目录下的配置文件；不在 CLAUDE.md 中放置敏感信息（API Key、密码等）；使用 Claude Code 的信任策略（trust policy）对特定项目限制权限。
+        </div>
+
+        <h2>五层 Prompt 结构参考</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>层</th>
+                    <th>来源</th>
+                    <th>示例内容</th>
+                    <th>缓存策略</th>
+                    <th>典型 Token 数</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Layer 1: Base</td>
+                    <td>代码硬编码</td>
+                    <td>Claude Code 人设、通用规则、安全准则</td>
+                    <td>Prompt Cache（高命中）</td>
+                    <td>~2000</td>
+                </tr>
+                <tr>
+                    <td>Layer 2: CLI Context</td>
+                    <td>CLI 参数、环境变量</td>
+                    <td>模型选择、工作目录、平台信息</td>
+                    <td>Prompt Cache（session 内稳定）</td>
+                    <td>~200</td>
+                </tr>
+                <tr>
+                    <td>Layer 3: Project</td>
+                    <td>CLAUDE.md 文件</td>
+                    <td>技术栈、代码规范、常用命令</td>
+                    <td>Prompt Cache（项目不变则稳定）</td>
+                    <td>~500-2000</td>
+                </tr>
+                <tr>
+                    <td>Layer 4: Skills</td>
+                    <td>SKILL.md 文件</td>
+                    <td>框架/工具特定知识</td>
+                    <td>按需注入，注入后缓存</td>
+                    <td>~500-3000/个</td>
+                </tr>
+                <tr>
+                    <td>Layer 5: Session</td>
+                    <td>运行时生成</td>
+                    <td>当前任务摘要、已完成的步骤</td>
+                    <td>不缓存（每轮变化）</td>
+                    <td>~200-1000</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>本章小结</h2>
+
+        <p>这一章我们深入了 System Prompt 工程的方方面面：五层分层架构（Base / CLI / Project / Skills / Session）、每一层的作用和注入时机、Prompt Cache 断点策略如何通过精准放置 <code>cache_control</code> 达到 92% 的缓存命中率、Skills 的懒加载机制如何节省上下文预算、以及 Prompt 工程中踩过的真实大坑。你现在拥有的知识，不仅能够理解 Claude Code 为什么"表现这么好"，还能为自己开发的 Agent 设计同样专业的 System Prompt。</p>
+
+        <p>System Prompt 决定了 Agent 的"人设"，但真正驱动 Agent 行动的，是下一章的 QueryEngine 主循环。我们会把当前所有的知识——Tool Use 协议、四件套工具、System Prompt——放回到那个每天运转数万次的 queryLoop 中，看看它到底是如何组织和协调这一切的。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

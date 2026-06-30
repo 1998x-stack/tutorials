@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第5章 Tool Use 协议深度解析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html" class="active">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第5章 Tool Use 协议深度解析</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们建立了 Claude Code 的整体架构坐标系。这一章我们要扎进一个最关键的细节层——<strong>Tool Use 协议</strong>。</p>
+
+        <p>你可能已经在第 3 章的 v0 Agent 中见过 Tool Use 的基本模样——模型返回一个 <code>tool_use</code> block，我们把它分发给对应的工具执行函数。但生产级的 Tool Use 比这复杂得多：JSON Schema 怎么写才能让模型正确理解工具的用法？并行工具调用怎么处理？Streaming 模式下 <code>content_block_start</code> 和 <code>content_block_delta</code> 的事件顺序是什么？这些问题如果搞不明白，写出来的 Agent 就会在边界情况上频频出错。</p>
+
+        <p>有一次我在做一个 Refactoring Agent 时，连续遇到了 5 次 <code>stop_reason = "tool_use"</code> 但 response 里没有任何 <code>tool_use</code> block 的奇怪现象。当时我盯着终端愣了 10 秒钟，然后意识到——我对 Tool Use 协议的理解太粗浅了。这一章就是为了填补那些"你以为你知道，但其实不知道"的知识盲区。</p>
+
+        <h2>Tool Use 的 API 契约</h2>
+
+        <p>Tool Use 的本质是一种<strong>消息格式约定</strong>：模型在响应中请求调用工具，我们的代码在下一轮请求中将工具的返回结果回传。整个过程遵守一套严格的消息交替规则。</p>
+
+        <p>来看核心的数据结构。模型响应中的 <code>content</code> 数组可以包含两种类型的 block：</p>
+
+        <pre><code>// Assistant 发送的两种内容块
+{
+  "type": "text",
+  "text": "让我先看看这个文件的内容..."      // 模型在思考或给出文本回答
+}
+
+{
+  "type": "tool_use",
+  "id": "toolu_abc123",                      // 工具调用的唯一 ID
+  "name": "read",                             // 要调用的工具名
+  "input": { "file_path": "src/main.py" }     // 调用参数
+}</code></pre>
+
+        <p>我们的代码将 <code>tool_result</code> 回传给模型的格式：</p>
+
+        <pre><code>// User 发送的内容块（注意这里"role": "user"）
+{
+  "type": "tool_result",
+  "tool_use_id": "toolu_abc123",              // 关联到之前的 tool_use
+  "content": "def main():\n    print('hello')", // 工具执行结果
+  "is_error": false                           // 是否出错
+}</code></pre>
+
+        <p>交替规则非常严格：</p>
+        <ul>
+            <li>消息列表必须以 <strong>user 角色</strong>开头或结尾（不能以 assistant 结尾）</li>
+            <li>每次 <code>tool_use</code> 之后必须在下一轮用户消息中给出对应的 <code>tool_result</code></li>
+            <li><code>tool_use_id</code> 必须与之前 assistant 返回的 <code>id</code> 精确匹配</li>
+            <li>一轮中可以有多个 <code>tool_use</code> block，每个都需要独立的 <code>tool_result</code></li>
+        </ul>
+
+        <div class="warning">
+            <strong>常见陷阱：</strong>新手最容易犯的错误是忘记把 assistant 的完整 <code>content</code> 数组回填到消息列表中。你不仅需要回填 <code>tool_use</code> block，还需要回填同次响应中的 <code>text</code> block（如果有的话）。如果你只追加了 <code>tool_use</code> 而没有追加对应的 <code>text</code>，模型的上下文就会不完整，可能导致"失忆"或行为异常。
+        </div>
+
+        <h2>JSON Schema 定义最佳实践</h2>
+
+        <p>工具定义的质量直接决定了 Agent 的行为质量。一个定义糟糕的工具会让模型频繁误用、调用参数错误、或者根本不知道什么时候该用这个工具。请记住以下原则：</p>
+
+        <p><strong>好的 description 告诉模型 WHEN 和 WHY 使用该工具</strong>，而不是仅仅描述 WHAT 它做。对比下面两个定义：</p>
+
+        <pre><code>// 坏的例子：太平淡
+{
+  "name": "read",
+  "description": "读取文件",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "file_path": { "type": "string" }
+    },
+    "required": ["file_path"]
+  }
+}
+
+// 好的例子：告诉模型何时使用
+{
+  "name": "read",
+  "description": "读取指定文件的全部或部分内容。当你需要查看源代码、配置文件、日志文件或任何文本文件时使用。支持行号偏移和行数限制，适合查看大文件的部分内容。对于二进制文件会自动检测并返回提示信息。",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "要读取的文件的绝对路径或相对于工作目录的路径"
+      },
+      "offset": {
+        "type": "number",
+        "description": "从第几行开始读取（从 0 开始），不传则从文件开头读取"
+      },
+      "limit": {
+        "type": "number",
+        "description": "最多读取多少行，不传则读取全部"
+      }
+    },
+    "required": ["file_path"]
+  }
+}</code></pre>
+
+        <p>关键要点：</p>
+        <ul>
+            <li><strong>工具名</strong>必须是唯一的、语义清晰的动词（如 <code>read</code>、<code>write</code>、<code>edit</code>），不要用模糊的名词（如 <code>file_operation</code>）</li>
+            <li><strong>描述</strong>中要用场景化的语言告诉模型"什么情况下该用这个工具"</li>
+            <li><strong>参数描述</strong>要给出具体的值格式提示（如"绝对路径或相对路径"、"从 0 开始的行号"）</li>
+            <li><strong>必填参数</strong>要精确——不要把可选参数设置成必填，这会导致模型在不必要的时候被迫提供值</li>
+        </ul>
+
+        <h2>并行工具调用机制</h2>
+
+        <p>Anthropic API 支持在单次响应中返回多个 <code>tool_use</code> block。这对于需要同时执行多个独立操作的场景非常有用——比如同时查看多个文件的内容、在多个目录中执行搜索。</p>
+
+        <p>当模型返回多个 <code>tool_use</code> block 时，我们的处理逻辑应该是并行执行它们：</p>
+
+        <pre><code>import asyncio
+
+async def handle_parallel_tools(response):
+    """并行执行同一个响应中的多个工具调用"""
+    tool_blocks = [b for b in response.content if b.type == "tool_use"]
+
+    if not tool_blocks:
+        return
+
+    # 将所有工具调用打包成异步任务
+    async def execute_one(block):
+        result = await execute_tool(block.name, block.input)
+        return (block.id, result)
+
+    tasks = [execute_one(b) for b in tool_blocks]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 构造 tool_result block
+    tool_results = []
+    for block, (tool_id, result) in zip(tool_blocks, results):
+        if isinstance(result, Exception):
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_id,
+                "content": f"Error: {str(result)}",
+                "is_error": True
+            })
+        else:
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_id,
+                "content": result
+            })
+
+    return tool_results</code></pre>
+
+        <p>并行执行的关键注意事项：</p>
+        <ul>
+            <li><strong>独立工具才能并行</strong>：如果工具 A 的输出是工具 B 的输入（比如先创建目录再写文件），则必须串行执行。目前的 API 不会告诉你哪些调用有依赖关系——需要模型自己通过消息顺序来管理</li>
+            <li><strong>部分失败的处理</strong>：一个工具调用失败不应该影响其他工具的执行。<code>return_exceptions=True</code> 确保一个失败不会引发 <code>gather</code> 整体崩溃</li>
+            <li><strong>并发限制</strong>：如果同时有 20 个工具调用，你的系统能处理吗？需要设置信号量限制并发数</li>
+        </ul>
+
+        <h2>Streaming 模式下的工具调用处理</h2>
+
+        <p>Claude Code 默认使用 Streaming 模式——你不必等到完整响应生成后再处理，而是可以逐块处理到达的事件。这对长响应特别重要（比如模型在返回大量工具调用的同时输出很长的分析文本）。</p>
+
+        <p>Streaming 模式下，工具调用相关的事件序列如下：</p>
+
+        <pre><code># Streaming 事件序列（工具调用场景）
+1. message_start            # 消息开始，包含消息级别的元数据
+2. content_block_start      # 第一个内容块开始（可能是 text 或 tool_use）
+   ├─ index: 0, type: "text"
+3. content_block_delta      # 文本内容逐块到达
+   ├─ index: 0, delta: { text: "让我查..." }
+   ...
+4. content_block_stop       # 第一个内容块结束
+5. content_block_start      # 第二个内容块开始
+   ├─ index: 1, type: "tool_use", id: "toolu_xxx", name: "read"
+   └─ input: {}              # input 初始为空对象
+6. content_block_delta      # input JSON 逐块到达
+   ├─ index: 1, delta: { partial_json: '{"file' }
+   ...
+7. content_block_stop       # 第二个内容块结束（input 完整了）
+8. message_delta            # 消息级别更新（stop_reason, usage）
+   ├─ stop_reason: "tool_use"
+9. message_stop             # 消息结束</code></pre>
+
+        <p>处理 streaming 工具调用的关键是要实现一个<strong>状态机</strong>来跟踪每个 content block 的构建进度：</p>
+
+        <pre><code>class StreamingToolParser:
+    """解析 streaming 响应中的工具调用"""
+
+    def __init__(self):
+        self.blocks = {}       # index -> block 状态
+        self.active_index = None
+
+    def handle_event(self, event):
+        event_type = event.type
+
+        if event_type == "content_block_start":
+            idx = event.index
+            block = event.content_block
+            if block.type == "tool_use":
+                self.blocks[idx] = {
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input or {},
+                    "partial_input": ""   # 累积 partial_json
+                }
+            else:
+                self.blocks[idx] = {
+                    "type": "text",
+                    "text": ""
+                }
+            self.active_index = idx
+
+        elif event_type == "content_block_delta":
+            idx = event.index
+            delta = event.delta
+            block = self.blocks[idx]
+
+            if block["type"] == "tool_use":
+                # 累积 partial JSON
+                block["partial_input"] += delta.partial_json
+            elif block["type"] == "text":
+                block["text"] += delta.text
+
+        elif event_type == "content_block_stop":
+            idx = event.index
+            block = self.blocks[idx]
+            if block["type"] == "tool_use":
+                # 解析完整的 JSON input
+                if block["partial_input"]:
+                    block["input"] = json.loads(block["partial_input"])
+                block.pop("partial_input")
+            self.active_index = None
+
+        elif event_type == "message_delta":
+            # 最终确认 stop_reason
+            self.stop_reason = event.delta.stop_reason
+            self.usage = event.usage
+
+    def get_tool_calls(self):
+        """返回所有完成的 tool_use blocks"""
+        return [
+            b for b in self.blocks.values()
+            if b["type"] == "tool_use"
+        ]</code></pre>
+
+        <p>注意一个关键细节：<strong>tool_use 的 <code>input</code> 是以 partial JSON 流式到达的</strong>。你不能在收到 <code>content_block_start</code> 事件时就读取 <code>block.input</code>——它在开始时刻是空对象 <code>{}</code>。你必须等待所有 <code>content_block_delta</code> 事件完成后，在 <code>content_block_stop</code> 时才能拿到完整的 <code>input</code>。</p>
+
+        <h2>工具调用中的踩坑实录</h2>
+
+        <p>以下是我在实际开发 Agent 过程中遇到过的几个最棘手的问题，每个都花了至少半天才定位到根因。</p>
+
+        <p><strong>坑 1：tool_use_id 不匹配</strong></p>
+        <p><code>tool_use_id</code> 由模型在响应中生成，你必须原样返回。如果你在构造 <code>tool_result</code> 时拼写错误（例如复制了错误的 ID），API 会返回一个 Invalid Request 错误。这个错误消息有时候不太明确，很容易让人误以为是别的 bug。</p>
+
+        <p><strong>坑 2：tool_result 内容过大</strong></p>
+        <p>某些工具调用会返回大量数据——比如读取一个几千行的日志文件、或者递归列出整个项目目录。Anthropic API 对 <code>tool_result</code> 的内容大小有限制（约 5MB）。如果超过限制，API 会返回错误。解决方案是<strong>在工具执行端就做好截断</strong>，确保返回给模型的数据不超过 1-2MB。模型通常不需要看到完整的 5000 行文件——给它前 100 行和后 100 行加上"中间省略了 N 行"的提示就够了。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>有一次我的 Agent 在处理一个大型前端项目时，Read 工具返回了整个 node_modules 的 package.json 文件内容。这个文件虽然不大，但 grep 匹配到的结果列表特别长。tool_result 瞬间飙到了 8MB，API 直接返回了 413 Payload Too Large。更糟的是，这个错误发生在 Agent 跑了 20 多轮之后，所有之前的上下文都浪费了。从那以后，我强制所有工具的输出上限为 100KB——宁可让模型多问一次，也不冒丢失上下文的风险。
+        </div>
+
+        <p><strong>坑 3：stop_reason 是 "tool_use" 但 content 里没有 tool_use block</strong></p>
+        <p>这种情况通常发生在 response 中只包含 <code>text</code> block 但 <code>stop_reason</code> 仍然是 <code>"tool_use"</code> 的时候。虽然罕见（据观察大约 1/500 次调用），但确实会发生。你的代码必须处理这种情况，否则会陷入死循环——一直以为有 <code>tool_use</code> 但永远找不到。</p>
+
+        <h2>Tool Use API 字段参考</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Block 类型</th>
+                    <th>字段</th>
+                    <th>类型</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>tool_use</code></td>
+                    <td><code>id</code></td>
+                    <td><code>string</code></td>
+                    <td>唯一标识符，格式 <code>toolu_xxx</code>，用于关联 tool_result</td>
+                </tr>
+                <tr>
+                    <td><code>tool_use</code></td>
+                    <td><code>name</code></td>
+                    <td><code>string</code></td>
+                    <td>工具名称，必须匹配工具定义中的 name</td>
+                </tr>
+                <tr>
+                    <td><code>tool_use</code></td>
+                    <td><code>input</code></td>
+                    <td><code>object</code></td>
+                    <td>工具调用参数，必须符合工具定义的 input_schema</td>
+                </tr>
+                <tr>
+                    <td><code>tool_result</code></td>
+                    <td><code>tool_use_id</code></td>
+                    <td><code>string</code></td>
+                    <td>关联的 tool_use 的 id</td>
+                </tr>
+                <tr>
+                    <td><code>tool_result</code></td>
+                    <td><code>content</code></td>
+                    <td><code>string | array</code></td>
+                    <td>执行结果，可以是文本字符串或内容块数组</td>
+                </tr>
+                <tr>
+                    <td><code>tool_result</code></td>
+                    <td><code>is_error</code></td>
+                    <td><code>boolean</code></td>
+                    <td>标记工具执行是否出错，默认为 false</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>本章小结</h2>
+
+        <p>这一章我们深入了 Tool Use 协议的每一个角落：消息交替规则、JSON Schema 最佳实践、并行调用与 Streaming 处理、以及真实踩坑案例。理解这些细节是开发健壮 Agent 的基础——因为 Tool Use 是你和模型之间唯一的通信渠道，这个渠道上的任何"毛刺"都会直接表现为 Agent 的行为异常。</p>
+
+        <p>下一章我们将进入另一个 BUILD 环节——基于本章对 Tool Use 协议的理解，动手实现生产级的"四件套工具"（Bash / Read / Write / Edit），并将它们与第 3 章的 v0 Agent 合体，升级出真正的 v1 Coding Agent。</p>
+
+        <div class="footer-nav">
+            <a href="04.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="06.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 Claude Code 顶层架构拆解</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html" class="active">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第4章 Claude Code 顶层架构拆解</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们用 50 行代码跑通了一个最简 Agent Loop。这证明了核心循环本身并不复杂。但接下来的问题是：如果核心循环就这么几行，那 Claude Code 的几十万行代码到底写了什么？</p>
+
+        <p>我自己在早期也带着这个疑问，花了两周时间反复阅读社区逆向工程的成果，才慢慢拼凑出全貌。这一章我会把你需要知道的核心架构一次性讲清楚——四层模型、七大组件、启动流程、以及最重要的 <strong>12 层渐进式 Harness Stack</strong>。这个架构图景将贯穿课程剩余的所有章节，它是我们理解 Claude Code 一切设计的坐标系。</p>
+
+        <h2>代码全景：60 万行 TypeScript 长什么样</h2>
+
+        <p>Claude Code 的核心代码库是一个庞大的 TypeScript 单体仓库（monorepo），包含大约 60 万行代码（不含 node_modules 和生成的 bundle）。这个数字听起来很吓人，但它不是 60 万行"一个文件"——而是按职责清晰地组织在多个目录中。</p>
+
+        <p>从入口角度看，Claude Code 支持四种运行模式——每种模式共享核心逻辑，但有不同的界面层：</p>
+
+        <ul>
+            <li><strong>CLI 模式</strong>（最常用）：通过终端命令 <code>claude</code> 启动，使用 Ink（React for Terminal）渲染交互界面</li>
+            <li><strong>IDE 扩展模式</strong>：集成到 VS Code 等编辑器，提供侧边栏和命令面板</li>
+            <li><strong>SDK 模式</strong>：通过 Anthropic SDK 调用 Claude Code 的功能，用于自定义集成</li>
+            <li><strong>Headless 模式</strong>：无 UI，非交互式运行，适合 CI/CD 流水线</li>
+        </ul>
+
+        <p>代码的运行环境是 Bun——它既不是 Node.js，也不是 Deno。Anthropic 选择了 Bun 做运行时，主要看中了它的性能（比 Node.js 快 2-4 倍）和内置的 TypeScript 支持。UI 层使用 React + Ink，这就是为什么你在终端中看到的彩色、交互式界面——它本质上是一个 React 应用，只是渲染在终端里。</p>
+
+        <h2>四层架构模型</h2>
+
+        <p>Claude Code 的整体架构可以抽象为四个层次。从最外层到最内层分别是：</p>
+
+        <pre><code>┌─────────────────────────────────────────┐
+│  Layer 1: UI Layer                       │
+│  (CLI / IDE / SDK / Headless interfaces) │
+├─────────────────────────────────────────┤
+│  Layer 2: QueryEngine (Agent Loop)       │
+│  (Task planning, tool dispatch,          │
+│   context management, sub-agent)         │
+├─────────────────────────────────────────┤
+│  Layer 3: Tools & Tasks                  │
+│  (54 built-in tools, permission system,  │
+│   Todos, Skills)                         │
+├─────────────────────────────────────────┤
+│  Layer 4: Infrastructure                 │
+│  (MCP protocol, Bridge extensions,       │
+│   shell sandbox, persistence)            │
+└─────────────────────────────────────────┘</code></pre>
+
+        <ul>
+            <li><strong>UI Layer</strong>（表现层）：负责与用户交互，将用户的输入转发给 QueryEngine，将 Agent 的输出渲染给用户。不同入口（CLI / IDE / SDK / Headless）共享同一个 QueryEngine 实例</li>
+            <li><strong>QueryEngine</strong>（引擎层）：整个 Agent 的大脑。它运行着主循环（queryLoop），调度工具调用，管理上下文窗口，触发 Sub-Agent 和压缩。这是 Claude Code 最复杂的组件</li>
+            <li><strong>Tools & Tasks</strong>（工具层）：包含 54 个内置工具（Bash、Read、Write、Edit、Grep 等）和任务管理（Todo 列表、Sub-Agent 调度）。权限系统在这一层对每个工具调用进行审查</li>
+            <li><strong>Infrastructure</strong>（基础设施层）：提供 Agent 运行所需的基础能力——MCP 协议用于与外部服务通信，Bridge 用于 VS Code 集成，shell 沙箱提供安全的命令执行环境，JSONL 文件用于持久化对话状态</li>
+        </ul>
+
+        <h2>七组件拆解</h2>
+
+        <p>在四层架构的每一个层面中，有几个核心组件值得单独拿出来讲清楚。</p>
+
+        <h4>1. Interfaces（四种入口模式）</h4>
+        <p>Claude Code 提供了四种不同的入口点，但核心逻辑完全复用。CLI 模式使用 Ink 终端渲染，IDE 模式通过 VS Code Extension API 提供侧边栏 UI。SDK 模式允许你将 Claude Code 作为库嵌入到自己的工具中。Headless 模式则在后台运行，适合 CI/CD 场景。入口层的切换几乎不会影响 Agent 的行为——这是良好架构设计的标志。</p>
+
+        <h4>2. Agent Loop（queryLoop）</h4>
+        <p>这就是我们上一章用 50 行代码复现的东西，但 Claude Code 的版本要复杂得多。它在每一轮循环中嵌入了一系列"钩子"（hooks）：前置检查（权限审批）、后置处理（上下文压缩）、条件分支（Sub-Agent 调度）。这些钩子使得循环不再是简单的"调用模型 -> 执行工具"，而是一个高度可扩展的管道。</p>
+
+        <h4>3. Permission System（7 种审批模式 + ML 分类器）</h4>
+        <p>权限系统是 Claude Code 最被低估的设计之一。对于每个工具调用，系统会根据工具的"危险等级"和用户的历史行为，自动决定是放行、询问还是拒绝。危险等级从"完全无害"（如读取当前目录）到"高危操作"（如修改系统文件、安装未知包）。此外还有基于 ML 的"可疑命令检测器"，用于识别混淆脚本和 Social Engineering 攻击。</p>
+
+        <h4>4. Tools（54 个内置工具 + MCP 扩展）</h4>
+        <p>Claude Code 内置了 54 个工具，覆盖了编码、调试、项目管理、网络通信等各个方面。但更重要是它的扩展机制——MCP（Model Context Protocol）允许任何人编写自定义工具。这也是为什么 MCP 被广泛认为是 Claude Code 对整个行业最深远的技术贡献。</p>
+
+        <h4>5. State & Persistence（JSONL 对话记录）</h4>
+        <p>Claude Code 将每一轮对话（完整请求-响应周期）以 JSONL 格式持久化到 <code>.claude/transcripts/</code> 目录。每个文件就是一个 session 的完整记录，包含所有 tool_use 和 tool_result。这些记录不仅用于"历史回顾"，也被用于上下文压缩和 Sub-Agent 状态重建。</p>
+
+        <h4>6. Execution Environment（Shell 沙箱）</h4>
+        <p>Bash 工具并不是简单调用 <code>subprocess.run</code>。它运行在一个受限的 Shell 环境中，包含超时限制、输出截断、环境变量隔离。所有命令执行前都会经过权限系统的审查。这部分我们会在第 17 章详细讲解。</p>
+
+        <h4>7. Extensions（MCP / Bridge）</h4>
+        <p>MCP 是 Anthropic 推出的开放协议，允许第三方服务以标准化方式向 Claude Code 提供工具。Bridge 是专门用于 VS Code 集成的协议层，负责在编辑器和 Terminal Agent 之间建立双向通信。</p>
+
+        <h2>启动流程全链路</h2>
+
+        <p>当你输入 <code>claude</code> 命令后，到 Agent 准备好接收你的第一个问题之前，发生了什么？完整的启动流程如下：</p>
+
+        <pre><code>Step 1: CLI 参数解析
+  └─ 解析 --model, --max-tokens, --system-prompt 等参数
+  └─ 检查是否有 --help, --version 等快捷标志
+
+Step 2: 配置文件加载
+  └─ 读取 ~/.claude/settings.json（全局配置）
+  └─ 读取 .claude/settings.json（项目级配置，覆盖全局）
+  └─ 检查 settings.local.json（本地敏感配置，不提交 Git）
+
+Step 3: MDM（Managed Device Mode）检查
+  └─ 企业用户：检查 MDM 策略，确定哪些功能被限制
+  └─ 检查是否允许网络访问、文件操作、命令执行
+
+Step 4: 认证
+  └─ 检查 ANTHROPIC_API_KEY 环境变量
+  └─ 如果未设置，提示用户登录或输入 Key
+  └─ API Key 验证：发送一个轻量请求检查有效性
+
+Step 5: 项目检测
+  └─ 检查当前目录是否是 Git 仓库
+  └─ 读取 CLAUDE.md（项目级知识库）
+  └─ 扫描项目文件结构（语言/框架检测）
+
+Step 6: System Prompt 组装
+  └─ 基础 Prompt（硬编码的 Claude Code "人设"）
+  └─ 叠加 CLI 参数中的自定义 Prompt
+  └─ 追加 CLAUDE.md 内容
+  └─ 追加已加载的 Skills 内容
+
+Step 7: Warmup 调用（Haiku 额度检查）
+  └─ 用最快的模型（Claude Haiku）发一条测试请求
+  └─ 验证 API Key 有足够额度
+  └─ 预热连接池，减少第一轮真实请求的延迟
+
+Step 8: 就绪
+  └─ 显示交互界面，等待用户输入</code></pre>
+
+        <p>整个过程通常在 2-3 秒内完成。最耗时的步骤是 Step 6（System Prompt 组装，尤其是如果项目中有一个很大的 CLAUDE.md）和 Step 7（Warmup 调用，需要一次网络往返）。</p>
+
+        <div class="highlight">
+            <strong>实战洞察：</strong>如果你使用 <code>claude --model claude-sonnet-4</code> 指定模型，Warmup 依然使用 Haiku——不是因为 Haiku 的额度用不完，而是因为 Warmup 的唯一目的是"验证连接"，不需要用主模型来增加成本和延迟。这个"用小模型做预检"的模式在很多 Agent 系统中都能看到。
+        </div>
+
+        <h2>12 层渐进式 Harness Stack 详解</h2>
+
+        <p>现在到了这一章最重要的部分。社区通过对 Claude Code 源代码的逆向工程，识别出了一个清晰的 <strong>12 层渐进式架构</strong>。这 12 层从最基础的 Agent Loop 一直延伸到高度自主化的多 Agent 协作。每一层解决一个特定的问题，层层叠加，互不耦合。</p>
+
+        <p>我可以直接告诉你结论：<strong>这 12 层不是一次性设计出来的，而是在实战中一层层叠加的——每一层解决一个真实痛点。</strong>这解释了为什么 Claude Code 的架构看起来如此"干净"——它没有过度设计，每一层都是被实际问题逼出来的。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>层</th>
+                    <th>机制</th>
+                    <th>核心功能</th>
+                    <th>相关章节</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>s01</td>
+                    <td>Agent Loop</td>
+                    <td>消息循环、工具分发、stop_reason 检测</td>
+                    <td>第3章, 第8章</td>
+                </tr>
+                <tr>
+                    <td>s02</td>
+                    <td>Tool Dispatch</td>
+                    <td>工具注册、参数校验、结果格式化、错误处理</td>
+                    <td>第5章, 第6章</td>
+                </tr>
+                <tr>
+                    <td>s03</td>
+                    <td>Planning</td>
+                    <td>Todo 任务列表自动分解与执行追踪</td>
+                    <td>第9章</td>
+                </tr>
+                <tr>
+                    <td>s04</td>
+                    <td>Sub-Agents</td>
+                    <td>子 Agent 并行执行独立子任务</td>
+                    <td>第12章, 第13章</td>
+                </tr>
+                <tr>
+                    <td>s05</td>
+                    <td>Knowledge on Demand</td>
+                    <td>Skills 懒加载、CLAUDE.md 注入时机管理</td>
+                    <td>第7章, 第14章, 第21章</td>
+                </tr>
+                <tr>
+                    <td>s06</td>
+                    <td>Context Compression</td>
+                    <td>自动摘要、历史丢弃、Token 预算管理</td>
+                    <td>第10章, 第11章</td>
+                </tr>
+                <tr>
+                    <td>s07</td>
+                    <td>Persistent Tasks</td>
+                    <td>长时运行任务的状态持久化与恢复</td>
+                    <td>第26章</td>
+                </tr>
+                <tr>
+                    <td>s08</td>
+                    <td>Background Tasks</td>
+                    <td>Agent 在后台继续执行，用户可同时做其他事</td>
+                    <td>第26章</td>
+                </tr>
+                <tr>
+                    <td>s09</td>
+                    <td>Agent Teams</td>
+                    <td>多 Agent 协作，共享上下文和工具</td>
+                    <td>第22章</td>
+                </tr>
+                <tr>
+                    <td>s10</td>
+                    <td>Team Protocols</td>
+                    <td>Agent 间通信协议、任务分配、冲突解决</td>
+                    <td>第22章</td>
+                </tr>
+                <tr>
+                    <td>s11</td>
+                    <td>Autonomous Agents</td>
+                    <td>Agent 自主决策权限，减少人类干预</td>
+                    <td>第15章, 第16章</td>
+                </tr>
+                <tr>
+                    <td>s12</td>
+                    <td>Worktree Isolation</td>
+                    <td>Git worktree 隔离、环境沙箱化</td>
+                    <td>第17章</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这个 12 层堆栈有一个非常重要的特性：<strong>每一层都可以单独启用或关闭</strong>。你可以只用 s01 + s02 做一个简单的 ReAct Agent（就像我们上一章的 v0），也可以全开 12 层获得 Claude Code 全部能力。这种渐进式设计使得系统既适合快速原型开发，也能支撑生产级高强度使用。</p>
+
+        <p>如果我们把这 12 层放到代码层面的 queryLoop 中，看起来像这样：</p>
+
+        <pre><code>// queryLoop 伪代码（含 12 层钩子）
+async function queryLoop(task, config) {
+    let messages = [{ role: "user", content: task }];
+
+    while (!done) {
+        // s05: 按需加载 Knowledge
+        if (config.knowledgeOnDemand)
+            await loadRelevantSkills(messages);
+
+        // s06: 上下文压缩（必要时）
+        if (config.contextCompression && contextTooLong(messages))
+            messages = await compressContext(messages);
+
+        // s01: 核心 LLM 调用
+        const response = await client.messages.create({
+            model: config.model, messages, tools: config.tools
+        });
+
+        if (response.stop_reason === "tool_use") {
+            for (const block of response.content) {
+                if (block.type !== "tool_use") continue;
+
+                // s11: 权限检查
+                if (config.permissionSystem)
+                    await checkPermission(block);
+
+                // s02: 工具分发 + 执行
+                const result = await dispatchTool(block);
+
+                messages.push(contentBlock(block), toolResult(result));
+
+                // s03: Todo 规划器更新
+                if (config.planning)
+                    await updateTodoList(block, result);
+            }
+
+            // s04: Sub-Agent 触发条件检查
+            if (config.subAgents && shouldSpawnSubAgent(messages))
+                messages = await spawnSubAgent(task, messages);
+
+            // s06: 流式后压缩
+            if (config.streamingCompression)
+                messages = await streamingCompress(messages);
+        } else {
+            done = true;
+        }
+    }
+    return messages;
+}</code></pre>
+
+        <p>注意这个伪代码中的 <code>if (config.xxx)</code> 检查——每一层都可以独立开关。在实际代码中，这些"钩子"是通过事件驱动（Event Emitter）模式注册的，底层循环并不知道具体有哪些钩子存在。这保持了核心循环的简洁性，同时允许上层自由扩展。</p>
+
+        <h2>本章小结</h2>
+
+        <p>这一章我们从宏观视角审视了 Claude Code 的架构全景：四层架构模型（UI → QueryEngine → Tools → Infrastructure）、七大组件（Interfaces / Agent Loop / Permission / Tools / State / Sandbox / Extensions）、启动全流程（8 个步骤）、以及最重要的 12 层渐进式 Harness Stack。这个架构坐标系会指导课程剩余的所有章节——每一章都会深入讲解 12 层中的某一层或某几层。</p>
+
+        <p>下一章我们将深入 s02——Tool Dispatch 层。你会理解 Tool Use 的 API 契约是如何被设计的，以及为什么 JSON Schema 的质量直接影响 Agent 的行为。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

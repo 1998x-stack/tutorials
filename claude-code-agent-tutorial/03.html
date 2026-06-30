@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 从零实现最简 Agent Loop</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html" class="active">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>🔨 第3章 从零实现最简 Agent Loop</h2>
+
+        <p>大家好，我是你们的讲师。在上一章我们搭建了逆向工具链，算是拿到了"解剖刀"。但说实话，光会拆不会建，理解和学习都是不完整的。这一章我们来换个角度——从零开始写一个最简的 Agent，亲手把那个核心循环跑通。</p>
+
+        <p>2025 年 Arize AI 的那份报告提到一个让我印象深刻的数字：<strong>一个完整 Coding Agent 里，调用模型的代码只有大约 50 行</strong>。今天我们就要亲手验证这一点——用 50 行 Python 代码，实现一个能真正工作的 Agent。不是说压缩到 50 行是面试题，而是说，去掉所有工程化包装后，Agent 最本质的那个循环真的就这么简单。</p>
+
+        <h2>Agent Loop 的最小定义</h2>
+
+        <p>在动手写代码之前，我们先搞清楚一个问题：<strong>到底什么才算一个 Agent？</strong></p>
+
+        <p>学术界和工业界有各种复杂的定义，但作为一个务实的工程师，我的定义很简单：一个系统只要满足三个条件，就是 Agent——</p>
+
+        <ul>
+            <li><strong>接收输入</strong>：理解人类的自然语言指令</li>
+            <li><strong>调用 LLM</strong>：基于当前上下文生成下一步行动决策</li>
+            <li><strong>执行行动</strong>：根据模型的输出，调用工具、观察结果、形成新上下文</li>
+        </ul>
+
+        <p>把三件事串成一个循环，就是 <strong>Agent Loop</strong>。伪代码如下：</p>
+
+        <pre><code># Agent Loop 最低限度伪代码
+messages = [{"role": "user", "content": task}]
+
+while not done:
+    # 1. 调用 LLM，获取响应
+    response = client.messages.create(
+        model="claude-sonnet-4",
+        messages=messages,
+        tools=[...]  # 注册可用工具
+    )
+
+    # 2. 检查响应：是工具调用还是最终回答
+    if response.stop_reason == "tool_use":
+        for block in response.content:
+            if block.type == "tool_use":
+                # 3. 执行工具
+                result = execute_tool(block.name, block.input)
+                # 4. 将结果附加到消息列表
+                messages.append(tool_result_block(result))
+    else:
+        # 模型给出了最终回答，循环结束
+        done = True
+        print(response.content[0].text)</code></pre>
+
+        <p>就是这样。一个 while 循环，一个 if-else 分支，两端 API 调用（模型端 + 工具执行端）。Agent 的神秘面纱瞬间就揭开了。</p>
+
+        <h2>环境准备与 API Key 配置</h2>
+
+        <p>在写代码之前，先准备好 Python 环境和 API Key：</p>
+
+        <pre><code># 创建项目目录
+mkdir -p ~/projects/mini-agent
+cd ~/projects/mini-agent
+
+# 创建虚拟环境
+python -m venv venv
+source venv/bin/activate
+
+# 安装依赖
+pip install anthropic python-dotenv</code></pre>
+
+        <p>配置 API Key。创建一个 <code>.env</code> 文件：</p>
+
+        <pre><code># .env
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxx</code></pre>
+
+        <p>注意：如果你是从 <a href="https://console.anthropic.com">console.anthropic.com</a> 获取的 API Key，确保你有访问 Claude Sonnet 4 或 Opus 4 的权限。对于本教程中的练习，Sonnet 4 足够用了，性价比也最高。</p>
+
+        <p>创建项目结构：</p>
+
+        <pre><code>mini-agent/
+  ├── .env
+  ├── v0_agent.py       # 我们这一章要写的文件
+  └── venv/</code></pre>
+
+        <h2>实现 v0：50 行 Bash Agent</h2>
+
+        <p>好，到了真正写代码的时候了。下面这个 <code>v0_agent.py</code> 只做一件事：它可以听懂你的自然语言指令，然后通过执行 Bash 命令来完成它。</p>
+
+        <pre><code>"""v0_agent.py — 最简 Bash Agent (50 行)"""
+
+import os
+import subprocess
+import json
+from dotenv import load_dotenv
+from anthropic import Anthropic
+
+load_dotenv()
+client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+# ===== 工具定义 =====
+TOOLS = [
+    {
+        "name": "bash",
+        "description": "执行 shell 命令，支持任意合法的 bash 命令",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "要执行的 bash 命令"
+                }
+            },
+            "required": ["command"]
+        }
+    }
+]
+
+# ===== 工具执行 =====
+def execute_tool(name, input_data):
+    if name == "bash":
+        result = subprocess.run(
+            input_data["command"],
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        output = ""
+        if result.stdout:
+            output += result.stdout
+        if result.stderr:
+            output += f"[stderr]\n{result.stderr}"
+        if result.returncode != 0:
+            output += f"\n[exit code: {result.returncode}]"
+        return output
+    raise ValueError(f"Unknown tool: {name}")
+
+# ===== Agent Loop =====
+def agent_loop(task, max_turns=10):
+    messages = [{"role": "user", "content": task}]
+
+    for turn in range(max_turns):
+        print(f"\n--- Turn {turn + 1} ---")
+
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            system="你是一个 Bash 助手。使用 bash 工具执行命令来完成任务。"
+                  "每次调用工具后观察结果，决定下一步。完成后直接给出总结。",
+            messages=messages,
+            tools=TOOLS
+        )
+
+        if response.stop_reason == "tool_use":
+            for block in response.content:
+                if block.type == "tool_use":
+                    print(f"🧰 调用工具: {block.name}({json.dumps(block.input)})")
+                    result = execute_tool(block.name, block.input)
+                    print(f"📋 结果:\n{result[:500]}")
+                    messages.append({
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", **block.model_dump()}]
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result",
+                             "tool_use_id": block.id,
+                             "content": result}
+                        ]
+                    })
+        else:
+            # stop_reason 为 end_turn 或其他，视为最终回答
+            for block in response.content:
+                if block.type == "text":
+                    print(f"🤖 {block.text}")
+            break
+    else:
+        print("⚠️ 达到最大对话轮次，强制结束")
+
+if __name__ == "__main__":
+    task = input("请输入任务: ")
+    agent_loop(task)</code></pre>
+
+        <p>这段代码其实做了四件简单的事：</p>
+
+        <ul>
+            <li><strong>工具定义</strong>：通过 JSON Schema 告诉模型它可以调用哪些工具（目前只有一个 bash）</li>
+            <li><strong>工具执行</strong>：接收模型的工具调用指令，用 <code>subprocess.run</code> 执行命令</li>
+            <li><strong>循环管理</strong>：把模型响应（tool_use blocks）和执行结果（tool_result blocks）追加到消息列表，形成持续对话</li>
+            <li><strong>终止检测</strong>：当 <code>stop_reason</code> 不是 <code>"tool_use"</code> 时，认为模型给出了最终回答，结束循环</li>
+        </ul>
+
+        <h2>首次运行与行为分析</h2>
+
+        <p>保存文件后运行：</p>
+
+        <pre><code>python v0_agent.py</code></pre>
+
+        <p>输入一个简单的任务测试，比如 <strong>"列出当前目录的文件"</strong>。你会看到类似这样的输出：</p>
+
+        <pre><code>--- Turn 1 ---
+🧰 调用工具: bash({"command": "ls -la"})
+📋 结果:
+总用量 32
+drwxr-xr-x  4 user user  128 Jun 30 10:00 .
+drwxr-xr-x 10 user user  320 Jun 30 09:55 ..
+-rw-r--r--  1 user user   51 Jun 30 09:55 .env
+drwxr-xr-x  2 user user 4096 Jun 30 09:55 __pycache__
+-rw-r--r--  1 user user 2460 Jun 30 10:00 v0_agent.py
+
+--- Turn 2 ---
+🤖 当前目录下共有以下文件：
+- .env（环境配置文件）
+- v0_agent.py（我们的 Agent 脚本）
+- __pycache__（Python 缓存目录）
+
+这些就是目录中的全部内容。</code></pre>
+
+        <p>注意观察 Agent Loop 是如何工作的：</p>
+
+        <ul>
+            <li><strong>Turn 1</strong>：模型收到"列出文件"的指令，决定调用 bash 工具，参数 <code>{"command": "ls -la"}</code>。工具执行后返回了目录列表</li>
+            <li><strong>Turn 2</strong>：模型看到了工具执行的结果，认为任务已完成，于是直接输出文本回答，不再调用工具。循环结束</li>
+        </ul>
+
+        <p>这就是一个完整的 ReAct 循环——思考（要执行 ls 命令）、行动（执行 bash）、观察（看输出）、总结（给出回答）。只有两个回合，但麻雀虽小五脏俱全。</p>
+
+        <p>再试一个更复杂的任务，比如 <strong>"创建一个 test.txt 文件，写入 Hello World，然后读取它"</strong>。你会看到更多回合：</p>
+
+        <pre><code>--- Turn 1 ---
+🧰 调用工具: bash({"command": "echo 'Hello World' > test.txt"})
+📋 结果:                (空——命令成功，无输出)
+
+--- Turn 2 ---
+🧰 调用工具: bash({"command": "cat test.txt"})
+📋 结果:
+Hello World
+
+--- Turn 3 ---
+🤖 已完成。创建了 test.txt 文件并写入 "Hello World"，读取验证成功。</code></pre>
+
+        <p>这里模型做了一个多步规划：先创建文件，再读取验证。它没有试图两步并一步，而是拆成了两个工具调用——中间观察了第一次的执行结果后，才决定进行第二次验证。这是 ReAct 范式的核心优势：每一步都基于上一步的实际结果做决策。</p>
+
+        <h2>v0 的局限与下一站</h2>
+
+        <p>我们这个 50 行的 v0 Agent 能做什么？能执行任何 shell 命令。这听起来已经很厉害了，但看看它不能做什么：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>能力维度</th>
+                    <th>能做 ✅</th>
+                    <th>不能做 ❌</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>命令执行</td>
+                    <td>执行任意 bash 命令</td>
+                    <td>没有超时限制（除了 subprocess 默认值）</td>
+                </tr>
+                <tr>
+                    <td>文件操作</td>
+                    <td>通过 bash 间接读写文件</td>
+                    <td>没有专门的 Read/Write 工具，依赖 cat/echo</td>
+                </tr>
+                <tr>
+                    <td>代码编辑</td>
+                    <td>通过 bash 使用 sed</td>
+                    <td>没有精确的编辑工具，sed 容易出错</td>
+                </tr>
+                <tr>
+                    <td>上下文管理</td>
+                    <td>消息列表不断累积</td>
+                    <td>没有压缩机制，上下文会无限增长</td>
+                </tr>
+                <tr>
+                    <td>错误恢复</td>
+                    <td>能看到 stderr</td>
+                    <td>命令失败后没有自动纠错逻辑</td>
+                </tr>
+                <tr>
+                    <td>任务规划</td>
+                    <td>模型自行决定步骤</td>
+                    <td>没有显式的 Todo 列表，模型可能遗漏</td>
+                </tr>
+                <tr>
+                    <td>权限控制</td>
+                    <td>无</td>
+                    <td>Agent 可以执行任何命令，包括 rm -rf /</td>
+                </tr>
+                <tr>
+                    <td>多工具</td>
+                    <td>只有 bash</td>
+                    <td>没有 Read/Write/Edit 等专用工具</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>最核心的局限是什么？<strong>只有 bash 一个工具。</strong>这意味着模型只能用 echo、cat、sed 等命令来读写文件，用 find、grep 来搜索代码。这些命令的输出格式不是为机器阅读优化的，模型需要花额外的 token 去 "parse" 它们。而且在编辑代码时，用 sed 做精确替换是非常容易出错的——你试过用 sed 替换一个包含特殊字符的 Python 多行字符串吗？那是噩梦。</p>
+
+        <p>另外，我们也没有处理一些工程细节：API 调用可能失败（网络问题、限流）、工具执行可能超时、上下文可能超过模型限制。这些都是设计一个生产级 Agent 必须解决的问题。</p>
+
+        <div class="tip">
+            <strong>关于限流的提示：</strong>Anthropic API 有速率限制（Rate Limit），免费层尤其严格。如果你频繁运行 Agent，可能会遇到 429 错误。一个简单的应对方案是加入指数退避（Exponential Backoff）：检测到 429 后等待 <code>2^n</code> 秒再重试（n 是重试次数）。更完整的做法可以参考 <code>anthropic</code> Python SDK 中内置的重试逻辑——它默认已经实现了自动重试，但在高并发场景下你仍然需要手动管理配额。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>这一章我们亲手实现了一个最简的 Agent Loop——50 行代码，一个 while 循环，两个 API 调用方向（模型 + 工具），一个 stop_reason 的 if-else 判断。你已经写出了一个真正的 AI Coding Agent 的核心骨架。</p>
+
+        <p>v0 看起来简单，但它证明了核心洞察：<strong>Agent Loop 本身并不复杂，复杂的是围绕它构建的工程系统</strong>。50 行代码就能跑通 Agent Loop，但 Claude Code 的 60 万行代码都加在了哪里？下一章我们拆解顶层架构，看看那些加出来的代码到底在解决什么问题。</p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

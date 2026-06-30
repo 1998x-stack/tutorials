@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 栅格地图与代价地图</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是路径规划</a></li>
+            <li><a href="02.html">第2章 状态空间与构型空间</a></li>
+            <li><a href="03.html">第3章 图论基础</a></li>
+            <li><a href="04.html" class="active">第4章 栅格地图与代价地图</a></li>
+            <li><a href="05.html">第5章 启发式搜索入门</a></li>
+            <li><a href="06.html">第6章 Dijkstra算法</a></li>
+            <li><a href="07.html">第7章 A*算法</a></li>
+            <li><a href="08.html">第8章 A*改进与变体</a></li>
+            <li><a href="09.html">第9章 D* Lite增量搜索</a></li>
+            <li><a href="10.html">第10章 JPS跳点搜索</a></li>
+            <li><a href="11.html">第11章 RRT快速随机树</a></li>
+            <li><a href="12.html">第12章 RRT*渐进最优</a></li>
+            <li><a href="13.html">第13章 PRM概率路线图</a></li>
+            <li><a href="14.html">第14章 采样方法大对比</a></li>
+            <li><a href="15.html">第15章 路径平滑与后处理</a></li>
+            <li><a href="16.html">第16章 动态窗口法DWA</a></li>
+            <li><a href="17.html">第17章 人工势场法</a></li>
+            <li><a href="18.html">第18章 运动学约束与曲线</a></li>
+            <li><a href="19.html">第19章 动态环境重规划</a></li>
+            <li><a href="20.html">第20章 多目标路径规划</a></li>
+            <li><a href="21.html">第21章 多机器人协调</a></li>
+            <li><a href="22.html">第22章 优化模型方法</a></li>
+            <li><a href="23.html">第23章 可视化与调试</a></li>
+            <li><a href="24.html">第24章 算法性能基准测试</a></li>
+            <li><a href="25.html">第25章 仿真到实车部署</a></li>
+            <li><a href="26.html">第26章 学习型路径规划</a></li>
+            <li><a href="27.html">第27章 前沿趋势与未来</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <p>大家好！上一章我们学习了图论的基础知识，知道了路径规划本质上是"图构造 + 图搜索"。但一个关键问题悬而未决：这张"图"究竟是怎么来的？在真实的机器人系统中，地图长什么样？</p>
+
+        <p>在大多数实际应用中，路径规划的环境表示形式是<strong>栅格地图（Grid Map / Occupancy Grid）</strong>和它更高级的进化版——<strong>代价地图（Costmap）</strong>。这两者是机器人在真实世界中"感知-建图-规划"这一闭环的核心数据基础设施。不理解它们，你的路径规划算法就只能在"理想的玩具世界"里跑。</p>
+
+        <p>说一个让我印象深刻的踩坑经历。几年前我在调试一个扫地机器人的导航系统，机器人在客厅里反复规划路径，但每次走到沙发附近就突然"刹车"，然后重新规划。我检查了激光雷达、里程计、甚至重新标定了传感器——问题依旧。最后打开代价地图的可视化一看，发现沙发区域的障碍物膨胀层半径设大了 10 厘米，导致沙发周围的"不可通行"区域比实际大了整整一圈，机器人在"安全距离"外就被迫绕行。这种问题在实际工程中非常常见——代价地图的参数设置直接决定了路径规划的效果，但很多人连代价地图有几个图层都不知道。</p>
+
+        <h2>占据栅格地图</h2>
+
+        <p><strong>占据栅格地图（Occupancy Grid Map）</strong>是最基础的地图表示形式。它将环境离散化为一系列均匀的栅格（cell），每个栅格存储一个值，表示该位置被障碍物占据的概率。</p>
+
+        <p>一个典型的占据栅格地图中：</p>
+        <ul>
+            <li><strong>0</strong>——该栅格是空闲的（free），机器人可以安全通过</li>
+            <li><strong>1</strong>——该栅格被占据（occupied），机器人无法通过</li>
+            <li><strong>0-1 之间的值</strong>——该栅格被占据的概率，值越高表示越可能是障碍物</li>
+        </ul>
+
+        <p>严格来说，"占据（Occupied）"在这里是指该空间被物理物体占据，导致机器人无法通过。但很少有一个传感器能够百分之百确定一个栅格的状态。激光雷达可能漏掉一根细柱子，声呐可能被玻璃误反射——所以占据栅格地图使用了<strong>概率模型</strong>来处理传感器的不确定性。</p>
+
+        <p>每次传感器扫描到某个栅格区域时，地图会更新该栅格的占据概率：</p>
+        <ul>
+            <li>如果传感器"看到"这个栅格是空的（激光穿过了它），该栅格的占据概率降低</li>
+            <li>如果传感器"看到"这个栅格有反射（激光打到了物体），该栅格的占据概率升高</li>
+        </ul>
+
+        <p>经过多次扫描，概率会逐步收敛。一个最初处于"未知"状态的栅格（概率 0.5），会在多次观测后趋近于 0（确认空闲）或 1（确认占据）。这种概率建图方法非常鲁棒——个别传感器的误检测不会对最终地图产生明显影响。</p>
+
+        <p>下面是用 Python 加载和显示一张占据栅格地图的示例代码：</p>
+
+        <pre><code>import numpy as np
+import matplotlib.pyplot as plt
+
+def load_grid_map(filepath):
+    """从图片文件加载栅格地图（白=空闲，黑=障碍物）。"""
+    from PIL import Image
+    img = Image.open(filepath).convert('L')  # 转灰度
+    grid = np.array(img)
+    # 二值化：阈值 128，0=空闲（白），1=障碍物（黑）
+    grid = (grid < 128).astype(np.int8)
+    return grid
+
+def display_grid_map(grid, start=None, goal=None, path=None):
+    """可视化栅格地图，可选标注起点、终点和路径。"""
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    # 用灰度显示：0=白，1=黑
+    ax.imshow(grid, cmap='gray_r', origin='upper')
+
+    if start:
+        ax.plot(start[1], start[0], 'go', markersize=10, label='起点')
+    if goal:
+        ax.plot(goal[1], goal[0], 'ro', markersize=10, label='终点')
+    if path:
+        path = np.array(path)
+        ax.plot(path[:, 1], path[:, 0], 'b-', linewidth=2, label='路径')
+
+    ax.legend()
+    ax.set_title("栅格地图")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+def grid_to_graph(grid):
+    """将栅格地图转换为图的邻接表表示。
+    返回: dict { (r,c): [(nr,nc,weight), ...] }
+    """
+    rows, cols = grid.shape
+    graph = {}
+    directions = [(-1, 0, 1), (1, 0, 1), (0, -1, 1), (0, 1, 1),
+                  (-1, -1, 1.414), (-1, 1, 1.414), (1, -1, 1.414), (1, 1, 1.414)]
+
+    for r in range(rows):
+        for c in range(cols):
+            if grid[r, c] == 1:  # 障碍物节点不加入图
+                continue
+            neighbors = []
+            for dr, dc, w in directions:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and grid[nr, nc] == 0:
+                    neighbors.append(((nr, nc), w))
+            graph[(r, c)] = neighbors
+    return graph
+
+# 使用示例
+# grid = load_grid_map('warehouse_map.png')
+# graph = grid_to_graph(grid)
+# print(f"地图尺寸: {grid.shape}")
+# print(f"图节点数: {len(graph)}")</code></pre>
+
+        <p>注意上面的 <code>grid_to_graph</code> 函数——它就完成了第 3 章所说的"图构造"步骤。它将栅格地图中每个空闲格子变成了图中的一个节点，把相邻格子之间的运动变成了带权重的边。这正是连接"地图"和"搜索算法"的关键桥梁。</p>
+
+        <h2>代价地图（Costmap）</h2>
+
+        <p>在实际机器人系统中（如 ROS 的 navigation stack），使用的不是简单的占据栅格地图，而是<strong>代价地图（Costmap）</strong>。代价地图是一个多层（layered）地图系统，每一层叠加不同的代价信息，最终合成一张综合的导航地图。</p>
+
+        <p>标准的 ROS costmap_2d 包含以下几个主要图层：</p>
+
+        <ul>
+            <li><strong>静态地图层（Static Map Layer）</strong>——由 SLAM 预先构建的全局地图，也就是我们上面说的占据栅格地图。它是整个代价地图的"底图"。</li>
+            <li><strong>障碍物层（Obstacle Layer）</strong>——来自传感器（激光雷达、深度相机等）的实时障碍物检测数据。你的机器人每次扫描到新的障碍物（比如突然出现的人），这一层就会动态更新。</li>
+            <li><strong>膨胀层（Inflation Layer）</strong>——在不至于碰墙的前提下，对每个障碍物周围一定范围的栅格赋予一个"代价梯度"，离障碍物越近代价越高。这是路径规划实现安全避障的关键机制。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>膨胀半径的工程技巧：</strong>膨胀层不仅仅是"安全 buffer"这么简单。它的巧妙之处在于：即使你不知道机器人的精确尺寸，只要将机器人近似为一个点，将障碍物膨胀机器人的最大半径，路径规划的结果自然就是安全的。这其实就是第 2 章讲的 C-Space 思想的工程落地——"把机器人缩小成一个点，把障碍物做相应的膨胀"。但要注意，膨胀太大会导致"无路可走"（比如狭窄门框被完全堵死），膨胀太小则不够安全。调试这个参数是每个机器人工程师的必修课。
+        </div>
+
+        <p>代价地图的核心思想是：<strong>给每个栅格赋予一个"通行代价"</strong>，而不仅仅是"可通行/不可通行"这样二值的判断。路径规划算法在搜索时会优先选择代价低的路径，自动绕开靠近障碍物的区域。这避免了路径紧贴墙壁的"剃须"现象——如果你回想第 3 章讲的可视图，它的最短路径就是紧贴障碍物的，在实际应用中非常危险。</p>
+
+        <p>ROS 的代价地图在底层使用了一个贪心算法来管理更新区域，只更新传感器数据发生变化的区域，而不是每帧重建整张地图。这个优化使得代价地图能够以 10-50 Hz 的频率实时更新，同时仅占用很少的 CPU 资源。</p>
+
+        <h2>地图分辨率的选择</h2>
+
+        <p>栅格地图最关键的一个参数是<strong>分辨率（Resolution）</strong>——每个栅格对应真实世界的多大面积。比如 5 cm/像素意味着地图上每个格子代表 5 cm × 5 cm 的实际区域。分辨率的选择直接影响路径规划的效果和性能。</p>
+
+        <table>
+            <tr>
+                <th>分辨率</th>
+                <th>100m × 100m 的栅格数</th>
+                <th>内存占用</th>
+                <th>路径精度</th>
+                <th>搜索时间</th>
+            </tr>
+            <tr>
+                <td>1 m（极粗）</td>
+                <td>10,000</td>
+                <td>~10 KB</td>
+                <td>低（可能找不到通道）</td>
+                <td>极快（<1 ms）</td>
+            </tr>
+            <tr>
+                <td>10 cm（中等）</td>
+                <td>1,000,000</td>
+                <td>~1 MB</td>
+                <td>中等</td>
+                <td>快（~10 ms）</td>
+            </tr>
+            <tr>
+                <td>5 cm（精细）</td>
+                <td>4,000,000</td>
+                <td>~4 MB</td>
+                <td>较好</td>
+                <td>中等（~50 ms）</td>
+            </tr>
+            <tr>
+                <td>2 cm（极细）</td>
+                <td>25,000,000</td>
+                <td>~25 MB</td>
+                <td>高</td>
+                <td>慢（>500 ms）</td>
+            </tr>
+            <tr>
+                <td>1 cm（极限）</td>
+                <td>100,000,000</td>
+                <td>~100 MB</td>
+                <td>很高</td>
+                <td>极慢（>5 s）</td>
+            </tr>
+        </table>
+
+        <p>这个表格清楚地展示了权衡关系。选择分辨率时需要考虑以下因素：</p>
+        <ul>
+            <li><strong>机器人尺寸</strong>——如果机器人直径是 50 cm，那 1 cm 分辨率的收益就很低，因为机器人不可能通过比自身还窄的缝隙。</li>
+            <li><strong>环境尺寸</strong>——一个 1 km² 的仓库，5 cm 分辨率就是 4 亿个栅格，A* 在上面跑一次可能需要几秒钟。</li>
+            <li><strong>传感器精度</strong>——如果激光雷达的角分辨率是 1°，在 10 米外的点间距约 17 cm，那 2 cm 分辨率的地图就过度精细了，栅格比传感器的精度还细，没有实际意义。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>工程建议：</strong>实际系统中常用"多层地图"策略——全局规划用较粗的分辨率（10-20 cm），局部规划用较细的分辨率（2-5 cm）。全局规划负责长距离的大致路径（不需要太精细），局部规划负责短距离的精确避障（需要高精度）。这种分层架构兼顾了效率和精度，几乎所有自动驾驶和机器人系统都在使用。
+        </div>
+
+        <h2>从真实世界到栅格</h2>
+
+        <p>最后一个问题：一张占据栅格地图是如何从传感器数据构建出来的？这个过程关系到路径规划的"输入质量"。</p>
+
+        <p>最主流的方案是<strong>SLAM（Simultaneous Localization and Mapping，同步定位与建图）</strong>。它的工作流程大致如下：</p>
+
+        <ol>
+            <li>机器人携带激光雷达或深度相机在环境中移动</li>
+            <li>SLAM 算法同时估计机器人的位姿（定位）和环境的几何结构（建图）</li>
+            <li>激光扫描数据通过逆传感器模型（Inverse Sensor Model）投影到栅格地图上，更新每个栅格的占据概率</li>
+            <li>随着机器人在环境中走过更多区域，地图逐步完善</li>
+        </ol>
+
+        <p>这个过程涉及几个重要的坐标变换：</p>
+        <ul>
+            <li><strong>传感器坐标系</strong>（激光雷达自己的坐标系）→ <strong>机器人基座坐标系</strong>（机器人中心）</li>
+            <li><strong>机器人基座坐标系</strong> → <strong>里程计坐标系</strong>（机器人运动起始点）</li>
+            <li><strong>里程计坐标系</strong> → <strong>全局地图坐标系</strong>（地图的原点和朝向）</li>
+        </ul>
+
+        <p>这些坐标变换的精度直接决定了地图的质量。如果定位偏差 5 cm，构建的地图就会有明显的"重影"——同一面墙在多次扫描中出现在不同的位置。对于路径规划来说，带重影的地图是一个灾难：搜索算法以为"这里有一条通道"，实际上那里是一堵墙。</p>
+
+        <p>所以在实际工程中，<strong>建图质量是路径规划的前提条件</strong>。如果你的路径规划经常失败，先检查地图，而不是先调算法参数。很多时候，一个好地图能让最简单的 Dijkstra 算法跑出惊艳的效果，而烂地图上最好的 A* 也会撞墙。</p>
+
+        <p>本章我们完整了解了栅格地图和代价地图——从最简单的占据栅格到 ROS 的多层代价地图，从分辨率的选择到真实世界的建图流程。这些知识构成了路径规划算法的"数据底层"。</p>
+
+        <p>下一章，我们将正式进入搜索算法的世界——从<strong>启发式搜索（Heuristic Search）</strong>开始。你会看到，在同样的地图上，使用不同的搜索策略会导致天差地别的效率。我们将学习各种启发式函数的设计——它们是让搜索变得"聪明"的关键。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

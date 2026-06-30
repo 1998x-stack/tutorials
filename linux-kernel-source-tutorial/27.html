@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第27章 现代内核对比</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html" class="active">27 现代内核对比</a></li>
+            <li><a href="28.html">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。上一章我们走过了从0.11到1.0的关键演化路径——看到了Linux如何在两年多的时间内从一个"玩具内核"成长为功能完整的操作系统。但你可能会产生一个疑问：<strong>既然我们的课程一直扎根于0.11，那现代内核长什么样？</strong></p>
+
+        <h2>引言</h2>
+
+        <p>坦白说，如果一个学完0.11的开发者穿越到现代内核的代码仓库中，他会感到既熟悉又陌生。熟悉的是——task_struct还在、VFS接口还在、中断处理框架还在。陌生的是——内存管理从几千行膨胀到几十万行，调度器从不到100行的schedule()变成了数万行的CFS/EEVDF，网络栈从一片空白变成了包含eBPF和XDP的可编程数据平面。</p>
+
+        <p>本章将追踪0.11中的核心子系统在现代内核中的演变。我们不会深究现代内核的所有细节——那需要不止一本教科书。我们的目标是：<strong>建立0.11到现代内核之间的"知识桥梁"，让你知道每一个你在0.11中学到的概念，在今天的内核中长成了什么样子。</strong></p>
+
+        <h2>内存管理演进</h2>
+
+        <p>0.11的内存管理非常朴素——一个<code>mem_map[]</code>数组标记每个物理页的引用计数，配合一个简单的页分配函数<code>get_free_page()</code>。到了现代内核，内存管理已经发展成一个极其复杂的子系统，但核心骨架仍然清晰可辨。</p>
+
+        <p>从<code>mem_map</code>到<strong>Buddy System</strong>（伙伴系统，2.0引入）：伙伴系统解决了物理内存碎片化问题——它将内存按2的幂次分成不同大小的块，分配时从最近的大小取一块，释放时将相邻的"兄弟"块合并。0.11中<code>get_free_page()</code>只能分配一页（4KB），而伙伴系统可以分配2、4、8……1024页的连续物理内存。</p>
+
+        <p>从伙伴系统到<strong>Slab分配器</strong>（2.2引入，2.6成为默认）：伙伴系统分配最小单位是页，但内核中大量对象只需要几十字节（如task_struct约1KB、inode几百字节）。Slab分配器在伙伴系统之上构建了一个对象缓存层，避免了频繁的页分配。2010年后<strong>SLUB</strong>取代Slab成为默认分配器——SLUB简化了Slab的复杂性，同时保持了对象缓存的核心能力。</p>
+
+        <table>
+            <thead>
+                <tr><th>分配器</th><th>引入版本</th><th>核心思想</th><th>适用场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>mem_map + get_free_page</td><td>0.11 (1991)</td><td>位图标记空闲页，逐页分配</td><td>内存极小（4MB），只需页级分配</td></tr>
+                <tr><td>Buddy System</td><td>2.0 (1996)</td><td>2次幂分割，相邻块合并</td><td>物理页框管理，解决碎片化</td></tr>
+                <tr><td>Slab Allocator</td><td>2.2 (1999)</td><td>对象缓存，避免反复分配页</td><td>频繁分配释放的小对象（inode, task_struct）</td></tr>
+                <tr><td>SLUB</td><td>2.6.27 (2008)</td><td>简化Slab，维护per-CPU缓存</td><td>现代生产系统默认选项</td></tr>
+            </tbody>
+        </table>
+
+        <p>现代内核的内存管理还引入了更复杂的功能：<strong>CMA</strong>（连续内存分配器）解决大块连续物理内存分配问题，<strong>VMA</strong>（虚拟内存区域）管理复杂的进程地址空间布局（堆、栈、mmap区域），<strong>KSM</strong>（内核同页合并）实现透明页共享，<strong>Huge Pages</strong>（大页）降低TLB miss。但无论多复杂，物理页管理仍然基于伙伴系统，对象缓存仍然基于SLUB——这是从0.11一路传承下来的血脉。</p>
+
+        <h2>进程调度演进</h2>
+
+        <p>0.11的调度器是所有内核子系统中"最简单"的一个——不到100行C代码的<code>schedule()</code>函数。核心算法是counter时间片轮转：每个进程有一个counter值（时间片），每次时钟中断减1，counter为0时让出CPU。schedule()遍历所有进程，选counter最大的运行。当所有进程counter归零时，统一按counter=counter/2+priority重新分配。</p>
+
+        <p>这个算法包含了现代调度器的所有核心要素：时间片、优先级、公平性。但它有一个根本问题：<strong>在进程数量增多时，每次调度都要遍历所有进程，时间复杂度O(n)</strong>。</p>
+
+        <pre><code>/* 调度器核心代码的演进 */
+/* 0.11 (1991) — 时间片轮转 + O(n)遍历 */
+void schedule(void) {
+    while (1) {
+        c = -1; next = 0; i = NR_TASKS;
+        while (--i) {
+            if (task[i]->state == TASK_RUNNING && task[i]->counter > c)
+                c = task[i]->counter, next = i;
+        }
+        if (c) break;
+        for (i = 0; i < NR_TASKS; i++)
+            task[i]->counter = (task[i]->counter >> 1) + task[i]->priority;
+    }
+    switch_to(next);
+}
+
+/* 现代CFS (2.6.23+) — 红黑树 + 虚拟运行时间 */
+/* 核心不再是counter，而是vruntime (虚拟运行时间) */
+static struct sched_entity *
+pick_next_entity(struct cfs_rq *cfs_rq) {
+    /* 从红黑树中取最左节点（vruntime最小 = 最需要CPU的进程） */
+    struct rb_node *left = cfs_rq->rb_leftmost;
+    struct sched_entity *se = rb_entry(left, struct sched_entity, run_node);
+    return se;
+}
+/* 时间复杂度 O(log n) — 红黑树取代了循环遍历 */</code></pre>
+
+        <p><strong>O(1)调度器</strong>（2.6内核，2003年）是第一个重大变革——Ingo Molnar用两个优先级数组（active + expired）实现了O(1)的进程选择。每个优先级对应一个链表，调度时直接从最高优先级的非空链表中取第一个进程。这个设计完美解决了当时服务器场景的性能瓶颈。</p>
+
+        <p><strong>CFS完全公平调度器</strong>（2.6.23，2007年）是第二个重大变革——它抛弃了O(1)调度器的静态优先级队列，转而用<strong>红黑树</strong>维护所有可运行进程，以<strong>虚拟运行时间（vruntime）</strong>作为排序键。vruntime越小的进程越"亏欠"CPU，因此被优先调度。其核心数学原理是：在任意时间窗口内，每个进程获得CPU时间的比例等于其权重占比。CFS的设计哲学是"理想公平的精确近似"——虽然实际不可能做到绝对公平，但CFS从数学上逼近这个极限。</p>
+
+        <p><strong>EEVDF</strong>（6.6，2023年）是最新的调度器——它引入了"时间片弹性"和"最早截止时间优先"的混合策略，为实时工作负载提供了更可预测的调度行为。但无论怎么变，调度的核心问题始终是那一个：<strong>下一个该谁运行？</strong></p>
+
+        <div class="tip">
+            <strong>调度器的哲学本质</strong>：counter算法回答"谁的时间片最大"，CFS回答"谁的vruntime最小"，EEVDF回答"谁的截止时间最近"。三者的背后是同一个问题——如何在多进程之间<em>公平</em>分配CPU时间。并且，无论调度器的代码膨胀了多少倍，0.11中那个不到100行的schedule()函数所蕴含的核心思想从未被推翻——它只是被更精确的数学模型替代了。
+        </div>
+
+        <h2>VFS与文件系统</h2>
+
+        <p>我们在第16-17章详细分析了0.11的MINIX文件系统。0.95引入的VFS框架在第26章也做了介绍。现代内核的VFS框架在接口层面几乎没有变化——仍然是file_operations、inode_operations、super_operations三大接口。但底层的文件系统已经发生了翻天覆地的变化：</p>
+
+        <p><strong>ext→ext2→ext3→ext4→btrfs</strong>是Linux文件系统的主线演化路径。ext文件系统（1992年）是第一个专为Linux设计的FS，但很快被其继任者ext2（1993年）取代。ext2引入了更高效的磁盘布局和更灵活的inode结构，成为Linux十多年来的默认文件系统。<strong>ext3</strong>（2001年）最大的贡献是<strong>日志（journaling）</strong>——通过预写日志（write-ahead logging）来保证崩溃后的文件系统一致性，避免了ext2需要冗长的fsck检查。<strong>ext4</strong>（2008年）引入了<strong>extent</strong>（区段）来替代ext2/3的间接块映射，在处理大文件时性能提升显著，单个文件最大可达16TB。</p>
+
+        <p><strong>btrfs</strong>（B-tree文件系统，2009年进入主线）代表了更激进的设计方向——写时复制（Copy-on-Write, CoW）让快照和回滚变得简单高效；内置压缩（zlib/zstd/lzo）节省磁盘空间；RAID支持（0/1/5/6/10）允许文件系统级别提供冗余。btrfs的设计哲学是"文件系统即卷管理器"——它将LVM和RAID的功能吸收到了文件系统内部。</p>
+
+        <p>不管底层多复杂，VFS的接口始终保持稳定。这就是抽象层的力量——它允许ext4和btrfs这两个设计哲学完全不同的文件系统在同一个操作系统中共存，用户只需要<code>mount -t ext4</code>或<code>mount -t btrfs</code>就能切换。</p>
+
+        <div class="highlight">
+            <strong>有趣的事实</strong>：Linux内核在2024年支持的文件系统数量超过了<strong>70种</strong>——从传统的ext4、XFS、btrfs到网络FS（NFS、CIFS）、FUSE（用户态文件系统）、甚至Windows NTFS和macOS HFS+。而无论哪种文件系统挂载进来，在用户看来都是同样的目录树和同样的open/read/write接口——这个"千变万化"中的"不变"，正是VFS框架的绝妙之处。你可以在0.11的VFS代码中找到这个思想的原始版本。
+        </div>
+
+        <h2>内核模块（LKM）</h2>
+
+        <p>0.11有一个极其"复古"的特性——<strong>所有代码都编译进内核映像</strong>。没有模块，没有动态加载，一切都在编译时确定。这意味着如果你想添加一个设备驱动，你必须修改Makefile、重新编译整个内核、然后重启。这个过程在今天看来效率低下，但对0.11来说完全合理——因为它只支持不到10种硬件设备，编译整个内核只需要一分钟。</p>
+
+        <p>随着支持的硬件设备爆炸式增长（从1.0的~50个驱动到现代内核的数万个驱动），把全部驱动编译进内核变得不可行。Linux在2.0时代引入了<strong>可加载内核模块（Loadable Kernel Module, LKM）</strong>机制。LKM允许在运行时动态加载和卸载代码——你插入一个USB网卡，内核自动加载对应的驱动模块，用完后卸载。模块本质上是一个ELF对象文件，通过<code>insmod</code>/<code>modprobe</code>命令加载，通过<code>rmmod</code>卸载。</p>
+
+        <p>从架构角度看，LKM是对纯宏内核的一种"务实折中"：宏内核的所有子系统运行在内核空间（零上下文切换开销），但通过模块机制获得了一定的动态性和灵活性。这是微内核（把所有服务放用户态）和宏内核之间的中间地带——Linux选择了"宏内核为主、模块化为辅"的混合策略。</p>
+
+        <pre><code>/* 现代内核模块的基本骨架 — 和0.11的全编译模式形成鲜明对比 */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kernel.h&gt;
+
+static int __init my_driver_init(void) {
+    printk(KERN_INFO "My driver loaded!\n");
+    return 0;
+}
+
+static void __exit my_driver_exit(void) {
+    printk(KERN_INFO "My driver unloaded!\n");
+}
+
+module_init(my_driver_init);
+module_exit(my_driver_exit);
+MODULE_LICENSE("GPL");
+
+/* 编译后生成 .ko 文件，通过 insmod 动态加载 */
+/* 而0.11中没有 .ko — 所有代码随内核一起编译、一起链接 */</code></pre>
+
+        <h2>网络栈与eBPF</h2>
+
+        <p>0.11没有网络支持。0.98引入了BSD Socket层的TCP/IP栈。从那时起，Linux网络栈经历了数轮重写。早期的<strong>netfilter</strong>框架（2.3引入）提供了iptables防火墙机制——通过hook点在网络协议栈的五个关键位置插入过滤规则。netfilter是"静态配置"的——你设置好规则后，除非手动修改，否则规则不会变化。</p>
+
+        <p><strong>nftables</strong>（3.13，2014年）取代了iptables，提供了更统一的规则集语法和更好的性能。但无论是netfilter还是nftables，都还是"规则匹配"的范式——你需要预先定义好规则，内核按规则执行。</p>
+
+        <p><strong>eBPF</strong>（extended Berkeley Packet Filter，4.x内核开始成熟）彻底改变了这个范式。eBPF允许用户编写自定义的字节码程序，通过bpf()系统调用加载到内核中，由内核验证器检查安全性后，挂载到网络栈的任意hook点执行。这意味着你可以在不修改内核代码、不重新编译内核的情况下，<strong>动态编程内核的数据包处理逻辑</strong>。</p>
+
+        <p><strong>XDP</strong>（eXpress Data Path，4.8引入）更是将eBPF的应用推到了极致——它在网卡驱动层（甚至硬件层面）就截获数据包，在进入完整网络栈之前完成处理。XDP可以实现10M+ pps（每秒百万包）的线速处理，被广泛应用于DDoS防御、负载均衡、网络监控。</p>
+
+        <p>从BSD Socket到eBPF/XDP，Linux网络栈的"可编程性"已经发生了质变。这不仅仅是一个协议栈——它是一个可以在内核态运行任意数据包处理逻辑的可编程网络引擎。这在0.11的时代是不可想象的。</p>
+
+        <div class="warning">
+            <strong>踩坑故事：eBPF验证器的"暴躁脾气"</strong>：eBPF程序加载时必须通过内核验证器的安全检查——验证器会模拟执行eBPF程序的所有路径，确保不存在循环（为保证终止性）、不存在越界访问、不存在空指针解引用。如果你写过复杂的eBPF程序，一定经历过验证器报错"bpf: 'invalid access to map value, 'R5 min value is negative'"之类的痛苦故事。但这"暴躁脾气"恰恰是eBPF的安全基础——它保证了加载到内核中的代码不会导致内核崩溃。这在0.11的"完全信任所有代码"时代完全不需要。
+        </div>
+
+        <h2>没变的本质</h2>
+
+        <p>说了这么多变化，让我们冷静下来看看那些<strong>穿越了30年时光依然没变</strong>的东西。这些"不变"才是Linux内核设计的真正精髓：</p>
+
+        <p><strong>task_struct仍是PCB核心。</strong>从0.11到6.x，<code>struct task_struct</code>一直位于<code>include/linux/sched.h</code>中（路径略有变化），始终是进程控制块（PCB）的核心。0.11中你在<code>sched.h</code>里看到的pid、state、counter、priority、signal等字段，在现代内核中依然存在——只不过增加了数百个新字段用于支持cgroup、命名空间、seccomp等新功能。</p>
+
+        <p><strong>VFS接口依然存在。</strong>我们第26章展示的0.95的file_operations结构体——read、write、open、release这四个函数指针，在现代内核中一个不少。现代file_operations扩展到了约40个函数指针，但那四个核心接口与30年前完全对应。</p>
+
+        <p><strong>中断处理框架未变。</strong>0.11的<code>trap.c</code>中注册中断处理函数的模式——通过一个函数指针数组将中断号映射到处理函数——在现代内核中演变成了<code>request_irq()</code>/<code>devm_request_irq()</code>，但"注册→触发→处理→返回"的流程一模一样。</p>
+
+        <p><strong>编译方式依旧。</strong>0.11的构建方式是<code>make config && make && make install</code>。现代内核的构建方式仍然是<code>make menuconfig && make -j$(nproc) && make install</code>。甚至是同样的Makefile语法、同样的Kconfig配置系统。</p>
+
+        <pre><code>/* 跨越30年的"编译三部曲" */
+/* 0.11 (1991) */   $ make config       /* 回答y/n问题 */
+/*                       make            /* 编译 */
+/*                       make install    /* 安装到/boot */
+
+/* 6.x (2024) */    $ make menuconfig   /* 图形化配置 */
+/*                       make -j32       /* 多核并行编译 */
+/*                       make install    /* 安装到/boot */
+
+/* 人变了，工具链变了，但流程没变 */</code></pre>
+
+        <p>这些"不变"说明了什么？说明Linux内核在<strong>核心设计层面</strong>从0.11起就是正确的。30年来的版本迭代只是在精益求精地完善这些核心设计，而不是推翻重来。这也许就是Linux最大的工程智慧——在最底层保持稳定的设计哲学，在上层放手拥抱变化。</p>
+
+        <p>好了，理论知识的灌溉到此为止。下一章——我们课程的最后一章——我们要动手了！我们将从零实现一个ramdisk驱动或一个简单的proc文件系统，把你在这个课程中学到的所有知识串联起来。</p>
+
+        <p><strong>下一章预告：综合项目</strong> —— 动手实现一个真实的内核功能，作为你Linux内核源码之旅的毕业设计。</p>
+
+        <div class="footer-nav">
+            <a href="26.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="28.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

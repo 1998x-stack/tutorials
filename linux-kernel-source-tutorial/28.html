@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第28章 综合项目</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🐧 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">01 Linux的诞生</a></li>
+            <li><a href="02.html">02 内核架构总览</a></li>
+            <li><a href="03.html">03 开发环境搭建</a></li>
+            <li><a href="04.html">04 引导启动(上)</a></li>
+            <li><a href="05.html">05 引导启动(下)</a></li>
+            <li><a href="06.html">06 内核初始化</a></li>
+            <li><a href="07.html">07 x86保护模式精要</a></li>
+            <li><a href="08.html">08 中断与异常</a></li>
+            <li><a href="09.html">09 系统调用</a></li>
+            <li><a href="10.html">10 进程调度</a></li>
+            <li><a href="11.html">11 进程生命周期</a></li>
+            <li><a href="12.html">12 信号机制</a></li>
+            <li><a href="13.html">13 内存管理(上)</a></li>
+            <li><a href="14.html">14 内存管理(下)</a></li>
+            <li><a href="15.html">15 缓冲区管理</a></li>
+            <li><a href="16.html">16 MINIX文件系统(上)</a></li>
+            <li><a href="17.html">17 MINIX文件系统(下)</a></li>
+            <li><a href="18.html">18 管道与exec</a></li>
+            <li><a href="19.html">19 块设备驱动(上)</a></li>
+            <li><a href="20.html">20 块设备驱动(下)</a></li>
+            <li><a href="21.html">21 字符设备驱动(上)</a></li>
+            <li><a href="22.html">22 字符设备驱动(下)</a></li>
+            <li><a href="23.html">23 内核调试技术</a></li>
+            <li><a href="24.html">24 GDB单步跟踪</a></li>
+            <li><a href="25.html">25 动手写系统调用</a></li>
+            <li><a href="26.html">26 从0.11到1.0</a></li>
+            <li><a href="27.html">27 现代内核对比</a></li>
+            <li><a href="28.html" class="active">28 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <p>大家好，我是你们的讲师。欢迎来到第28章——我们这个课程的最后一章。前27章我们做了一件很难的事情：把Linux 0.11内核从引导扇区到设备驱动的每一段核心代码都读了一遍。但如果你只停留在"读代码"的层面，学习的闭环还没有真正完成。</p>
+
+        <h2>引言</h2>
+
+        <p><strong>只有当你亲手写过内核代码之后，你才能真正理解内核。</strong>这不是什么玄学——这是一个工程事实。读代码是被动输入，写代码是主动输出。你在写代码的过程中踩过的每一个坑、调试的每一个bug、解决的每一个问题，都会让你对内核的理解上升一个台阶。</p>
+
+        <p>本章提供了两个项目方案：<strong>ramdisk驱动</strong>（主推，中等难度，涉及块设备驱动的完整流程）和<strong>简单proc文件系统</strong>（备选，主要涉及VFS接口实现）。建议你至少完成其中一项。如果时间充裕，两项都做。</p>
+
+        <h2>项目一：实现ramdisk驱动</h2>
+
+        <p>ramdisk是一个用内存模拟块设备的驱动。它的核心思想很简单：在一段预先分配的内存上模拟磁盘的块读写操作。当内核向ramdisk发出读块请求时，驱动从内存中拷贝数据到请求缓冲区；写请求则反向拷贝。</p>
+
+        <p>这个项目的精彩之处在于：它复用了我们在第19-20章学到的所有块设备驱动的知识——请求队列（request queue）、请求处理函数、设备号注册、blk_dev[]表。你将看到hd.c的代码模式如何被复用到一个新的驱动中。</p>
+
+        <pre><code>/* rd.c — 在Linux 0.11上实现ramdisk驱动 */
+/* 仿照 kernel/blk_drv/hd.c 的request处理模式 */
+
+#include &lt;linux/config.h&gt;
+#include &lt;linux/sched.h&gt;
+#include &lt;asm/system.h&gt;
+#include &lt;asm/io.h&gt;
+
+/* ramdisk设备号 — 使用主设备号1（未使用的RAM盘） */
+#define RAMDISK_MAJOR  1
+#define RAMDISK_SIZE   (1024 * 1024)    /* 1 MB ramdisk */
+#define BLOCK_SIZE     1024             /* 块大小 */
+
+static char *rd_buffer = NULL;          /* 内存中的"磁盘" */
+
+/* 请求处理函数 — 被do_hd_request()类似的模式调用 */
+void do_rd_request(void) {
+    int block;
+    struct buffer_head *bh;
+    char *disk_addr;
+
+    while (1) {
+        /* 从请求队列中取出一个请求 */
+        if (!(CURRENT-&gt;bh)) break;
+
+        bh = CURRENT-&gt;bh;
+        block = CURRENT-&gt;block;
+        disk_addr = rd_buffer + block * BLOCK_SIZE;
+
+        if (CURRENT-&gt;cmd == WRITE) {
+            /* 写：从buffer_head拷贝到ramdisk */
+            memcpy(disk_addr, bh-&gt;b_data, BLOCK_SIZE);
+        } else {
+            /* 读：从ramdisk拷贝到buffer_head */
+            memcpy(bh-&gt;b_data, disk_addr, BLOCK_SIZE);
+        }
+
+        /* 标记请求完成，唤醒等待的进程 */
+        end_request(1);
+    }
+}
+
+/* 初始化函数 — 在内核启动时调用 */
+void rd_init(void) {
+    int i;
+
+    /* 1. 分配内存空间作为ramdisk的存储介质 */
+    rd_buffer = (char *)kmalloc(RAMDISK_SIZE, GFP_KERNEL);
+    if (!rd_buffer) {
+        printk("rd_init: failed to allocate buffer\n");
+        return;
+    }
+
+    /* 2. 清零所有"磁盘块" */
+    memset(rd_buffer, 0, RAMDISK_SIZE);
+
+    /* 3. 注册块设备 */
+    blk_dev[RAMDISK_MAJOR].request_fn = do_rd_request;
+
+    /* 4. 创建/dev/ram0设备节点 (mknod /dev/ram0 b 1 0) */
+    printk("Ramdisk initialized: %d KB at 0x%x\n",
+           RAMDISK_SIZE / 1024, (unsigned)rd_buffer);
+}</code></pre>
+
+        <p>实现步骤（请跟着做）：</p>
+
+        <ul>
+            <li><strong>步骤1</strong>：在<code>kernel/blk_drv/</code>目录下创建<code>rd.c</code>文件</li>
+            <li><strong>步骤2</strong>：定义设备号为1（确认与现有设备不冲突）</li>
+            <li><strong>步骤3</strong>：实现<code>do_rd_request()</code>函数——处理读写请求</li>
+            <li><strong>步骤4</strong>：实现<code>rd_init()</code>——分配内存、将处理函数注册到<code>blk_dev[]</code>表</li>
+            <li><strong>步骤5</strong>：修改<code>kernel/blk_drv/Makefile</code>，将rd.c加入编译</li>
+            <li><strong>步骤6</strong>：在<code>kernel/blk_drv/ll_rw_blk.c</code>中引用外部函数</li>
+            <li><strong>步骤7</strong>：修改<code>init/main.c</code>，在<code>init()</code>中调用<code>rd_init()</code></li>
+            <li><strong>步骤8</strong>：重新编译内核，用QEMU启动测试</li>
+            <li><strong>步骤9</strong>：在Linux 0.11中用<code>mknod /dev/ram0 b 1 0</code>创建设备节点</li>
+            <li><strong>步骤10</strong>：使用<code>dd if=/dev/zero of=/dev/ram0 bs=1024 count=1024</code>测试</li>
+        </ul>
+
+        <h2>项目二：简单procfs（备选）</h2>
+
+        <p>如果你对文件系统更感兴趣，可以考虑实现一个只读的<code>/proc</code>虚拟文件系统。procfs是一个"伪造"的文件系统——它不存储在磁盘上，而是动态生成内容。当用户<code>cat /proc/meminfo</code>时，内核实时收集内存信息并格式化为文本返回。</p>
+
+        <p>在0.11上实现procfs的核心思路：</p>
+
+        <pre><code>/* 在Linux 0.11上实现一个简易procfs的核心步骤 */
+/*
+ * 关键难点：0.11只实现了MINIX文件系统，所有文件操作假设数据在磁盘上。
+ * procfs没有磁盘数据，需要"虚拟化"inode的读取逻辑。
+ */
+
+/* 1. 注册proc文件系统类型 */
+/* 在fs/super.c中添加proc_fs_type */
+static struct file_system_type proc_fs_type = {
+    NULL,           /* next */
+    "proc",         /* name */
+    FS_SINGLE,      /* flags */
+    proc_read_super /* read_super */
+};
+
+/* 2. 实现proc_read_super — 创建根inode */
+struct super_block *proc_read_super(struct super_block *s, void *data, int silent) {
+    struct inode *root_inode;
+    s->s_mounted = iget(s, PROC_ROOT_INO);
+    root_inode = s->s_mounted;
+    root_inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO;
+    return s;
+}
+
+/* 3. 实现proc_read_inode — 动态构造inode内容 */
+struct inode *proc_read_inode(struct inode *inode) {
+    /* 根据ino返回对应文件的模拟inode信息 */
+    switch (inode->i_ino) {
+    case PROC_ROOT_INO:    /* 根目录 */  ...
+    case PROC_MEMINFO_INO: /* meminfo */ ...
+    }
+    return inode;
+}
+
+/* 4. 创建/proc/meminfo节点 — 返回内存统计信息 */
+/* 当read()触发时，动态格式化内存信息到用户缓冲区 */</code></pre>
+
+        <div class="tip">
+            <strong>为什么推荐选ramdisk而不是procfs？</strong>ramdisk的代码模式（request_fn）在第19-20章中有完整的对照代码（hd.c），你可以直接模仿。而procfs在0.11上的实现需要对VFS框架做较大的扩展——0.11的VFS还没有为"虚拟文件系统"预留足够的hook点。如果你真的想做procfs，建议你在Linux 0.95以上的版本上实验，那里的VFS接口更完善。
+        </div>
+
+        <h2>开发流程</h2>
+
+        <p>从需求到测试的完整流程，不是"先写代码再debug"的蛮力模式，而是一个需要你反复循环的过程。下面这张checklist涵盖了0.11上开发内核模块的标准流程：</p>
+
+        <pre><code>=== Linux 0.11 内核开发 Checklist ===
+
+[ ] 需求分析
+    [ ] 明确要做什么功能
+    [ ] 确定与哪些现有模块交互
+    [ ] 画出数据和函数调用流程图
+
+[ ] 设计方案
+    [ ] 选择将代码放在哪个目录
+    [ ] 定义数据结构（有没有现成的可用？）
+    [ ] 确定与内核其他部分的接口函数
+    [ ] 考虑错误路径：内存不足？参数无效？
+
+[ ] 编码
+    [ ] 编写.c文件
+    [ ] 编写.h文件（如果需要）
+    [ ] 修改Makefile
+    [ ] 在main.c或其他地方添加初始化调用
+
+[ ] 编译
+    $ make clean  # 清理旧的目标文件
+    $ make        # 编译整个内核
+
+[ ] 调试
+    [ ] 编译错误：检查语法、函数声明、头文件路径
+    [ ] 链接错误：检查外部符号是否声明、Makefile是否遗漏
+    [ ] 运行时panic：检查空指针、未初始化变量
+
+[ ] 测试
+    [ ] 功能测试：功能是否如预期工作
+    [ ] 边界测试：最坏情况下的行为（满盘、最大并发）
+    [ ] 压力测试：重复操作1000次看是否稳定
+
+[ ] QEMU验证
+    $ make start  # 启动QEMU模拟器
+    # 在模拟器中执行功能测试</code></pre>
+
+        <div class="highlight">
+            <strong>高效开发的小技巧</strong>：在0.11上开发时，<code>printk()</code>是你最好的朋友——它等价于用户态的printf，但输出到内核日志。你可以把它当作"printf调试法"来用：在每个函数的入口和出口加printk，打印关键变量的值。当内核panic时，这些printk输出会停留在屏幕上，告诉你最后执行到哪里。这个方法虽然"原始"，但在0.11的简单环境下非常高效。
+        </div>
+
+        <h2>测试与验证</h2>
+
+        <p>写完了驱动只是第一步。你需要系统地测试它是否真的可靠。以下是ramdisk驱动的测试用例清单：</p>
+
+        <table>
+            <thead>
+                <tr><th>测试场景</th><th>操作</th><th>预期结果</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>正常读</td><td><code>dd if=/dev/ram0 of=/tmp/test bs=1024 count=10</code></td><td>成功读取10个块，返回0填充的数据</td></tr>
+                <tr><td>正常写</td><td><code>dd if=/dev/zero of=/dev/ram0 bs=1024 count=100</code></td><td>成功写入100个块，无报错</td></tr>
+                <tr><td>写后读校验</td><td>写固定模式数据，再读出比对</td><td>读出的数据与写入的完全一致</td></tr>
+                <tr><td>满盘测试</td><td>写入超过1MB的数据（ramdisk大小）</td><td>写入失败，返回"设备无空间"错误</td></tr>
+                <tr><td>边界访问</td><td>读写第0块和最后一块</td><td>正常完成</td></tr>
+                <tr><td>非法参数</td><td>向ramdisk发出不存在设备的请求</td><td>请求被拒绝，内核不panic</td></tr>
+                <tr><td>连续读写</td><td>循环1000次写+读+校验</td><td>1000次全部通过，无数据损坏</td></tr>
+                <tr><td>挂载文件系统</td><td><code>mkfs.minix /dev/ram0 && mount /dev/ram0 /mnt/ram</code></td><td>成功挂载，可以正常创建/读写文件</td></tr>
+            </tbody>
+        </table>
+
+        <p>如果你所有测试用例都通过，恭喜你——你成功在Linux 0.11上实现了一个完善的ramdisk驱动。这意味着你完全掌握了块设备驱动的开发流程。</p>
+
+        <h2>踩坑故事</h2>
+
+        <p>内核开发远比用户态编程容易"翻车"。以下是初学者在写ramdisk驱动时最容易栽的三个跟头——我在教学和实践中都见过：</p>
+
+        <p><strong>踩坑一：设备号冲突。</strong>0.11的设备号分配不像现代内核那样有统一的注册机制。如果你不小心使用了已经被占用的主设备号（比如2代表软盘），内核会尝试调用错误的请求处理函数，导致不可预测的行为。解决方法：分配设备号前，查看<code>kernel/blk_drv/</code>下所有驱动使用的设备号，确保你的设备号不与现有驱动冲突。</p>
+
+        <p><strong>踩坑二：忘记初始化结构体中的指针字段为NULL。</strong>C语言中局部变量和kmalloc分配的内存不会自动清零。如果你定义了一个<code>struct request</code>但没有初始化所有字段，其中的函数指针可能包含随机值。当内核尝试调用这个"野指针"函数时——直接panic。0.11的内核没有现代内核的防御性检查（如<code>BUG_ON()</code>），一旦跳转到非法地址，你能看到的只有一串十六进制寄存器dump，没有任何错误信息。所以：<strong>每次定义结构体后，立即memset(&stru, 0, sizeof(stru))</strong>。</p>
+
+        <p><strong>踩坑三：请求队列死循环。</strong><code>do_rd_request()</code>中有一个<code>while(1)</code>循环。如果处理完一个请求后没有正确调用<code>end_request(1)</code>（标记请求完成），或者判断请求结束的条件写错了，循环会永远运行下去。更隐蔽的变体是：你处理了请求但没有从队列中移除它，下次同样的请求再次被处理——无限循环。参考hd.c的<code>do_hd_request()</code>，注意每一处<code>end_request()</code>的调用逻辑。</p>
+
+        <div class="warning">
+            <strong>内核panic后怎么办？</strong>在QEMU中运行0.11时，如果遇到内核panic（屏幕显示"Kernel panic: ..."），QEMU会暂停CPU。此时你可以关闭QEMU窗口或按Ctrl+A然后按X退出。如果panic信息不足以定位问题，可以在关键路径上添加<code>printk()</code>输出，重新编译后再次运行。记住——在0.11的环境中，<code>printk()</code>是最可靠的调试手段。
+        </div>
+
+        <h2>结语——RTFSC！</h2>
+
+        <p>至此，我们跨越了整整28章的旅程。让我带你回顾一下我们都走过哪些路：</p>
+
+        <p>我们从<strong>第1章</strong>的"一枚1991年8月25日的新闻组帖子"开始，了解了Linux诞生的历史。然后在<strong>第2-3章</strong>中建立了内核的总览地图和开发环境。在<strong>第4-6章</strong>中，我们跟着<code>bootsect.s</code>、<code>setup.s</code>、<code>head.s</code>的引导流程，一直走到了<code>main()</code>函数。在<strong>第7-9章</strong>中，我们将x86保护模式、GDT/IDT、中断和系统调用的硬件机制一一解锁。</p>
+
+        <p>在<strong>第10-12章</strong>中，我们深入到进程管理的世界——从<code>schedule()</code>的时间片轮转调度算法，到进程的<code>fork()</code>/<code>exit()</code>生命周期，再到信号机制的传递路径。在<strong>第13-15章</strong>中，我们揭开了内存管理的面纱——分页机制、内存分配策略、以及缓冲区管理。</p>
+
+        <p>在<strong>第16-18章</strong>中，我们啃下了课程中最长的一块代码——MINIX文件系统的完整实现，以及pipe和exec的系统调用。在<strong>第19-22章</strong>中，我们研究了块设备驱动（hd.c）和字符设备驱动（串口、键盘、终端）的实现模式。在<strong>第23-25章</strong>中，我们学习了调试技能和动手实践——GDB单步跟踪、添加自己的系统调用。</p>
+
+        <p>在<strong>第26-27章</strong>中，我们回顾了从0.11到1.0的关键演化路径，然后与3000万行的现代Linux内核做了对比分析。最后，在这<strong>第28章</strong>中，你动手实现了一个真正运行在内核中的功能。</p>
+
+        <p>这一路走来，你做了大多数计算机专业学生不会做的事情——你一行一行地读过一个真实操作系统内核的源代码。这不是一件容易的事情，如果你坚持到了这里，你已经超越了99%的开发者。Linus本人在2000年的一次采访中说过：<strong>"如果你想理解操作系统，你必须读源码。没有第二条路。"</strong>——你已经在走这条唯一的道路了。</p>
+
+        <div class="tip">
+            <strong>课程结束了，但真正的旅程才刚刚开始</strong>：学完0.11之后，你有几个自然的进阶方向。如果你对文件系统感兴趣，可以去读ext2/ext4的源码（<code>fs/ext4/</code>），你会发现VFS的接口和我们学过的完全一致。如果你对网络栈感兴趣，从<code>net/ipv4/</code>开始，对照你读过的BSD Socket层代码。如果你对现代调度器感兴趣，打开<code>kernel/sched/fair.c</code>，看CFS的<code>pick_next_task_fair()</code>——那是0.11中schedule()的现代后裔。更重要的是——<strong>去读你想读的代码</strong>。找到一个让你好奇的问题，找到对应的内核模块，打开源代码，逐行理解它。
+        </div>
+
+        <p>作为最后的礼物，我想把Linus在Linux内核邮件列表中说过的一句话送给你——这句话定义了Linux内核社区的"文化基因"：</p>
+
+        <pre><code>"Don't bother me with your problems — show me the code."
+            — Linus Torvalds, linux-kernel mailing list
+
+他的意思是：不要只说"我觉得有个bug"，而是把代码贴出来。代码不会撒谎。代码是最真实的文档、最准确的设计说明、最诚实的注释。
+
+RTFSC — Read The F***ing Source Code.
+
+这三万个函数、三千万行代码、三十年的工程积累——它们全部公开、全部免费、全部等着你去阅读和理解。
+
+课程结束了，但你的源代码阅读之旅才刚刚开始。
+
+去吧，去读你想读的代码。
+</code></pre>
+
+        <p>感谢你跟我走完这28章的学习旅程。希望这些知识会在你的职业生涯中发挥意想不到的作用。</p>
+
+        <p><strong>RTFSC，有缘再见！</strong></p>
+
+        <div class="footer-nav">
+            <a href="27.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="javascript:void(0)">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

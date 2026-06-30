@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第27章 生产部署与MLOps | 时序分析课程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📈 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 认识时间序列</a></li>
+            <li><a href="02.html">第2章 时序的组成与分解</a></li>
+            <li><a href="03.html">第3章 平稳性</a></li>
+            <li><a href="04.html">第4章 自相关分析</a></li>
+            <li><a href="05.html">第5章 指数平滑</a></li>
+            <li><a href="06.html">第6章 时间序列回归</a></li>
+            <li><a href="07.html">第7章 频谱分析入门</a></li>
+            <li><a href="08.html">第8章 自回归模型(AR)</a></li>
+            <li><a href="09.html">第9章 移动平均模型(MA)</a></li>
+            <li><a href="10.html">第10章 ARMA模型</a></li>
+            <li><a href="11.html">第11章 差分与ARIMA</a></li>
+            <li><a href="12.html">第12章 季节性ARIMA</a></li>
+            <li><a href="13.html">第13章 建模实践与诊断</a></li>
+            <li><a href="14.html">第14章 预测与评估</a></li>
+            <li><a href="15.html">第15章 波动率建模(ARCH/GARCH)</a></li>
+            <li><a href="16.html">第16章 多元时间序列(VAR)</a></li>
+            <li><a href="17.html">第17章 协整与误差修正模型</a></li>
+            <li><a href="18.html">第18章 状态空间与卡尔曼滤波</a></li>
+            <li><a href="19.html">第19章 时序特征工程</a></li>
+            <li><a href="20.html">第20章 树模型与时序预测</a></li>
+            <li><a href="21.html">第21章 Prophet与自动预测</a></li>
+            <li><a href="22.html">第22章 时序交叉验证</a></li>
+            <li><a href="23.html">第23章 循环神经网络</a></li>
+            <li><a href="24.html">第24章 卷积与时序</a></li>
+            <li><a href="25.html">第25章 Transformer与时序</a></li>
+            <li><a href="26.html">第26章 基础模型与扩散模型</a></li>
+            <li><a href="27.html" class="active">第27章 生产部署与MLOps</a></li>
+            <li><a href="28.html">第28章 综合实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第27章 生产部署与MLOps</h2>
+
+        <p>如果你做过几年数据科学工作，大概率见过这样的场景：一个模型在 Jupyter Notebook 里的表现堪称完美——MAE 刷新了团队纪录，可视化结果漂亮得可以直接放进论文。但当它被部署到生产环境后，一切开始悄悄走样。预测偏差逐日增大，监控面板上的红色警报一个接一个亮起，最终整个 pipeline 被回滚到简单的移动平均线。</p>
+
+        <p>从模型开发到生产部署之间的距离，被称为"最后一公里"问题。对于时间序列预测，这个问题尤其棘手——因为时序数据是非静态的，数据分布会变化，模型会老化，环境会漂移。本章我们就来系统地梳理这"最后一公里"该怎么走。</p>
+
+        <h3>27.1 从 Notebook 到 API：最小可行部署</h3>
+
+        <p>假设你已经在 Jupyter Notebook 里训练好了一个 ARIMA 模型，要怎么让别人用起来？最直接的方式是用 FastAPI 把它封装成一个 REST API。</p>
+
+        <pre><code># model_serve.py — 用 FastAPI 部署时序模型
+import pickle
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI(title="Time Series Forecasting API")
+
+# 加载训练好的模型
+with open("model.pkl", "rb") as f:
+    model = pickle.load(f)
+
+class ForecastRequest(BaseModel):
+    history: list[float]
+    steps: int = 12
+
+class ForecastResponse(BaseModel):
+    forecast: list[float]
+    upper_bound: list[float] | None = None
+    lower_bound: list[float] | None = None
+
+@app.post("/predict", response_model=ForecastResponse)
+def predict(req: ForecastRequest):
+    if len(req.history) &lt; 10:
+        raise HTTPException(400, "History must contain at least 10 points")
+    # 模型预测
+    forecast = model.forecast(y=np.array(req.history), steps=req.steps)
+    return ForecastResponse(forecast=forecast.tolist())
+
+# 启动：uvicorn model_serve:app --host 0.0.0.0 --port 8000</code></pre>
+
+        <p>这只是一个起点。实际生产中，你还需要考虑模型加载的预热（避免冷启动延迟）、请求级别的异常隔离、超时控制和并发管理。但至少，你的模型已经有了一个可以被业务系统调用的 HTTP 接口。</p>
+
+        <h3>27.2 Docker 容器化</h3>
+
+        <p>为了让模型能在任何环境中一致地运行，Docker 是标配。一个简单的 Dockerfile 如下：</p>
+
+        <pre><code>FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY model.pkl model_serve.py ./
+
+EXPOSE 8000
+CMD ["uvicorn", "model_serve:app", "--host", "0.0.0.0", "--port", "8000"]</code></pre>
+
+        <p>容器化的好处显而易见：环境一致性、版本控制和弹性伸缩。部署时只需要 <code>docker build -t ts-forecast .</code> 然后推到你的容器 registry，Kubernetes 集群或 ECS 直接拉取运行即可。</p>
+
+        <h3>27.3 模型版本管理：MLflow</h3>
+
+        <p>在时序项目中，你会频繁地重新训练模型——可能是定期（每天/每周），也可能是触发的（检测到 drift 后）。每次训练都会产生一个新的模型版本。没有版本管理的话，你很快会陷入混乱：当前线上跑的是哪个版本？上个月的效果为什么比这个好？谁动了什么？</p>
+
+        <p>MLflow 是目前最广泛使用的模型生命周期管理工具。它提供三个核心功能：</p>
+
+        <ul>
+            <li><strong>Experiment Tracking</strong>：记录每次实验的参数、指标和产物</li>
+            <li><strong>Model Registry</strong>：管理模型版本、状态（Staging / Production / Archived）</li>
+            <li><strong>Serving</strong>：将模型部署为 REST API</li>
+        </ul>
+
+        <div class="tip">
+            <strong>实用技巧：</strong>在时序预测项目中，除了记录常规指标（MAE, RMSE），我强烈建议额外记录 validation 集的 <strong>MASE</strong>（Mean Absolute Scaled Error）和 <strong>预测残差的自相关检验 p-value</strong>。后者可以帮你判断模型是否漏掉了重要的时序模式——即使 MAE 看起来不错，如果残差仍有自相关，说明模型没有充分捕捉数据中的信息。
+        </div>
+
+        <h3>27.4 数据漂移与概念漂移</h3>
+
+        <p>时序预测生产化中最容易被忽视、也是造成问题最多的一环：漂移检测。</p>
+
+        <ul>
+            <li><strong>Data Drift（数据漂移）</strong>：输入数据的分布发生了变化。例如，你的模型是在 2020-2023 年数据上训练的，而 2024 年用户行为因某个大事件发生了变化，导致输入特征的分布偏移。</li>
+            <li><strong>Concept Drift（概念漂移）</strong>：输入到输出的映射关系发生了变化。例如，过去"促销活动"意味着销量增长 50%，现在用户对促销已经疲劳，同样的促销力度只带来 10% 的增长。</li>
+        </ul>
+
+        <p>检测数据漂移最简单的方式是监控预测残差（residual）的统计量：如果残差的均值显著偏离 0，或者残差的方差突然增大，很可能就是 drift 的信号。更系统的方法是用 Population Stability Index（PSI）或 Kolmogorov-Smirnov 检验来比较实时数据分布和训练数据分布。</p>
+
+        <pre><code># 用一个简单规则检测 data drift
+import numpy as np
+
+def detect_drift(residuals: np.ndarray, window: int = 100) -> bool:
+    """
+    基于残差均值和标准差的滑动窗口 drift 检测
+    返回 True 表示检测到漂移
+    """
+    recent_mean = np.mean(residuals[-window:])
+    recent_std = np.std(residuals[-window:])
+
+    # 如果最近残差均值显著偏离 0（超过 2 倍标准差），触发告警
+    if abs(recent_mean) > 2 * recent_std / np.sqrt(window):
+        return True
+    # 如果最近残差标准差比历史标准差大了 50%，触发告警
+    historical_std = np.std(residuals[:-window]) if len(residuals) > window else recent_std
+    if recent_std > 1.5 * historical_std:
+        return True
+    return False
+
+# 模拟使用
+residuals = np.random.normal(0, 1, 1000)
+# 注入漂移
+residuals[-50:] += 0.8
+print("Drift detected:", detect_drift(residuals))  # True</code></pre>
+
+        <h3>27.5 自动重训练 Pipeline</h3>
+
+        <p>检测到 drift 后，你需要自动化的重训练流程。一个典型的时序自动重训练 pipeline 包含：</p>
+
+        <ol>
+            <li>数据采集管道定时拉取新数据（每小时/每天）</li>
+            <li>验证新数据的完整性和质量</li>
+            <li>用最新的训练窗口（如最近 365 天）重新训练模型</li>
+            <li>在留出的 validation 集上验证新模型 vs 旧模型</li>
+            <li>如果新模型显著优于旧模型（或旧模型已 drift），将新模型推送到 Model Registry 的 Production 阶段</li>
+            <li>触发蓝绿部署或金丝雀发布</li>
+        </ol>
+
+        <div class="highlight">
+            <strong>关键原则：</strong>自动重训练不是越频繁越好。尤其对于统计模型（ARIMA、ETS），每次重训练都需要重新搜索超参数，如果数据变化不大，新的超参数可能反而导致预测不稳定。一个稳妥的做法是：<strong>定期重训练（如每周）</strong>加上 <strong>drift 触发重训练</strong>，两者并行。
+        </div>
+
+        <h3>27.6 时序数据库与实时流处理</h3>
+
+        <p>当你的预测系统需要处理实时数据流（比如每秒钟接入的 IoT 传感器数据），传统的关系型数据库就力不从心了。这时你需要时序数据库（Time Series Database，TSDB）和流处理框架。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>工具</th>
+                    <th>类型</th>
+                    <th>适用场景</th>
+                    <th>特点</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>InfluxDB</td>
+                    <td>时序数据库</td>
+                    <td>IoT 监控、运维指标</td>
+                    <td>类 SQL 查询，压缩率高，内置持续查询</td>
+                </tr>
+                <tr>
+                    <td>TimescaleDB</td>
+                    <td>时序数据库</td>
+                    <td>需要与关系数据关联的场景</td>
+                    <td>基于 PostgreSQL，支持完整 SQL</td>
+                </tr>
+                <tr>
+                    <td>Apache Kafka</td>
+                    <td>流处理平台</td>
+                    <td>实时数据管道的中间层</td>
+                    <td>高吞吐、持久化、支持 exactly-once</td>
+                </tr>
+                <tr>
+                    <td>Apache Flink</td>
+                    <td>流计算引擎</td>
+                    <td>实时特征计算和预测</td>
+                    <td>状态管理强，低延迟</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>一个经典的实时预测架构是：<strong>传感器 → Kafka → Flink（特征计算）→ ML Model Server（推理）→ InfluxDB（结果存储 + 监控面板）</strong>。每一层都有明确的职责，可以独立扩缩容。</p>
+
+        <h3>27.7 生产就绪检查清单</h3>
+
+        <p>在把模型推到生产环境之前，建议对照下面这份清单逐项确认：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>类别</th>
+                    <th>检查项</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>性能</td>
+                    <td>推理延迟满足 SLA</td>
+                    <td>P99 延迟必须在业务容忍范围内（通常 &lt; 500ms）</td>
+                </tr>
+                <tr>
+                    <td>性能</td>
+                    <td>吞吐量测试通过</td>
+                    <td>能承受预期峰值 QPS 的 2-3 倍压力</td>
+                </tr>
+                <tr>
+                    <td>可靠性</td>
+                    <td>模型加载有预热机制</td>
+                    <td>避免部署更新时的冷启动长尾延迟</td>
+                </tr>
+                <tr>
+                    <td>可靠性</td>
+                    <td>降级方案已定义</td>
+                    <td>模型不可用时 fallback 到简单 baseline</td>
+                </tr>
+                <tr>
+                    <td>监控</td>
+                    <td>预测残差实时监控已部署</td>
+                    <td>每批次预测后自动计算残差统计</td>
+                </tr>
+                <tr>
+                    <td>监控</td>
+                    <td>Drift 检测告警已配置</td>
+                    <td>PSI / KS 检验或残差规则告警</td>
+                </tr>
+                <tr>
+                    <td>运维</td>
+                    <td>模型版本可回滚</td>
+                    <td>MLflow Registry 标记旧版本可快速恢复</td>
+                </tr>
+                <tr>
+                    <td>运维</td>
+                    <td>自动重训练 pipeline 就绪</td>
+                    <td>定期 + drift 触发两种触发方式</td>
+                </tr>
+                <tr>
+                    <td>安全</td>
+                    <td>API 鉴权已配置</td>
+                    <td>预测接口不能对公网开放</td>
+                </tr>
+                <tr>
+                    <td>安全</td>
+                    <td>输入校验严格</td>
+                    <td>拒绝异常输入防止模型推理崩溃</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>27.8 真实故事：一个没有被发现的 drift</h3>
+
+        <p>这是我亲身经历的一个教训。一家电商平台用 Prophet 模型做日销售额预测，模型在上线后的前三个月表现非常好，MAPE 保持在 8% 左右。团队非常满意，没有人再去关注它。</p>
+
+        <p>到了第四个月，运营部门开始搞"满减活动"——这是过去没有的模式。但模型训练数据中没有任何促销相关的特征。残差开始慢慢增大，但增大的速度很慢——每周 MAPE 上涨 0.5%，根本不足以引起注意。</p>
+
+        <p>直到第六个月，财务部门在季度汇报时发现：预测和实际的偏差已经达到了 23%。这三个月里，业务部门基于错误的预测做了库存计划和资金安排，造成了数百万元的损失。</p>
+
+        <p>问题出在哪里？<strong>没有 drift detection。</strong>团队部署了模型，但没有部署任何监控和告警机制。模型静默地降级了整整三个月，没有人注意到。事后复盘时，团队在 pipeline 里加上了一个简单的残差监控——如果连续 7 天的 MAPE 超过 15%，自动告警并触发重训练。这是十几行代码就能实现的防护。</p>
+
+        <div class="warning">
+            <strong>血的教训：</strong>在时序预测中，一个没有被监控的模型比没有模型更危险——因为你在基于一个你自以为有效、实际上已经失效的工具做决策。<strong>"部署"不等于"交付"，"上线"不等于"结束"。</strong>一个完整的时序 ML 系统，监控和告警和模型的预测能力同等重要。
+        </div>
+
+        <p>从模型的开发到生产部署，我们完成了一个完整的闭环。最后一章，让我们把所有知识融合到一起，做一个端到端的综合实战项目。</p>
+
+        <div class="footer-nav">
+            <a href="26.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="28.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

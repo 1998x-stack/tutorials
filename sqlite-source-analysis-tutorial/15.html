@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 原子提交与事务</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html" class="active">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第15章 原子提交与事务</h1>
+
+        <p>大家好，我是你们的讲师。前面几章我们深入了 VFS 层，了解了 SQLite 是怎么在抽象层之上屏蔽操作系统差异的。但 SQLite 最了不起的工程成就之一，是在这么轻薄的一层抽象之上，实现了完整的 <strong>ACID 事务</strong>——而且是即使系统在写入过程的任意时刻崩溃，也能保证数据的完整性。这一章我们就来掀开这个黑盒，看看 SQLite 的原子提交和事务系统是怎么工作的。</p>
+
+        <p>SQLite 的 ACID 承诺听起来很玄乎，但它的核心机制其实非常朴素：<strong>Rollback Journal（回滚日志）</strong>。在默认的 delete 模式下，每次事务开始前，SQLite 会把即将修改的页的原始内容先写入一个 journal 文件。如果事务提交成功，journal 文件被删除；如果崩溃发生，下次启动时通过 journal 文件回滚到之前的状态。就这么简单的一个"先备份再修改"的策略，撑起了 SQLite 的整个可靠性基础。</p>
+
+        <h2>ACID 在 SQLite 中的实现</h2>
+
+        <p>我们来逐一拆解 ACID 四个属性在 SQLite 源码中的落脚点：</p>
+
+        <table>
+            <thead>
+                <tr><th>属性</th><th>实现机制</th><th>关键代码</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>原子性 (Atomicity)</strong></td><td>Rollback Journal 或 WAL 日志：要么全部写入，要么全部回滚</td><td><code>pager.c</code> — <code>pager_playback()</code>, <code>pager_write()</code></td></tr>
+                <tr><td><strong>一致性 (Consistency)</strong></td><td>约束检查 + journal 回滚确保数据始终合法</td><td><code>btree.c</code> — 完整性校验, <code>vdbe.c</code> — 约束检查</td></tr>
+                <tr><td><strong>隔离性 (Isolation)</strong></td><td>五级文件锁实现事务隔离，见第 17 章</td><td><code>os_unix.c</code> — <code>unixLock()</code>, <code>sqlite3LockAndPrepare()</code></td></tr>
+                <tr><td><strong>持久性 (Durability)</strong></td><td><code>fsync()</code>/<code>fdatasync()</code> 确保数据落到磁盘</td><td><code>vfs.c</code> — <code>fullSync()</code>, <code>pager.c</code> — <code>syncJournal()</code></td></tr>
+            </tbody>
+        </table>
+
+        <p>这里面有趣的是，SQLite 的 ACID 不是靠数据库服务器保证的——它是一个嵌入式库，不需要独立的进程、不需要网络通信。所有的保证都落在三个层面上：<strong>文件格式约定</strong>（journal 的写入顺序）、<strong>操作系统调用</strong>（锁和 fsync）、以及 <strong>启动时的自恢复逻辑</strong>。没有守护进程，没有 redo log 的 background writer——一切都在调用者的线程中同步完成。</p>
+
+        <div class="highlight">
+            <strong>理解 SQLite 事务的关键 insight：</strong> SQLite 的原子提交协议本质上是一个"双缓冲"策略——修改先写到 journal 文件，再写回主数据库文件。如果两步之间系统崩溃，启动时的 recovery 过程可以把数据库文件"倒回"到 journal 中保存的原始状态，仿佛修改从未发生过。这就是原子性的本质——要么全做，要么全不做。
+        </div>
+
+        <h2>Rollback Journal 格式</h2>
+
+        <p>journal 文件并不是简单的"把旧数据复制一份"——它有精心设计的格式，确保即使在写入过程中崩溃，也能正确判断 journal 的有效性。我们来看 journal 文件的结构：</p>
+
+        <pre><code>/* Rollback Journal 文件布局 */
++---------------------------+
+| Journal Header (28 bytes) |  ← 文件开始
++---------------------------+
+| Page 1 Original Data      |  ← 第一个被修改的页的原始内容
++---------------------------+
+| Page 1 Page Number (4B)   |
++---------------------------+
+| Page 2 Original Data      |
++---------------------------+
+| Page 2 Page Number (4B)   |
++---------------------------+
+| ...                       |
++---------------------------+
+| Checksum (8 bytes)        |  ← 文件末尾
++---------------------------+
+
+/* Header 结构体定义 (pager.c) */
+struct JournalHeader {
+    char aMagic[8];            /* 魔数: 0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7 */
+    u32 nPage;                  /* journal 中包含的页数 */
+    u32 nRec;                   /* 记录数 (通常等于 nPage, 但可被截断检测使用) */
+    u32 wz;                     /* 页大小 (checksum seed 的一部分) */
+    u32 checksum;               /* 整个 journal 的校验和 */
+};</code></pre>
+
+        <p>journal 文件的格式有几个巧妙的设计点。首先是 <strong>魔数 (magic number)</strong>——它不是一个固定的常量，而是每个 journal 文件生成时随机确定的值，用于检测 journal 是否属于当前数据库文件（而非来自其他数据库的残留物）。其次是 <strong>页号附带在每页数据之后</strong>——这在回放时至关重要，因为修改过的页在 journal 中出现的顺序和它们在主数据库文件中的顺序不一定相同，通过页号可以正确地将数据恢复到对应的页位置。</p>
+
+        <p>最精妙的是 <strong>checksum 的位置</strong>：它放在文件的最末尾。这意味着如果事务提交过程中系统崩溃，journal 文件的 checksum 很可能还没有被写入，或者写入不完整——SQLite 在启动恢复时发现 checksum 不匹配，就会判定这是一个"未完成的提交"，从而忽略整个 journal。这个设计巧妙地利用了文件系统的写入顺序来检测崩溃。</p>
+
+        <h2>原子提交协议</h2>
+
+        <p>SQLite 的原子提交不是一个单一的函数调用，而是一个精心编排的 <strong>状态机</strong>，主要在 <code>pager.c</code> 中实现。我们来追踪一次写事务从开始到提交的完整生命周期：</p>
+
+        <pre><code>/* 原子提交的核心状态机 (简化版) */
+/* 文件: src/pager.c */
+
+1. PAGER_STATE_WRITER_LOCKED
+   → 获取 EXCLUSIVE 锁
+   → 清空页缓存中的脏页列表
+
+2. PAGER_STATE_WRITER_CACHEMOD
+   → 第一次修改页时进入此状态
+   → 修改数据被缓存在内存中，尚未写回
+
+3. PAGER_STATE_WRITER_DBMOD
+   → 脏页开始写回数据库文件
+   → 关键保证: 必须先写 journal, 再写数据库
+
+4. PAGER_STATE_WRITER_COMMITTED
+   → 执行 fsync() 确认所有数据已落到磁盘
+   → 写入 journal 文件完成标记
+   → 再次 fsync() journal 文件
+
+5. PAGER_STATE_WRITER_FINISHED
+   → 释放锁或降级锁
+   → 删除 journal 文件 (delete 模式下)</code></pre>
+
+        <p>这个状态机中最关键、也最容易出错的部分是 <strong>sync 顺序</strong>。SQLite 必须严格遵守以下写入顺序才能保证 crash-safe：</p>
+
+        <div class="warning">
+            <strong>不可违反的 sync 顺序：</strong><br>
+            <ol>
+                <li><strong>先写 journal 数据</strong> — 把修改前的页原始内容写入 journal 文件</li>
+                <li><strong>fsync journal 文件</strong> — 确保 journal 内容已落盘</li>
+                <li><strong>写数据库文件</strong> — 把修改后的页写入主数据库文件</li>
+                <li><strong>fsync 数据库文件</strong> — 确保数据库内容已落盘</li>
+                <li><strong>删除 journal 文件</strong> — 标记事务完成（或者写入 journal 完成标志）</li>
+            </ol>
+            如果 1 和 2 的顺序颠倒，或者跳过任何一步 fsync，在系统崩溃时会导致无法恢复的数据库损坏。这不是理论上的风险——真实生产环境中因为这个顺序错误导致的数据损坏案例比比皆是。
+        </div>
+
+        <p>对应的源码路径在 <code>pager.c</code> 的 <code>pager_commit()</code> 函数中。你可以 grep 一下 <code>sqlite3OsSync</code> 的调用位置——每次 sync 调用都是对持久性的一个承诺。</p>
+
+        <h2>事务类型：DEFERRED / IMMEDIATE / EXCLUSIVE</h2>
+
+        <p>SQLite 支持三种事务类型，它们的区别在于获取锁的时机和级别。理解这三者的区别，对编写高并发应用至关重要。</p>
+
+        <table>
+            <thead>
+                <tr><th>事务类型</th><th>初始锁级别</th><th>行为描述</th><th>适用场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>DEFERRED</code></td><td>NONE</td><td>直到第一次写操作时才获取 RESERVED 锁。多个读事务可以同时开始，第一个写事务可以获取 RESERVED 锁但读事务仍在进行。</td><td>默认类型。纯读操作的最佳选择。</td></tr>
+                <tr><td><code>IMMEDIATE</code></td><td>RESERVED</td><td>BEGIN 时立即获取 RESERVED 锁。不允许其他写事务同时开始，但允许读事务继续读取。</td><td>写事务居多，且不希望遇到 <code>SQLITE_BUSY</code> 的场景。</td></tr>
+                <tr><td><code>EXCLUSIVE</code></td><td>EXCLUSIVE</td><td>BEGIN 时立即获取 EXCLUSIVE 锁。不允许任何其他事务（包括读事务）访问。</td><td>需要绝对隔离的场景，如 VACUUM、备份恢复。</td></tr>
+            </tbody>
+        </table>
+
+        <p>我见过很多初学者踩的坑就是：<strong>在写密集型应用中使用默认的 DEFERRED 事务</strong>。两个连接同时 BEGIN DEFERRED，然后都执行 UPDATE，结果其中一个在获取 RESERVED 锁时失败，返回 SQLITE_BUSY。如果你知道即将写入，请使用 BEGIN IMMEDIATE——它会在事务开始时提前锁定，给你一个清晰的失败信号，而不是在写到一半时才告诉你"不行了"。</p>
+
+        <h2>崩溃恢复</h2>
+
+        <p>现在我们来聊聊最精彩的部分：<strong>如果系统在事务提交的中间时刻崩溃了，SQLite 是怎么恢复的？</strong></p>
+
+        <p>当 SQLite 打开一个数据库文件时，它做的第一件事（在 <code>sqlite3PagerOpen()</code> 过程中）就是检查是否存在 journal 文件。如果存在，说明上一次会话可能没有正常结束。这时会调用 <code>pager_playback()</code>——journal 回放函数。</p>
+
+        <pre><code>/* pager_playback() 的核心逻辑 (简化伪代码) */
+/* 文件: src/pager.c */
+
+static int pager_playback(Pager *pPager, int isHot){
+    /* isHot 表示 journal 是否来自一个"热"的、即未完成提交的事务 */
+
+    /* 1. 读取 journal header */
+    readJournalHeader(pPager, &header);
+
+    /* 2. 校验 checksum — 判断 journal 是否完整 */
+    if (!verifyJournalChecksum(pPager, &header)){
+        /* checksum 不匹配：journal 不完整，忽略它 */
+        goto end_playback;
+    }
+
+    /* 3. 逐页回放：将 journal 中的原始数据写回数据库文件 */
+    for (i = 0; i &lt; header.nPage; i++){
+        readPageFromJournal(pPager, &pageData, &pageNum);
+        /* 关键：只覆盖对应页号的位置 */
+        writePageToDbFile(pPager, pageNum, pageData);
+    }
+
+    /* 4. 同步数据库文件，确保所有回放已落盘 */
+    sqlite3OsSync(pPager->fd, SQLITE_SYNC_NORMAL);
+
+    /* 5. 删除 journal 文件 — 恢复完成 */
+    sqlite3OsDelete(pPager->pVfs, pPager->zJournal, 0);
+
+end_playback:
+    return rc;
+}</code></pre>
+
+        <p>恢复过程的精妙之处在于：如果 journal 文件中的内容本身就是不完整的（比如只写了一半页），checksum 校验会失败，SQLite 直接丢弃这个残缺的 journal。此时数据库文件可能处于"部分更新"的状态——但你可能会问，这样数据不就不一致了吗？</p>
+
+        <p>答案在于前面提到的 <strong>sync 顺序保证</strong>。因为 journal 内容在数据库内容被修改之前就已经 fsync 到磁盘了，所以如果数据库文件被部分更新了，journal 一定写全了。反过来，如果 journal 没写全（checksum 失败），那么数据库文件一定没有被更新——因为数据库的写入发生在 journal 被确认之后。这个"全有或全无"的保证，就是原子提交协议的数学基础。</p>
+
+        <div class="tip">
+            💡 你可以在源码中搜索 <code>JOURNAL_HDR_SZ</code> 和 <code>JOURNAL_PG_SZ</code> 这两个宏，它们定义了 journal 文件中 header 和每页记录的固定大小。实际运行时，SQLite 通过 <code>sqlite3OsRead()</code> 和 <code>sqlite3OsWrite()</code>（也就是 VFS 层的读写函数）来操作 journal 文件——所以 journal 的读写也是经过 VFS 抽象的，可以运行在任何文件系统之上。
+        </div>
+
+        <h2>真实踩坑：文件 sync 顺序错误导致的数据损坏</h2>
+
+        <p>好了，到了每章一次的真实故事时间。</p>
+
+        <p>2013 年左右，我参与的一个嵌入式项目中使用了 SQLite 作为配置数据的持久化存储。设备运行在 Linux 环境下，文件系统是 JFFS2（一种针对 Nor Flash 优化的日志型文件系统，常用于嵌入式设备）。设备运行了几个月都很稳定，直到有一天客户反馈说：设备偶尔会在异常断电后出现配置丢失，更严重的情况下甚至会完全无法启动——数据文件损坏了。</p>
+
+        <p>排查过程非常痛苦。我们一开始怀疑是 SQLite 的 bug，但查阅了大量资料后发现，SQLite 针对 JFFS2 这类日志型文件系统有一个<strong>已知问题</strong>：很多日志型文件系统在 <code>fsync()</code> 返回成功时，并不能保证数据已经真正写入持久存储。JFFS2 的 <code>fsync</code> 实现有 bug，在特定条件下（NAND flash 坏块处理中）会返回成功但实际上数据还在缓存中。</p>
+
+        <p>更要命的是，我们的代码为了"性能优化"，在调用 SQLite 事务提交之前，手动调用了一个 <code>fdatasync()</code> 而不是 <code>fsync()</code>——我们认为 journal 文件不需要同步元数据（如文件大小），所以用了轻量级的 <code>fdatasync</code>。但在 JFFS2 上，<code>fdatasync</code> 在某些内核版本中的实现是错误的——它可能根本不刷数据，只是清一下 page cache 了事。</p>
+
+        <p>最终我们做了三件事来修复：<br>
+        1. 移除所有对 <code>fdatasync</code> 的直接调用，全部改为 <code>fsync</code>，并确保 SQLite 自己的同步机制不被绕过<br>
+        2. 在 SQLite 编译时启用 <code>SQLITE_DIRECT_OVERFLOW_READ</code> 选项，减少对文件系统 page cache 的依赖<br>
+        3. 在硬件层面增加一个大电容，给设备断电后留出足够的放电时间让 fsync 完成</p>
+
+        <p>教训是深刻的：<strong>fsync 在某些文件系统上并不可靠</strong>，而 SQLite 的 ACID 保证建立在"fsync 是可靠的"这一假设之上。如果你的硬件或文件系统不能保证 fsync 的语义，SQLite 的原子提交承诺也无法兑现。这就是为什么 SQLite 官方专门有一篇文档《SQLite and File System Corruption》——值得每一个在生产环境中使用 SQLite 的开发者细读。</p>
+
+        <p>好了，这一章我们从 ACID 的实现出发，深入了 Rollback Journal 的格式、原子提交状态机、事务类型的选择，以及崩溃恢复机制。下一章我们要聊的是 SQLite 的另一个事务模型——<strong>WAL (Write-Ahead Log) 模式</strong>，它从根本上解决了 journal 模式下"读阻塞写、写阻塞读"的问题，是 SQLite 在高并发场景下的必备选择。我们第 16 章见。</p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

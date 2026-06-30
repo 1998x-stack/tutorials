@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第18章 查询规划器</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html" class="active">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第18章 查询规划器</h1>
+
+        <p>大家好，我是你们的讲师。前面几章我们都在聊 SQLite 的"下半身"——怎么存数据、怎么保证事务、怎么加锁并发。从这一章开始，我们转向"上半身"——<strong>查询规划器 (Query Planner)</strong>，也就是 SQLite 中负责决定"怎么写 SQL 才能跑得快"的那个最聪明的组件。</p>
+
+        <p>查询规划器的任务听起来简单：给定一条 SQL 语句，找出执行它最高效的方式。但真正实现起来极其复杂——因为可能的执行计划数量随着 JOIN 的表数量呈阶乘级增长。对于 6 个表的 JOIN，可能的连接顺序就有 720 种（6!），再乘以每种顺序下每个表的索引选择方案，轻松上万。SQLite 的查询规划器要在毫秒级别从这上万个计划中挑出最优的一个——这就是我们这一章要揭秘的黑科技。</p>
+
+        <div class="highlight">
+            <strong>一个对比：</strong> PostgreSQL 和 MySQL 的查询规划器动辄几万行代码，使用了复杂的统计信息（直方图、相关性、MCV 列表）、并行化执行、自适应规划等高级技术。SQLite 的查询规划器（主要在 <code>src/where.c</code> 中）只有约 7000 行 C 代码，没有后台统计信息收集、没有并行执行。它用了一系列巧妙的启发式算法和穷举搜索的平衡策略，在"足够好"和"足够快"之间找到了自己的黄金分割点。这正是嵌入式系统的工程哲学——在资源约束下做到最好。
+        </div>
+
+        <h2>查询规划的三步</h2>
+
+        <p>SQLite 的查询规划分为三个主要阶段：</p>
+
+        <table>
+            <thead>
+                <tr><th>阶段</th><th>输入</th><th>输出</th><th>关键函数</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>语法树</strong></td><td>SQL 文本</td><td>抽象语法树 (AST)</td><td><code>sqlite3Parser()</code> / Lemon</td></tr>
+                <tr><td><strong>逻辑计划</strong></td><td>AST</td><td>表达式分解、WHERE 子句拆分、等价类推导</td><td><code>whereLoopInit()</code>、<code>whereSplit()</code></td></tr>
+                <tr><td><strong>物理计划</strong></td><td>逻辑计划 + 索引信息</td><td>执行计划 (VDBE 字节码)</td><td><code>whereBestPath()</code>、<code>codeOneLoopStart()</code></td></tr>
+            </tbody>
+        </table>
+
+        <p>第一步是解析器的工作（Lemon 生成的词法+语法分析），生成 AST。第二步是逻辑优化——把 WHERE 子句中的条件拆分成可以独立评估的片段，推导出等价类（例如 <code>a=b AND b=c</code> 意味着 <code>a=c</code>），确定哪些条件可以用索引来加速。第三步是真正"规划"的核心——枚举所有可能的访问路径（全表扫描、索引扫描、索引查找），计算每种方案的成本，选择最优的一个。</p>
+
+        <h2>WHERE 子句分析</h2>
+
+        <p>一切查询规划的核心是 <code>where.c</code> 中的 <code>WhereLoop</code> 结构体。它代表了访问一个表的一种可能方式：</p>
+
+        <pre><code>/* WhereLoop 结构体 — 表示一种可能的表访问路径 */
+/* 文件: src/where.c (简化版) */
+
+struct WhereLoop {
+    Bitmask prereq;              /* 这个 loop 依赖哪些前置表（用于 JOIN） */
+    Bitmask maskSelf;            /* 这个 loop 对应的表 */
+    WhereLoop **pNextLoop;       /* 链表中的下一个候选 loop */
+
+    union {
+        struct {
+            int iIdxCur;         /* 索引游标号 */
+            int iIndexCur;       /* 表游标号 */
+            int nEq;             /* 等值条件的数量 */
+            int nBtm;            /* 下界条件的数量 */
+            int nTop;            /* 上界条件的数量 */
+            int nSkip;           /* 可跳过的前缀列数 */
+            Logest rRun;         /* 预估的运行成本 */
+            Logest nOut;         /* 预估的输出行数 */
+        } btree;                 /* B-Tree 索引访问路径 */
+        struct {
+            /* 全表扫描路径 */
+            Logest rRun;         /* 运行成本 = 表页数 */
+            Logest nOut;         /* 输出行数 = 表行数 */
+        } fullScan;
+    } u;
+
+    Logest rSetup;               /* 建立这个 loop 的固定成本 */
+    WhereLoop *pNextLoop;        /* 链表中的下一个项 */
+    u8 wsFlags;                  /* 标志位 (索引类型、排序方式等) */
+    u8 nLSlot;                   /* 可用插槽数 */
+    u8 nLTerm;                   /* 实际使用的条件数 */
+    WhereTerm *aLTerm[1];        /* 使用的 WHERE 条件数组 */
+};</code></pre>
+
+        <p>这个结构体是整个查询规划器的核心数据结构。对于每个表，SQLite 会构建多个 <code>WhereLoop</code> 候选者——一个代表全表扫描，若干个代表使用不同索引的扫描。然后规划器从这些候选者中挑出成本最低的那个。</p>
+
+        <p>WHERE 子句的分析过程大致如下：</p>
+        <ol>
+            <li><strong>拆分</strong> — 用 <code>whereSplit()</code> 把 WHERE 子句在 AND 处拆分成单个条件</li>
+            <li><strong>分类</strong> — 对每个条件，判断它能不能用索引（sARGability，即 Search ARGument ABILITY）</li>
+            <li><strong>绑定</strong> — 将可用的条件绑定到对应的索引列上（<code>whereLoopAddBtree()</code>）</li>
+            <li><strong>排序</strong> — 判断索引能否满足 ORDER BY 子句，避免额外的排序操作</li>
+        </ol>
+
+        <div class="tip">
+            💡 sARGable 这个词是数据库领域的术语，意思是"可以作为搜索参数使用"。一个 WHERE 条件如果是 sARGable 的，意味着它可以直接被索引用于定位数据。例如 <code>col = 42</code> 是 sARGable 的（索引可以直接跳到 col=42 的位置），但 <code>func(col) = 42</code> 不是（因为索引存储的是 col 的原始值，不是 func(col) 的结果）。这是为什么在 SQL 中尽量<strong>不要对索引列使用函数</strong>的原因——函数会破坏索引的可搜索性。
+        </div>
+
+        <h2>Cost 模型</h2>
+
+        <p>SQLite 的成本模型没有 PostgreSQL 那么复杂（不维护表的统计信息直方图），但它有一套有效的估算方法。成本以"处理一条记录的成本单位"来度量：</p>
+
+        <pre><code>/* 成本估算的核心公式 */
+/* 文件: src/where.c (whereLoopAddBtree() 中的计算逻辑) */
+
+/* 1. 全表扫描的成本 = 表中的页数 */
+pNew->u.btree.rRun = estTablePages(pTab);
+
+/* 2. 索引查找的成本 = 索引树深度 + (等值匹配数 * 每行I/O成本) */
+/* 索引树深度估算: 对于 N 行记录的 B-Tree, 深度 ≈ log_pagesize(N) */
+int treeDepth = estBTreeDepth(pTab->nRow);
+pNew->u.btree.rRun = treeDepth;
+
+/* 3. 索引扫描 (范围查询) 的成本 */
+/* 对于 col &gt; 100 AND col &lt; 200 这样的范围查询 */
+/* 成本 = log(N) + 估计范围内的行数 * 0.1 (每个索引项成本) */
+pNew->u.btree.rRun = treeDepth + (estimatedRangeRows * 0.1);
+
+/* 4. 输出行数估算 (用于 JOIN 顺序决策) */
+/* 如果使用了等值条件: nOut ≈ nRow / 索引区分度 */
+/* 如果没有等值条件: nOut ≈ nRow * 0.1 (启发式假设 10% 的选择率) */
+if (nEq > 0){
+    /* 等值条件通常只匹配少数行 */
+    pNew->nOut = estimateOutputRows(pTab, pIdx, nEq);
+} else {
+    /* 范围或不带条件: 保守估计 10% */
+    pNew->nOut = pTab->nRowEstimate / 10;
+}</code></pre>
+
+        <p>这里的估算精度虽然不如大型数据库，但在绝大多数场景下已经足够。SQLite 团队做过一个有趣的统计：在数千个真实世界的查询中，SQLite 的成本模型选出的执行计划与"理论最优"计划相差超过 2 倍的情况不到 5%。这是因为 OLTP 场景下的查询通常比较简单（1-3 个表的 JOIN 加上简单的 WHERE 条件），即便估算有误差，也基本不影响最终计划的质量。</p>
+
+        <table>
+            <thead>
+                <tr><th>估算项</th><th>方法</th><th>精度</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>表行数 (<code>nRowEstimate</code>)</td><td>从 B-Tree 根页估算，或在 ANALYZE 后直接读取 <code>sqlite_stat1</code></td><td>良好</td></tr>
+                <tr><td>索引区分度</td><td>ANALYZE 收集的 <code>sqlite_stat4</code> 采样数据</td><td>较好 (有 ANALYZE) / 一般 (无)</td></tr>
+                <tr><td>选择率 (范围查询)</td><td>默认 10%，有直方图数据时更精确</td><td>一般</td></tr>
+                <tr><td>B-Tree 深度</td><td>基于页大小和行大小估算</td><td>良好</td></tr>
+            </tbody>
+        </table>
+
+        <p>值得注意的是，<code>ANALYZE</code> 命令对 SQLite 的查询规划质量有显著影响。运行 <code>ANALYZE</code> 后，SQLite 会创建 <code>sqlite_stat1</code>、<code>sqlite_stat4</code> 等内部表，存储索引的统计信息。这能让规划器做出更准确的选择率估算。如果你发现某些查询的执行计划不是最优的，第一步就是运行 <code>ANALYZE</code>，然后看 <code>EXPLAIN QUERY PLAN</code> 的输出有没有变化。</p>
+
+        <h2>连接顺序优化</h2>
+
+        <p>对于多表 JOIN，连接顺序的选择是最影响性能的因素。SQLite 使用了一种叫做 <strong>"N 个最优"</strong> 的启发式算法：</p>
+
+        <pre><code>/* 连接顺序选择算法 (简化伪代码) */
+/* 文件: src/where.c — whereBestPath() */
+
+/* 算法: "N 个最优" (N Best) — 不是穷举所有排列！ */
+/* 对 k 个表的 JOIN，最多保留 N 个候选路径 */
+
+#define N_BEST 12  /* SQLite 最多保留 12 个候选路径 */
+
+void whereBestPath(WhereInfo *pWInfo, int nTable, WherePath **ppBest){
+    WherePath *apBest[N_BEST];  /* 当前最优的前 N 个路径 */
+    int nBest;                   /* 当前候选路径数量 */
+    int iTable;
+
+    /* 逐层构建: 每次添加一个表 */
+    for (iTable = 0; iTable &lt; nTable; iTable++){
+        /* 对当前每个候选路径，尝试添加下一个表 */
+        for (each candidate path pPath in apBest){
+            for (each unjoined table T){
+                /* 构建新的路径: 在 pPath 后追加表 T */
+                newPath = extendPath(pPath, T);
+
+                /* 计算新路径的成本 */
+                newPath->cost = pPath->cost + bestLoopForTable(T)->cost;
+
+                /* 插入到最佳列表中，保留前 N_BEST 个 */
+                addToBestList(newPath, apBest, &amp;nBest);
+            }
+        }
+    }
+
+    /* 返回最佳路径 */
+    *ppBest = apBest[0];
+}</code></pre>
+
+        <p>这个算法的精妙之处在于它是 <strong>O(N_BEST * nTable^2)</strong> 的，而不是穷举的 O(nTable!)。当 N_BEST=12、表数量为 10 时，穷举需要 360 万种可能，而 SQLite 的算法只需要评估约 1200 个路径。这种"近似最优"的取舍在嵌入式场景下完全合理。</p>
+
+        <p>在 3.53.0 版本中，SQLite 引入了 <strong>星型 JOIN (Star Join) 改进</strong>。星型 JOIN 是数据仓库中常见的查询模式：一个大的事实表 (fact table) 与多个小的维度表 (dimension table) 做 JOIN，事实表包含外键引用维度表。优化器现在能识别这种模式，优先扫描事实表，然后对每个维度表做索引查找，而不是反过来。这个优化在某些数据仓库查询中带来了 10 倍以上的性能提升。</p>
+
+        <h2>EXISTS-to-JOIN 优化</h2>
+
+        <p>SQLite 的查询规划器还包含一系列基于规则的优化。其中最实用的一个就是 <strong>EXISTS-to-JOIN 转换</strong>：</p>
+
+        <pre><code>/* EXISTS 子查询 → JOIN 转换 */
+/* 优化前 */
+SELECT * FROM orders o
+WHERE EXISTS (
+    SELECT 1 FROM customers c
+    WHERE c.id = o.customer_id AND c.status = 'active'
+);
+
+/* 优化后 (规划器内部转换) */
+SELECT o.* FROM orders o
+INNER JOIN customers c ON c.id = o.customer_id
+WHERE c.status = 'active';</code></pre>
+
+        <p>这个转换的意义在于：子查询（EXISTS）通常会被独立执行，即对 orders 表的每一行都执行一次子查询。而转换为 JOIN 后，规划器可以对 orders 和 customers 的连接顺序做全局优化。对于数据量大的表，这个转换通常能带来数量级的性能提升。</p>
+
+        <p>3.53.0 版本对这个优化做了显著增强。以前只有"简单的 EXISTS 子查询"（只包含一个表且没有聚合函数）能被转换。现在范围扩展到了：包含 JOIN 的子查询、带有子查询的 IN 子句、以及某些带有聚合函数的子查询（如果能证明在连接后等价）。</p>
+
+        <h2><code>omit-noop-join</code> 优化</h2>
+
+        <p>这个优化在 SQLite 社区中不太为人所知，但它在实践中非常有用。考虑以下查询：</p>
+
+        <pre><code>-- 查询所有有订单的客户
+SELECT c.* FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+WHERE c.status = 'active';</code></pre>
+
+        <p>在这个查询中，orders 表只被用来做 LEFT JOIN，但 SELECT 子句中并没有引用 orders 的任何列。而且由于 WHERE 子句只过滤 customers 表，orders 表的存在"不影响输出结果"——所有 customer 的行都保留（LEFT JOIN 的语义）。</p>
+
+        <p>SQLite 的 <code>omit-noop-join</code> 优化能够检测到这种"不影响输出的 JOIN"，并直接<strong>跳过这个 JOIN</strong>——不扫描 orders 表。优化器判断的逻辑是：</p>
+        <ul>
+            <li>如果 JOIN 表没有在 SELECT、WHERE、ORDER BY、GROUP BY 中被引用</li>
+            <li>并且没有任何索引条件绑定到 JOIN 表上</li>
+            <li>那么这个 JOIN 可以安全地省略</li>
+        </ul>
+
+        <p>这个优化在 ORM 生成的查询中特别常见——ORM 经常在 SELECT 中不加选择地 JOIN 关联表，即使上层代码根本不需要那些表的数据。SQLite 默默地帮你优化掉了。</p>
+
+        <div class="warning">
+            ⚠️ <strong>注意：</strong> <code>omit-noop-join</code> 优化不会移除有副作用的 JOIN。例如，如果 JOIN 表上有 <code>INSTEAD OF</code> 触发器，或者连接条件涉及用户自定义函数（UDF）且有副作用，优化器会保守地保留 JOIN。安全永远是第一位的。
+        </div>
+
+        <h2>实战：用 <code>.wheretrace</code> 观察查询规划器决策过程</h2>
+
+        <p>理论讲完了，我们来点实战。SQLite 的 CLI 工具提供了一个非常强大的调试命令——<code>.wheretrace</code>，可以打印出查询规划器在决策过程中的所有中间信息。</p>
+
+        <pre><code>-- 在 sqlite3 CLI 中启用 wheretrace
+sqlite&gt; .wheretrace on
+
+sqlite&gt; CREATE TABLE t1(a, b, c);
+sqlite&gt; CREATE INDEX t1_a ON t1(a);
+sqlite&gt; CREATE INDEX t1_bc ON t1(b, c);
+sqlite&gt; INSERT INTO t1 VALUES ...
+sqlite&gt; ANALYZE;
+
+sqlite&gt; EXPLAIN QUERY PLAN SELECT * FROM t1 WHERE a = 10 AND b &gt; 5;
+QUERY PLAN
+|--SEARCH t1 USING INDEX t1_a (a=?)
+
+-- 实际内部输出 (.wheretrace):
+-- WhereLoop: 表=t1, 方法=全表扫描, 成本=100.00, 输出=100行
+-- WhereLoop: 表=t1, 方法=索引t1_a, 等值条件=1, 成本=2.50, 输出=1行
+-- WhereLoop: 表=t1, 方法=索引t1_bc, 等值条件=0, 范围条件=1, 成本=15.00, 输出=10行
+-- 选择索引 t1_a: 成本最低 (2.50 &lt; 15.00 &lt; 100.00)</code></pre>
+
+        <p><code>.wheretrace</code> 的输出清晰地展示了三个候选方案的评估过程：</p>
+        <ul>
+            <li>全表扫描：成本 100（对应 100 页的读取）</li>
+            <li>索引 t1_a 查找（等值匹配 a=10）：成本 2.5，预计只输出 1 行</li>
+            <li>索引 t1_bc 范围扫描（b > 5）：成本 15，预计输出 10 行</li>
+        </ul>
+
+        <p>最终规划器选择了 t1_a，因为它的成本最低。</p>
+
+        <p>除了 <code>.wheretrace</code>，还有几个有用的调试命令：</p>
+
+        <table>
+            <thead>
+                <tr><th>命令</th><th>作用</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>.wheretrace on</code></td><td>打印查询规划器的候选路径评估过程</td></tr>
+                <tr><td><code>.eqptrace on</code></td><td>打印表达式的代码生成过程</td></tr>
+                <tr><td><code>.vdbtrace on</code></td><td>打印 VDBE 运行时执行的每条指令</td></tr>
+                <tr><td><code>EXPLAIN QUERY PLAN ...</code></td><td>展示最终的查询计划（推荐日常使用）</td></tr>
+                <tr><td><code>EXPLAIN ...</code></td><td>展示 VDBE 字节码（调试深层次问题）</td></tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            💡 在调试慢查询时，我的标准流程是：<br>
+            1. 先 <code>EXPLAIN QUERY PLAN</code> 看总体计划<br>
+            2. 如果计划不合理，检查是否缺少索引或统计信息过时（运行 <code>ANALYZE</code>）<br>
+            3. 如果仍然不满意，启用 <code>.wheretrace</code> 查看规划器的候选路径和成本估算<br>
+            4. 找到成本估算的偏差（例如规划器认为某个索引扫描成本 10，实际上要扫描 1000 行），然后考虑创建更好的索引或改写查询
+        </div>
+
+        <p>好了，这一章我们从查询规划的三步模型出发，深入了 WhereLoop 的数据结构、成本估算公式、连接顺序优化算法，以及几个重要的基于规则的优化。下一章我们要切换视角，看看 <strong>SQLite 的内置函数</strong>——从字符串处理到日期计算，从聚合函数到窗口函数，它们是怎么在 VDBE 虚拟机的框架下实现的。我们第 19 章见。</p>
+
+        <div class="footer-nav">
+            <a href="17.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="19.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

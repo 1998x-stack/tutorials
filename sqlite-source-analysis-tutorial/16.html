@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 WAL模式深度解析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html" class="active">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第16章 WAL模式深度解析</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们深入了 Rollback Journal 和原子提交流程，那是 SQLite 从 1.0 时代就传承下来的经典事务模型。但有一个问题始终困扰着开发者：在默认的 journal 模式下，<strong>任何写事务都需要 EXCLUSIVE 锁才能提交</strong>——这意味着当有一个会话正在写入时，其他所有人的读操作都必须等待。对于"读多写少"的应用场景来说，这是不可接受的。</p>
+
+        <p>2010 年的 SQLite 3.7.0 版本引入了 <strong>WAL (Write-Ahead Log)</strong> 模式，从根本上一劳永逸地解决了这个并发瓶颈。WAL 模式使得读写可以完全并行——写操作追加到 WAL 文件，读操作从 WAL 文件或主数据库文件中读取最新数据，两者互不阻塞。这一章我们就来深入 WAL 的源码实现，看看这个精妙的设计是如何运作的。</p>
+
+        <h2>WAL 设计动机</h2>
+
+        <p>在进入源码之前，我们先明确 WAL 要解决的核心问题。在传统的 journal（回滚日志）模式下，事务提交的流程是这样的：</p>
+
+        <ul>
+            <li><strong>读事务</strong>：需要获取 SHARED 锁。多个读可以同时进行。</li>
+            <li><strong>写事务</strong>：需要升级到 EXCLUSIVE 锁才能提交。这意味着在提交的那一瞬间，所有读事务必须已经释放了 SHARED 锁。</li>
+            <li><strong>结果</strong>：读操作和写操作在提交时互斥（不能同时进行）。</li>
+        </ul>
+
+        <p>WAL 的解决思路非常直接：<strong>不再把"修改过的原始数据"写入 journal，而是把"修改后的新数据"追加到 WAL 文件末尾</strong>。提交时只需要确保 WAL 内容已落盘，完全不需要碰主数据库文件。读事务同时读取两个数据源——先查 WAL 中是否有更新的版本，如果没有再从主数据库文件读取。这样一来，读写就彻底解耦了。</p>
+
+        <div class="highlight">
+            <strong>WAL 模式的核心哲学：</strong> 以"追加"代替"原地覆盖"。写操作永远追加到 WAL 文件的末尾，从不覆盖已有的数据。读操作从 WAL + 主数据库文件的"合并视图"中读取。因为写操作不需要修改主数据库文件，也就不需要 EXCLUSIVE 锁——RESERVED 锁就足够了，读操作完全不受影响。
+        </div>
+
+        <h2>WAL 文件格式</h2>
+
+        <p>WAL 文件的格式比 journal 文件更复杂一些，因为它要支持"追加写入"和"按页号查找"两种操作。我们来看 WAL 文件的结构：</p>
+
+        <pre><code>/* WAL 文件总体布局 */
++===========================+
+| WAL Header (32 bytes)     |  ← 文件开头，只有一份
++===========================+
+| Frame 1 Header (24 bytes) |
+| Frame 1 Page Data         |  ← 第一个被修改的页的新内容
++---------------------------+
+| Frame 2 Header (24 bytes) |
+| Frame 2 Page Data         |  ← 第二个被修改的页的新内容
++---------------------------+
+| ...                       |
++---------------------------+
+| Frame N Header (24 bytes) |
+| Frame N Page Data         |  ← 最后一个被修改的页的新内容
++===========================+
+
+/* WAL Header 结构体 (wal.c) */
+struct WalHeader {
+    u32 magic;          /* 魔数: 0x377f0682 (WAL) 或 0x377f0683 (WAL-checkpoint) */
+    u32 version;        /* 格式版本，当前为 3007000 */
+    u32 nPage;          /* 数据库文件的总页数 */
+    u32 szPage;         /* 页大小（以加密形式存储） */
+    u32 mxFrame;        /* WAL 中当前包含的帧数量 */
+};
+
+/* Frame Header 结构体 */
+struct WalFrameHdr {
+    u32 pgno;           /* 该帧对应的页号 */
+    u32 prevFrame;      /* 上一帧的帧号（用于链表遍历） */
+    u64 rowid;          /* 该页面修改对应的 rowid（用于 FTS 优化） */
+    u64 checksum[2];    /* 64-bit 校验和，两个值 */
+};</code></pre>
+
+        <p>这里有一个非常巧妙的设计：<strong>每个 Frame Header 都包含了 prevFrame 字段</strong>。这实际上在 WAL 文件中构建了一个单向链表——给定最新的帧，通过 prevFrame 可以回溯到所有之前的帧。这意味着 SQLite 不需要遍历整个 WAL 文件来找到某个页的最新版本，它只需要维护一个"页号 → 最新帧号"的哈希表，然后通过 prevFrame 链回溯旧版本。这个哈希表在 <code>Wal.aHash[]</code> 中实现（见 <code>wal.c</code> 中的 <code>walHash()</code> 和 <code>walHashGet()</code>）。</p>
+
+        <h2>读事务在 WAL 下如何工作</h2>
+
+        <p>WAL 模式下读一个页的过程，比 journal 模式要复杂得多。我们以 <code>sqlite3PagerRead()</code> 为入口来看看读取路径：</p>
+
+        <pre><code>/* WAL 模式下页读取的简化路径 */
+/* 文件: src/pager.c + src/wal.c */
+
+int sqlite3PagerRead(Pager *pPager, Pgno pgno, DbPage **ppPage){
+    PgHdr *pPg;
+
+    /* 1. 先在 page cache 中查找 */
+    pPg = pager_lookup(pPager, pgno);
+    if (pPg) return pPg;  /* cache hit */
+
+    /* 2. cache miss, 从磁盘读取 */
+    if (pPager->pWal){
+        /* WAL 模式: 尝试从 WAL 读取 */
+        rc = walTryRead(pPager->pWal, pgno, &pPg);
+        if (rc == SQLITE_OK){
+            /* 在 WAL 中找到最新版本 */
+            goto read_done;
+        }
+        /* WAL 中没有: 从主数据库文件读取 */
+    }
+
+    /* 3. 从主数据库文件读取 */
+    rc = readDbPage(pPager, pgno, pPg);
+
+read_done:
+    /* 4. 将页加入 cache */
+    pager_add_to_cache(pPager, pPg);
+    *ppPage = pPg;
+    return SQLITE_OK;
+}
+
+/* walTryRead 在 WAL 中查找指定页的最新帧 */
+/* 文件: src/wal.c */
+static int walTryRead(Wal *pWal, Pgno pgno, DbPage **ppPage){
+    int iFrame;        /* 最新帧号 */
+
+    /* 通过哈希表找到 pgno 对应的最新帧 */
+    iFrame = walFrameFromHash(pWal, pgno);
+    if (iFrame == 0) return SQLITE_NOT_FOUND;
+
+    /* 读取该帧的数据 */
+    readWALFrame(pWal, iFrame, ppPage);
+    return SQLITE_OK;
+}</code></pre>
+
+        <p>这个流程告诉我们一个重要的性能特征：<strong>WAL 模式下读一个不在 cache 中的页，最多需要两次 I/O</strong>（一次查 WAL、一次读主数据库文件）。如果页经常被修改，它在 WAL 中出现的概率很高，这实际上要比 journal 模式更快——因为 journal 模式每次读都要从主数据库文件读取，而 WAL 模式可能从一个较短的文件（只包含最新修改）中读取，I/O 更少。</p>
+
+        <p>在实际代码中，<code>VdbeCursor</code> 在遍历 B-Tree 时会对每个页调用 <code>sqlite3BtreeMoveto()</code>、<code>sqlite3BtreeNext()</code> 等函数，最终这些函数都会落到 <code>sqlite3PagerRead()</code> 上。所以 WAL 的读取路径是整个查询链路上的关键一环。</p>
+
+        <h2>Checkpoint 算法</h2>
+
+        <p>WAL 文件不能无限增长——它必须定期合并回主数据库文件。这个过程就是 <strong>Checkpoint</strong>，由 <code>sqlite3WalCheckpoint()</code> 函数实现。SQLite 提供了三种 checkpoint 模式，以不同的激进程度回收 WAL 空间：</p>
+
+        <table>
+            <thead>
+                <tr><th>模式</th><th>枚举值</th><th>行为</th><th>对并发的影响</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>PASSIVE</strong></td><td><code>SQLITE_CHECKPOINT_PASSIVE</code></td><td>尽可能多地将 WAL 帧写回数据库，但不阻塞任何读操作。如果当前有读者活动，跳过正在读取的帧。</td><td>无阻塞。可能无法完成全部 checkpoint。</td></tr>
+                <tr><td><strong>FULL</strong></td><td><code>SQLITE_CHECKPOINT_FULL</code></td><td>等待所有读事务完成，然后一次性将所有 WAL 帧写入数据库。完成后截断 WAL 文件。</td><td>短暂阻塞新读事务（等待已有读事务完成），完成后读操作无缝切换到数据库文件。</td></tr>
+                <tr><td><strong>RESTART</strong></td><td><code>SQLITE_CHECKPOINT_RESTART</code></td><td>同 FULL，但额外保证 checkpoint 完成后没有任何读者持有 WAL 文件中的旧引用。WAL 文件被完全清空。</td><td>最激进的模式。完成后所有后续阅读都从数据库文件进行。</td></tr>
+            </tbody>
+        </table>
+
+        <pre><code>/* Checkpoint 核心逻辑 (简化伪代码) */
+/* 文件: src/wal.c */
+
+int sqlite3WalCheckpoint(Wal *pWal, int eMode, u32 *pnLog){
+    /* eMode: PASSIVE / FULL / RESTART */
+
+    /* 1. 获取 WAL 写锁 */
+    walLockExclusive(pWal, WAL_WRITE_LOCK);
+
+    /* 2. 遍历所有未检查的帧 */
+    for (iFrame = pWal->nCkpt; iFrame &lt;= pWal->mxFrame; iFrame++){
+        /* 读取帧数据 */
+        readFrameData(pWal, iFrame, &pageData, &pgno);
+
+        /* 写回主数据库文件 */
+        writePageToDbFile(pWal->pDbFd, pgno, pageData);
+
+        /* PASSIVE 模式下: 每写一帧检查是否有新读者 */
+        if (eMode == SQLITE_CHECKPOINT_PASSIVE && walHasReader(pWal)){
+            break;  /* 有读者，暂停 checkpoint */
+        }
+    }
+
+    /* 3. 更新 checkpoint 标记 */
+    pWal->nCkpt = iFrame;
+
+    /* 4. FULL 或 RESTART 模式下，截断 WAL */
+    if (eMode >= SQLITE_CHECKPOINT_FULL){
+        walTruncate(pWal, iFrame);
+    }
+
+    /* 5. 释放锁 */
+    walUnlockExclusive(pWal, WAL_WRITE_LOCK);
+}</code></pre>
+
+        <div class="tip">
+            💡 在生产环境中，建议将 checkpoint 设置为自动模式（<code>PRAGMA wal_autocheckpoint=1000</code>），这意味着 WAL 文件增长到约 1000 页（~4MB）时自动触发 checkpoint。你也可以使用 <code>PRAGMA wal_checkpoint(TRUNCATE)</code> 手动触发，但注意 FULL 和 RESTART 模式在写操作频繁时可能引起短暂抖动。对于实时性要求高的系统，推荐使用 PASSIVE 模式配合定时 checkpoint 的调度方案。
+        </div>
+
+        <h2>WAL 并发模型</h2>
+
+        <p>WAL 模式下的并发模型比 journal 模式要宽松得多。它的核心规则是：<strong>一个写者 + 多个读者</strong>。</p>
+
+        <p>具体来说，WAL 使用两个独立的锁来管理并发：</p>
+
+        <ul>
+            <li><strong><code>WAL_READ_LOCK</code></strong> — 读者获取这个锁。多个读者可以同时持有。写者在 checkpoint 时需要等待所有读者释放 READ_LOCK。</li>
+            <li><strong><code>WAL_WRITE_LOCK</code></strong> — 写者获取这个锁。同一时刻只能有一个写者。读者不需要这个锁，所以读写完全不冲突。</li>
+        </ul>
+
+        <p>这种设计带来的效果是：在 WAL 模式下，读操作几乎永远不会被阻塞。唯一的阻塞场景是 checkpoint 的 FULL/RESTART 模式需要短暂等待所有读事务完成。但 <strong>写操作仍然会被其他写操作阻塞</strong>——因为 RESERVED 锁是互斥的。这是 SQLite "单写者"架构的固有限制，不是 WAL 能解决的。</p>
+
+        <div class="highlight">
+            <strong>一个常见的误解：</strong> 很多人以为 WAL 模式可以让多个写操作同时进行。不，WAL 解决的问题是"读不阻塞写、写不阻塞读"，而不是"多写并发"。SQLite 始终是单写者架构——这是由它的嵌入式设计哲学决定的（没有独立的写线程、没有 MVCC 的多版本存储）。如果你需要真正的多写并发，请考虑 PostgreSQL 或 MySQL。
+        </div>
+
+        <h2>3.51.3 WAL-reset bug 详解</h2>
+
+        <p>真实的故事往往比理论更有教育意义。2025 年底，SQLite 3.51.3 版本中发现了一个 WAL 相关的严重 bug，我把它作为一个案例来分析，因为它揭示了 WAL 实现中一个非常微妙的 edge case。</p>
+
+        <p><strong>Bug 的触发场景：</strong></p>
+        <ul>
+            <li>一个数据库启用了 WAL 模式，且正在被频繁地读写</li>
+            <li>某个时刻，另一个进程（或线程）调用了 <code>sqlite3_wal_checkpoint_v2()</code> 并指定了 <code>SQLITE_CHECKPOINT_RESTART</code></li>
+            <li>在 checkpoint 过程中，一个并发的读事务正在读取一个"即将被 checkpoint 覆盖"的帧</li>
+            <li>checkpoint 完成后，WAL 被截断，文件大小变为 0</li>
+            <li>此时那个旧的读事务尝试再次读取同一页——但该页的最新版本已经被 checkpoint 写回了主数据库，WAL 中已经没有了</li>
+            <li>读取到的数据是数据库文件中的旧版本，而不是事务应该看到的"一致性快照"</li>
+        </ul>
+
+        <p>问题根源出在 <code>wal.c</code> 中的 <code>walTryRead()</code> 函数：当 WAL 被截断时，它没有正确通知正在进行的读事务更新它们的"快照边界"。读事务持有的 <code>iReadMark</code>（用于标识"在我开始之后写入的帧我不应该看到"）在 checkpoint 截断后变成了一个无效值，导致读事务错误地跳过了应该看到的帧。</p>
+
+        <p>SQLite 团队在 3.51.3 → 3.51.4 的补丁中修复了这个问题，主要改动是：在 <code>sqlite3WalCheckpoint()</code> 的 RESTART 模式中，在所有读事务释放它们的读锁之前，不允许完成截断操作。修复相当简洁——只加了不到 10 行代码，但排查这个问题的过程涉及了 WAL 读写路径的每一个角落。</p>
+
+        <div class="warning">
+            <strong>这个 bug 的教训：</strong> WAL 模式下的并发模型比看起来要复杂得多。读者和 checkpoint 之间的交互涉及多个共享状态（WAL 文件长度、帧索引、读标记），任何一处状态更新的顺序错了，都可能导致"读脏数据"或"读不到已提交数据"的问题。这也是为什么 SQLite 团队在 WAL 代码中大量使用 <code>assert()</code> 来验证状态一致性——你可以搜索 <code>assert( pWal->nCkpt &lt;= pWal->mxFrame )</code> 看看有多少类似的断言。
+        </div>
+
+        <h2>WAL vs Rollback Journal 性能对比</h2>
+
+        <p>我们来做一个全面的对比，帮助你根据实际场景选择合适的事务模式：</p>
+
+        <table>
+            <thead>
+                <tr><th>维度</th><th>Rollback Journal (delete 模式)</th><th>WAL 模式</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>读写并发</strong></td><td>写阻塞读，读阻塞写</td><td>读写完全并行</td></tr>
+                <tr><td><strong>写性能</strong></td><td>需要写两遍（journal + 原文），且有 fsync 竞争</td><td>仅追加写 WAL，顺序 I/O，比 journal 快 2-3 倍</td></tr>
+                <tr><td><strong>读性能</strong></td><td>纯顺序读，结构简单</td><td>需要查 WAL 索引，读不在 cache 中的页时略有额外开销</td></tr>
+                <tr><td><strong>文件大小</strong></td><td>事务提交后 journal 被删除，无额外空间占用</td><td>WAL 文件保留，需要定期 checkpoint 回收</td></tr>
+                <tr><td><strong>崩溃恢复</strong></td><td>启动时检测 journal 并回放，恢复时间与写入量成正比</td><td>启动时回放 WAL，但 checkpoint 后的 WAL 很小，恢复极快</td></tr>
+                <tr><td><strong>适用场景</strong></td><td>写操作少、数据库文件小、简单可靠</td><td>读多写少、需要高并发、数据库文件大</td></tr>
+            </tbody>
+        </table>
+
+        <p>在我自己的实践经验中，一个很好的判断标准是：如果你的应用有超过 3 个并发连接，或者读写操作同时发生，直接上 WAL 模式。如果你的应用是单线程的、读写操作有严格的时序（先一批读完，再一批写入），journal 模式完全够用，而且更简单。</p>
+
+        <p>好，WAL 的旅程到这里就告一段落了。下一章我们要进入 SQLite 另一个至关重要的基础设施——<strong>锁机制与并发控制</strong>。我们会深入分析 SQLite 的五级锁状态机，对比 Unix 和 Windows 平台上的锁实现差异，并通过真实的生产事故来理解锁顺序的重要性。第 17 章见。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

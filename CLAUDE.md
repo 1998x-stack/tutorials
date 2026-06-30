@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 32 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 34 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
@@ -32,7 +32,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `advanced-matrix-analysis-tutorial/` | 高级矩阵分析 | 28 | `https://1998x-stack.github.io/advanced-matrix-analysis-tutorial/` |
 | `calculus-tutorial/` | 微积分 | 28 | `https://1998x-stack.github.io/calculus-tutorial/` |
 
-### 系统 / 基础设施 (9)
+### 系统 / 基础设施 (10)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `vllm-tutorial/` | vLLM推理引擎 | 28 | `https://1998x-stack.github.io/vllm-tutorial/` |
@@ -44,6 +44,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `memcached-source-analysis-tutorial/` | Memcached源码分析 | 28 | `https://1998x-stack.github.io/memcached-source-analysis-tutorial/` |
 | `claude-code-agent-tutorial/` | Claude Code Agent | 28 | `https://1998x-stack.github.io/claude-code-agent-tutorial/` |
 | `backend-development-tutorial/` | 后端开发实战 | 28 | `https://1998x-stack.github.io/backend-development-tutorial/` |
+| `compiler-principles-tutorial/` | 编译原理 | 28 | `https://1998x-stack.github.io/compiler-principles-tutorial/` |
 
 ### 网络 / 通信 (3)
 | Directory | Topic | Chapters | URL |
@@ -60,6 +61,11 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `microeconomics-tutorial/` | 微观经济学 | 28 | `https://1998x-stack.github.io/microeconomics-tutorial/` |
 | `financial-analysis-tutorial/` | 金融分析 | 28 | `https://1998x-stack.github.io/financial-analysis-tutorial/` |
 | `cryptocurrency-tutorial/` | 加密货币 | 28 | `https://1998x-stack.github.io/cryptocurrency-tutorial/` |
+
+### 机器人 / 控制 (1)
+| Directory | Topic | Chapters | URL |
+|-----------|-------|----------|-----|
+| `robotics-tutorial/` | 机器人学 | 28 | `https://1998x-stack.github.io/robotics-tutorial/` |
 
 ### 算法 / 数据结构 (3)
 | Directory | Topic | Chapters | URL |

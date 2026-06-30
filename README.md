@@ -1,6 +1,6 @@
 # 1998x-stack Tutorials
 
-A collection of 33 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 34 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
@@ -30,7 +30,7 @@ A collection of 33 free, comprehensive technical tutorials in Chinese — from f
 | 📐 | 高级矩阵分析 | 28 | [advanced-matrix-analysis-tutorial](https://1998x-stack.github.io/advanced-matrix-analysis-tutorial/) |
 | 📐 | 微积分 · 从入门到精通 | 28 | [calculus-tutorial](https://1998x-stack.github.io/calculus-tutorial/) |
 
-### 系统 / 基础设施 (9 courses)
+### 系统 / 基础设施 (10 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -43,6 +43,7 @@ A collection of 33 free, comprehensive technical tutorials in Chinese — from f
 | ⚙️ | Memcached 源码分析 | 28 | [memcached-source-analysis-tutorial](https://1998x-stack.github.io/memcached-source-analysis-tutorial/) |
 | 🤖 | Claude Code 源码深度解析与 Agent Harness 搭建 | 28 | [claude-code-agent-tutorial](https://1998x-stack.github.io/claude-code-agent-tutorial/) |
 | 🖥️ | 后端开发实战 | 28 | [backend-development-tutorial](https://1998x-stack.github.io/backend-development-tutorial/) |
+| 🔧 | 编译原理 · 从入门到精通 | 28 | [compiler-principles-tutorial](https://1998x-stack.github.io/compiler-principles-tutorial/) |
 
 ### 网络 / 通信 (3 courses)
 
@@ -61,6 +62,12 @@ A collection of 33 free, comprehensive technical tutorials in Chinese — from f
 | 📊 | 微观经济学：从稀缺到均衡 | 28 | [microeconomics-tutorial](https://1998x-stack.github.io/microeconomics-tutorial/) |
 | 💹 | 金融分析实战体系 | 28 | [financial-analysis-tutorial](https://1998x-stack.github.io/financial-analysis-tutorial/) |
 | 🪙 | 比特币与加密货币 | 28 | [cryptocurrency-tutorial](https://1998x-stack.github.io/cryptocurrency-tutorial/) |
+
+### 机器人 / 控制 (1 course)
+
+| | Topic | Chapters | URL |
+|---|-------|----------|-----|
+| 🤖 | 机器人学 · 从入门到精通 | 28 | [robotics-tutorial](https://1998x-stack.github.io/robotics-tutorial/) |
 
 ### 算法 / 数据结构 (3 courses)
 

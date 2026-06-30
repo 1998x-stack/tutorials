@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第5章 BERT输入表示与分词 - BERT教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 NLP预训练发展简史</a></li>
+            <li><a href="02.html">第2章 Transformer架构精讲</a></li>
+            <li><a href="03.html">第3章 BERT开山论文精读(上)</a></li>
+            <li><a href="04.html">第4章 BERT开山论文精读(下)</a></li>
+            <li><a href="05.html" class="active">第5章 BERT输入表示与分词</a></li>
+            <li><a href="06.html">第6章 MLM与NSP深度剖析</a></li>
+            <li><a href="07.html">第7章 BERT微调实战范式</a></li>
+            <li><a href="08.html">第8章 RoBERTa训练配方革命</a></li>
+            <li><a href="09.html">第9章 数据工程与动态掩码</a></li>
+            <li><a href="10.html">第10章 超参数与优化器配置</a></li>
+            <li><a href="11.html">第11章 预训练数据规模效应</a></li>
+            <li><a href="12.html">第12章 训练稳定性技术</a></li>
+            <li><a href="13.html">第13章 多语言BERT与跨语言迁移</a></li>
+            <li><a href="14.html">第14章 BERT变体生态横评</a></li>
+            <li><a href="15.html">第15章 ELECTRA判别式预训练</a></li>
+            <li><a href="16.html">第16章 XLNet排列语言模型</a></li>
+            <li><a href="17.html">第17章 MPNet掩码排列融合</a></li>
+            <li><a href="18.html">第18章 ALBERT参数高效设计</a></li>
+            <li><a href="19.html">第19章 DeBERTa解耦注意力</a></li>
+            <li><a href="20.html">第20章 中文BERT全景</a></li>
+            <li><a href="21.html">第21章 长文本BERT方案</a></li>
+            <li><a href="22.html">第22章 SimCSE对比学习句向量</a></li>
+            <li><a href="23.html">第23章 知识蒸馏轻量化</a></li>
+            <li><a href="24.html">第24章 移动端BERT部署</a></li>
+            <li><a href="25.html">第25章 高效微调实战</a></li>
+            <li><a href="26.html">第26章 ModernBERT与2025前沿</a></li>
+            <li><a href="27.html">第27章 极致压缩与端侧智能</a></li>
+            <li><a href="28.html">第28章 端到端实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第5章 BERT输入表示与分词</h1>
+
+        <p>大家好，我是你们的讲师。前两章我们把BERT的论文精读完了，从顶层设计到实验结果都了解得差不多了。但如果你打开BERT的源码，第一个会面对的问题就是：<strong>如何把自然语言文本变成BERT能吃下去的数字</strong>？</p>
+
+        <p>这个"变"的过程看起来简单（不就是查词表吗？），但实际隐藏着大量关键细节：分词算法的选择直接影响模型的效果，特殊Token的设计影响所有下游任务，三层嵌入的叠加方式决定了输入信息的完整性，而max_seq_length=512这条"红线"更是伴随了无数BERT用户的日日夜夜。今天我们就深入BERT的输入端，彻底搞明白输入表示的全流程。</p>
+
+        <h2 class="h2">5.1 WordPiece分词算法</h2>
+
+        <p>BERT使用WordPiece进行分词。WordPiece可以看成BPE（Byte Pair Encoding）的变体，核心思想是：<strong>从单字符开始，逐步合并最有助于提高语言模型似然的相邻字符对</strong>。</p>
+
+        <h3 class="h3">5.1.1 WordPiece与BPE的关键区别</h3>
+
+        <p>BPE的合并原则是"频率优先"——合并出现次数最多的相邻符号对。而WordPiece的合并原则是<strong>互信息优先</strong>——选择能最大程度提高语言模型似然的合并：</p>
+
+        <pre><code># WordPiece合并得分公式
+score(x, y) = P(xy) / (P(x) * P(y))
+
+# 其中：
+# P(xy) = 子串xy在语料中的概率（频率）
+# P(x) = x的概率
+# P(y) = y的概率
+# 得分越高，说明x和y的共现越"不平凡"，越值得合并</code></pre>
+
+        <p>这个公式的直觉是：如果"ing"出现的频率远高于"i"和"n"和"g"各自出现的频率乘积，说明"ing"是一个有意义的子词单元，值得合并到词表中。</p>
+
+        <h3 class="h3">5.1.2 词表构建流程</h3>
+
+        <p>BERT的WordPiece词表大小为30,000（实际为30,522个token，包含特殊token）：</p>
+
+        <pre><code># WordPiece词表构建伪代码
+def build_wordpiece_vocab(corpus, vocab_size=30000):
+    # 1. 初始化：将所有字符加入词表（含特殊token）
+    vocab = {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"}
+    vocab.update(set(all_characters_in_corpus))
+
+    # 2. 预分词：按空格和标点分割为"单词"
+    words = pre_tokenize(corpus)
+
+    # 3. 迭代合并，直到达到目标词表大小
+    while len(vocab) < vocab_size:
+        # 统计所有相邻子词对的频率
+        pair_counts = count_adjacent_pairs(words, vocab)
+
+        # 计算每对互信息得分
+        scores = {}
+        for (x, y), count in pair_counts.items():
+            score = count * vocab[x] * vocab[y]  # 简化版得分
+            scores[(x, y)] = score
+
+        # 选择得分最高的对合并
+        best_pair = max(scores, key=scores.get)
+        new_token = best_pair[0] + best_pair[1]
+        vocab.add(new_token)
+
+        # 更新语料中的分词结果
+        words = merge_pair(words, best_pair)
+
+    return vocab
+
+# 实际BERT词表中的示例条目
+# "玩"            # 中文字符
+# "##家"          # "##"表示不是词的开头（continuation）
+# "playing"       # 完整英文词
+# "play"          # 词根
+# "##ing"         # 后缀
+# "un"            # 前缀
+# "##able"        # 后缀</code></pre>
+
+        <div class="tip">
+            <p><strong>### 符号的含义：</strong> WordPiece中，##前缀表示该subword不是新词的开头，而是前一个subword的继续。例如"unhappiness"被分词为 ["un", "##happiness"]，"玩"被分词为 ["玩", "##具"]（如果"玩具"在词表中）。这个标记方式让模型知道哪些subword属于同一个原始词，对理解词边界非常有帮助。</p>
+        </div>
+
+        <h2 class="h2">5.2 特殊Token详解</h2>
+
+        <p>BERT词表中有5个特殊token，每个角色明确：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Token</th>
+                    <th>ID</th>
+                    <th>作用</th>
+                    <th>出现位置</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>[CLS]</td>
+                    <td>101</td>
+                    <td>分类标记，其输出向量作为句子级表示</td>
+                    <td>序列最开头</td>
+                </tr>
+                <tr>
+                    <td>[SEP]</td>
+                    <td>102</td>
+                    <td>分隔标记，区分不同句子</td>
+                    <td>句子之间和序列末尾</td>
+                </tr>
+                <tr>
+                    <td>[MASK]</td>
+                    <td>103</td>
+                    <td>掩码标记，预训练时替换被mask的token</td>
+                    <td>预训练阶段随机位置</td>
+                </tr>
+                <tr>
+                    <td>[UNK]</td>
+                    <td>100</td>
+                    <td>未知词标记，词表中不存在的token</td>
+                    <td>遇到OOV（集外词）时</td>
+                </tr>
+                <tr>
+                    <td>[PAD]</td>
+                    <td>0</td>
+                    <td>填充标记，将batch内句子对齐到相同长度</td>
+                    <td>序列末尾不足max_len时</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2 class="h2">5.3 输入序列构造</h2>
+
+        <p>BERT的输入可以是单句或句对，格式高度结构化：</p>
+
+        <pre><code># 单句输入格式
+[CLS] token1 token2 ... tokenN [SEP]
+# 输入ids:     101  2054  2055  ...  2010  102
+# 段ids:         0     0     0   ...     0    0
+# 注意力掩码:    1     1     1   ...     1    1
+
+# 句对输入格式
+[CLS] A_token1 A_token2 ... A_tokenN [SEP] B_token1 B_token2 ... B_tokenM [SEP]
+# 输入ids:     101  2054  2001  ...  2009  102   3124  2010  1996  ...  1999  102
+# 段ids:         0     0     0   ...     0    0      1     1     1   ...     1    1
+# 注意力掩码:    1     1     1   ...     1    1      1     1     1   ...     1    1</code></pre>
+
+        <p>这三个向量（input_ids, token_type_ids, attention_mask）构成了BERT的标准输入。值得注意的是，<strong>Segment IDs</strong> 是0/1值，而非one-hot——这意味着BERT原生只支持两个句子（A/B）。</p>
+
+        <h2 class="h2">5.4 三层嵌入的叠加机制</h2>
+
+        <p>在进入Transformer编码器之前，三个嵌入层的信息被逐元素相加（element-wise addition）：</p>
+
+        <pre><code>import torch
+import torch.nn as nn
+
+class BERTEmbedding(nn.Module):
+    """BERT三层嵌入的叠加"""
+
+    def __init__(self, vocab_size=30522, hidden_size=768,
+                 max_position=512, type_vocab_size=2, dropout=0.1):
+        super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, hidden_size)
+        self.position_embedding = nn.Embedding(max_position, hidden_size)
+        self.segment_embedding = nn.Embedding(type_vocab_size, hidden_size)
+        self.layer_norm = nn.LayerNorm(hidden_size, eps=1e-12)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, input_ids, token_type_ids):
+        seq_len = input_ids.size(1)
+
+        # 位置编码索引: [0, 1, 2, ..., seq_len-1]
+        position_ids = torch.arange(seq_len, dtype=torch.long,
+                                    device=input_ids.device)
+        position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+
+        # 三层嵌入叠加
+        token_emb = self.token_embedding(input_ids)
+        position_emb = self.position_embedding(position_ids)
+        segment_emb = self.segment_embedding(token_type_ids)
+
+        embedding = token_emb + position_emb + segment_emb
+        embedding = self.layer_norm(embedding)
+        embedding = self.dropout(embedding)
+
+        return embedding
+
+# 使用示例
+input_ids = torch.tensor([[101, 2054, 2003, 1996, 2055, 102]])
+token_type_ids = torch.tensor([[0, 0, 0, 0, 0, 0]])
+embedding = BERTEmbedding()(input_ids, token_type_ids)
+# embedding shape: (1, 6, 768)</code></pre>
+
+        <h2 class="h2">5.5 max_seq_length=512的由来与限制</h2>
+
+        <p>BERT的最大输入长度是512个token。这个限制来源于<strong>可学习位置编码</strong>——我们只训练了512个位置向量。超过512的输入必须截断。</p>
+
+        <p>这个限制在实际应用中造成了不少困扰：</p>
+        <ul>
+            <li><strong>长文档处理：</strong> 一篇论文摘要可能只有300词，但一篇法律合同可能有5000词</li>
+            <li><strong>全文本分类：</strong> 如果截断掉重要信息，分类效果会明显下降</li>
+            <li><strong>内存限制：</strong> Self-Attention计算复杂度是O(n²)，即使1024长度也会导致12倍于512的显存消耗</li>
+        </ul>
+
+        <div class="highlight">
+            <p><strong>一个真实的踩坑故事：</strong> 我做过一个法律文档的分类项目，文档平均长度约2000词。一开始简单地截断前512个token，结果F1只有0.82。后来改用"头部+尾部"截断（取文档开头200个token和结尾312个token拼接），F1提升到0.88。再后来使用滑动窗口取多个segment再聚合，F1达到0.91。这说明：<strong>同样是用BERT，输入策略的差异可以导致近10个百分点的差距</strong>。</p>
+        </div>
+
+        <h2 class="h2">5.6 中文BERT分词的特殊性</h2>
+
+        <p>中文BERT（bert-base-chinese）在分词策略上与英文有本质区别：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>对比维度</th>
+                    <th>英文BERT</th>
+                    <th>中文BERT</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>分词粒度</td>
+                    <td>子词（Subword）</td>
+                    <td>字（Character）</td>
+                </tr>
+                <tr>
+                    <td>词表</td>
+                    <td>30k WordPiece subwords</td>
+                    <td>约21k 汉字 + 少量英文/符号</td>
+                </tr>
+                <tr>
+                    <td>预处理</td>
+                    <td>需要tokenizer分词</td>
+                    <td>按字直接切分（white space split后取每字符）</td>
+                </tr>
+                <tr>
+                    <td>OOV处理</td>
+                    <td>拆解为已知subword</td>
+                    <td>基本不存在OOV（所有汉字都在词表中）</td>
+                </tr>
+                <tr>
+                    <td>英文/数字</td>
+                    <td>正常subword分词</td>
+                    <td>每个字符独立处理</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>中文BERT选择字粒度的原因：中文的"词"边界模糊（"天然语言处理"是3个词还是5个词？），而字是天然的最小语义单元。WordPiece对中文的收益有限，因为中文字本身已经是高度浓缩的信息单元——每个字约等于一个语义基元。</p>
+
+        <h2 class="h2">5.7 分词算法对比</h2>
+
+        <p>以下是NLP领域几种主流分词算法的对比：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>算法</th>
+                    <th>核心原理</th>
+                    <th>词表构建</th>
+                    <th>典型应用</th>
+                    <th>优点</th>
+                    <th>缺点</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>BPE</td>
+                    <td>按频率合并相邻符号对</td>
+                    <td>贪心合并</td>
+                    <td>GPT, RoBERTa</td>
+                    <td>简单高效，实现容易</td>
+                    <td>合并策略可能不最优</td>
+                </tr>
+                <tr>
+                    <td><strong>WordPiece</strong></td>
+                    <td>按互信息合并（似然提升）</td>
+                    <td>贪心合并</td>
+                    <td><strong>BERT</strong>, DistilBERT</td>
+                    <td>语义感知合并</td>
+                    <td>训练速度稍慢</td>
+                </tr>
+                <tr>
+                    <td>SentencePiece</td>
+                    <td>基于Unigram语言模型 + EM训练</td>
+                    <td>全局优化</td>
+                    <td>ALBERT, XLNet,  T5</td>
+                    <td>不依赖预分词，原生支持多语言</td>
+                    <td>训练复杂度更高</td>
+                </tr>
+                <tr>
+                    <td>Unigram LM</td>
+                    <td>从大词表逐步剪枝</td>
+                    <td>EM算法迭代剪枝</td>
+                    <td>SentencePiece内部选项</td>
+                    <td>可控制词表大小和质量</td>
+                    <td>计算量较大</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <p><strong>一个常见误解：</strong> 很多同学以为BERT直接用空格分词。实际上所有预训练模型（包括BERT）都使用子词分词方法。即使在中文中，bert-base-chinese也使用一个约21k的词表，而非直接按unicode编码处理。你看到的"按字切分"是tokenizer预处理的结果，背后依然是查词表获取token id。</p>
+        </div>
+
+        <h2 class="h2">5.8 本章小结</h2>
+
+        <p>本章我们深入了BERT的输入表示层：</p>
+        <ul>
+            <li><strong>WordPiece</strong>通过互信息驱动的合并策略构建30k子词词表</li>
+            <li><strong>特殊Token</strong>（[CLS]/[SEP]/[MASK]/[UNK]/[PAD]）各司其职，构建结构化输入</li>
+            <li><strong>三层嵌入</strong>（Token + Position + Segment）通过element-wise加法叠加</li>
+            <li><strong>max_seq_length=512</strong>限制了BERT处理长文本的能力</li>
+            <li><strong>中文BERT</strong>采用字粒度分词，与英文的subword策略形成鲜明对比</li>
+        </ul>
+
+        <p>理解了输入表示，我们解决了"BERT吃进去什么"的问题。下一章我们将反向来看——BERT预训练的"损失函数"到底是什么？MLM的15%掩码策略为什么如此精巧？NSP为什么后来被证明效果有限？让我们从损失函数的角度重新审视BERT的训练目标。</p>
+
+        <div class="footer-nav">
+            <a href="04.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="06.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

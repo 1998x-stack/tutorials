@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 MLM与NSP深度剖析 - BERT教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 NLP预训练发展简史</a></li>
+            <li><a href="02.html">第2章 Transformer架构精讲</a></li>
+            <li><a href="03.html">第3章 BERT开山论文精读(上)</a></li>
+            <li><a href="04.html">第4章 BERT开山论文精读(下)</a></li>
+            <li><a href="05.html">第5章 BERT输入表示与分词</a></li>
+            <li><a href="06.html" class="active">第6章 MLM与NSP深度剖析</a></li>
+            <li><a href="07.html">第7章 BERT微调实战范式</a></li>
+            <li><a href="08.html">第8章 RoBERTa训练配方革命</a></li>
+            <li><a href="09.html">第9章 数据工程与动态掩码</a></li>
+            <li><a href="10.html">第10章 超参数与优化器配置</a></li>
+            <li><a href="11.html">第11章 预训练数据规模效应</a></li>
+            <li><a href="12.html">第12章 训练稳定性技术</a></li>
+            <li><a href="13.html">第13章 多语言BERT与跨语言迁移</a></li>
+            <li><a href="14.html">第14章 BERT变体生态横评</a></li>
+            <li><a href="15.html">第15章 ELECTRA判别式预训练</a></li>
+            <li><a href="16.html">第16章 XLNet排列语言模型</a></li>
+            <li><a href="17.html">第17章 MPNet掩码排列融合</a></li>
+            <li><a href="18.html">第18章 ALBERT参数高效设计</a></li>
+            <li><a href="19.html">第19章 DeBERTa解耦注意力</a></li>
+            <li><a href="20.html">第20章 中文BERT全景</a></li>
+            <li><a href="21.html">第21章 长文本BERT方案</a></li>
+            <li><a href="22.html">第22章 SimCSE对比学习句向量</a></li>
+            <li><a href="23.html">第23章 知识蒸馏轻量化</a></li>
+            <li><a href="24.html">第24章 移动端BERT部署</a></li>
+            <li><a href="25.html">第25章 高效微调实战</a></li>
+            <li><a href="26.html">第26章 ModernBERT与2025前沿</a></li>
+            <li><a href="27.html">第27章 极致压缩与端侧智能</a></li>
+            <li><a href="28.html">第28章 端到端实战项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第6章 MLM与NSP深度剖析</h1>
+
+        <p>大家好，我是你们的讲师。前面三章我们已经从论文、架构和输入表示三个角度认识了BERT。但这几章都绕不开两个核心概念：MLM（Masked Language Model）和NSP（Next Sentence Prediction）。这两个预训练任务就像BERT的两条腿——或者说，曾经有两条腿。</p>
+
+        <p>为什么说"曾经"？因为后续的研究（尤其是RoBERTa）几乎废掉了NSP这条腿。但更耐人寻味的是：<strong>即使NSP被质疑，MLM的设计也远比你想象的更精妙</strong>。15%的mask比例、80-10-10规则、随机性策略、训练效率问题——每一个细节背后都有深刻的统计学和工程学考量。今天我们就来当一次"拆解专家"，把这些细节掰开揉碎。</p>
+
+        <div class="highlight">
+            <p><strong>本章核心命题：</strong> MLM为什么有效？NSP为什么失效？从两者的成败中，我们能学到什么关于预训练任务设计的通用原则？</p>
+        </div>
+
+        <h2 class="h2">6.1 MLM 15%掩码策略的深度解析</h2>
+
+        <h3 class="h3">6.1.1 80-10-10规则的统计直觉</h3>
+
+        <p>当一个token被选中进入那"幸运的15%"后，它面临三种命运：</p>
+
+        <pre><code>def mlm_80_10_rule(tokens, mask_token_id, vocab_size, mask_prob=0.15):
+    """
+    BERT MLM 80-10-10掩码策略的精确实现
+
+    参数说明：
+    - tokens: 原始token ID列表
+    - mask_prob: 每个token被选中的概率（15%）
+    """
+    labels = []        # 用于损失计算的标签（-100表示忽略）
+    masked_tokens = tokens.copy()
+
+    for i, token_id in enumerate(tokens):
+        p = random.random()
+
+        if p < mask_prob:  # 15% → 进入mask候选
+            labels.append(token_id)   # 保存原始ID作为预测目标
+            r = random.random()
+
+            if r < 0.8:
+                # 80% → [MASK]
+                masked_tokens[i] = mask_token_id
+            elif r < 0.9:
+                # 10% → 随机token
+                masked_tokens[i] = random.randint(0, vocab_size - 1)
+            else:
+                # 10% → 保持不变
+                pass  # 保持原始token_id
+        else:
+            labels.append(-100)  # 不参与损失计算
+
+    return masked_tokens, labels
+
+# 示例：对"I love natural language processing"进行MLM
+tokens = [1045, 2293, 3019, 2653, 3007, 2616]  # token ids
+masked, labels = mlm_80_10_rule(tokens, mask_token_id=103, vocab_size=30522)
+# 假设索引2（natural）和4（processing）被选中：
+#   索引2: 80% → [MASK], labels[2] = 3019
+#   索引4: 10% → 随机替换, labels[4] = 3007
+#   其他: 保持不变, labels[i] = -100</code></pre>
+
+        <div class="tip">
+            <p><strong>为什么不100%用[MASK]？</strong> 如果你在预训练时把所有被选中的token都换成[MASK]，那模型会学会一个"偷懒"的策略：看到[MASK]才去预测，看到正常token就忽略。但在微调阶段，输入里永远不会出现[MASK]。这导致了严重的<strong>预训练-微调分布不匹配</strong>。80-10-10策略强迫模型在任何输入位置都产出高质量的上下文表示——因为你永远不知道一个token是否"本该被替换"。</p>
+        </div>
+
+        <h3 class="h3">6.1.2 为什么是15%，不是5%或30%？</h3>
+
+        <p>15%这个数字不是拍脑袋决定的。论文通过实验验证了这个选择的合理性：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Mask比例</th>
+                    <th>任务难度</th>
+                    <th>上下文可用性</th>
+                    <th>对下游任务的影响</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>5%</td>
+                    <td>极低（每20个词才mask一个）</td>
+                    <td>上下文信息充足</td>
+                    <td>预训练信号不足，下游收益有限</td>
+                </tr>
+                <tr>
+                    <td><strong>15%</strong></td>
+                    <td><strong>适中</strong></td>
+                    <td><strong>仍有充足上下文</strong></td>
+                    <td><strong>GLUE上表现最佳</strong></td>
+                </tr>
+                <tr>
+                    <td>25%</td>
+                    <td>较高（每4个词就mask一个）</td>
+                    <td>上下文开始碎片化</td>
+                    <td>略微下降</td>
+                </tr>
+                <tr>
+                    <td>30%+</td>
+                    <td>极高</td>
+                    <td>上下文严重破坏</td>
+                    <td>显著下降</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>15%是一个精心平衡的点：mask足够多的token让预训练任务有足够的学习信号，同时又保留了足够的上下文让模型能够进行有意义的预测。</p>
+
+        <h3 class="h3">6.1.3 掩码的随机性 vs 独立性</h3>
+
+        <p>这里有一个很多人忽略的细节：<strong>BERT的mask不是"一次性"的</strong>。每个训练epoch都会重新随机选择哪些token被mask。这意味着同一个句子在不同epoch看到的"被遮挡模式"完全不同。这种随机性带来了数据增强的效果——模型被迫学习在各种遮挡模式下都能产出合理的表示。</p>
+
+        <div class="highlight">
+            <p><strong>这与计算机视觉中的Cutout/RandomErasing有异曲同工之妙：</strong> 随机遮挡是一种非常有效的数据增强策略。BERT在NLP中率先大规模应用了这种思想，比MAE（Masked Autoencoder）在CV中的广泛应用早了数年。</p>
+        </div>
+
+        <h2 class="h2">6.2 MLM的训练效率问题</h2>
+
+        <p>MLM有一个无法回避的<strong>效率问题</strong>：每个batch中只有15%的token参与损失计算。如果序列长度为512，意味着每批128个样本中，只有约128 × 512 × 15% ≈ 9,830个token贡献了梯度。与之对比，自回归语言模型（如GPT）的<strong>所有</strong>token都参与损失计算（128 × 512 = 65,536个）。</p>
+
+        <p>从"每个token产生的学习信号"的角度看，MLM的效率只有自回归模型的15%。但是：</p>
+        <ul>
+            <li><strong>信号质量更高：</strong> MLM每次预测都使用了双向上下文，每个预测任务的"信息量"更大</li>
+            <li><strong>收敛更快：</strong> 实际上BERT只需要约1M步就达到了很好的效果，而相同规模的自回归模型需要更多步</li>
+            <li><strong>改进空间：</strong> ELECTRA（第15章）通过判别式预训练解决了这个问题——所有token参与损失计算</li>
+        </ul>
+
+        <div class="warning">
+            <p><strong>一个典型的误解：</strong> 有些同学以为BERT每步只看15%的token，所以训练速度应该很快。实际上，<strong>前向传播和反向传播仍然要计算全部token</strong>的Attention——15%的影响只在损失函数和梯度更新层面。真正计算Attention的计算量一点都没省！所以MLM的效率问题不在于计算量，而在于<strong>每步的样本效率</strong>——大部分前向计算并没有直接贡献到梯度中。</p>
+        </div>
+
+        <h2 class="h2">6.3 NSP任务的有效性质疑</h2>
+
+        <h3 class="h3">6.3.1 NSP的任务设计</h3>
+
+        <p>NSP试图教BERT理解句间关系，但它的任务设计存在<strong>根本性缺陷</strong>：</p>
+
+        <pre><code># NSP的"偷懒"解决方案
+# 正例：同一篇文章的连续句
+A = "深度学习需要大量标注数据。"
+B = "因此数据增强变得尤为重要。"
+# 主题: "数据" → 相关 → 判为正例 ✓
+
+# 负例：不同文章的句子
+A = "深度学习需要大量标注数据。"
+B = "明太祖朱元璋建立了明朝。"
+# 主题: "数据" vs "历史" → 不相关 → 判为负例 ✓
+
+# NSP的漏洞：模型可以通过"主题是否一致"来做判断
+# 而不需要真正理解"下一句"的逻辑关系！
+# 这正是RoBERTa的发现</code></pre>
+
+        <p>RoBERTa的消融实验清晰显示：去掉NSP后，GLUE分数不但没下降，反而在很多任务上略有提升。这说明NSP要么不重要，要么甚至有害——它可能让模型更关注"主题一致性"而非"真正的句间逻辑"。</p>
+
+        <h3 class="h3">6.3.2 NSP vs SOP vs 无辅助任务</h3>
+
+        <p>ALBERT（第18章）提出了SOP（Sentence Order Prediction）来替代NSP。两者的核心区别：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>对比维度</th>
+                    <th>NSP（BERT原始）</th>
+                    <th>SOP（ALBERT改进）</th>
+                    <th>无辅助任务（RoBERTa）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>正例</td>
+                    <td>连续句子 A→B</td>
+                    <td>连续句子 A→B</td>
+                    <td>不使用</td>
+                </tr>
+                <tr>
+                    <td>负例</td>
+                    <td>不同文档的句子</td>
+                    <td>同一文档的反序 B→A</td>
+                    <td>不使用</td>
+                </tr>
+                <tr>
+                    <td>模型需要学习</td>
+                    <td>主题判别（是否同主题）</td>
+                    <td>句间连贯性（顺序正确吗）</td>
+                    <td>仅MLM</td>
+                </tr>
+                <tr>
+                    <td>难度</td>
+                    <td>低（主题不同一眼看出）</td>
+                    <td>高（细节顺序需理解）</td>
+                    <td>—</td>
+                </tr>
+                <tr>
+                    <td>对下游任务的影响</td>
+                    <td>句对任务收益有限</td>
+                    <td>句对任务有明显收益</td>
+                    <td>多数任务最优</td>
+                </tr>
+                <tr>
+                    <td>代表模型</td>
+                    <td>BERT</td>
+                    <td>ALBERT</td>
+                    <td>RoBERTa</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>SOP的负例（B→A反序）强制模型理解"句子A在句子B之后"是否合理，这需要真正的连贯性理解，而不是简单的主题匹配。实验表明SOP在所有句对任务上都优于NSP。</p>
+
+        <h2 class="h2">6.4 从NSP的失败中学到的设计原则</h2>
+
+        <p>NSP的故事告诉我们，设计预训练辅助任务时要注意几个原则：</p>
+
+        <ul>
+            <li><strong>避免"捷径"：</strong> 如果模型可以通过肤浅的特征（如主题一致性）解决任务，它就不会学习更深层的语义理解。确保你的负例和正例差别足够"微妙"。</li>
+            <li><strong>消融不可少：</strong> NSP在原始论文中通过消融展示了收益（QNLI +2.6%），但这种收益可能是暂时的或任务特定的。RoBERTa的强大之处在于做了更全面的消融。</li>
+            <li><strong>MLM才是核心：</strong> 所有后续工作都确认了MLM的有效性，而辅助任务（NSP/SOP等）的收益始终存在争议。MLM的双向预测+随机掩码策略比后续任何"花哨"的辅助任务贡献都大。</li>
+        </ul>
+
+        <div class="highlight">
+            <p><strong>2025年的新视角：</strong> 最近的研究表明，MLM的"低效率"在高计算资源场景下可以通过更大的batch size和更多的训练步数来弥补。而NSP之类辅助任务的作用，在巨型模型（10B+参数）上的表现还需要进一步验证。不过有一点是清晰的：<strong>双向上下文建模才是BERT成功的本质，NSP只是一个锦上添花的副产物</strong>。</p>
+        </div>
+
+        <h2 class="h2">6.5 MLM的变体与改进方向</h2>
+
+        <p>MLM的设计启发了后续许多改进工作：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>改进方向</th>
+                    <th>代表方法</th>
+                    <th>核心思想</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>动态掩码</td>
+                    <td>RoBERTa</td>
+                    <td>每epoch重新生成mask，非静态缓存</td>
+                </tr>
+                <tr>
+                    <td>全词掩码</td>
+                    <td>WWM (哈工大)</td>
+                    <td>mask整个词而非子词，增强中文语义</td>
+                </tr>
+                <tr>
+                    <td>实体级掩码</td>
+                    <td>ERNIE (百度)</td>
+                    <td>mask命名实体（人名/地名等）</td>
+                </tr>
+                <tr>
+                    <td>短语级掩码</td>
+                    <td>SpanBERT</td>
+                    <td>mask连续span，强制模型预测片段</td>
+                </tr>
+                <tr>
+                    <td>判别式预训练</td>
+                    <td>ELECTRA</td>
+                    <td>所有token参与二分类（替换检测）</td>
+                </tr>
+                <tr>
+                    <td>统一掩码</td>
+                    <td>MPNet</td>
+                    <td>结合掩码和排列两种预训练目标</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这些改进方向将在本教程后续章节中逐一详谈。每一方向的出发点都是"MLM还不够好"，但这也反过来证明了MLM设计的经典地位——它定义了一个范式，后续所有工作都是在这个范式内迭代优化。</p>
+
+        <h2 class="h2">6.6 本章小结</h2>
+
+        <p>本章我们对BERT的两个预训练任务做了深度的剖析：</p>
+        <ul>
+            <li><strong>MLM的80-10-10规则</strong>解决了预训练/微调分布不一致问题，15%的mask比例在"任务难度"和"上下文可用性"之间取得了平衡</li>
+            <li><strong>MLM的样本效率</strong>存在问题（仅15% token参与损失计算），但信号质量更高</li>
+            <li><strong>NSP被RoBERTa证伪</strong>——主题判别式解决方案无法真正学到句间连贯性</li>
+            <li><strong>SOP（ALBERT）</strong>通过反序负例设计解决了NSP的缺陷</li>
+            <li><strong>MLM的变体</strong>（动态掩码、全词掩码、实体级掩码等）构成了BERT生态的改进图谱</li>
+        </ul>
+
+        <p>理解了预训练任务的设计哲学，下一章我们将走向实际应用——BERT微调实战。从文本分类到NER到QA，看看如何把预训练好的BERT接到具体的任务上，以及那些让无数人"掉坑"的微调细节。纸上得来终觉浅，绝知此事要coding。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

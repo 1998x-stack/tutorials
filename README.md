@@ -1,12 +1,12 @@
 # 1998x-stack Tutorials
 
-A collection of 44 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
+A collection of 45 free, comprehensive technical tutorials in Chinese — from fundamentals to production-ready skills.
 
 **Hub page:** https://1998x-stack.github.io/tutorials/
 
 ## Tutorials by Discipline
 
-### AI / 数据科学 (11 courses)
+### AI / 数据科学 (12 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -16,6 +16,7 @@ A collection of 44 free, comprehensive technical tutorials in Chinese — from f
 | 🤖 | RAG检索增强生成 · 从入门到精通 | 28 | [rag-tutorial](https://1998x-stack.github.io/rag-tutorial/) |
 | 🤖 | 强化学习 · 从入门到精通 | 28 | [reinforcement-learning-tutorial](https://1998x-stack.github.io/reinforcement-learning-tutorial/) |
 | 🤖 | 推荐系统实战体系 | 28 | [recommendation-system-tutorial](https://1998x-stack.github.io/recommendation-system-tutorial/) |
+| 📊 | 多元统计分析 · 从入门到精通 | 28 | [multivariate-statistics-tutorial](https://1998x-stack.github.io/multivariate-statistics-tutorial/) |
 | 📊 | 统计学 · 从入门到精通 | 28 | [statistics-tutorial](https://1998x-stack.github.io/statistics-tutorial/) |
 | 📈 | 时间序列分析完全指南 | 28 | [time-series-analysis-tutorial](https://1998x-stack.github.io/time-series-analysis-tutorial/) |
 | 🔥 | PyTorch 深度学习实战教程 | 28 | [pytorch-tutorial](https://1998x-stack.github.io/pytorch-tutorial/) |
@@ -62,7 +63,7 @@ A collection of 44 free, comprehensive technical tutorials in Chinese — from f
 | 📡 | 电波传播与天线 · 从入门到精通 | 28 | [antenna-propagation-tutorial](https://1998x-stack.github.io/antenna-propagation-tutorial/) |
 | 📡 | 传感网技术 · 从入门到精通 | 28 | [sensor-network-tutorial](https://1998x-stack.github.io/sensor-network-tutorial/) |
 
-### 经济 / 金融 (9 courses)
+### 经济 / 金融 (10 courses)
 
 | | Topic | Chapters | URL |
 |---|-------|----------|-----|
@@ -75,6 +76,7 @@ A collection of 44 free, comprehensive technical tutorials in Chinese — from f
 | 📊 | 财报实战分析 | 28 | [financial-statement-analysis-tutorial](https://1998x-stack.github.io/financial-statement-analysis-tutorial/) |
 | 🪙 | 比特币与加密货币 | 28 | [cryptocurrency-tutorial](https://1998x-stack.github.io/cryptocurrency-tutorial/) |
 | 📝 | 申论体系 · 从入门到精通 | 28 | [shenlun-tutorial](https://1998x-stack.github.io/shenlun-tutorial/) |
+| 🛡️ | 保险学 · 从入门到精通 | 28 | [insurance-tutorial](https://1998x-stack.github.io/insurance-tutorial/) |
 
 ### 机器人 / 控制 (1 course)
 

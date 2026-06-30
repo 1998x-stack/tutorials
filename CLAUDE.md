@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This repository contains 44 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
+This repository contains 45 static HTML tutorial courses on technical topics, all published via GitHub Pages under the `1998x-stack` organization. Each tutorial is a standalone directory of self-contained HTML files with a two-column layout (sidebar navigation + main content), written in conversational Chinese.
 
 Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/tutorial-publisher/`). The skill handles topic research, chapter outline design, HTML generation with themed CSS, and deployment.
 
 ## Active Tutorials
 
-### AI / 数据科学 (11)
+### AI / 数据科学 (12)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `machine-learning-tutorial/` | 机器学习 | 28 | `https://1998x-stack.github.io/machine-learning-tutorial/` |
@@ -19,6 +19,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `rag-tutorial/` | RAG检索增强生成 | 28 | `https://1998x-stack.github.io/rag-tutorial/` |
 | `reinforcement-learning-tutorial/` | 强化学习 | 28 | `https://1998x-stack.github.io/reinforcement-learning-tutorial/` |
 | `recommendation-system-tutorial/` | 推荐系统 | 28 | `https://1998x-stack.github.io/recommendation-system-tutorial/` |
+| `multivariate-statistics-tutorial/` | 多元统计分析 | 28 | `https://1998x-stack.github.io/multivariate-statistics-tutorial/` |
 | `statistics-tutorial/` | 统计学 | 28 | `https://1998x-stack.github.io/statistics-tutorial/` |
 | `time-series-analysis-tutorial/` | 时间序列分析 | 28 | `https://1998x-stack.github.io/time-series-analysis-tutorial/` |
 | `pytorch-tutorial/` | PyTorch深度学习 | 28 | `https://1998x-stack.github.io/pytorch-tutorial/` |
@@ -62,7 +63,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `antenna-propagation-tutorial/` | 电波传播与天线 | 28 | `https://1998x-stack.github.io/antenna-propagation-tutorial/` |
 | `sensor-network-tutorial/` | 传感网技术 | 28 | `https://1998x-stack.github.io/sensor-network-tutorial/` |
 
-### 经济 / 金融 (9)
+### 经济 / 金融 (10)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `investment-tutorial/` | 投资学 | 28 | `https://1998x-stack.github.io/investment-tutorial/` |
@@ -74,6 +75,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `financial-statement-analysis-tutorial/` | 财报实战分析 | 28 | `https://1998x-stack.github.io/financial-statement-analysis-tutorial/` |
 | `cryptocurrency-tutorial/` | 加密货币 | 28 | `https://1998x-stack.github.io/cryptocurrency-tutorial/` |
 | `shenlun-tutorial/` | 申论体系 | 28 | `https://1998x-stack.github.io/shenlun-tutorial/` |
+| `insurance-tutorial/` | 保险学 | 28 | `https://1998x-stack.github.io/insurance-tutorial/` |
 
 ### 机器人 / 控制 (1)
 | Directory | Topic | Chapters | URL |

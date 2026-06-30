@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 设备驱动</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html" class="active">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第16章 设备驱动</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们站在用户程序的角度理解了I/O模型——从阻塞到非阻塞，从epoll到io_uring——但你是否想过一个问题：当你调用 <code>write(fd, buf, len)</code> 时，数据是怎么从用户空间最终写到NVMe固态硬盘上的？又或者当你收到一个网络包时，网卡的电信号是如何变成 <code>recv()</code> 返回的字节流的？答案全藏在设备驱动（Device Driver）里。</p>
+
+        <p>设备驱动是操作系统和硬件之间的翻译官。Linux内核中约70%的代码都是设备驱动——它们是最庞大也最容易出Bug的部分。理解驱动的设计模式，不仅能帮你写出更稳定的驱动程序，更重要的是让你明白OS是如何做到"同一套系统调用接口应对千差万别的硬件"的。</p>
+
+        <p>讲一个我第一次写驱动的踩坑经历。大学时在STM32上裸写一个SPI驱动，照着数据手册配置寄存器，信心满满地烧录下去——结果SPI总线上一片死寂，没有任何波形。查了三天，最终发现原因是GPIO复用功能位没设置对。这种事情在驱动开发中太常见了：硬件手册上有一行"Note: AF5 must be enabled before using SPI2"，你扫一眼就忽略了，然后三天就没了。驱动开发的本质就是和硬件手册作斗争。</p>
+
+        <h2>一、Linux设备模型</h2>
+
+        <p>在动手写驱动之前，必须先理解Linux的设备模型。它不是一个可有可无的抽象——它定义了驱动、设备和总线之间如何建立连接，也是<code>/sys</code>文件系统的底层逻辑。</p>
+
+        <h3>device / driver / bus 三剑客</h3>
+        <p>Linux设备模型的核心是三个结构体，它们以"三角关系"紧密配合：</p>
+        <p><strong>struct bus_type</strong>：代表一种总线类型（PCI、USB、SPI、I2C等）。总线负责完成两个关键工作：一是匹配设备和驱动（match函数），二是提供在总线上传输数据的操作方法。当你在 <code>/sys/bus/pci/</code> 下看到的那些目录，每个都对应一个 <code>bus_type</code> 实例。</p>
+        <p><strong>struct device</strong>：代表一个物理或虚拟设备。它包含设备所在的父总线、电源管理状态、DMA参数等信息。当内核检测到新硬件时（比如插入USB设备），会创建一个 <code>device</code> 实例并挂接到对应总线上。</p>
+        <p><strong>struct device_driver</strong>：代表一个驱动程序。它不直接操作硬件，而是提供 <code>probe()</code> 和 <code>remove()</code> 回调。当bus的match函数发现一个device和一个driver匹配时，bus调用driver的 <code>probe()</code> 方法——驱动初始化硬件、注册中断、创建设备文件的逻辑从这里开始。</p>
+
+        <div class="highlight">
+            <p><strong>理解匹配过程</strong>：你在终端里运行 <code>modprobe xyz</code> 加载驱动时，内核会将这个driver和所有已注册的device进行匹配。反过来，当你插上一个新设备时，内核也会遍历总线上所有已注册的driver。这就是Linux设备模型的"热插拔"基础。无论是哪种方向，<code>match</code> → <code>probe</code> 的逻辑是不变的。</p>
+        </div>
+
+        <h3>sysfs与设备树</h3>
+        <p><code>/sys</code> 文件系统是设备模型在用户空间的投影。你不必解析二进制数据或调用netlink——直接读文件就能看到设备的拓扑结构。比如 <code>/sys/class/net/eth0/device/</code> 告诉你网卡在哪个PCI总线上，<code>/sys/block/sda/size</code> 告诉你磁盘扇区数。</p>
+
+        <pre><code># 查看块设备的拓扑结构
+$ ls -l /sys/block/sda
+lrwxrwxrwx 1 root root 0 Jun 30 09:00 /sys/block/sda -> ../devices/pci0000:00/0000:00:1f.2/ata1/host0/target0:0:0/0:0:0:0/block/sda
+
+# 查看驱动的probe信息
+$ cat /sys/bus/pci/drivers/nvme/probe
+# 输出驱动支持的设备ID列表
+
+# 手动绑定/解绑驱动（调试有用）
+$ echo -n "0000:01:00.0" > /sys/bus/pci/drivers/nvme/unbind
+$ echo -n "0000:01:00.0" > /sys/bus/pci/drivers/nvme/bind</code></pre>
+
+        <h3>udev的工作机制</h3>
+        <p>当你插入一个USB键盘时，内核通过netlink socket向用户空间的 <code>udevd</code> 守护进程发送 <code>uevent</code>。udev根据 <code>/etc/udev/rules.d/</code> 下的规则文件决定如何处置：创建什么设备节点？赋予什么权限？是否运行某个脚本？这就是"udev"（userspace /dev）的由来——把对设备的管理从内核空间迁移到用户空间，更灵活、更安全。</p>
+
+        <h2>二、字符设备驱动实战</h2>
+
+        <p>字符设备（char device）是最简单的设备类型——数据像字节流一样顺序读写。键盘、鼠标、串口都是典型的字符设备。写一个简单的字符设备驱动是理解Linux驱动框架的最佳入门实践。</p>
+
+        <h3>驱动骨架</h3>
+
+        <pre><code>#include &lt;linux/module.h&gt;
+#include &lt;linux/fs.h&gt;
+#include &lt;linux/cdev.h&gt;
+#include &lt;linux/uaccess.h&gt;
+
+#define DEVICE_NAME "my_demo"
+#define BUFFER_SIZE 1024
+
+static int major;
+static char device_buffer[BUFFER_SIZE];
+static struct cdev my_cdev;
+
+// file_operations —— 驱动和用户空间对话的接口
+static int my_open(struct inode *inode, struct file *file) {
+    printk(KERN_INFO "my_demo: device opened\n");
+    return 0;
+}
+
+static ssize_t my_read(struct file *file, char __user *user_buf,
+                       size_t count, loff_t *offset) {
+    size_t to_read = min(count, (size_t)(BUFFER_SIZE - *offset));
+    if (to_read == 0) return 0;
+    // copy_to_user —— 从内核空间拷贝数据到用户空间
+    if (copy_to_user(user_buf, device_buffer + *offset, to_read))
+        return -EFAULT;
+    *offset += to_read;
+    return to_read;
+}
+
+static ssize_t my_write(struct file *file, const char __user *user_buf,
+                        size_t count, loff_t *offset) {
+    size_t to_write = min(count, (size_t)(BUFFER_SIZE - *offset));
+    if (to_write == 0) return -ENOSPC;
+    // copy_from_user —— 从用户空间安全拷贝数据到内核
+    if (copy_from_user(device_buffer + *offset, user_buf, to_write))
+        return -EFAULT;
+    *offset += to_write;
+    return to_write;
+}
+
+static struct file_operations my_fops = {
+    .owner   = THIS_MODULE,
+    .open    = my_open,
+    .read    = my_read,
+    .write   = my_write,
+};
+
+static int __init my_init(void) {
+    // 1. 分配设备号
+    major = register_chrdev(0, DEVICE_NAME, &my_fops);
+    if (major &lt; 0) return major;
+
+    // 2. 初始化cdev并关联到file_operations
+    cdev_init(&my_cdev, &my_fops);
+
+    // 3. 将cdev添加到内核
+    dev_t devno = MKDEV(major, 0);
+    cdev_add(&my_cdev, devno, 1);
+
+    printk(KERN_INFO "my_demo: loaded, major=%d\n", major);
+    return 0;
+}
+
+static void __exit my_exit(void) {
+    dev_t devno = MKDEV(major, 0);
+    cdev_del(&my_cdev);
+    unregister_chrdev_region(devno, 1);
+    printk(KERN_INFO "my_demo: unloaded\n");
+}
+
+module_init(my_init);
+module_exit(my_exit);
+MODULE_LICENSE("GPL");</code></pre>
+
+        <table>
+            <tr><th>步骤</th><th>函数</th><th>说明</th></tr>
+            <tr><td>1. 分配设备号</td><td>register_chrdev 或 alloc_chrdev_region</td><td>动态（推荐）或静态申请主次设备号</td></tr>
+            <tr><td>2. 初始化cdev</td><td>cdev_init()</td><td>将cdev对象和file_operations结构体绑定</td></tr>
+            <tr><td>3. 添加cdev</td><td>cdev_add()</td><td>将字符设备注册到内核，分配的设备号生效</td></tr>
+            <tr><td>4. 实现fops</td><td>open/read/write/release/ioctl</td><td>用户态read/write最终调用到这里</td></tr>
+            <tr><td>5. 清理卸载</td><td>cdev_del + unregister_chrdev_region</td><td>按添加的反向顺序逐一释放资源</td></tr>
+        </table>
+
+        <div class="tip">
+            <p><strong>动手实验</strong>：如果你有Linux开发环境，把上述代码保存为 <code>my_demo.c</code>，编写一个Makefile使用内核的构建系统（kbuild），编译后用 <code>insmod</code> 加载，然后用 <code>mknod /dev/my_demo c 240 0</code> 创建设备节点（主设备号用你的实际major替换），最后用 <code>echo hello > /dev/my_demo && cat /dev/my_demo</code> 验证。一步步感受从代码到硬件交互的完整链路。</p>
+        </div>
+
+        <h3>copy_to_user 为什么不能直接 memcpy？</h3>
+        <p>初学者常问：为什么内核驱动里不用 <code>memcpy</code> 而要用 <code>copy_to_user</code> 和 <code>copy_from_user</code>？原因有两个：一是安全性——用户空间传递的指针可能指向非法地址，直接访问会导致内核崩溃（oops）；二是架构原因——某些架构上内核不能直接访问用户空间内存，需要特殊的指令（如x86的 <code>movs</code> 配合段寄存器）。<code>copy_to_user</code> 内部做了地址校验 + 页面错误处理，失败时返回未拷贝的字节数。</p>
+
+        <h2>三、设备树（Device Tree）</h2>
+
+        <p>在x86平台上，硬件拓扑信息通过ACPI（高级配置与电源管理接口）传递给内核——这是一个复杂的表格系统。但在ARM和RISC-V平台上，ACPI过于复杂和冗余，Linux内核采用了更精简的方案：设备树（Device Tree, DT）。</p>
+
+        <h3>从.dts到.dtb的编译过程</h3>
+        <p>设备树源文件（<code>.dts</code>）是一种人类可读的文本格式，描述硬件的寄存器地址、中断号、时钟频率等信息。通过设备树编译器（<code>dtc</code>）编译成二进制的 <code>.dtb</code> 文件。引导加载程序（U-Boot、GRUB）在启动内核时，将 <code>.dtb</code> 在内存中的地址传递给内核。内核解析 <code>.dtb</code>，自动创建 <code>device</code> 实例并尝试匹配驱动。</p>
+
+        <pre><code>// 一个简单的设备树片段 — 描述UART控制器
+/dts-v1/;
+/ {
+    model = "Tutorial Board v1";
+    compatible = "tutorial,tb-v1";
+
+    chosen {
+        bootargs = "console=ttyS0,115200";
+    };
+
+    soc {
+        uart0: serial@10000000 {
+            compatible = "ns16550a";
+            reg = &lt;0x10000000 0x1000&gt;;  // 基地址+地址范围
+            interrupts = &lt;33&gt;;           // 中断号
+            clock-frequency = &lt;3686400&gt;;
+            status = "okay";
+        };
+
+        gpio0: gpio@20000000 {
+            compatible = "tutorial,gpio-v1";
+            reg = &lt;0x20000000 0x1000&gt;;
+            interrupts = &lt;48&gt;;
+            gpio-controller;
+            #gpio-cells = &lt;2&gt;;
+            status = "okay";
+        };
+    };
+};</code></pre>
+
+        <p>内核驱动通过 <code>of_match_table</code> 声明它支持的设备，设备树中的 <code>compatible</code> 属性就是这个匹配的关键字：</p>
+
+        <pre><code>static const struct of_device_id my_of_match[] = {
+    { .compatible = "tutorial,gpio-v1", },
+    { /* 结束标记 */ },
+};
+MODULE_DEVICE_TABLE(of, my_of_match);
+
+static struct platform_driver my_driver = {
+    .probe  = my_probe,
+    .remove = my_remove,
+    .driver = {
+        .name = "my_gpio",
+        .of_match_table = my_of_match,
+    },
+};</code></pre>
+
+        <div class="warning">
+            <p><strong>踩坑实录</strong>：设备树的 <code>reg</code> 属性中地址和大小单位极易混淆。在 <code>&lt;0x10000000 0x1000&gt;</code> 中，前者是基地址，后者是地址范围长度。但如果父节点定义了 <code>#address-cells = &lt;2&gt;</code>，那么每个地址需要两个32位单元！漏掉一个look-up会导致驱动ioremap到错误的地址——我曾在RK3399平台上被这个问题折磨了一整个下午。</p>
+        </div>
+
+        <h2>四、Rust驱动开发初探</h2>
+
+        <p>2024-2025年的Linux内核（6.12-6.18版本）见证了一个历史性的转变：Rust语言在内核中从"实验性"走向了"可用"。虽然Rust for Linux的初始合并（6.1版本）只提供了基础设施，但到了6.12之后，真正的Rust驱动开始涌现。</p>
+
+        <table>
+            <tr><th>驱动/模块</th><th>内核版本</th><th>说明</th></tr>
+            <tr><td>Rust for Linux 基础设施</td><td>Linux 6.1 (2022)</td><td>Rust作为第二语言的初始支持，核心抽象层</td></tr>
+            <tr><td>Android Binder（Rust版）</td><td>Linux 6.12-6.13</td><td>Android IPC核心驱动的Rust重写，更安全</td></tr>
+            <tr><td>Nova GPU驱动</td><td>Linux 6.14-6.16</td><td>NVIDIA的开源Rust GPU驱动（基于GSP固件）</td></tr>
+            <tr><td>以太网PHY驱动（Rust版）</td><td>Linux 6.17-6.18</td><td>网络PHY芯片驱动的Rust抽象</td></tr>
+            <tr><td>Rust DMA/IOMMU抽象</td><td>Linux 6.18-6.19</td><td>DMA和IOMMU API的Rust绑定</td></tr>
+        </table>
+
+        <h3>为什么Rust在内核中如此重要？</h3>
+        <p>Linux内核中约70%的安全漏洞是内存安全问题（缓冲区溢出、释放后使用、空指针解引用）。C语言在驱动开发中尤其容易出问题——因为驱动要直接操作硬件寄存器、处理并发中断、管理DMA缓冲区。Rust的所有权模型在编译时就消除了数据竞争和use-after-free，这在驱动开发中极其有价值。</p>
+
+        <div class="highlight">
+            <p><strong>不仅仅是安全性</strong>：Rust的trait系统为驱动接口提供了比C函数指针更强类型的抽象。在C中，<code>file_operations</code> 是一个包含十几个函数指针的结构体，你很可能忘记初始化某个回调——内核会优雅地崩溃。在Rust中，trait保证你必须实现所有必要的方法。类型安全 + 内存安全，让Rust驱动的初始bug率显著低于同类C驱动。</p>
+        </div>
+
+        <p>Nova驱动的意义尤其重大：它是NVIDIA首次在内核中提供开源的GPU驱动（传统的NVIDIA闭源驱动一直是个黑盒）。虽然Nova依赖于GSP固件进行硬实时控制，但驱动核心使用Rust编写，这让安全性有了根本保障。加上Android Binder的Rust重写已经进入主线，我们有理由相信，在未来5-10年内，Rust将逐步取代C成为内核驱动开发的首选语言。</p>
+
+        <h2>五、结语与下一章预告</h2>
+
+        <p>本章我们从Linux设备模型的三大支柱（device、driver、bus）出发，手写了一个字符设备驱动，学习了设备树在ARM/RISC-V平台上的硬件描述方式，最后眺望了Rust驱动在Linux内核中的新兴浪潮。设备驱动是OS和硬件之间的最后一道桥梁——理解它，你就真正理解了"OS抽象硬件"这句话的背后代码。</p>
+
+        <p>驱动的核心工作方式离不开中断——硬件完成操作后通过中断通知CPU。下一章，我们将全面深入地学习中断与异常处理机制，看看操作系统是如何在"必须响应得快"和"要做的事情很多"这对矛盾中找到解决方案的。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

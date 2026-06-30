@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 中断与异常处理</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html" class="active">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第17章 中断与异常处理</h2>
+
+        <p>大家好，我是你们的讲师。想象一下你正在写一封重要的邮件，然后有人每隔几秒就来拍你肩膀问问题——你肯定写不下去。CPU面临的正是同样的困境。在CPU全速执行指令的过程中，网卡突然说"包到了"，磁盘说"数据读好了"，定时器说"时间片到了"。如果CPU要停下来一一处理这些请求，那正常的程序执行就被完全打乱了。</p>
+
+        <p>这就是中断处理（Interrupt Handling）存在的意义和挑战。中断是现代操作系统的"事件驱动引擎"——没有中断，CPU就不知道I/O何时完成，就无法公平调度，就无法响应键盘鼠标。但中断也带来了一个核心矛盾：处理中断要快（否则系统响应变慢），但中断要做的事情往往很多（数据拷贝、协议解析、唤醒进程）。操作系统如何权衡这对矛盾？本章将逐一拆解。</p>
+
+        <p>讲一个真实案例。2019年某云厂商的物理机频繁出现"软锁死"（soft lockup）告警，CPU的"watchdog"检测到某个CPU核心连续20秒没有调度。排查发现罪魁祸首是一个网卡驱动的中断处理函数中调用了 <code>printk</code>——在中断上下文中打印日志。串口驱动在打印时关闭了中断，而printk的速率正好匹配了网卡的接收速率，导致CPU永远无法退出中断上下文。从此我学到一个铁律：不要在中断上下文里做任何可能阻塞或耗时过长的操作。</p>
+
+        <h2>一、中断处理的挑战</h2>
+
+        <p>当中断发生时，CPU硬件自动完成以下动作：保存当前指令地址（PC/CSR）、关闭中断使能、跳转到中断向量表指定的入口。然后内核的中断处理程序开始执行。问题来了——在中断处理期间，CPU不能响应其他中断（或者说，如果允许嵌套中断，复杂度将呈指数级增长）。这意味着中断处理函数必须极快地完成，否则其他设备的中断就会被延迟。</p>
+
+        <p>但很多设备的中断处理确实需要做很多工作。网卡中断需要把数据包从硬件缓冲区搬到内核协议栈，磁盘中断需要将DMA完成的请求向上层文件系统提交。如果中断处理函数完成所有这些工作，中断延迟将变得不可接受。</p>
+
+        <div class="highlight">
+            <p><strong>核心思想</strong>：中断处理被拆分为两半——上半部（Top Half）只做最紧急、最少量的工作（保存硬件状态、清除中断标志、发起DMA传输），然后立即返回；下半部（Bottom Half）在更宽松的环境中完成剩余的大量处理。这就像急诊室的分类流程——护士先做紧急止血（上半部），然后把病人转移到普通病房做进一步治疗（下半部）。</p>
+        </div>
+
+        <h2>二、下半部机制全景</h2>
+
+        <p>Linux内核提供了四种下半部机制，每一种都是在前一种的基础上演进而来。理解它们的设计选择和适用场景，能帮你写出更健壮的驱动代码。</p>
+
+        <table>
+            <tr><th>机制</th><th>引入版本</th><th>可睡眠</th><th>执行上下文</th><th>特点</th></tr>
+            <tr><td>软中断（softirq）</td><td>Linux 2.3</td><td>否</td><td>中断上下文</td><td>静态分配，可并发（同类型可在不同CPU同时执行）</td></tr>
+            <tr><td>tasklet</td><td>Linux 2.3</td><td>否</td><td>中断上下文</td><td>基于softirq构建，同类型串行执行，更安全</td></tr>
+            <tr><td>工作队列（workqueue）</td><td>Linux 2.5</td><td>是</td><td>进程上下文（内核线程）</td><td>允许阻塞、可以持有锁、执行大量操作</td></tr>
+            <tr><td>线程化中断</td><td>Linux 2.6.30</td><td>是</td><td>内核线程（request_threaded_irq）</td><td>将整个中断处理放入内核线程，彻底避免中断上下文限制</td></tr>
+        </table>
+
+        <h3>softirq：性能最高的下半部</h3>
+        <p>softirq是完全在中断上下文中执行的，不能睡眠、不能持有信号量。但softirq有一个极其重要的属性：同类型的softirq可以在多个CPU上同时执行。这意味着它必须使用自旋锁或其他机制保护共享数据。因为这种复杂度，softirq一般只有对性能极度敏感的核心子系统使用——网络协议栈的 <code>NET_RX_SOFTIRQ</code> 和 <code>NET_TX_SOFTIRQ</code> 就是两个典型的softirq实例。你可以用 <code>cat /proc/softirqs</code> 查看各个CPU上每种softirq的执行次数。</p>
+
+        <pre><code># 查看各个CPU上的软中断计数
+$ cat /proc/softirqs
+                    CPU0       CPU1       CPU2       CPU3
+          HI:          5          2          3          1
+       TIMER:    1245678    1189345    1312456    1287567
+      NET_TX:      34567      28901      30123      31245
+      NET_RX:     567890     512345     534567     589012
+       BLOCK:      12345      10345      11234      10890
+    IRQ_POLL:          0          0          0          0
+     TASKLET:        456        389        412        378
+       SCHED:     234567     223456     245678     234567
+     HRTIMER:       1234       1123       1345       1289
+         RCU:     789012     765432     801234     776543</code></pre>
+
+        <h3>tasklet：更安全但退化的软中断</h3>
+        <p>tasklet基于softirq实现，但加了一个关键限制：同类型的tasklet在任何时刻最多只能在一个CPU上执行。这消除了并发问题，让驱动作者不需要考虑锁的问题。但代价就是不能利用多核并行加速同一个tasklet。tasklet曾经是最广泛使用的下半部机制，但在现代Linux内核中已被标记为deprecated（弃用），推荐使用工作队列或线程化中断。</p>
+
+        <h3>workqueue：能睡觉的下半部</h3>
+        <p>工作队列（workqueue）将下半部的工作推迟到内核线程中执行。这意味着你可以在workqueue回调中调用任何可能阻塞的函数——<code>mutex_lock</code>、<code>kmalloc(GFP_KERNEL)</code>、<code>copy_to_user</code>，甚至文件系统操作。workqueue使用内核全局的工作者线程池（每个CPU一个"kworker"线程），但也支持创建专用的workqueue。</p>
+
+        <pre><code>// 使用workqueue延迟执行下半部操作
+// 上半部（中断处理函数）
+irqreturn_t my_interrupt_handler(int irq, void *dev_id) {
+    struct my_device *dev = (struct my_device *)dev_id;
+
+    // 保存硬件状态（必须快！）
+    dev->hw_status = readl(dev->reg_base + STATUS_REG);
+    // 清除中断标志
+    writel(0, dev->reg_base + INT_CLEAR_REG);
+
+    // 调度工作队列——下半部将在进程上下文中执行
+    schedule_work(&dev->work);
+
+    return IRQ_HANDLED;
+}
+
+// 下半部（在kworker线程中执行，可以放心做任何事）
+void my_work_handler(struct work_struct *work) {
+    struct my_device *dev = container_of(work, struct my_device, work);
+    // 现在可以安全地做大量工作了
+    // 可以持有mutex、可以分配内存、可以唤醒进程
+    process_data(dev);
+}</code></pre>
+
+        <h3>线程化中断：最新最通用的方案</h3>
+        <p>从Linux 2.6.30开始，<code>request_threaded_irq()</code> 允许将整个中断处理（包括上半部）放在一个内核线程中。你提供一个"上半部"函数（在中断上下文中执行，return IRQ_WAKE_THREAD 时唤醒线程），和一个"thread_fn"（在进程上下文中执行）。如果你不需要在真正的上半部做任何紧急操作，可以传入 <code>IRQF_ONESHOT</code> 标志让内核自动管理中断屏蔽——线程化中断会在执行期间自动屏蔽该中断线，执行完成后重新使能。</p>
+
+        <p>线程化中断已成为新驱动开发的首选方案，因为它在不牺牲太多性能的前提下极大地简化了驱动逻辑。事实上，PREEMPT_RT实时内核将所有中断都强制线程化了——这引出了我们后面的话题。</p>
+
+        <h2>三、中断亲和性与CPU绑定</h2>
+
+        <p>在多核系统中，中断应该发往哪个CPU？这是中断控制器（如x86的APIC）需要处理的问题。Linux允许你通过 <code>/proc/irq/</code> 系统接口精细控制每个中断的CPU亲和性（affinity）。</p>
+
+        <p>每个IRQ在 <code>/proc/irq/</code> 下有一个目录，其中 <code>smp_affinity</code> 是一个位图（bitmask），每一位代表一个CPU核心。设置位图中的某一位，相应的中断就会被路由到对应的CPU核心。</p>
+
+        <pre><code># 查看IRQ 130（假设是NVMe磁盘中断）的当前亲和性
+$ cat /proc/irq/130/smp_affinity
+ff  # 默认所有8个CPU都可能处理这个中断（十六进制掩码）
+
+# 将NVMe中断绑定到CPU0和CPU1
+$ echo "03" > /proc/irq/130/smp_affinity
+
+# 查看每个CPU上的中断计数
+$ cat /proc/interrupts | grep nvme
+ 130:  12345678   9876543        0        0        0        0        0        0  PCI-MSI-msi  nvme0q0</code></pre>
+
+        <div class="tip">
+            <p><strong>最佳实践</strong>：在高性能网络场景中，通常将网卡的多队列中断和应用的worker线程绑定到同一组CPU上。比如一个4核机器上有两个网卡队列，可以将queue 0的中断绑定到CPU 0-1，queue 1的中断绑定到CPU 2-3，同时将应用线程也绑定到对应核心。这保证了数据包从硬件中断到应用处理的"全路径"都在同一个CPU上完成，最大限度地利用L1/L2缓存。</p>
+        </div>
+
+        <p>内核还包含一个 <code>irqbalance</code> 守护进程，它会自动在CPU之间分散中断负载。在大多数通用服务器上，irqbalance是默认启动的。但在追求极致性能的场景（如高频交易、高性能数据库）中，通常关闭irqbalance，手动设置每个中断的亲和性以获得确定性。</p>
+
+        <h2>四、/proc/interrupts 解读</h2>
+
+        <p><code>/proc/interrupts</code> 是诊断中断相关性能问题的第一站。我们来逐列解读它的含义：</p>
+
+        <pre><code>$ cat /proc/interrupts
+           CPU0       CPU1       CPU2       CPU3
+  0:        123          0          0          0   IO-APIC   2-edge      timer
+  8:          0          0          0          0   IO-APIC   8-edge      rtc0
+  9:          0          0          0          0   IO-APIC   9-fasteoi   acpi
+ 18:          0          0          0          0   IO-APIC  18-fasteoi   i801_smbus
+ 24:    1234567          0     987654     567890   PCI-MSI-msi    edge      nvme0q0
+ 25:          0    1234567          0          0   PCI-MSI-msi    edge      nvme0q1
+130:   56789012   51234567   53456789   58901234   PCI-MSI-msi    edge      eth0-rx-0
+131:   48901234   46789012   45678901   50123456   PCI-MSI-msi    edge      eth0-rx-1</code></pre>
+
+        <table>
+            <tr><th>列</th><th>含义</th><th>诊断价值</th></tr>
+            <tr><td>IRQ号</td><td>中断请求编号，每个设备一个或多个</td><td>通过号码查 /proc/irq/N/ 下的详细信息</td></tr>
+            <tr><td>CPU0-CPUN</td><td>该中断在各CPU上的累积触发次数</td><td>分布不均说明affinity设置有问题</td></tr>
+            <tr><td>中断控制器</td><td>IO-APIC / PCI-MSI / GIC-v3 等</td><td>MSI是现代设备的标准，IO-APIC用于传统设备</td></tr>
+            <tr><td>触发方式</td><td>edge（边沿触发）或 fasteoi（电平触发）</td><td>电平触发容易产生中断风暴，罕见但一旦发生极难排查</td></tr>
+            <tr><td>设备名</td><td>注册中断时驱动提供的名称</td><td>快速定位哪个设备产生的中断</td></tr>
+        </table>
+
+        <div class="warning">
+            <p><strong>中断风暴案例</strong>：某次线上排查让我亲身体验了什么是"中断风暴"。一台服务器的 <code>/proc/interrupts</code> 中一个USB控制器在1分钟内触发了超过10亿次中断——另一个 <code>cat /proc/interrupts</code> 命令还没打完，计数又涨了数千万。原因是劣质USB键盘的控制器在电气噪声下反复触发中断，而该USB驱动的上半部只清除了一个中断源而未清除另一个。结果CPU被这个中断完全吞噬，所有用户态进程都被饿死了。修复方法是在驱动中增加对所有待处理中断位的全面清除。</p>
+        </div>
+
+        <h2>五、实时性与PREEMPT_RT</h2>
+
+        <p>标准Linux内核是一个"尽力交付"的分时系统——它保证进程最终会得到CPU时间，但不保证在特定时间窗口内一定得到。这对大多数应用来说足够了，但对工业控制、机器人、音频处理等实时场景来说，远远不够。</p>
+
+        <h3>为什么中断处理会破坏实时性？</h3>
+        <p>问题出在标准内核的中断模型上：中断处理函数的优先级高于任何用户进程。当一个中断发生时，CPU会暂停当前运行的用户进程去执行中断处理函数——即使这个用户进程是一个需要在1ms内响应的实时任务。更糟糕的是，如果中断处理函数持有某个锁，而实时任务也在等待这个锁——实时任务的截止时间就会被中断处理函数的执行时间所"污染"。</p>
+
+        <h3>PREEMPT_RT如何解决？</h3>
+        <p>PREEMPT_RT补丁集（从Linux 6.12开始已经完全合并入主线）采取了一个根本性的方案：将所有中断处理强制线程化。中断到来时，不再是中断处理函数抢占当前进程，而是唤醒一个内核线程——这个内核线程参与调度器的正常调度，可以被更高优先级的实时任务抢占。换句话说，中断不再是"不可中断的"，而是变成了一个普通（但高优先级）的调度实体。</p>
+
+        <div class="highlight">
+            <p><strong>PREEMPT_RT的哲学</strong>：标准Linux说"中断必须尽快响应"——所以中断处理函数可以抢占任何进程。PREEMPT_RT说"实时任务必须在截止时间前完成"——所以任何资源（包括CPU）都不能被优先级反转所阻塞，包括中断。这个视角转换意味着：中断不再是特权的，中断线程化后它只是一个普通的任务。代价是中断响应延迟略有增加（因为增加了调度开销），但确定性大幅提升。</p>
+        </div>
+
+        <p>除了中断线程化，PREEMPT_RT还做了几项关键改造：将大部分自旋锁替换为可睡眠的 <code>rt_mutex</code>（避免优先级反转）、将临界区通过 <code>local_lock</code> 保护而非全局锁、增加更多的抢占点。这些改造让Linux从一个"尽量公平"的系统变成了一个"保证可预测"的系统——这是从"软实时"迈向"硬实时"的关键一步。</p>
+
+        <h2>六、结语与下一章预告</h2>
+
+        <p>本章我们从中断处理的核心矛盾出发，逐层深入了下半部的四种机制（softirq、tasklet、workqueue、线程化中断），学习了通过 <code>/proc/irq/smp_affinity</code> 和 <code>/proc/interrupts</code> 诊断和优化中断性能的方法，最后探讨了PREEMPT_RT如何将中断线程化以实现硬实时能力。中断是OS响应外部世界的"触发机制"，没有中断，操作系统就像没有传感器的人——对外界一无所知。</p>
+
+        <p>中断的触发离不开时间——定时器中断是操作系统一切时间相关功能的"心跳"。下一章，我们将深入研究操作系统的时间管理：jiffies、hrtimer、以及现代CPU时钟源的演化故事。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

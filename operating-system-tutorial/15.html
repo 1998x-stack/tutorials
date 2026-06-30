@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第15章 I/O模型与io_uring</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🖥️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 什么是操作系统</a></li>
+            <li><a href="02.html">第2章 硬件架构基础</a></li>
+            <li><a href="03.html">第3章 OS内核架构</a></li>
+            <li><a href="04.html">第4章 用户态与内核态</a></li>
+            <li><a href="05.html">第5章 引导与初始化</a></li>
+            <li><a href="06.html">第6章 OS内核源码初探</a></li>
+            <li><a href="07.html">第7章 OS实验环境搭建</a></li>
+            <li><a href="08.html">第8章 进程管理</a></li>
+            <li><a href="09.html">第9章 线程与协程</a></li>
+            <li><a href="10.html">第10章 CPU调度</a></li>
+            <li><a href="11.html">第11章 同步与互斥</a></li>
+            <li><a href="12.html">第12章 虚拟内存</a></li>
+            <li><a href="13.html">第13章 物理内存管理</a></li>
+            <li><a href="14.html">第14章 文件系统</a></li>
+            <li><a href="15.html" class="active">第15章 I/O模型与io_uring</a></li>
+            <li><a href="16.html">第16章 设备驱动</a></li>
+            <li><a href="17.html">第17章 中断与异常处理</a></li>
+            <li><a href="18.html">第18章 时间管理</a></li>
+            <li><a href="19.html">第19章 网络协议栈</a></li>
+            <li><a href="20.html">第20章 eBPF可观测性</a></li>
+            <li><a href="21.html">第21章 虚拟化技术</a></li>
+            <li><a href="22.html">第22章 容器与命名空间</a></li>
+            <li><a href="23.html">第23章 内核调试技术</a></li>
+            <li><a href="24.html">第24章 性能分析与调优</a></li>
+            <li><a href="25.html">第25章 动手写一个小OS</a></li>
+            <li><a href="26.html">第26章 现代OS前沿趋势</a></li>
+            <li><a href="27.html">第27章 OS内核设计决策</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第15章 I/O模型与io_uring</h2>
+
+        <p>大家好，我是你们的讲师。在操作系统十四年的进化史中，I/O一直是最大的性能瓶颈。CPU从几十MHz飙到几GHz，内存从几MB涨到几百GB，但磁盘和网络的速度增长相对缓慢。更要命的是，CPU做一次I/O操作需要从用户态陷入内核态、经过驱动栈、等待硬件完成——这一趟来回的开销极大。所以操作系统设计者们的目标始终如一：如何让程序在等待I/O的时候不浪费CPU？如何把I/O的吞吐量做到极致？</p>
+
+        <p>本章是"工程实践"部分的开篇。前面14章我们构建了OS的理论骨架——进程、内存、文件系统——现在我们要深入硬件交互的前线，系统学习操作系统与外部世界的对话方式。I/O模型是每一个后端开发、系统程序员必须烂熟于心的基本功，而io_uring作为Linux内核近年来最具革命性的I/O创新，正在彻底改变高性能应用的设计方式。</p>
+
+        <p>讲一个真实的故事。我在2018年维护一个日活千万级别的消息推送服务时，遇到过一个诡异的性能问题：服务端基于epoll的reactor模型，白天一切正常，但每天晚上8点到11点间延迟会飙升到秒级。排查了应用代码、数据库、网络链路一无所获，最后通过perf top发现内核中 <code>tcp_collapse</code> 和 <code>tcp_prune_queue</code> 占据了大量CPU。原因是晚间高峰期TCP接收缓冲区内存不足，内核在大量地回收和折叠内存碎片——传统的epoll + read循环在内存压力下产生了大量不必要的内存拷贝和系统调用。如果当时有io_uring，通过Fixed Buffers和缓冲区共享可以完全避免这个问题。</p>
+
+        <h2>一、五种I/O模型全景图</h2>
+
+        <p>在讨论具体技术之前，我们先建立一个统一的框架。一次典型的I/O操作分为两个阶段：第一阶段是准备数据（等待数据到达网卡或磁盘读出数据），第二阶段是拷贝数据（将数据从内核缓冲区拷贝到用户缓冲区）。不同I/O模型在这两个阶段的行为不同，这是理解一切I/O技术的起点。</p>
+
+        <table>
+            <tr><th>I/O模型</th><th>第一阶段（等待数据）</th><th>第二阶段（拷贝数据）</th><th>特点</th><th>典型API</th></tr>
+            <tr><td>阻塞I/O</td><td>阻塞</td><td>阻塞</td><td>简单直观，并发靠多线程</td><td>read / write</td></tr>
+            <tr><td>非阻塞I/O</td><td>轮询返回</td><td>阻塞</td><td>用户态轮询，浪费CPU</td><td>read with O_NONBLOCK</td></tr>
+            <tr><td>I/O多路复用</td><td>阻塞在select/epoll上</td><td>阻塞（由应用调用read）</td><td>单线程管理海量连接</td><td>epoll_wait / select</td></tr>
+            <tr><td>信号驱动I/O</td><td>信号通知，不阻塞</td><td>阻塞（在信号处理中调用read）</td><td>需信号处理上下文</td><td>fcntl F_SETOWN + sigaction</td></tr>
+            <tr><td>异步I/O（POSIX AIO / io_uring）</td><td>不阻塞</td><td>不阻塞（内核完成后通知）</td><td>真正的异步，无阻塞点</td><td>io_uring_enter / aio_read</td></tr>
+        </table>
+
+        <div class="highlight">
+            <p><strong>关键认知</strong>：很多开发者以为epoll就是"异步I/O"，这是不对的。epoll只是在第一阶段帮你等数据，第二阶段仍然要应用主动调用read()去拷贝数据——这一步依然是阻塞的。真正的异步I/O是io_uring这样的，连拷贝数据都不需要应用操心，内核全权处理完毕后再通知你。</p>
+        </div>
+
+        <h3>阻塞I/O：最朴素但最浪费</h3>
+        <p>这是最原始的I/O模型。当你调用 <code>read(fd, buf, len)</code>，如果数据还没准备好，进程就进入睡眠状态——CPU被白白浪费在等待上。早期服务器每个连接一个线程，当数千个连接同时阻塞时，线程切换的开销高得离谱。这就是C10K问题的根源之一。</p>
+
+        <h3>非阻塞I/O：让出CPU但代价更高</h3>
+        <p>设置 <code>O_NONBLOCK</code> 后，read() 立即返回 <code>-1</code> 并设置 <code>errno = EAGAIN</code>。应用需要在循环中反复调用——这就是"忙等"。忙等不仅耗尽CPU，还让指令缓存在反复的syscall上下文中被污染。实际项目中几乎不会有人用纯非阻塞模型。</p>
+
+        <h3>I/O多路复用：单线程管理千军万马</h3>
+        <p>select/poll/epoll 让一个线程同时等待多个文件描述符。内核帮你筛选出哪些fd准备好了数据，你只需要处理"就绪"的fd即可。这极大地降低了线程开销，是过去15年高性能服务器的基石。</p>
+
+        <h3>信号驱动I/O：鲜为人知的历史尝试</h3>
+        <p>通过 <code>SIGIO</code> 信号在数据到达时通知进程。听起来完美，但信号上下文中能做的工作极有限，且信号可能丢失。除了一些高版本的UDP服务外，TCP场景下几乎没人使用。</p>
+
+        <h3>异步I/O：终局方案</h3>
+        <p>应用发起一次I/O请求后立即返回，内核完全接管后续工作。当整个I/O完成后（包括数据已经拷贝到用户缓冲区），内核通知应用。应用不需要在任何时刻等待——这才是真正的异步。io_uring是当前Linux上最完善的异步I/O实现。</p>
+
+        <h2>二、epoll与C10K问题</h2>
+
+        <p>在io_uring出现之前，epoll是Linux上最成功的I/O事件通知机制。它解决了select/poll的根本性缺陷，让C10K（同时处理1万个连接）成为标配，甚至推动C10M（1000万连接）的探索。</p>
+
+        <h3>select/poll为什么不行？</h3>
+        <p>select的最大问题是传入的 <code>fd_set</code> 是位图，只能管理1024个fd（<code>FD_SETSIZE</code> 限制）。poll虽然通过数组突破了1024的限制，但两者都存在一个O(n)的性能问题：每次调用都要把所有fd从用户空间拷贝到内核空间，内核遍历所有fd检查就绪状态，然后返回时再拷贝回用户空间。当fd数量到达数万级别时，每次调用都是数MB的数据拷贝和O(n)的遍历——这在SSD和万兆网卡时代是不可接受的。</p>
+
+        <h3>epoll的event-driven设计</h3>
+        <p>epoll通过三个关键设计解决了O(n)问题：</p>
+        <p><strong>1. 红黑树管理关注fd</strong>：<code>epoll_ctl()</code> 在内核空间维护一棵红黑树，增删改fd的时间复杂度为O(log n)。不再需要每次传递所有fd。</p>
+        <p><strong>2. 就绪队列（ready list）</strong>：当fd上的I/O事件发生时，设备驱动通过回调函数将fd加入到就绪队列。epoll_wait 只需从就绪队列中取出已经活跃的fd——返回的就绪fd数量远小于监听的fd总数，复杂度接近O(1)。</p>
+        <p><strong>3. mmap减少拷贝</strong>：epoll通过 <code>mmap</code> 共享内核和用户空间的就绪事件数组，减少了数据拷贝开销。</p>
+
+        <pre><code>// epoll的经典用法——事件驱动服务器骨架
+int epfd = epoll_create1(0);
+struct epoll_event ev, events[1024];
+ev.events = EPOLLIN | EPOLLET;  // 边缘触发
+ev.data.fd = listen_fd;
+epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
+
+while (1) {
+    int nready = epoll_wait(epfd, events, 1024, -1);
+    for (int i = 0; i &lt; nready; i++) {
+        if (events[i].data.fd == listen_fd) {
+            // 处理新连接（accept）
+        } else {
+            // 处理已就绪的fd（非阻塞read/write）
+        }
+    }
+}</code></pre>
+
+        <div class="warning">
+            <p><strong>踩坑实录</strong>：边缘触发（ET）模式配合非阻塞I/O，需要在read()时循环读取直到返回EAGAIN。很多初学者把ET当作性能神器，但注意——如果你在ET模式下没有读完数据就返回epoll_wait，该fd的剩余数据永远不会再触发事件（因为边缘触发只在状态变化时通知一次）。这就是著名的"ET饿死"问题。</p>
+        </div>
+
+        <h3>水平触发 vs 边缘触发</h3>
+        <p>水平触发（LT）是默认模式：只要fd还有数据没读完，每次epoll_wait都会通知你。简单、不容易出错，但可能多次通知同一个fd。边缘触发（ET）是状态变化触发：只有fd从"无数据"变为"有数据"时才通知一次，你必须一次读完所有数据。ET效率更高，但编程难度大幅增加。Netty、Redis等高性能项目都使用ET模式，因为它们对I/O的精细控制有足够自信。</p>
+
+        <h2>三、io_uring：新时代的异步I/O</h2>
+
+        <p>2019年，Jens Axboe（Linux块层核心维护者）将io_uring合并入Linux 5.1内核。这不仅是Linux I/O栈的一次革命，更是操作系统I/O模型的一次范式跃迁。io_uring从根本上解决了传统I/O的两大痛点：系统调用开销和数据拷贝开销。</p>
+
+        <h3>共享内存环形队列（SQ/CQ）</h3>
+        <p>io_uring的核心创新是使用两个内存环形队列——提交队列（Submission Queue, SQ）和完成队列（Completion Queue, CQ）——在应用和内核之间共享。应用在SQ中填入I/O请求（open/read/write/send/recv/accept 等等），内核从SQ消费请求、执行、然后将结果写入CQ。整个过程不需要系统调用——不！需！要！</p>
+
+        <pre><code>// io_uring的基础用法——提交读请求并等待完成
+struct io_uring ring;
+io_uring_queue_init(1024, &ring, 0);
+
+struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+io_uring_prep_read(sqe, fd, buf, buf_size, offset);
+io_uring_submit(&ring);  // 可能需要一次syscall来通知内核
+
+// 做一些其他工作...
+
+struct io_uring_cqe *cqe;
+io_uring_wait_cqe(&ring, &cqe);  // 等待I/O完成
+if (cqe->res &lt; 0) {
+    // 处理错误
+} else {
+    // 数据已拷贝到buf，直接使用
+}
+io_uring_cqe_seen(&ring, &cqe);</code></pre>
+
+        <div class="highlight">
+            <p><strong>零系统调用理想路径</strong>：在io_uring的SQ/CQ管理中，如果SQ中有空闲槽位，应用通过 <code>mmap</code> 映射直接写入共享内存，完全不需要系统调用。只有需要"通知内核来取任务"时，才需要 <code>io_uring_enter()</code> 系统调用。更进一步，通过 <code>IORING_SETUP_SQPOLL</code> 让内核线程轮询SQ，甚至连这最后一次系统调用都省掉了——真正的零系统调用路径。</p>
+        </div>
+
+        <h3>Fixed Files / Buffers 优化</h3>
+        <p>传统 <code>read(fd, buf, ...)</code> 每次都要做文件描述符查找和用户空间页面的映射，这些是系统调用中的常见开销。io_uring通过两种"固定"机制大幅降低这个开销：</p>
+        <p><strong>Fixed Files</strong>：通过 <code>IORING_REGISTER_FILES</code> 预先将fd注册到内核，后续I/O操作使用fd索引而非fd本身，避免了每次查找文件描述符表。</p>
+        <p><strong>Fixed Buffers</strong>：通过 <code>IORING_REGISTER_BUFFERS</code> 预先注册用户缓冲区并锁定物理内存页（<code>mlock</code>），消除后续I/O操作中逐页映射的开销。这对大块数据传输（如存储服务器的读写）效果极为显著。</p>
+
+        <table>
+            <tr><th>特性</th><th>传统read/write</th><th>io_uring普通模式</th><th>io_uring + Fixed</th></tr>
+            <tr><td>系统调用次数</td><td>每次I/O 1次syscall</td><td>批量提交，均摊syscall</td><td>SQPOLL下0次syscall</td></tr>
+            <tr><td>fd查找</td><td>每次从进程fd表查找</td><td>每次查找</td><td>索引查找，O(1)</td></tr>
+            <tr><td>页映射</td><td>每次建立临时映射</td><td>每次建立临时映射</td><td>预先锁定，复用映射</td></tr>
+            <tr><td>内存拷贝</td><td>必须经过内核缓冲</td><td>取决于操作类型</td><td>支持零拷贝</td></tr>
+            <tr><td>批量提交</td><td>不支持</td><td>支持batch提交</td><td>支持batch提交</td></tr>
+            <tr><td>适用场景</td><td>通用场景</td><td>高并发网络/存储</td><td>极致性能场景</td></tr>
+        </table>
+
+        <h2>四、io_uring高级特性演进</h2>
+
+        <p>io_uring从Linux 5.1开始，几乎每个内核版本都有新特性加入。让我们看看截至Linux 6.19时代的一些重要演进：</p>
+
+        <h3>IORING_SETUP_SQE_MIXED</h3>
+        <p>传统上，一旦io_uring开始处理请求，SQ条目就不能再被应用修改。SQE MIXED允许在请求已提交但尚未被内核消费时，应用仍然"撤回"或修改SQE内容。这在某些竞态场景下非常有用——比如你提交了一个read请求，但应用逻辑决定放弃等待，可以将SQE修改为cancel命令。</p>
+
+        <h3>零拷贝接收（zcrx）</h3>
+        <p>这是io_uring的杀手级特性。在传统的网卡接收路径中，数据包从网卡DMA到内核缓冲区，然后通过 <code>recvmsg</code> 拷贝到用户空间——两次拷贝。io_uring的零拷贝接收（zcrx）让网卡直接将数据DMA到用户空间的预先注册缓冲区，完全绕过了内核缓冲区。这在高性能网络应用中（DPDK的替代方案？）具有革命性意义。</p>
+
+        <div class="tip">
+            <p><strong>io_uring zcrx vs DPDK</strong>：DPDK通过完全绕过内核协议栈来实现极致性能，但代价是应用必须自己实现TCP/IP协议栈——开发成本和维护成本极高。io_uring的零拷贝接收在内核框架内实现了类似效果，应用仍然使用标准的socket API，只是buf可以映射到用户空间而不经过内核。这意味着你既可以享受零拷贝的性能，又不必放弃内核协议栈的成熟和兼容性。</p>
+        </div>
+
+        <h3>BPF控制io_uring</h3>
+        <p>从Linux 6.x开始，io_uring可以注册BPF（Berkeley Packet Filter）程序来过滤或修改I/O请求。比如在存储场景下，可以在BPF程序中实现自定义的数据压缩或加密——在I/O数据到达用户空间之前就完成了处理。这种"内核内计算"的思路代表了OS演进的一个重要方向。</p>
+
+        <h3>dmabuf读写（Linux 6.12-6.19）</h3>
+        <p>dmabuf（DMA Buffer）是Linux内核中用于在设备之间共享DMA缓冲区的机制。io_uring在6.12到6.19版本中逐步支持了dmabuf的读写操作。这使得GPU和NIC之间可以直接交换数据，而不需要经过CPU。对AI训练场景来说，这意味着GPU可以直接读取NVMe盘上的训练数据，或者直接从网卡接收远程GPU数据——完全不需要CPU参与数据搬运。这就是GPUDirect Storage和GPUDirect RDMA的io_uring集成版本。</p>
+
+        <h2>五、零拷贝技术矩阵</h2>
+
+        <p>说了一整章的"零拷贝"，但零拷贝实际上是一个大家族，每种技术解决的层面不同。我们来一个系统比较：</p>
+
+        <table>
+            <tr><th>技术</th><th>内核版本</th><th>实现方式</th><th>应用场景</th><th>消除的拷贝</th></tr>
+            <tr><td>sendfile</td><td>Linux 2.2+</td><td>文件→socket直接DMA</td><td>静态文件服务</td><td>文件→用户空间→socket</td></tr>
+            <tr><td>splice</td><td>Linux 2.6.17+</td><td>两个fd之间的管道传输</td><td>代理服务器中的数据中转</td><td>中间缓冲区的用户态拷贝</td></tr>
+            <tr><td>MSG_ZEROCOPY</td><td>Linux 4.14+</td><td>send()带MSG_ZEROCOPY标志</td><td>大包发送场景</td><td>用户空间→内核空间拷贝</td></tr>
+            <tr><td>io_uring zcrx</td><td>Linux 6.x+</td><td>注册用户缓冲区，NIC DMA直达</td><td>高性能网络接收</td><td>内核态→用户态拷贝</td></tr>
+            <tr><td>TCP devmem DMABUF</td><td>Linux 6.12+</td><td>dmabuf在NIC和GPU间共享</td><td>AI训练GPU Direct Storage</td><td>NIC→内存→GPU全部消除</td></tr>
+        </table>
+
+        <p>这些技术不是互斥的，而是可以在不同层面组合使用。比如一个高性能存储服务器可以用 <code>io_uring</code> + Fixed Buffers来处理读写，用 <code>sendfile</code> 来响应客户端的文件请求，并在网络发送侧启用 <code>MSG_ZEROCOPY</code> 进一步减少拷贝。</p>
+
+        <div class="highlight">
+            <p><strong>工程启示</strong>：零拷贝不是银弹。每种零拷贝技术都有适用边界——sendfile不能用于需要修改数据的场景，MSG_ZEROCOPY在发送小包时性能反而更差（因为需要额外的完成通知机制），io_uring zcrx需要应用层配合做buffer生命周期管理。选择零拷贝技术的判断依据是：数据流中是否有不必要的内存副本？如果有，能否在不引入更大开销的前提下消除它？</p>
+        </div>
+
+        <h2>六、结语与下一章预告</h2>
+
+        <p>本章我们走过了操作系统I/O模型的完整演进路径——从阻塞I/O到非阻塞，从epoll的事件驱动到io_uring的革命性创新。你看到了工程师们如何一步步解决C10K问题，如何通过共享内存环形队列消除系统调用，又如何通过零拷贝技术消除数据移动的开销。I/O模型不仅仅是OS特性，它深刻影响着你写的每一行网络代码、每一个数据库查询、每一次文件读写。</p>
+
+        <p>值得一提的是，io_uring的演进远未结束——它正在从纯粹的I/O框架演变为通用的异步系统调用接口。未来我们甚至可能用 <code>io_uring</code> 来执行 <code>openat</code>、<code>mkdir</code> 甚至 <code>clone</code> 系统调用。可以说io_uring正在模糊"I/O"和"系统调用"的边界。</p>
+
+        <p>下一章，我们将从I/O系统的"使用者"视角切换到"实现者"视角，深入理解设备驱动的工作原理。应用程序的I/O请求如何穿越层层内核代码，最终到达硬件设备？设备驱动又是如何通过中断和DMA与硬件交互的？下一章见分晓。</p>
+
+        <div class="footer-nav">
+            <a href="14.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="16.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

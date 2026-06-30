@@ -151,9 +151,9 @@ Dispatch subagents to write chapters in parallel. The minimum is **3 subagents a
 | E | 19-22 | Advanced topics |
 | F | 23-25 | Tools & practice |
 | G | 26-NN | Final chapters |
-| H | index.html | Course directory (run AFTER all chapters, since it needs chapter titles/topics) |
+| H | courses.json + index.html | Generate courses.json with all chapter data, then copy index-template.html (loads from JSON) |
 
-**Batches B through G can run in parallel** (they're independent). Batch A should run first to establish the pattern. Batch H runs last.
+**Batches B through G can run in parallel** (they're independent). Batch A should run first to establish the pattern. Batch H runs after all chapter batches complete — it generates `courses.json` from the chapter titles/topics defined in Phase 2, then copies `assets/index-template.html` → `index.html`. No placeholder substitution needed — the template reads everything from `courses.json` at page load.
 
 **Subagent instructions template** — give each subagent:
 1. The exact chapters to write (with numbers and titles from Phase 2)
@@ -171,20 +171,37 @@ Dispatch subagents to write chapters in parallel. The minimum is **3 subagents a
 2. Verify sidebars are complete and `class="active"` is on the correct link
 3. Commit the batch: `git add <files> && git commit -m "<message>"`
 4. If a subagent's output has issues, fix them before committing — or dispatch a targeted fix
+5. After ALL chapter batches complete, generate `courses.json` and copy `assets/index-template.html` → `index.html`
+6. Commit `courses.json` and `index.html` together: `git add courses.json index.html && git commit -m "Add index.html — course directory with <N>-chapter card grid"`
+
+#### Generating courses.json
+
+After all chapters are written, generate `courses.json` in the project directory. This JSON file drives the index page — the index loads chapter data from it via `fetch()`:
+
+```json
+{
+  "title": "Topic名称 · 从入门到精通",
+  "emoji": "🤖",
+  "subtitle": "📘 28章 实战体系",
+  "chapterCount": 28,
+  "chapters": [
+    { "num": "01", "title": "章节标题", "topics": ["知识点1", "知识点2", "知识点3"], "file": "01.html" },
+    ...
+  ]
+}
+```
+
+- `title` — from Phase 1 topic name (Chinese, include "· 从入门到精通" suffix for complex tutorials)
+- `emoji` — context-appropriate emoji (🤖 for AI, 🌐 for network, 🖥️ for systems, 📈 for data, etc.)
+- `subtitle` — format: `"{emoji} {N}章 实战体系"`
+- `chapterCount` — total number of chapters
+- `chapters` — array of chapter objects with num, title, topics (from Phase 2 outline), and file (HTML filename)
 
 #### Index Page Construction
 
-After all chapters are written and committed, build the index page using `assets/index-template.html`:
+After generating `courses.json`, copy `assets/index-template.html` into the project as `index.html`. The template loads data from `courses.json` via `fetch('courses.json')` — no placeholders to fill in, no `{{COURSES_JSON}}` to replace. All content (title, emoji, subtitle, chapters) is read from the JSON at page load.
 
-- Fill in `{{COURSE_TITLE}}`, `{{CHAPTER_COUNT}}`, `{{HEADER_EMOJI}}`, `{{COURSE_EMOJI}}`
-- Fill `{{COURSES_JSON}}` with a JS array of all chapters:
-  ```javascript
-  [
-      { num: '01', title: '章节标题', topics: ['知识点1', '知识点2', '知识点3'], file: '01.html' },
-      ...
-  ]
-  ```
-- The index page loads `theme.css` plus has its own inline `<style>` for card-grid overrides
+**Important:** The index-template.html already includes `display: block;` on `.container` to override the theme.css sidebar grid layout. Do NOT remove this. Copy the template as-is.
 
 ### Phase 5: Deploy to GitHub Pages
 
@@ -228,9 +245,16 @@ After deployment, dispatch a review subagent that inspects all generated HTML fi
    - Technical claims are consistent across chapters (e.g., version numbers match)
    - Each chapter closes with a transition to the next topic
 
-3. **Visual consistency:**
+3. **Data integrity:**
+   - `courses.json` exists and is valid JSON
+   - Every chapter referenced in `courses.json` has a corresponding HTML file
+   - Chapter count in `courses.json` matches the actual number of chapter files
+   - `index.html` was copied from `assets/index-template.html` (not recreated from scratch)
+
+4. **Visual consistency:**
    - All chapters use the same CSS class names (no custom inline styles)
    - Heading hierarchy is consistent (h2 for sections, h3 for subsections)
+   - `index.html` has `display: block;` on `.container` (prevents theme.css grid leak)
 
 **The review subagent should:**
 - Produce a concise report listing issues by severity: CRITICAL (broken links/structure), WARNING (missing elements), INFO (minor suggestions)
@@ -250,7 +274,8 @@ Present:
 
 ## Key Principles
 
-- **External CSS only.** HTML pages use `<link rel="stylesheet" href="theme.css">`. No inline `<style>` blocks in chapter pages. The theme is copied from `assets/themes/` in Phase 3.
+- **JSON-driven index page.** The index.html loads chapter data from `courses.json` via `fetch()`. After generating all chapters, create `courses.json` with title, emoji, subtitle, and chapters array. Then copy `assets/index-template.html` as-is (no placeholders to fill).
+- **`display: block` on index `.container`.** The index-template.html MUST override the theme.css `.container { display: grid; }` to prevent the card grid from collapsing into a sidebar column. The template already includes this — copy it as-is.
 - **Static sidebar in every file.** Each page has its own complete sidebar HTML — navigation works with JS disabled.
 - **Subagent parallelism.** Use at least 3 subagents simultaneously for chapter generation. Independent batches run in parallel.
 - **Research-informed content.** Phase 0 web search grounds the content in current, accurate information.

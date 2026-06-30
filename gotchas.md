@@ -97,6 +97,36 @@ A curated collection of real-world mistakes, debugging war stories, and lessons 
 
 ---
 
+## Static HTML / GitHub Pages Tutorials
+
+### Index page layout broken by theme.css grid
+
+**Symptom:** Tutorial index.html page shows cards stacked in a narrow ~260px column instead of filling the full 1400px container width. The card grid looks broken — cards are squeezed into a sidebar-width column.
+
+**Root cause:** Every `theme.css` sets `.container { display: grid; grid-template-columns: 260px 1fr; }` for the chapter sidebar layout. The index.html template uses the same `.container` class but needs a single-column layout. If the index template's `.container` doesn't explicitly set `display: block;`, the theme's `display: grid` bleeds through from the linked stylesheet.
+
+**Fix:** The index-template.html MUST include `display: block;` as the first property in its `.container` rule:
+
+```css
+.container {
+    display: block;  /* Override theme.css grid layout */
+    max-width: 1400px;
+    ...
+}
+```
+
+**Prevention:** The canonical index-template.html lives in `.claude/skills/tutorial-publisher/assets/index-template.html`. Always use this template — never recreate the index page from scratch. When deploying index.html updates, copy from this template, not from another tutorial directory (which may be outdated).
+
+**Why tutorials had same root cause:** All five theme CSS files (blue-purple.css, green.css, warm.css, violet-teal.css, slate-blue.css) define `.container { display: grid; }`. The index page links to theme.css, so the grid layout always leaks unless overridden.
+
+### Shell scripts leave CWD in wrong repo
+
+**Symptom:** `git add` fails with "pathspec did not match any files" when running batch scripts across multiple git repos. The working directory from a prior script run points into a different repository.
+
+**Fix:** Always use `git -C <absolute-path>` rather than `cd` in batch scripts. When chaining commands with `&&`, each `git -C` is self-contained and immune to prior CWD state.
+
+---
+
 ## NLP
 
 | Gotcha | Symptom | Fix |

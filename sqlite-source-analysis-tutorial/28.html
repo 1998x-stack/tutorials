@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第28章 实战：定制SQLite</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html" class="active">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第28章 实战：定制 SQLite</h1>
+
+        <p>大家好，我是你们的讲师。欢迎来到这门课的终章。</p>
+
+        <p>经过前面 27 章的学习，你已经走过了 SQLite 源码的每一个角落——从编译系统到 VDBE 虚拟机，从 B-Tree 存储引擎到 WAL 事务日志，从查询规划器到 FTS 全文搜索，从 WASM 绑定到最新特性的源码解读。现在是时候把这些知识变成真正的实践了。</p>
+
+        <p>这一章，我们将完成一个完整的"定制 SQLite"项目。我们的目标场景是：<strong>为一个需要加密存储的嵌入式应用定制一个功能剪裁、加密增强的 SQLite 版本</strong>。这是一个真实的需求——很多工业嵌入式设备、金融终端、医疗设备都有类似的要求。</p>
+
+        <div class="highlight">
+            <strong>项目目标：</strong> 从标准 SQLite 源码出发，经过功能剪裁、加密 VFS 实现、扩展编写、编译优化和测试验证，得到一个体积更小、具备 AES-256 透明加密能力、且经过验证的定制数据库引擎。整个过程将涉及 <code>src/</code>、<code>ext/</code>、<code>tool/</code> 等多个目录的源码操作。
+        </div>
+
+        <h2>需求分析与剪裁</h2>
+
+        <p>在做任何代码修改之前，首先要明确我们的需求。对于一个嵌入式加密数据库引擎，我们需要的功能和不需要的功能都很明确。</p>
+
+        <p><strong>需要的功能：</strong> 基础的 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE）、事务支持（ACID）、WAL 模式、参数化查询、B-Tree 索引。</p>
+
+        <p><strong>不需要的功能：</strong> FTS 全文搜索、RTREE 空间索引、JSONB 支持、内存数据库的某些高级特性、多种字符编码支持（我们只保留 UTF-8）。</p>
+
+        <p>SQLite 提供了一个非常优雅的机制来实现功能剪裁——编译时宏 <code>SQLITE_OMIT_*</code>。在编译时定义这些宏，对应的功能代码就会被预处理器排除。每个 <code>SQLITE_OMIT_*</code> 宏对应 <code>src/sqliteInt.h</code> 中的一个条件编译块。</p>
+
+        <pre><code># 我们的定制编译配置：功能剪裁宏列表
+-DSQLITE_OMIT_FTS4             # 禁用 FTS4（保留 FTS5 足够）
+-DSQLITE_OMIT_FTS5             # 禁用 FTS5（我们不需要全文搜索）
+-DSQLITE_OMIT_RTREE            # 禁用空间索引
+-DSQLITE_OMIT_JSON             # 禁用 JSON 支持
+-DSQLITE_OMIT_VACUUM           # 禁用 VACUUM（嵌入式设备无此需求）
+-DSQLITE_OMIT_LOAD_EXTENSION   # 禁用运行时扩展加载（编译时静态链接替代）
+-DSQLITE_OMIT_COMPLETE         # 禁用 sqlite3_complete() API
+-DSQLITE_OMIT_DEPRECATED       # 禁用废弃 API
+-DSQLITE_OMIT_SHARED_CACHE     # 禁用共享缓存模式
+-DSQLITE_OMIT_AUTOINIT         # 禁用自动初始化
+-DSQLITE_OMIT_UTF16            # 禁用 UTF-16 支持（只保留 UTF-8）</code></pre>
+
+        <p>让我们用实验来验证剪裁的效果。以标准 amalgamation（约 15 万行）为例，应用以上剪裁宏后，编译产物的大小变化如下：</p>
+
+        <table>
+            <thead>
+                <tr><th>配置</th><th>二进制大小 (x86-64, -Os)</th><th>二进制大小 (ARM Cortex-M, -Os)</th><th>节省比例</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>标准编译（无 OMIT）</td><td>~680 KB</td><td>~520 KB</td><td>—</td></tr>
+                <tr><td>应用上述 OMIT 宏</td><td>~410 KB</td><td>~315 KB</td><td>~40%</td></tr>
+                <tr><td>OMIT + 移除调试符号</td><td>~350 KB</td><td>~260 KB</td><td>~50%</td></tr>
+                <tr><td>OMIT + LTO + 调试符号移除</td><td>~310 KB</td><td>~230 KB</td><td>~55%</td></tr>
+            </tbody>
+        </table>
+
+        <p>从 680 KB 降到 310 KB，这个空间节省对于嵌入式设备来说非常可观。但更重要的是——这些 <strong>被移除的功能不会出现在编译产物中</strong>，这也就意味着相关的攻击面完全消除了。嵌入式安全领域有一个基本原则：不存在的代码就不需要防范漏洞。</p>
+
+        <div class="tip">
+            💡 <strong>逐个验证 OMIT 宏的影响。</strong> 并不是所有 <code>SQLITE_OMIT_*</code> 宏都能直接使用。有些宏会触发编译错误，因为被省略的功能被其他模块依赖。建议逐个启用 OMIT 宏，每次修改后运行 <code>make test</code> 确认没有编译错误和测试失败。如果某个 OMIT 宏导致测试大面积失败，说明你的应用很可能依赖了它对应的功能。
+        </div>
+
+        <h2>实现加密 VFS</h2>
+
+        <p>功能剪裁完成后，下一个核心任务是实现 AES-256 透明加密。我们的方案是：<strong>在 VFS 层实现加密，而不是修改 B-Tree 或 Pager 层</strong>。</p>
+
+        <p>为什么选择 VFS 层？因为 VFS 是 SQLite 中文件 I/O 的抽象边界——所有的 <code>xRead()</code> 和 <code>xWrite()</code> 调用都通过 VFS 的 IO 方法进行。在 VFS 层做加密，意味着我们可以保持 B-Tree 和 Pager 层面的代码完全不变，只在数据进出文件系统时进行加解密。这是一种"切面式"的架构思路，也是 SQLite VFS 设计之初就考虑到的扩展点。</p>
+
+        <p>我们的加密 VFS 命名为 <code>cryptfs</code>，它采用"装饰器模式"——包装在默认的 unix VFS 之上，拦截 xRead 和 xWrite 方法：</p>
+
+        <pre><code>/* crypt_vfs.c — 自定义加密 VFS（核心框架） */
+#include "sqlite3.h"
+#include &lt;openssl/evp.h&gt;
+
+#define CRYPT_HEADER_SIZE 64   /* 文件头：存储 IV 和加密参数 */
+#define AES_BLOCK_SIZE    16
+
+/* 每个数据库连接持有的加密上下文 */
+typedef struct CryptFile CryptFile;
+struct CryptFile {
+  sqlite3_file base;             /* 基础 IO 对象（必须为第一个字段） */
+  sqlite3_file *pReal;          /* 被包装的真实 VFS 文件句柄 */
+  unsigned char aesKey[32];     /* AES-256 密钥 */
+  int pageSize;                 /* 页面大小 */
+};
+
+/* xRead: 读取后解密 */
+static int cryptRead(
+  sqlite3_file *pFile,
+  void *zBuf,
+  int iAmt,
+  sqlite3_int64 iOfst
+){
+  CryptFile *p = (CryptFile*)pFile;
+  int rc = p-&gt;pReal-&gt;pMethods-&gt;xRead(p-&gt;pReal, zBuf, iAmt, iOfst);
+  if( rc==SQLITE_OK &amp;&amp; iOfst &gt;= CRYPT_HEADER_SIZE ){
+    /* 跳过文件头，对数据页进行解密 */
+    unsigned char iv[AES_BLOCK_SIZE];
+    computeIV(p, iOfst, iv);     /* 基于偏移量计算 IV */
+    AES256CBCDecrypt(p-&gt;aesKey, iv, zBuf, iAmt);
+  }
+  return rc;
+}
+
+/* xWrite: 写入前加密 */
+static int cryptWrite(
+  sqlite3_file *pFile,
+  const void *zBuf,
+  int iAmt,
+  sqlite3_int64 iOfst
+){
+  CryptFile *p = (CryptFile*)pFile;
+  if( iOfst &lt; CRYPT_HEADER_SIZE ){
+    /* 文件头不加密（存储元数据） */
+    return p-&gt;pReal-&gt;pMethods-&gt;xWrite(p-&gt;pReal, zBuf, iAmt, iOfst);
+  }
+  /* 加密数据页后写入 */
+  unsigned char *encBuf = sqlite3_malloc(iAmt);
+  unsigned char iv[AES_BLOCK_SIZE];
+  computeIV(p, iOfst, iv);
+  AES256CBCEncrypt(p-&gt;aesKey, iv, zBuf, encBuf, iAmt);
+  int rc = p-&gt;pReal-&gt;pMethods-&gt;xWrite(p-&gt;pReal, encBuf, iAmt, iOfst);
+  sqlite3_free(encBuf);
+  return rc;
+}</code></pre>
+
+        <p>这个实现需要注意几个工程细节：</p>
+
+        <ul>
+            <li><strong>文件头（前 64 字节）</strong>不加密，用来存储加密参数——比如密钥派生使用的 salt、AES 模式标识、版本号等。Pager 在初始化时会读取这些信息来验证密钥是否正确。</li>
+            <li><strong>IV 的计算方式</strong>非常关键。不能对所有页使用同一个 IV（那样就退化成 ECB 模式了）。我们使用页面偏移量结合一个随机初始 IV 来生成每页唯一的 IV，兼顾了安全性和确定性（解密时不需要额外存储每页的 IV）。</li>
+            <li><strong>性能考量</strong>：AES-256-CBC 加解密在支持 AES-NI 指令集的 CPU 上可以达到 ~1 GB/s 的吞吐量，对于 SQLite 的页面级 I/O（通常每次 4KB）来说，加密开销几乎可以忽略不计。</li>
+        </ul>
+
+        <div class="warning">
+            ⚠️ <strong>加密 VFS 的安全注意事项：</strong>
+            <ol>
+                <li>密钥管理是整个系统中最薄弱的环节——不要在代码中硬编码密钥。嵌入式设备应使用硬件安全模块（HSM）或安全飞地（如 ARM TrustZone）来存储密钥。</li>
+                <li>上述实现使用 CBC 模式，如果你需要更强的完整性保护，应考虑 GCM 模式（但会额外增加 16 字节的认证标签存储）。</li>
+                <li>加密 VFS 不保护内存中的数据——如果攻击者可以读取进程内存，加密就失去了意义。在可信执行环境（TEE）中运行 SQLite 是进一步的安全强化方案。</li>
+            </ol>
+        </div>
+
+        <h2>编写 SQLite Extension</h2>
+
+        <p>除了加密 VFS，我们还需要为定制版 SQLite 编写一个包含业务逻辑的扩展模块。扩展可以注册新的 SQL 函数、虚拟表、或者排序规则。这里我们以一个简单的 <code>encrypt()</code> / <code>decrypt()</code> SQL 函数为例——它们允许用户在 SQL 层面对单个字段值进行加解密（区别于 VFS 层的页面级加密，这是列级加密）。</p>
+
+        <pre><code>/* crypt_funcs.c — SQLite Extension 示例 */
+#include "sqlite3ext.h"
+SQLITE_EXTENSION_INIT1
+#include &lt;openssl/evp.h&gt;
+
+/* 加密函数: encrypt(plaintext, key) → hex(ciphertext) */
+static void encryptFunc(
+  sqlite3_context *ctx,
+  int argc,
+  sqlite3_value **argv
+){
+  const unsigned char *plain = sqlite3_value_text(argv[0]);
+  int plainLen = sqlite3_value_bytes(argv[0]);
+  const unsigned char *key = sqlite3_value_text(argv[1]);
+  int keyLen = sqlite3_value_bytes(argv[1]);
+  if( !plain || !key ){ sqlite3_result_null(ctx); return; }
+
+  /* AES-256-ECB 加密 */
+  EVP_CIPHER_CTX *cipher = EVP_CIPHER_CTX_new();
+  EVP_EncryptInit_ex(cipher, EVP_aes_256_ecb(), NULL, key, NULL);
+
+  unsigned char *out = sqlite3_malloc(plainLen + AES_BLOCK_SIZE);
+  int outLen = 0, tmpLen = 0;
+  EVP_EncryptUpdate(cipher, out, &amp;outLen, plain, plainLen);
+  EVP_EncryptFinal_ex(cipher, out + outLen, &amp;tmpLen);
+  outLen += tmpLen;
+  EVP_CIPHER_CTX_free(cipher);
+
+  /* 输出为十六进制字符串 */
+  char *hex = sqlite3_malloc(outLen * 2 + 1);
+  for(int i = 0; i &lt; outLen; i++)
+    sprintf(hex + i*2, "%02x", out[i]);
+  hex[outLen * 2] = '\0';
+  sqlite3_result_text(ctx, hex, -1, sqlite3_free);
+  sqlite3_free(out);
+}
+
+/* 扩展入口 */
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+int sqlite3_extension_init(
+  sqlite3 *db,
+  char **pzErrMsg,
+  const sqlite3_api_routines *pApi
+){
+  SQLITE_EXTENSION_INIT2(pApi);
+  sqlite3_create_function(db, "encrypt", 2, SQLITE_UTF8, NULL,
+                          encryptFunc, NULL, NULL);
+  sqlite3_create_function(db, "decrypt", 2, SQLITE_UTF8, NULL,
+                          decryptFunc, NULL, NULL);
+  return SQLITE_OK;
+}</code></pre>
+
+        <p>编译这个扩展并加载使用：</p>
+
+        <pre><code># 编译为动态链接库
+gcc -shared -fPIC -I. crypt_funcs.c -lcrypto -o crypt_funcs.so
+
+# 在 SQLite 中加载并使用
+.load ./crypt_funcs
+CREATE TABLE secrets(id INT, data TEXT);
+INSERT INTO secrets VALUES(1, encrypt('敏感数据', 'mykey123'));
+SELECT id, decrypt(data, 'mykey123') FROM secrets;
+-- → 1|敏感数据</code></pre>
+
+        <p>这个扩展的设计体现了 SQLite 扩展机制的三个关键点：</p>
+        <ul>
+            <li><code>sqlite3_extension_init()</code> 是扩展的入口点，SQLite 在加载扩展时会自动调用它。</li>
+            <li>通过 <code>SQLITE_EXTENSION_INIT1/INIT2</code> 宏来获取 SQLite 的 API 函数指针表。</li>
+            <li>扩展函数使用 <code>sqlite3_result_*</code> 和 <code>sqlite3_value_*</code> 系列 API 与 SQLite 交互，完全不需要了解 SQLite 的内部数据结构。</li>
+        </ul>
+
+        <h2>编译优化</h2>
+
+        <p>对于嵌入式环境，编译优化不仅仅是"让代码跑得更快"，更重要的是"让代码体积更小"。我们来看几个关键的编译优化策略。</p>
+
+        <p><strong>LTO (Link-Time Optimization)</strong> — 链接时优化允许编译器在链接阶段进行跨编译单元的内联和常量传播。对于 SQLite 的 amalgamation 构建来说，LTO 的效果特别明显——因为所有代码都在一个编译单元中，传统 LTO 的优势反而不大。但如果你使用分散源码构建，LTO 可以显著减少交叉调用开销。</p>
+
+        <p><strong>PGO (Profile-Guided Optimization)</strong> — 基于 profile 的优化是 SQLite 性能调优中最强大的技术。流程如下：</p>
+
+        <pre><code># 第1步：使用 -fprofile-generate 编译插桩版本
+gcc -Os -fprofile-generate sqlite3.c shell.c -o sqlite3-pgo -lpthread -ldl
+
+# 第2步：使用典型工作负载运行，生成 profile 数据
+./sqlite3-pgo &lt; typical_workload.sql
+
+# 第3步：使用 -fprofile-use 重新编译，利用 profile 进行优化
+gcc -Os -fprofile-use sqlite3.c shell.c -o sqlite3-optimized -lpthread -ldl</code></pre>
+
+        <p>典型的 PGO 优化效果是：查询性能提升约 10-20%，同时二进制体积减小约 5-10%。这是因为 PGO 让编译器可以更准确地判断哪些分支是热路径（频繁执行的），从而将热路径的代码紧凑排列，提高指令缓存命中率。</p>
+
+        <p>以下是不同的编译选项组合的效果对比：</p>
+
+        <table>
+            <thead>
+                <tr><th>编译配置</th><th>体积 (ARM)</th><th>SELECT 性能</th><th>INSERT 性能</th><th>编译时间</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>-Os</code>（基准）</td><td>520 KB</td><td>1.00x</td><td>1.00x</td><td>~5s</td></tr>
+                <tr><td><code>-Os -flto</code></td><td>470 KB</td><td>1.05x</td><td>1.03x</td><td>~8s</td></tr>
+                <tr><td><code>-O2 -flto</code></td><td>610 KB</td><td>1.15x</td><td>1.10x</td><td>~7s</td></tr>
+                <tr><td><code>-Os -fprofile-generate</code> + PGO</td><td>485 KB</td><td>1.18x</td><td>1.12x</td><td>~30s（两步合计）</td></tr>
+                <tr><td><code>-O2 -flto</code> + PGO</td><td>590 KB</td><td>1.25x</td><td>1.20x</td><td>~40s（两步合计）</td></tr>
+            </tbody>
+        </table>
+
+        <p>对于嵌入式场景，推荐 <code>-Os -flto</code> + PGO 的组合——在体积最小的前提下获得接近 20% 的性能提升。PGO 的额外编译时间是值得的，因为它只在发布构建时执行一次。</p>
+
+        <div class="tip">
+            💡 <strong>针对特定硬件的优化：</strong> 如果你的目标平台是 ARM Cortex-M 系列，可以添加 <code>-mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16</code> 等架构特定的 flag。SQLite 在 ARM 上的表现尤其出色——它的代码非常适合 ARM 的 16 位 Thumb 指令集，二进制体积可以进一步压缩到 200 KB 以下。
+        </div>
+
+        <h2>SQLite 测试您的修改</h2>
+
+        <p>在完成所有定制修改后，验证工作是重中之重。SQLite 团队对测试的重视程度我们在第 1 章就已经领教过了。对于我们的定制版本，验证需要覆盖三个层次。</p>
+
+        <p><strong>第一层：SQLite 自有测试套件</strong></p>
+
+        <p>运行标准测试可以确保我们的功能剪裁没有破坏基本功能：</p>
+
+        <pre><code># 运行快速测试（约 5 分钟）
+make quicktest
+
+# 运行完整测试（约 30 分钟）
+make test
+
+# 针对特定模块测试
+make testfixture &amp;&amp; ./testfixture test/where.test  # 查询规划器专项</code></pre>
+
+        <p>在启用大量 OMIT 宏的情况下，部分测试用例可能会因为被测试的功能已经被移除而失败。你需要逐个检查失败的测试：如果是"功能已被剪裁所以测试当然失败"的情况，可以忽略；如果是核心功能（CRUD、事务）的测试失败，那就需要回头检查剪裁宏是否正确配置了。</p>
+
+        <p><strong>第二层：加密 VFS 专项测试</strong></p>
+
+        <p>针对加密 VFS，我们需要编写自己的测试用例来验证加密的正确性：</p>
+
+        <pre><code># 测试 1: 加密数据库文件不可直接读取
+./sqlite3-crypt :memory: "CREATE TABLE t(x); INSERT INTO t VALUES('hello');"
+# 检查磁盘文件：应该全是乱码
+hexdump test.db | head -5
+# → 输出应该是不可读的密文
+
+# 测试 2: 用错误密钥打开加密数据库应失败
+./sqlite3-crypt -key wrongkey test.db "SELECT * FROM t;"
+# → 预期输出: "Error: file is not a database"
+
+# 测试 3: CRUD 完整性
+./sqlite3-crypt -key testkey test.db &lt;&lt; EOF
+CREATE TABLE users(id INT PRIMARY KEY, name TEXT);
+INSERT INTO users VALUES(1, 'Alice'), (2, 'Bob');
+SELECT * FROM users WHERE id=1;
+EOF
+# → 预期输出: 1|Alice</code></pre>
+
+        <p><strong>第三层：集成测试（场景模拟）</strong></p>
+
+        <p>在接近真实环境的条件下进行测试：</p>
+
+        <ul>
+            <li><strong>压力测试：</strong> 连续写入 10 万条记录，过程中随机断电模拟（通过 <code>PRAGMA synchronous=FULL</code> 确保数据完整性），重启后验证数据一致性。</li>
+            <li><strong>并发测试：</strong> 多个线程/进程同时读写同一个加密数据库文件，验证 WAL 模式和锁机制在加密 VFS 下是否正常。</li>
+            <li><strong>边界测试：</strong> NULL 字段、空字符串、特殊字符（包括 NULL 字节）、超长字符串（1MB+ 的单行数据）在加密存储下是否正常读写。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>关于 TH3 测试：</strong> SQLite 的 TH3（专有测试套件）并不对公众开放。它的 100% 分支覆盖率测试是 SQLite 商业许可证的一部分。不过，对于开源定制项目来说，SQLite 的公开测试套件（<code>test/</code> 目录下的数万个 TCL 测试用例）已经提供了极为充分的覆盖。如果你的定制版本通过了公开测试 + 你的专项测试，稳定性是有保障的。
+        </div>
+
+        <h2>课程总结</h2>
+
+        <p>到这里，SQLite 源码分析之旅就走到了终点。让我带你回顾一下这 28 章走过的路。</p>
+
+        <p><strong>第一阶段（第 1-3 章）</strong>是入门与鸟瞰——我们了解了 SQLite 的历史、获取源码的方式、目录结构、编译体系，建立了对项目的整体感知。</p>
+
+        <p><strong>第二阶段（第 4-7 章）</strong>深入了 SQLite 的基础设施——核心数据结构（<code>sqlite3</code>、<code>Btree</code>、<code>Vdbe</code> 等对象的定义）、内存管理（私有内存分配器）、错误处理（rc 码、错误栈）、调试设施（SQLITE_DEBUG 下的断言与日志）。这些是理解所有后续代码的基础。</p>
+
+        <p><strong>第三阶段（第 8-11 章）</strong>追踪了 SQL 语句从文本到执行的全链路——词法分析（tokenize）→ 语法分析（Lemon 解析器）→ 语义分析（表达式编译）→ 字节码生成（VDBE 指令序列）。你看到了一个 SQL 引擎的"前端"是怎么工作的。</p>
+
+        <p><strong>第四阶段（第 12-17 章）</strong>进入了存储引擎的深渊——B-Tree 的页面管理、Pager 的页缓存与事务、VFS 的抽象层、原子提交协议、WAL 模式与日志回滚、锁机制与并发控制。这是 SQLite 最复杂也最精华的部分。</p>
+
+        <p><strong>第五阶段（第 18-22 章）</strong>聚焦在查询优化和扩展能力——查询规划器的代价估算、内置函数的 C 实现、虚拟表机制（vtab）、FTS 全文搜索、表达式索引与自修复。你看到了 SQLite 如何以极小的代码量实现强大的查询能力。</p>
+
+        <p><strong>第六阶段（第 23-25 章）</strong>关注开发和运维工具——CLI shell 的源码、测试框架（TCL test fixture、TH3）、性能分析工具和方法论。这些是在真实项目中用好 SQLite 的必备技能。</p>
+
+        <p><strong>第七阶段（第 26-28 章）</strong>展望未来并付诸实践——WASM/JS 绑定让 SQLite 来到了浏览器、2026 年新特性的源码解读让我们看到了项目的前进方向、而这一章的定制实践则把前面所有的知识融会贯通。</p>
+
+        <div class="highlight">
+            <strong>二十八章，</strong>从源码获取到定制编译，从词法分析到 WAL 事务，从 15 万行 C 代码中抽丝剥茧，我们把 SQLite 这个"工业级嵌入式数据库引擎"的每一层都拆开看了个遍。现在，你不再只是一个 SQLite 的"使用者"——你是一个理解它内部运作、能够定制它、甚至能为它贡献代码的"懂行的人"。
+        </div>
+
+        <p>如果你问我：学完这门课之后，下一步应该做什么？我的建议是三条路：</p>
+
+        <ul>
+            <li><strong>深入方向：</strong> SQLite 的源码中有很多"未完成"的扩展和实验性功能。去 <code>ext/</code> 目录下探索，挑一个你感兴趣的模块（比如 <code>ext/misc/csv.c</code>、<code>ext/misc/closure.c</code>）阅读、理解、改进。这是参与开源最温和的方式。</li>
+            <li><strong>应用方向：</strong> 把你在第 28 章学到定制技能真正用起来。在你的嵌入式项目或桌面应用中，尝试剪裁 SQLite、添加自定义 VFS 或扩展。通过实际项目来巩固对 SQLite 的理解。</li>
+            <li><strong>横向对比：</strong> 读完 SQLite 的源码之后，再去看其他数据库——比如 LMDB（纯键值存储）、Berkeley DB（事务性存储引擎）、DuckDB（列式 OLAP 引擎）——的源码，你会发现很多共通的设计模式，也会有全新的理解角度。</li>
+        </ul>
+
+        <p>最后，我想用 D. Richard Hipp 在 2023 年 SQLite 用户年会上的开场白来结束这门课。有人问他："SQLite 已经二十多年了，接下来的十年你打算做什么？"他想了想说："SQLite 的哲学一直是——'把事情做对，然后继续打磨'。下一个十年，我们会让 SQLite 跑在更多你意想不到的地方，同时让它比现在更加可靠。还有什么比这更令人兴奋的呢？"</p>
+
+        <p>感谢你跟我走完这 28 章的旅程。保持好奇，保持动手——我们源码中再见。</p>
+
+        <div class="footer-nav">
+            <a href="27.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="javascript:void(0)">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

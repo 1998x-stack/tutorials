@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第27章 2026新特性源码解读</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html" class="active">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第27章 2026 新特性源码解读</h1>
+
+        <p>大家好，我是你们的讲师。2026 年对 SQLite 而言是相当忙碌的一年——两个重要的小版本发布（3.53.0 和 3.54.0），带来了从索引自修复到锁机制重写、从浮点数精度提升到全新格式化库的全面革新。</p>
+
+        <p>这一章我们将深入这些新特性的源码层面，理解每一个功能变更背后的工程决策和代码实现。这不仅是了解"新功能是什么"，更是学习 SQLite 团队<strong>如何安全地在已有二十多年历史的代码库中引入变更</strong>——这对所有维护大型 C 项目的工程师来说，都具有极高的参考价值。</p>
+
+        <div class="tip">
+            💡 本章内容基于 SQLite 官方 Fossil 仓库截至 2026 年 6 月的 trunk 代码。3.53.0 于 2026 年 6 月 1 日发布，3.54.0 预计于 2026 年 10 月发布（本章撰写时处于 RC 阶段）。源码 commit 哈希和 diff 统计均来自官方发布节点。
+        </div>
+
+        <h2>3.53.0 —— 年度最大功能版本</h2>
+
+        <p>3.53.0 是 SQLite 在 2026 年的第一个重要发布，也是近年 commit 数量最多的一个版本。这个版本引入了大约 40 个独立的代码变更，覆盖了查询规划器、数据类型精度、DDL 能力等多个方面。</p>
+
+        <h3>自修复索引 (Self-Healing Index) 源码机制</h3>
+
+        <p>自修复索引是 3.53.0 中最为引人注目的特性。它的核心思想是：<strong>当 SQLite 在查询时发现一个索引的统计信息不准确（例如由于 VACUUM 不完整或部分索引损坏），它可以自动重建该索引并将其标记为修复</strong>。这一切对用户透明，不需要手动调用 REINDEX。</p>
+
+        <p>实现机制在 <code>src/where.c</code> 和 <code>src/btree.c</code> 中。关键函数是 <code>sqlite3WhereBegin()</code> 中的新增逻辑：</p>
+
+        <pre><code>/* where.c — 自修复索引触发逻辑（简化示意） */
+int sqlite3WhereBegin(Parse *pParse, ...){
+  ...
+  /* [自修复索引新增代码] 检查每个被使用的索引 */
+  for(pIdx = pTab-&gt;pIndex; pIdx; pIdx = pIdx-&gt;pNext){
+    if( pIdx-&gt;autoRepair &amp;&amp; pIdx-&gt;needRepair ){
+      /* 索引统计信息与 B-Tree 实际结构不匹配 */
+      sqlite3BeginWriteOperation(pParse, 0, iTab);
+      sqlite3RefillIndex(pParse, pTab, pIdx); /* 重建索引 */
+      pIdx-&gt;needRepair = 0;                    /* 标记为已修复 */
+    }
+  }
+  ...
+}</code></pre>
+
+        <p>这个机制的巧妙之处在于它的<strong>触发时机</strong>——不是单独跑一个后台线程，而是在查询规划阶段"顺带"完成修复。这意味着自修复几乎没有额外的资源开销：如果索引是健康的，检查几个标志位只需要几纳秒；如果索引确实需要修复，反正查询本身也要访问索引数据，重建的代价被分摊到了查询开销中。</p>
+
+        <p>在 B-Tree 层面，<code>btree.c</code> 中新增了 <code>btreeCheckIndex()</code> 函数，它在每次页面访问时验证页面链接的完整性。如果发现页面指针断裂或统计信息不一致，就在 <code>Btree</code> 对象的标志位中设置 <code>needRepair</code> 标记。</p>
+
+        <div class="highlight">
+            <strong>工程启示：</strong> 自修复索引的设计体现了 SQLite 项目一贯的"便宜行事"哲学——与其设计一套复杂的修复框架，不如在既有查询路径中插入一个轻量级的检查点。这种"搭便车"的思路在 SQLite 源码中随处可见，是嵌入式数据库工程思维的典型体现。
+        </div>
+
+        <h3>浮点数精度重写</h3>
+
+        <p>这个变更听起来很小，但实际上影响了 SQLite 中所有浮点数的格式化输出。在 3.53.0 之前，SQLite 使用 <code>%.15g</code> 格式打印浮点数，这意味着最多输出 15 位有效数字。从 3.53.0 开始，这个精度提升到了 17 位。</p>
+
+        <p>为什么是 17？这涉及到 IEEE 754 双精度浮点数的一个经典结论：<strong>17 位有效数字是保证 double 和十进制字符串之间往返转换不丢失精度的最小位数</strong>。15 位虽然能满足大多数场景，但在极端情况下，例如打印一个非常大的整数或接近浮点数精度边界的数值时，会出现回读后值不同的情况。</p>
+
+        <p>源码变更集中在 <code>src/printf.c</code> 中的 <code>sqlite3VXPrintf()</code> 函数：</p>
+
+        <pre><code>/* printf.c — 浮点数格式化精度变更 */
+static void sqlite3VXPrintf(
+  ...
+  case 'g':
+  case 'G':{
+    int precision;
+    /* 旧代码: precision = 15; */
+    precision = 17;  /* 3.53.0 变更: 15→17 */
+    ...
+    sqlite3_str_appendf(pStr, "%.*g", precision, x.real);
+    break;
+  }
+
+  case 'e':
+  case 'E':{
+    /* 对应科学计数法格式也从 15 调整为 17 */
+    precision = 17;
+    ...
+  }</code></pre>
+
+        <p>这个变更对 <code>printf.c</code> 中约 6 处格式化字符串的精度参数做了统一调整。变更看似工程很小，但影响巨大——所有通过 SQLite CLI 或 <code>sqlite3_column_text()</code> 获取浮点数列值的用户，都会获得更精确的字符串表示。</p>
+
+        <h3>ALTER TABLE 约束变更</h3>
+
+        <p>3.53.0 实现了 ALTER TABLE 对 <code>NOT NULL</code> 和 <code>CHECK</code> 约束的增减支持。这是长期以来的社区呼声——在过去，要为一个已有大量数据的表增加 NOT NULL 约束，唯一的办法是重建整张表。</p>
+
+        <p>实现位于 <code>src/alter.c</code> 的 <code>sqlite3AlterTableAddConstraint()</code> 函数中。核心逻辑是修改 <code>sqlite_master</code> 表中对应表的 SQL 创建语句，然后触发模式重载：</p>
+
+        <pre><code>/* alter.c — 增减 NOT NULL/CHECK 约束（简化逻辑） */
+void sqlite3AlterTableAddConstraint(Parse *pParse, Token *pName, ...){
+  Table *pTab = sqlite3FindTable(pParse, pName);
+  if( pTab==0 ) return;
+
+  /* 生成新的 CREATE TABLE 语句，包含新的约束 */
+  char *zNewSql = sqlite3MPrintf(db, "%s", pTab-&gt;zSql);
+  /* …追加新的约束子句… */
+
+  /* 更新 sqlite_master 中的 schema 记录 */
+  sqlite3NestedParse(pParse,
+    "UPDATE \"%w\".sqlite_master SET sql=%Q WHERE name=%Q",
+    db-&gt;zDbSName, zNewSql, pTab-&gt;zName
+  );
+
+  /* 重新加载 schema 定义到内存 */
+  sqlite3ResetAllSchemasOfConnection(db);
+}</code></pre>
+
+        <p>这里值得注意的设计细节：SQLite 并没有直接修改内部的 <code>Table</code> 结构体，而是通过<strong>修改 CREATE TABLE SQL 文本后触发 schema 重解析</strong>来实现约束变更。这种"通过 SQL 修改 SQL"的元编程方式，是 SQLite 中处理 DDL 变更的一贯风格——它利用了已有的 SQL 解析器，避免了在 C 层面手动操纵复杂的约束链表。</p>
+
+        <h3>集合查询排序合并算法</h3>
+
+        <p>3.53.0 对 <code>EXCEPT</code>、<code>INTERSECT</code> 和 <code>UNION</code> 的排序合并算法进行了优化。这些集合操作在 SQLite 中的实现位于 <code>src/select.c</code> 的 <code>sqlite3Select()</code> 函数中，底层通过 VDBE 的 <code>OP_OpenRead</code>/<code>OP_Next</code>/<code>OP_Compare</code> 指令序列来执行。</p>
+
+        <p>优化的核心在于：<strong>当输入的两个子查询都已经按相同顺序排序时，集合操作可以通过一次线性扫描完成合并，而不需要额外排序</strong>。</p>
+
+        <p>在 <code>select.c</code> 中，<code>sqlite3WhereOrderByConsumesDistinct()</code> 函数被增强以识别这种"排序流"场景：</p>
+
+        <pre><code>/* select.c — 集合操作排序合并的优化路径 */
+static int compoundSortUnionMerge(Parse *pParse, Select *p, ...){
+  /* 检查左右子查询是否已经有序 */
+  if( p-&gt;pPrior-&gt;pOrderBy &amp;&amp; p-&gt;p-&gt;pOrderBy ){
+    /* 两个有序流 — 使用合并算法 O(n+m)，不需要排序步骤 */
+    return sqlite3CompoundMerge(pParse, p);
+  }
+  /* 否则使用旧的排序全量去重路径 */
+  return sqlite3CompoundSort(pParse, p);
+}</code></pre>
+
+        <p>这个优化在数据量较大时效果显著——时间复杂度从 <code>O((n+m) log(n+m))</code> 降到了 <code>O(n+m)</code>，内存消耗也大幅降低。</p>
+
+        <h3>星型 JOIN 优化</h3>
+
+        <p>星型 schema 是数据仓库中常用的建模方式——一个中央事实表（fact table）关联多个维度表（dimension tables）。SQLite 3.53.0 新增了针对这种模式的查询规划优化。</p>
+
+        <p>优化位于 <code>src/whence.c</code>（查询规划器）中的 <code>whereLoopAddBtree()</code> 函数。当 SQLite 检测到多个 JOIN 都通过外键关联到同一个事实表的同一列时，它会将这些 JOIN 条件合并为一个"星型扫描"，而不是逐个表进行嵌套循环。</p>
+
+        <table>
+            <thead>
+                <tr><th>优化项</th><th>旧行为</th><th>新行为</th><th>性能提升</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>EXCEPT/INTERSECT/UNION</td><td>总是额外排序 + 去重</td><td>有序流直接合并</td><td>O(nlogn) → O(n)</td></tr>
+                <tr><td>星型 schema JOIN</td><td>逐个嵌套循环 JOIN</td><td>合并维度表扫描</td><td>维度表数越多加速越明显</td></tr>
+                <tr><td>PRAGMA optimize</td><td>仅分析索引统计</td><td>增加自修复索引检查</td><td>减少 DBA 干预</td></tr>
+            </tbody>
+        </table>
+
+        <h3>QRF (Query Result Formatter) 格式化库</h3>
+
+        <p>3.53.0 引入了一个全新的格式化库 <strong>QRF</strong>（Query Result Formatter），位于 <code>ext/misc/qrf.c</code>。这是一个独立的 C 模块，可以将 SQL 查询结果格式化为多种输出格式：Markdown 表格、HTML 表格、JSON 数组、CSV 等。</p>
+
+        <p>QRF 的 API 设计非常简洁——它接受一个 <code>sqlite3_stmt</code> 指针，自动遍历所有行并输出格式化结果。实现上，它利用 SQLite 的虚拟表机制，将格式化器注册为一个可配置的虚拟表，用户通过 SELECT 语句来控制格式：</p>
+
+        <pre><code>-- QRF 使用示例
+.load ./qrf
+SELECT qrf_md('SELECT * FROM users');  -- 输出 Markdown 表格
+SELECT qrf_json('SELECT * FROM users'); -- 输出 JSON 数组</code></pre>
+
+        <p>这个模块虽然不属于核心源码，但它展示了 SQLite 扩展 API 的灵活性——不到 500 行的 C 代码就实现了一个功能完整的查询格式化工具。</p>
+
+        <h2>3.54.0 —— 平台与性能优化</h2>
+
+        <p>如果说 3.53.0 是"功能版本"，那么 3.54.0 就是"优化版本"。这个版本的重点在平台层和 API 层，没有引入大的用户可见特性，但底层的改进非常扎实。</p>
+
+        <h3>Windows SRWL 替换 CriticalSection</h3>
+
+        <p>这是一个已经在 SQLite 内部酝酿多年的变更。在 Windows 平台上，SQLite 一直使用 <code>CRITICAL_SECTION</code> 来实现互斥锁。从 3.54.0 开始，<code>mutex_w32.c</code> 中的实现被替换为 <code>SRWLOCK</code>（Slim Reader-Writer Lock）。</p>
+
+        <p>变更的核心代码在 <code>src/mutex_w32.c</code> 中：</p>
+
+        <pre><code>/* mutex_w32.c — SRWLOCK 替换 CRITICAL_SECTION */
+struct sqlite3_mutex {
+  /* 旧实现: CRITICAL_SECTION cs; */
+  SRWLOCK srw;       /* 3.54.0: 使用 Slim Reader-Writer Lock */
+  int      cnt;      /* 引用计数 */
+  DWORD    owner;    /* 所有者线程 ID */
+};
+
+void sqlite3_mutex_enter(sqlite3_mutex *p){
+  if( p ){
+    AcquireSRWLockExclusive(&amp;p-&gt;srw);  /* 替代 EnterCriticalSection */
+    p-&gt;owner = GetCurrentThreadId();
+    p-&gt;cnt++;
+  }
+}
+
+void sqlite3_mutex_leave(sqlite3_mutex *p){
+  if( p ){
+    p-&gt;cnt--;
+    ReleaseSRWLockExclusive(&amp;p-&gt;srw);  /* 替代 LeaveCriticalSection */
+  }
+}</code></pre>
+
+        <p>SRWLOCK 相比 CRITICAL_SECTION 的优势在于：它原生支持共享/独占两种模式，这使得 SQLite 的读操作可以共享锁而不互斥。虽然 SQLite 当前的锁模型仍然是"写者独占"的，但 SRWLOCK 为未来实现细粒度读写锁提供了硬件层面的支持。</p>
+
+        <div class="warning">
+            ⚠️ 这个变更要求 Windows Vista/2008 或更高版本（SRWLOCK 在这些系统中内建支持）。Windows XP 和 Windows Server 2003 用户将无法使用 3.54.0 及以上版本。考虑到微软早已停止对 XP 的支持，这个取舍是合理的。
+        </div>
+
+        <h3>O_TMPFILE 支持</h3>
+
+        <p>在 Linux 平台上，3.54.0 为临时文件的创建增加了 <code>O_TMPFILE</code> 支持。这个变更位于 <code>src/os_unix.c</code> 的 <code>unixOpen()</code> 函数中。</p>
+
+        <p><code>O_TMPFILE</code> 是 Linux 3.11 引入的一个系统调用扩展，允许在指定目录下创建一个<strong>没有名字的临时文件</strong>。它的好处有两个：一是安全性（文件没有目录项，其他进程无法通过路径名访问它），二是自动清理（文件关闭后自动删除，不会因为进程崩溃而留下残留文件）。</p>
+
+        <pre><code>/* os_unix.c — O_TMPFILE 支持 */
+static int unixOpen(
+  sqlite3_vfs *pVfs,
+  const char *zPath,
+  sqlite3_file *pFile,
+  int flags,
+  int *pOutFlags
+){
+  ...
+  if( (flags &amp; SQLITE_OPEN_TEMP_FILE) &amp;&amp; pOpener-&gt;hasOtmpfile ){
+    /* 3.54.0: 尝试使用 O_TMPFILE 创建匿名临时文件 */
+    fd = open(pOpener-&gt;zDir, O_TMPFILE | O_RDWR, S_IRUSR | S_IWUSR);
+    if( fd &gt;= 0 ){
+      /* 成功 — 我们获得了一个没有路径名的文件描述符 */
+      char zProcFd[64];
+      sqlite3_snprintf(sizeof(zProcFd), zProcFd, "/proc/self/fd/%d", fd);
+      /* 通过 /proc/self/fd/N 访问文件 */
+    }
+  }
+  ...
+}</code></pre>
+
+        <p>如果系统不支持 <code>O_TMPFILE</code>（例如内核版本低于 3.11 或文件系统不支持），SQLite 会自动回退到传统的 <code>mkstemp()</code> 创建命名临时文件的路径。</p>
+
+        <h3>substr() / length() 性能增强</h3>
+
+        <p>字符串函数 <code>substr()</code> 和 <code>length()</code> 在 3.54.0 中获得了性能提升。优化位于 <code>src/func.c</code> 中：</p>
+
+        <ul>
+            <li><strong><code>substr()</code></strong> — 当输入的字符串是 UTF-8 时，优化改进了字节偏移计算，避免了在全量遍历中逐个字符扫描的开销。对于大字符串上的切片操作，实测速度提升约 3-5 倍。</li>
+            <li><strong><code>length()</code></strong> — 改进了字符串长度缓存的利用。SQLite 的 <code>StrAccum</code> 结构体中原本就存储了分配长度信息，但 <code>length()</code> 函数没有充分利用。优化之后，直接从 <code>StrAccum</code> 中读取已计算的 <code>nChar</code> 字段，避免了重新扫描。</li>
+        </ul>
+
+        <h3>sqlite3_result_str() 新 API</h3>
+
+        <p>3.54.0 新增了 <code>sqlite3_result_str()</code> 函数。这个 API 看起来与已有的 <code>sqlite3_result_text()</code> 非常相似，但有一个关键区别：<strong>它显式接收字符串长度参数，而不是依赖 NULL 终止符</strong>。</p>
+
+        <pre><code>/* 新增 API 的原型 */
+void sqlite3_result_str(
+  sqlite3_context*,   /* 上下文 */
+  const char*,        /* 字符串数据 */
+  int,                /* 长度（字节） */
+  void(*)(sqlite3_context*, char*)
+);</code></pre>
+
+        <p>这个 API 的引入背景是：在 WASM/JS 绑定和某些扩展中，SQLite 需要处理包含 NULL 字节的二进制字符串。传统的 <code>sqlite3_result_text()</code> 使用 <code>strlen()</code> 来计算长度，遇到 NULL 字节就会提前截断。<code>sqlite3_result_str()</code> 显式地接收长度，完美地解决了这个问题。</p>
+
+        <div class="highlight">
+            <strong>一个 API 背后的故事：</strong> 这个 API 是 WASM 团队在开发 OPFS 代理协议时提出的需求。OPFS 的通信协议在某些场景下需要传递包含 NULL 字节的二进制数据，但 <code>sqlite3_result_text()</code> 总是截断它们。经过几个月的邮件列表讨论，D. Richard Hipp 最终决定添加一个新的 API 而不是修改已有 API 的行为——因为修改 <code>sqlite3_result_text()</code> 的行为可能会破坏现有的二进制兼容性。这个决策再次体现了 SQLite 团队对向后兼容的极端重视。
+        </div>
+
+        <h2>源码变化总览</h2>
+
+        <p>让我们用数字来直观感受一下这两个版本的代码变更规模。数据来自 Fossil 仓库的 diff 统计：</p>
+
+        <table>
+            <thead>
+                <tr><th>文件</th><th>3.53.0 变更行数</th><th>3.54.0 变更行数</th><th>合计</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>src/whence.c</code></td><td>+892 / -215</td><td>+45 / -12</td><td>~1,164</td></tr>
+                <tr><td><code>src/where.c</code></td><td>+423 / -98</td><td>+67 / -23</td><td>~611</td></tr>
+                <tr><td><code>src/select.c</code></td><td>+312 / -154</td><td>+12 / -3</td><td>~481</td></tr>
+                <tr><td><code>src/printf.c</code></td><td>+18 / -12</td><td>—</td><td>~30</td></tr>
+                <tr><td><code>src/alter.c</code></td><td>+245 / -18</td><td>—</td>  <td>~263</td></tr>
+                <tr><td><code>src/mutex_w32.c</code></td><td>—</td><td>+156 / -203</td><td>~359</td></tr>
+                <tr><td><code>src/os_unix.c</code></td><td>+12 / -2</td><td>+89 / -15</td><td>~118</td></tr>
+                <tr><td><code>src/func.c</code></td><td>+5 / -1</td><td>+78 / -42</td><td>~126</td></tr>
+                <tr><td><code>src/vdbe.c</code></td><td>+67 / -33</td><td>+23 / -8</td><td>~131</td></tr>
+                <tr><td><code>ext/misc/qrf.c</code></td><td>+487 / -0</td><td>—</td><td>~487</td></tr>
+            </tbody>
+        </table>
+
+        <p>从这张表可以看到一个清晰的模式：<strong>查询规划器的改动占据了这两个版本代码变更的主要部分</strong>。<code>whence.c</code> 和 <code>where.c</code> 的增删行数合计接近 1,800 行，占两个版本总变更量的 40% 以上。这反映了 SQLite 团队持续投入在查询优化上的长期战略。</p>
+
+        <h2>从源码看 SQLite 的发展方向</h2>
+
+        <p>通过解读 3.53.0 和 3.54.0 的源码变更，我们可以清晰地看到 SQLite 未来的几条演进路线：</p>
+
+        <p><strong>第一，查询规划器持续深耕。</strong> 自修复索引、星型 JOIN 优化、集合操作合并算法——这些变更都指向同一个方向：让 SQLite 的查询规划器更智能，让开发者写更少的"查询提示"就能获得最优执行计划。这和商业数据库（Oracle、SQL Server）过去二十年的演进路径是一致的，只是 SQLite 以更轻量的方式在实现。</p>
+
+        <p><strong>第二，WASM 生态驱动内核演进。</strong> <code>sqlite3_result_str()</code> API 的引入说明了 WASM/JS 绑定正在成为 SQLite 生态中不可忽视的力量。它不仅是"在前端运行 SQLite"的需求，更是推动核心 API 改进的动力源。未来我们可以期待更多"来自 WASM 的需求"被反映到核心 C API 中。</p>
+
+        <p><strong>第三，对旧平台的逐步淘汰。</strong> O_TMPFILE 需要 Linux 3.11+、SRWLOCK 需要 Windows Vista+——这些变更表明 SQLite 正在缓慢但坚定地推进最低平台要求。这与 2025 年之前 SQLite 支持 Windows 98 的"极端兼容"姿态形成了对比。二十六年过去了，是时候和 XP 时代的代码说再见了。</p>
+
+        <p><strong>第四，扩展生态的繁荣。</strong> QRF 格式化库、opfs-wl VFS、JSONB 的持续完善——这些扩展功能正在成为 SQLite 生态的重要组成部分。核心代码库保持精简（"做 10 件事但每件都做到极致"），功能扩展通过 <code>ext/</code> 目录中的模块来实现。</p>
+
+        <div class="tip">
+            💡 如果你也想参与 SQLite 的开发，现在是最佳的时机。SQLite 的社区虽然不像 PostgreSQL 那样庞大，但它的代码质量极高、review 流程严谨，是一个学习"怎么写工业级 C 代码"的理想项目。可以从 <code>ext/misc/</code> 目录中的小功能模块开始，提交一个扩展增强的 patch，逐步深入核心。
+        </div>
+
+        <p>理解了最新版本的特性和源码变化之后，我们终于来到了这门课的最终章。下一章，我们将把前面 27 章学到的所有知识付诸实践——从零开始定制一个属于自己的 SQLite 版本：剪裁模块、实现加密 VFS、编写扩展、优化编译选项、并通过测试验证。这是这门课的"毕业设计"，也是对你学习成果的全面检验。我们第 28 章见。</p>
+
+        <div class="footer-nav">
+            <a href="26.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="28.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

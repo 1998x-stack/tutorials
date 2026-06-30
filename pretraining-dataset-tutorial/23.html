@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第23章 Datatrove实战：从Common Crawl到清洗数据</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 预训练数据决定模型上限</a></li>
+            <li><a href="02.html">第2章 全球通用基座数据集全景</a></li>
+            <li><a href="03.html">第3章 中文预训练语料现状与挑战</a></li>
+            <li><a href="04.html">第4章 垂直领域与增强语料</a></li>
+            <li><a href="05.html">第5章 Common Crawl：预训练的石油矿藏</a></li>
+            <li><a href="06.html">第6章 许可证合规与数据安全红线</a></li>
+            <li><a href="07.html">第7章 数据配比策略与混合哲学</a></li>
+            <li><a href="08.html">第8章 数据采集与原始格式解析</a></li>
+            <li><a href="09.html">第9章 语言识别与初步清洗</a></li>
+            <li><a href="10.html">第10章 精确去重：剔除重复文本</a></li>
+            <li><a href="11.html">第11章 模糊去重：MinHash与LSH原理</a></li>
+            <li><a href="12.html">第12章 语义级与句子级去重</a></li>
+            <li><a href="13.html">第13章 基于模型的质量评分体系</a></li>
+            <li><a href="14.html">第14章 有害内容过滤与安全审查</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 流式加载与内存管理</a></li>
+            <li><a href="17.html">第17章 基准污染检测与去除</a></li>
+            <li><a href="18.html">第18章 数据版本管理与溯源</a></li>
+            <li><a href="19.html">第19章 合成数据生成与增强</a></li>
+            <li><a href="20.html">第20章 多语言与低资源语料构建</a></li>
+            <li><a href="21.html">第21章 课程学习与动态数据调度</a></li>
+            <li><a href="22.html">第22章 代码与数学数据专项处理</a></li>
+            <li><a href="23.html" class="active">第23章 Datatrove实战：从Common Crawl到清洗数据</a></li>
+            <li><a href="24.html">第24章 NeMo Curator与GPU加速清洗</a></li>
+            <li><a href="25.html">第25章 数据质量评估与消融实验</a></li>
+            <li><a href="26.html">第26章 2026年数据工程前沿趋势</a></li>
+            <li><a href="27.html">第27章 实战项目：构建1B模型训练数据集</a></li>
+            <li><a href="28.html">第28章 规模化落地：从TB级到PB级的挑战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>开篇：从 WARC 到高质量文本，就差一个管道</h2>
+
+        <p>大家好，我是你们的讲师。前面二十多章，我们把数据清洗的理论讲了个遍——去重算法、质量评分、安全过滤、污染检测……但有一个问题始终悬而未决：<strong>这些东西到底怎么串起来跑通？</strong></p>
+
+        <p>我相信不少同学有过这样的经历：在多台机器上手动部署一套清洗流程，自己写 Shell 脚本串联各个步骤，然后用 <code>nohup</code> 丢在后台提心吊胆地等结果。一旦某个步骤失败，调试起来简直要命——日志分散在各台机器上，错误信息晦涩难懂，重跑还得手动跳过已处理过的数据。</p>
+
+        <p>2024 年，HuggingFace 开源了 <strong>Datatrove</strong>，一个专为大规模预训练数据清洗设计的模块化框架。它把前面各章讲的那些技术——语言过滤、质量评分、MinHash 去重——全部封装成了可插拔的 Pipeline Block。你只需要像搭积木一样把它们串起来，剩下的并发调度、容错恢复、进度追踪，框架全帮你搞定。本章我们就来亲手搭建一条从 Common Crawl 原始 WARC 文件到干净训练数据的完整流水线。</p>
+
+        <h2>23.1 Datatrove 架构概览</h2>
+
+        <p>Datatrove 的核心设计哲学是 <strong>"模块化 + 平台无关"</strong>。它不绑定任何特定的集群管理系统，既可以在单机调试，也可以扩展到 Slurm 集群上运行。整个框架由四个核心概念构成：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>概念</th>
+                    <th>作用</th>
+                    <th>类比</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Reader</td>
+                    <td>读取原始数据（WARC、Parquet、JSONL 等格式）</td>
+                    <td>水管进水口</td>
+                </tr>
+                <tr>
+                    <td>Block</td>
+                    <td>一个数据处理步骤（过滤、清洗、变换）</td>
+                    <td>净水器滤芯</td>
+                </tr>
+                <tr>
+                    <td>Writer</td>
+                    <td>将处理后的数据写出到目标存储</td>
+                    <td>出水龙头</td>
+                </tr>
+                <tr>
+                    <td>PipelineExecutor</td>
+                    <td>调度整个管道运行（单机/Slurm）</td>
+                    <td>水压泵</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>Datatrove 最厉害的一点是它的<strong>内存效率</strong>。即使是处理 TB 级数据，它也几乎不占用大量 RAM——数据以流式方式在块之间传递，每个 Block 只看到当前正在处理的单条记录。这意味着你可以在 32GB 内存的机器上处理 PB 级的数据，只要你有足够的磁盘和网络带宽。</p>
+
+        <div class="tip">
+            <strong>内存管理提醒：</strong>Datatrove 的流式设计虽然省内存，但有一个前提——你使用的 Block 本身不会缓存大量数据。例如，MinHashDeduplicator 在构建签名索引时会占用一定内存，因此对于超大规模的去重任务，建议使用独立的签名存储后端（如 Redis）。
+        </div>
+
+        <h2>23.2 Pipeline Blocks 详解</h2>
+
+        <p>Datatrove 内置了大量 Block，覆盖了从原始 WARC 解析到最终质量筛选的全流程。下面是从 Common Crawl 到训练数据最常用的一组 Block：</p>
+
+        <h3>WarcReader</h3>
+        <p>这是管道的入口点。它读取 Common Crawl 的 <code>.warc.gz</code> 文件，解析出每个记录的 HTTP 响应头、URL、原始 HTML 内容和元数据。WarcReader 支持断点续传——它会记录每个文件已处理的位置，即使任务中途崩溃，重启时也会从断点继续，不会重复处理已完成的记录。</p>
+
+        <h3>TrafilaturaExtractor</h3>
+        <p>从 HTML 中提取正文内容。这个 Block 封装了著名的 <strong>Trafilatura</strong> 库，它能识别页面的主内容区域，去除导航栏、广告、评论区等噪声，并保留标题、段落、列表等结构化信息。与简单的 <code>html2text</code> 相比，Trafilatura 的提取质量明显更高，尤其是在处理新闻文章和技术文档时。</p>
+
+        <h3>LanguageFilter</h3>
+        <p>基于 FastText 的语言分类器，过滤掉目标语言之外的文档。你可以指定一个允许的语言列表（如 <code>["zh", "en"]</code>），低于置信度阈值的文档将被丢弃。FastText 模型小巧且速度极快——在单核上每天可以处理数亿篇文档。</p>
+
+        <h3>GopherQualityFilter</h3>
+        <p>这是 DeepMind Gopher 论文中定义的 17 个质量启发式规则的实现，包括：</p>
+        <ul>
+            <li>文档中必须有至少 50% 的单词包含字母字符</li>
+            <li>文档中不能有超过 30% 的句子以 "! " 结尾（避免过度夸张的标题党内容）</li>
+            <li>文档中不能有超过 10% 的行以冒号结尾（避免目录和列表）</li>
+            <li>文档中不能存在重复的段落（去重后的进一步检查）</li>
+        </ul>
+
+        <p>与 GopherQualityFilter 搭配使用的还有 <strong>C4QualityFilter</strong>（来自 Raffel et al. 2019 的 C4 数据集规则）和 <strong>FineWebQualityFilter</strong>（HuggingFace 的最新改进版规则）。FineWeb 版本的过滤规则是目前业界公认效果最好的启发式过滤器。</p>
+
+        <h3>MinHashDeduplicator</h3>
+        <p>实现第 11 章介绍的 MinHash + LSH 模糊去重。Datatrove 中的实现支持多进程并行计算签名，并可以配置签名写入外部存储（本地文件或 Redis），从而支持跨机器共享去重。</p>
+
+        <h2>23.3 完整 Pipeline 实战</h2>
+
+        <p>下面是一个完整的 Datatrove Pipeline 代码，它将从 Common Crawl 的 WARC 文件中提取中文文本，经过质量过滤，执行 MinHash 去重，最终输出干净的 JSONL 文件：</p>
+
+        <pre><code>from datatrove.executor import LocalPipelineExecutor
+from datatrove.pipeline.readers import WarcReader
+from datatrove.pipeline.extractors import TrafilaturaExtractor
+from datatrove.pipeline.filters import (
+    LanguageFilter,
+    GopherQualityFilter,
+    C4QualityFilter,
+    FineWebQualityFilter,
+)
+from datatrove.pipeline.dedup import MinHashDeduplicator
+from datatrove.pipeline.writers import JsonlWriter
+
+
+def build_cc_pipeline(
+    input_path: str,
+    output_path: str,
+    language: str = "zh",
+    num_workers: int = 8,
+):
+    """从 Common Crawl 到清洗数据的完整管道"""
+
+    pipeline = [
+        # 1. 读取 WARC 文件
+        WarcReader(input_path),
+
+        # 2. 用 Trafilatura 提取正文
+        TrafilaturaExtractor(),
+
+        # 3. 语言过滤：只保留指定语言
+        LanguageFilter(
+            language=language,
+            threshold=0.65,
+        ),
+
+        # 4. 三重质量过滤
+        GopherQualityFilter(),
+        C4QualityFilter(),
+        FineWebQualityFilter(),
+
+        # 5. MinHash 模糊去重
+        MinHashDeduplicator(
+            ngrams=5,          # 5-gram
+            num_hashes=256,    # 256 个 MinHash 签名
+            num_buckets=16,    # LSH 分桶数
+            threshold=0.7,     # Jaccard 相似度阈值
+            storage="file://./minhash_signatures",
+        ),
+
+        # 6. 写出为 JSONL
+        JsonlWriter(output_path),
+    ]
+
+    executor = LocalPipelineExecutor(
+        pipeline=pipeline,
+        tasks=num_workers,
+        logging_dir="./logs/cc_pipeline",
+    )
+
+    executor.run()
+    return executor.stats
+
+
+# 执行
+if __name__ == "__main__":
+    stats = build_cc_pipeline(
+        input_path="/data/common_crawl/warc/CC-MAIN-2025-50/*.warc.gz",
+        output_path="/data/clean_dataset/",
+        num_workers=16,
+    )
+    print(f"处理完成。保留率: {stats.retention_rate:.2%}")
+    print(f"总输入文档数: {stats.total_docs:,}")
+    print(f"输出文档数: {stats.output_docs:,}")</code></pre>
+
+        <div class="highlight">
+            <strong>经验之谈：</strong>在运行大规模管道之前，务必先用少量 WARC 文件（比如 10-20 个）调试管道参数。质量过滤器的阈值设置直接影响数据保留率。对于中文语料，FineWebQualityFilter 的默认参数可能偏严——建议将一些长度相关的阈值下调 10%-20%，因为中文文本的平均段落长度通常短于英文。
+        </div>
+
+        <h2>23.4 重现 FineWeb 数据集</h2>
+
+        <p>FineWeb 是 HuggingFace 在 2024 年发布的一个高质量英文预训练数据集，它完全使用 Datatrove 从 Common Crawl 构建。团队在论文中详细披露了他们的处理流程，我们来看看具体的参数配置：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>处理阶段</th>
+                    <th>使用的 Block / 方法</th>
+                    <th>关键参数</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>URL 过滤</td>
+                    <td>URlFilter (黑名单 + 域名黑白名单)</td>
+                    <td>基于 500+ 已知低质量域名黑名单</td>
+                </tr>
+                <tr>
+                    <td>正文提取</td>
+                    <td>TrafilaturaExtractor</td>
+                    <td>min_extracted_length=200 字符</td>
+                </tr>
+                <tr>
+                    <td>语言过滤</td>
+                    <td>LanguageFilter</td>
+                    <td>fasttext 模型, threshold=0.5</td>
+                </tr>
+                <tr>
+                    <td>质量过滤</td>
+                    <td>FineWebQualityFilter</td>
+                    <td>18 条规则, 全默认参数</td>
+                </tr>
+                <tr>
+                    <td>精确去重</td>
+                    <td>ExactDeduplicator (行级)</td>
+                    <td>SHA256 hash 指纹</td>
+                </tr>
+                <tr>
+                    <td>模糊去重</td>
+                    <td>MinHashDeduplicator</td>
+                    <td>5-gram, 256 hashes, 14 buckets, threshold=0.7</td>
+                </tr>
+                <tr>
+                    <td>质量评分</td>
+                    <td>FastText Quality Scorer</td>
+                    <td>基于 C4/OpenWebText 训练的分类器</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这套流程从约 1,700 亿篇文档开始，经过逐层过滤后，最终剩下约 3.4 亿篇高质量文档——综合保留率约为 <strong>0.2%</strong>。你没看错，99.8% 的原始 Common Crawl 数据被过滤掉了！这看似"浪费"，却恰恰是 FineWeb 质量优秀的根本原因。</p>
+
+        <h2>23.5 配置管理与集群运行</h2>
+
+        <p>在实际项目中，管道参数经常需要调整。Datatrove 支持使用 YAML 配置文件来管理管道，避免每次都修改代码：</p>
+
+        <pre><code># configs/fineweb_zh.yaml
+reader:
+  type: WarcReader
+  path: /data/common_crawl/warc/CC-MAIN-2025-50/
+
+extractors:
+  - type: TrafilaturaExtractor
+
+filters:
+  - type: LanguageFilter
+    language: zh
+    threshold: 0.65
+  - type: GopherQualityFilter
+  - type: C4QualityFilter
+    min_words: 50
+  - type: FineWebQualityFilter
+
+dedup:
+  type: MinHashDeduplicator
+  ngrams: 5
+  num_hashes: 256
+  num_buckets: 16
+  threshold: 0.7
+
+writer:
+  type: JsonlWriter
+  path: /data/clean_dataset/
+
+executor:
+  type: local  # 或 slurm
+  tasks: 32
+  logging_dir: ./logs/cc_pipeline</code></pre>
+
+        <p>你可以通过环境变量覆盖配置中的任何参数，这在需要在不同环境（开发/测试/生产）间切换时非常有用：</p>
+
+        <pre><code># 开发环境：用少量数据调试
+export DATATROVE_OVERRIDE_READER_PATH="/data/sample/*.warc.gz"
+export DATATROVE_OVERRIDE_EXECUTOR_TASKS=4
+python run_pipeline.py --config configs/fineweb_zh.yaml
+
+# 生产环境：全量数据
+export DATATROVE_OVERRIDE_EXECUTOR_TYPE="slurm"
+export DATATROVE_OVERRIDE_EXECUTOR_TASKS=256
+python run_pipeline.py --config configs/fineweb_zh.yaml</code></pre>
+
+        <p>在 Slurm 集群上运行时，只需将 <code>LocalPipelineExecutor</code> 替换为 <code>SlurmPipelineExecutor</code>：</p>
+
+        <pre><code>from datatrove.executor import SlurmPipelineExecutor
+
+executor = SlurmPipelineExecutor(
+    pipeline=pipeline,
+    tasks=256,                  # 256 个 Slurm 任务
+    time="12:00:00",            # 单任务最大运行时间
+    partition="gpu",            # Slurm partition
+    logging_dir="./logs/slurm_cc",
+    random_start_delay=30,      # 随机启动延迟，防止同时请求存储
+)
+executor.run()</code></pre>
+
+        <h2>23.6 日志与监控——避免"黑盒"运行</h2>
+
+        <p>大规模数据处理最怕的就是"跑着跑着出错了却不知道"。Datatrove 提供了完善的日志和统计追踪功能，让你的管道不再是黑盒。</p>
+
+        <p>每个 <code>logging_dir</code> 目录下会生成以下日志：</p>
+        <ul>
+            <li><strong>info.log</strong> — 常规运行日志，记录了每个 Block 的处理进度</li>
+            <li><strong>errors.log</strong> — 错误记录，包括哪些文件处理失败及其原因</li>
+            <li><strong>stats.json</strong> — 按任务汇总的统计信息（处理文档数、过滤率、平均耗时等）</li>
+        </ul>
+
+        <p>在我参与的一个项目中，有一次管道跑了将近 30 个小时后突然报错。如果没有 Datatrove 的断点续传机制，这意味着所有工作都要从头再来。但得益于 <code>WarcReader</code> 的断点能力，我们只花了 5 分钟就定位到出错的 WARC 文件，修复后从失败点继续运行，最终只损失了不到 1% 的处理时间——这比"重启大法"不知道高到哪里去了。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>有一次我们发现 Datatrove 管道"跑完了"，但输出的文件数比预期少了 30%。排查了整整一天，最终发现问题出在 <code>tasks</code> 参数设置上。管道的并行度 <code>tasks</code> 不能超过输入文件的分片数。我们输入了 1,000 个 WARC 文件，却设置了 2,000 个 tasks——多余的 tasks 没有分配到任何输入文件，因此有将近一半的"worker"一直在空转。正确的做法是将 tasks 数设置为输入文件数的 1-2 倍，让每个 worker 处理 1-2 个文件。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>Datatrove 让大规模数据清洗从"一门手艺"变成了"一条流水线"。通过把语言过滤、质量评分、去重等步骤封装为可组合的 Block，我们只需关注参数调优，而不再需要为分布式调度和容错操心。如果你之前还在手动写 Python 脚本串联清洗步骤，现在该升级到 Datatrove 了。</p>
+
+        <p>Datatrove 虽然好用，但它主要还是跑在 CPU 集群上。当数据规模突破百亿甚至千亿级别时，CPU 的处理速度就开始捉襟见肘了。下一章我们来聊另一种思路——用 GPU 来加速数据清洗。NVIDIA 的 NeMo Curator 框架，能让你的去重速度提升整整一个数量级。</p>
+
+        <p>我是你们的讲师，我们第 24 章见。</p>
+
+        <div class="footer-nav">
+            <a href="22.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="24.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

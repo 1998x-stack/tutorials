@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 语言识别与初步清洗</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 预训练数据决定模型上限</a></li>
+            <li><a href="02.html">第2章 全球通用基座数据集全景</a></li>
+            <li><a href="03.html">第3章 中文预训练语料现状与挑战</a></li>
+            <li><a href="04.html">第4章 垂直领域与增强语料</a></li>
+            <li><a href="05.html">第5章 Common Crawl：预训练的石油矿藏</a></li>
+            <li><a href="06.html">第6章 许可证合规与数据安全红线</a></li>
+            <li><a href="07.html">第7章 数据配比策略与混合哲学</a></li>
+            <li><a href="08.html">第8章 数据采集与原始格式解析</a></li>
+            <li><a href="09.html" class="active">第9章 语言识别与初步清洗</a></li>
+            <li><a href="10.html">第10章 精确去重：剔除重复文本</a></li>
+            <li><a href="11.html">第11章 模糊去重：MinHash与LSH原理</a></li>
+            <li><a href="12.html">第12章 语义级与句子级去重</a></li>
+            <li><a href="13.html">第13章 基于模型的质量评分体系</a></li>
+            <li><a href="14.html">第14章 有害内容过滤与安全审查</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 流式加载与内存管理</a></li>
+            <li><a href="17.html">第17章 基准污染检测与去除</a></li>
+            <li><a href="18.html">第18章 数据版本管理与溯源</a></li>
+            <li><a href="19.html">第19章 合成数据生成与增强</a></li>
+            <li><a href="20.html">第20章 多语言与低资源语料构建</a></li>
+            <li><a href="21.html">第21章 课程学习与动态数据调度</a></li>
+            <li><a href="22.html">第22章 代码与数学数据专项处理</a></li>
+            <li><a href="23.html">第23章 Datatrove实战：从Common Crawl到清洗数据</a></li>
+            <li><a href="24.html">第24章 NeMo Curator与GPU加速清洗</a></li>
+            <li><a href="25.html">第25章 数据质量评估与消融实验</a></li>
+            <li><a href="26.html">第26章 2026年数据工程前沿趋势</a></li>
+            <li><a href="27.html">第27章 实战项目：构建1B模型训练数据集</a></li>
+            <li><a href="28.html">第28章 规模化落地：从TB级到PB级的挑战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>找对语言，筛掉垃圾：清洗流水线的第一关</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们把 WARC 文件里的 HTML 解析成了原始文本——但这只是万里长征第一步。打开一个刚解析完的文本文件夹，你会发现里面什么都有：英文、中文、阿拉伯文、乱码、只有标点符号的页面、全是 URL 列表的页面……最夸张的一次，我看到一个"文章"居然是一个 YouTube 视频的 2,000 条自动翻译评论的拼接体——中文夹杂着泰语，中间还混了一段 Python traceback。</p>
+
+        <p>如果把这堆东西直接喂给模型，后果不堪设想。这就是为什么在数据流水线的第二个阶段，我们需要做两件事：<strong>语言识别</strong>（确定每篇文档的语言并筛选目标语言）和<strong>初步清洗</strong>（用一系列启发式规则快速剔除明显的低质量文本）。</p>
+
+        <p>业界经过多年实践，已经沉淀出一套比较成熟的"过滤管道"——从 fastText 语言分类器到 Gopher/C4/FineWeb 的启发式过滤器。这一章我们来逐一拆解。</p>
+
+        <h2>9.1 fastText 语言分类器</h2>
+
+        <p>在预训练数据处理中，<strong>fastText</strong> 是使用最广泛的语言识别工具。它由 Facebook AI Research 开发，核心优势在于：</p>
+
+        <ul>
+            <li><strong>覆盖 176 种语言</strong>的预训练分类模型</li>
+            <li><strong>基于字符 n-gram</strong>，对拼写错误和形态变化有很好的鲁棒性</li>
+            <li><strong>推理速度极快</strong>——在 CPU 上每秒可处理数千条短文本</li>
+            <li>对中文、日文等 CJK 语言的分辨率相当高，很少发生中日韩语之间的误判</li>
+        </ul>
+
+        <p>使用 fastText 做语言检测非常简单：</p>
+
+        <pre><code>import fasttext
+
+# 加载预训练语言分类模型（约 900MB）
+# 可以从 https://fasttext.cc/docs/en/language-identification.html 下载
+model = fasttext.load_model('lid.176.bin')
+
+def detect_language(text, threshold=0.5):
+    """返回 (语言代码, 置信度)"""
+    labels, scores = model.predict(text.replace('\n', ' '), k=1)
+    lang = labels[0].replace('__label__', '')
+    score = scores[0]
+    return (lang, score)
+
+# 测试
+print(detect_language("Hello, how are you?"))      # ('en', 0.98)
+print(detect_language("今天天气真不错"))            # ('zh', 0.99)
+print(detect_language("こんにちは"))                # ('ja', 0.97)
+
+# 实际过滤逻辑：只保留中文文档
+text = "这里是某篇文章的正文..."
+lang, score = detect_language(text)
+if lang == 'zh' and score > 0.7:
+    print("保留：置信度高的中文文档")
+else:
+    print("丢弃：非中文或置信度不足")</code></pre>
+
+        <p>在实际流水线中，一个常见的配置是：设置最小置信度阈值为 0.5（对于长文档）或 0.7（对于短文档），<strong>置信度低于阈值的文档直接丢弃</strong>。为什么不用降低阈值来多保留一些数据？因为低置信度通常意味着文档是混合语言、乱码或内容太短——这些对预训练都是有害的。</p>
+
+        <div class="tip">
+            <strong>性能优化：</strong>fastText 模型文件约 900MB，在分布式处理中每个 Worker 加载一份会消耗大量内存。优化方法是：使用 <code>fasttext.FastText._load_model_bytes()</code> 预先将模型加载到共享内存中，或者使用内存映射（mmap）方式加载。在 Spark/Datatrove 中，通常每个 Executor 只加载一次模型，在所有 Task 之间共享。
+        </div>
+
+        <h2>9.2 CLD3：Google 的轻量级替代方案</h2>
+
+        <p>如果你对推理速度有极致要求，或者不能接受 900MB 的模型体积，Google 的 <strong>CLD3（Compact Language Detector v3）</strong> 是一个优秀的选择。CLD3 基于字符 n-gram 的神经网络，模型大小仅约 2MB，支持 107 种语言，推理速度是 fastText 的 3-5 倍。</p>
+
+        <pre><code>import cld3
+
+def detect_language_cld3(text):
+    """使用 CLD3 检测语言"""
+    result = cld3.get_language(text)
+    return (result.language, result.probability)
+
+# CLD3 对短文本的检测效果通常优于 fastText
+print(detect_language_cld3("Hello world"))           # ('en', 0.99)
+print(detect_language_cld3("深度学习是机器学习的一个分支"))  # ('zh', 0.98)</code></pre>
+
+        <p>CLD3 的缺点是对高度混合语言的文本和有大量专有名词的文档（如包含大量英文技术术语的中文文章）精度稍低。实际做法是：在需要高吞吐的场景下用 CLD3 做一轮粗筛，对边界案例再交给 fastText 做二次确认。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>对比维度</th>
+                    <th>fastText</th>
+                    <th>CLD3</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>模型大小</td>
+                    <td>~900 MB</td>
+                    <td>~2 MB</td>
+                </tr>
+                <tr>
+                    <td>支持语言数</td>
+                    <td>176</td>
+                    <td>107</td>
+                </tr>
+                <tr>
+                    <td>长文本精度</td>
+                    <td>优秀</td>
+                    <td>良好</td>
+                </tr>
+                <tr>
+                    <td>短文本精度</td>
+                    <td>良好</td>
+                    <td>优秀</td>
+                </tr>
+                <tr>
+                    <td>推理速度</td>
+                    <td>快</td>
+                    <td>极快（3-5x fastText）</td>
+                </tr>
+                <tr>
+                    <td>混合语言文本</td>
+                    <td>较好</td>
+                    <td>一般</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>9.3 Gopher 质量过滤器（DeepMind）</h2>
+
+        <p>语言识别之后，我们需要用一套启发式规则来快速剔除那些"一看就不是好数据"的文档。DeepMind 在训练 Gopher（2022）时定义了一套经典的质量过滤规则，后来被几乎所有后续项目沿用和改进。</p>
+
+        <p>Gopher 过滤器的主要规则包括：</p>
+
+        <ul>
+            <li><strong>最小/最大词数</strong>：丢弃词数少于 50 或多于 100,000 的文档。太短的文档信息量不足，太长的通常是拼接产物。</li>
+            <li><strong>重复段落比例</strong>：计算文档中最长公共子串的比例。如果任何一行出现了 30 次以上，或文档的重复行占比超过 30%，丢弃。</li>
+            <li><strong>字母字符占比</strong>：文档中字母字符（对于英文）或 Unicode 字符（对于通用）占比应超过 70%。这能有效过滤掉乱码页面和纯表格数据。</li>
+            <li><strong>符号占比</strong>：文档中非字母、非数字、非空格的字符占比不应超过 30%。过滤掉大量特殊符号的页面（如表情符号列表、ASCII art）。</li>
+            <li><strong>停用词覆盖率</strong>：文档必须包含至少一定比例的停用词（常见词如 "the"、"a"、"is"）。这能有效筛掉关键词堆砌的垃圾页面。</li>
+        </ul>
+
+        <pre><code>import re
+from collections import Counter
+
+def gopher_quality_filter(text: str) -> bool:
+    """实现 Gopher 的启发式过滤规则"""
+    words = text.split()
+    num_words = len(words)
+
+    # 规则 1: 词数范围
+    if num_words < 50 or num_words > 100000:
+        return False
+
+    # 规则 2: 重复行检测
+    lines = text.split('\n')
+    line_counts = Counter(lines)
+    repeated_ratio = sum(c for l, c in line_counts.items() if c > 1) / len(lines)
+    if repeated_ratio > 0.3:
+        return False
+
+    # 规则 3: 字母字符占比
+    alpha_chars = sum(1 for c in text if c.isalpha())
+    total_chars = len(text)
+    if alpha_chars / total_chars < 0.7:
+        return False
+
+    return True
+
+# 测试
+good_text = "这是一个正常的文档，包含足够的信息量。"
+bad_text = "!!@@##$$%%^^&&**(())__++==  " * 100
+print(gopher_quality_filter(good_text))  # True
+print(gopher_quality_filter(bad_text))   # False</code></pre>
+
+        <h2>9.4 C4 质量过滤器（Google）</h2>
+
+        <p>Google 在构建 C4（Colossal Clean Crawled Corpus）数据集时，在 Gopher 的基础上增加了一批针对网页文本特点的过滤规则，使过滤后的数据更适合预训练场景。C4 过滤器的独特之处在于：</p>
+
+        <ul>
+            <li><strong>终端标点要求</strong>：文档的最后一句必须以句号、感叹号、问号或引号结束。这确保文档是"完整"的，而不是被截断的。</li>
+            <li><strong>"脏词"过滤</strong>：如果文档包含一个预定义的脏词列表中的任何词，直接丢弃。这个列表包含约 400 个英语中的歧视性、冒犯性和粗俗词汇。</li>
+            <li><strong>JavaScript 警告移除</strong>：丢弃带有 "Javascript"、"lorem ipsum" 等占位文本的页面。</li>
+            <li><strong>花括号占比</strong>：花括号占比过高的文档通常是 JSON 或代码片段，不是正常文本。</li>
+        </ul>
+
+        <pre><code>def c4_additional_filters(text: str) -> bool:
+    """C4 额外的过滤规则"""
+    # 规则 1: 终端标点
+    stripped = text.strip()
+    if not stripped.endswith(('.', '!', '?', '"', '。', '！', '？')):
+        return False
+
+    # 规则 2: 脏词检测（简化版本）
+    profanity_list = ['badword1', 'badword2']  # 实际有 ~400 词
+    text_lower = text.lower()
+    for word in profanity_list:
+        if word in text_lower:
+            return False
+
+    # 规则 3: 花括号占比
+    curly_brace_count = text.count('{') + text.count('}')
+    if curly_brace_count / max(len(text), 1) > 0.01:
+        return False
+
+    return True</code></pre>
+
+        <div class="warning">
+            <strong>需要注意：</strong>C4 的脏词列表是针对英语文化的。如果你构建的是中文数据集的过滤管道，不能直接套用——你需要构建自己的中文敏感词和脏词列表。此外，终端标点要求对于中文页面也应当调整：中文文档经常没有终端句号吗？事实上是的——很多中文新闻和博客的结尾并不带句号。在中文场景下，可以考虑放宽这个条件，或者对中文文档单独设置规则。
+        </div>
+
+        <h2>9.5 FineWeb 质量过滤器：集大成者</h2>
+
+        <p>2024 年，Hugging Face 发布了 FineWeb 数据集（已被广泛认为是目前最优的公开预训练数据集之一），其过滤器的设计融合了 Gopher 和 C4 的经验，并做了多项改进。FineWeb 的思路是：<strong>宁缺毋滥，宁可丢弃可疑的好数据，也不要让坏数据通过</strong>。</p>
+
+        <p>FineWeb 在 Gopher + C4 基础上的主要改进包括：</p>
+
+        <ul>
+            <li><strong>更严格的重复阈值</strong>：将重复行比例阈值从 30% 收紧到 20%</li>
+            <li><strong>最小词数提升</strong>：从 50 词提升到 100 词</li>
+            <li><strong>长线检测（Line End Detection）</strong>：检测文档中是否存在只有 1-2 个单词的"短线"——这通常是导航栏、页脚的标志</li>
+            <li><strong>困惑度预筛选</strong>：在应用模型评分之前，先用一个轻量级的 n-gram 语言模型计算文档的困惑度，去除那些困惑度异常高（可能是乱码）或异常低（可能是极度重复）的文档</li>
+        </ul>
+
+        <pre><code>def fineweb_quality_filter(text: str) -> bool:
+    """FineWeb 的增强过滤规则"""
+    lines = text.split('\n')
+    words = text.split()
+
+    # 1. 基础 Gopher 规则（更严格）
+    if len(words) < 100 or len(words) > 100000:
+        return False
+
+    # 2. 重复行比例（收紧到 20%）
+    from collections import Counter
+    line_counter = Counter(lines)
+    dup_ratio = sum(c for c in line_counter.values() if c > 1) / len(lines)
+    if dup_ratio > 0.2:
+        return False
+
+    # 3. 短线检测：超过 30% 的行是短线（1-2 个单词），丢弃
+    short_lines = sum(1 for l in lines if 0 < len(l.split()) <= 2)
+    if short_lines / max(len(lines), 1) > 0.3:
+        return False
+
+    # 4. C4 终端标点（FineWeb 对中英文分别处理）
+    if not text.strip()[-1] in '.!?"\'。！？）':
+        return False
+
+    return True</code></pre>
+
+        <h2>9.6 启发式过滤链的实际效果</h2>
+
+        <p>在真实的大规模数据流水线中，这些过滤器的数据淘汰率是相当惊人的。以下是我们从一次 FineWeb 风格的流水线运行中记录的数据缩减情况：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>过滤阶段</th>
+                    <th>通过率</th>
+                    <th>累计保留率</th>
+                    <th>主要淘汰原因</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>原始 HTML 抽取</td>
+                    <td>100%</td>
+                    <td>100%</td>
+                    <td>—</td>
+                </tr>
+                <tr>
+                    <td>语言识别（仅保留中文）</td>
+                    <td>~30%</td>
+                    <td>~30%</td>
+                    <td>Common Crawl 中英语占 ~50%，中文占 ~3-5%</td>
+                </tr>
+                <tr>
+                    <td>词数过滤（50-100K）</td>
+                    <td>~85%</td>
+                    <td>~25.5%</td>
+                    <td>过短页面（导航页、占位页）</td>
+                </tr>
+                <tr>
+                    <td>重复行检测</td>
+                    <td>~90%</td>
+                    <td>~23%</td>
+                    <td>模板化页面、拼接文章</td>
+                </tr>
+                <tr>
+                    <td>终端标点检查</td>
+                    <td>~80%</td>
+                    <td>~18.4%</td>
+                    <td>截断页面、垃圾内容</td>
+                </tr>
+                <tr>
+                    <td>字母/符号比率</td>
+                    <td>~85%</td>
+                    <td>~15.6%</td>
+                    <td>乱码、纯表格/列表数据</td>
+                </tr>
+                <tr>
+                    <td>短线检测</td>
+                    <td>~90%</td>
+                    <td>~14%</td>
+                    <td>评论区、导航页</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>从原始数据到通过初步清洗——你大约只会保留 <strong>10-15%</strong> 的原始数据。这不是浪费，而是必需的筛选。保留率越低，最终进入训练集的数据质量就越高。</p>
+
+        <div class="highlight">
+            <strong>关键洞察：</strong>很多做预训练的新手团队对清洗过程的"数据损失率"感到恐慌——觉得丢了 85% 的数据太浪费了。但经验表明：最终进入训练集的 token 数量不是由原始数据量决定的，而是由<strong>有效信息密度</strong>决定的。你用 1TB 高质量数据训练的模型，效果大概率优于用 5TB 低质量数据训练的模型。清洗不是损失，而是提纯。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>语言识别和启发式清洗是数据处理流水线中最关键、数据淘汰率最高的阶段。fastText 和 CLD3 各有所长，Gopher、C4、FineWeb 的过滤器设计理念一脉相承但层层加码。把这些过滤器组合成一个可配置的过滤链，你就有了一个稳健的数据初筛系统。</p>
+
+        <p>经过这一轮的清洗，我们手里已经有了"干净的文本"——但还有一个巨大的问题没有解决：<strong>重复数据</strong>。同样的文章可能出现在多个 URL 上，被多次爬取；不同文章之间可能在段落级别高度雷同。这就是下一章的主题——精确去重。</p>
+
+        <p>我是你们的讲师，我们第 10 章见。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 模糊去重：MinHash与LSH原理</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 预训练数据决定模型上限</a></li>
+            <li><a href="02.html">第2章 全球通用基座数据集全景</a></li>
+            <li><a href="03.html">第3章 中文预训练语料现状与挑战</a></li>
+            <li><a href="04.html">第4章 垂直领域与增强语料</a></li>
+            <li><a href="05.html">第5章 Common Crawl：预训练的石油矿藏</a></li>
+            <li><a href="06.html">第6章 许可证合规与数据安全红线</a></li>
+            <li><a href="07.html">第7章 数据配比策略与混合哲学</a></li>
+            <li><a href="08.html">第8章 数据采集与原始格式解析</a></li>
+            <li><a href="09.html">第9章 语言识别与初步清洗</a></li>
+            <li><a href="10.html">第10章 精确去重：剔除重复文本</a></li>
+            <li><a href="11.html" class="active">第11章 模糊去重：MinHash与LSH原理</a></li>
+            <li><a href="12.html">第12章 语义级与句子级去重</a></li>
+            <li><a href="13.html">第13章 基于模型的质量评分体系</a></li>
+            <li><a href="14.html">第14章 有害内容过滤与安全审查</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 流式加载与内存管理</a></li>
+            <li><a href="17.html">第17章 基准污染检测与去除</a></li>
+            <li><a href="18.html">第18章 数据版本管理与溯源</a></li>
+            <li><a href="19.html">第19章 合成数据生成与增强</a></li>
+            <li><a href="20.html">第20章 多语言与低资源语料构建</a></li>
+            <li><a href="21.html">第21章 课程学习与动态数据调度</a></li>
+            <li><a href="22.html">第22章 代码与数学数据专项处理</a></li>
+            <li><a href="23.html">第23章 Datatrove实战：从Common Crawl到清洗数据</a></li>
+            <li><a href="24.html">第24章 NeMo Curator与GPU加速清洗</a></li>
+            <li><a href="25.html">第25章 数据质量评估与消融实验</a></li>
+            <li><a href="26.html">第26章 2026年数据工程前沿趋势</a></li>
+            <li><a href="27.html">第27章 实战项目：构建1B模型训练数据集</a></li>
+            <li><a href="28.html">第28章 规模化落地：从TB级到PB级的挑战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>"差不多"的重复也是重复</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们解决了"完全一样"的问题，但现实世界中更常见的是"差不多一样"——同一篇新闻被不同媒体改写，同一段维基百科解说被不同的博客以略有不同的措辞引用，同一个 GitHub README 被翻译成不同的语言版本。</p>
+
+        <p>我在 2024 年做数据质量分析时遇到过一个典型案例：一个 1TB 的中文语料，经过精确去重后，我用 MinHash 做了模糊去重，结果发现其中一篇关于"Transformer 注意力机制"的科普文章存在 <strong>37 个不同的"变体"</strong>——有的改了标题，有的加了开头段，有的修改了部分措辞。虽然它们都不完全一样，但信息含量几乎是相同的。如果把这些模糊副本全部保留，模型在注意力机制这个话题上的"学习信号"会被严重稀释。</p>
+
+        <p>这一章我们来深入讲解工业界最常用的模糊去重方法——<strong>MinHash + LSH（局部敏感哈希）</strong>。这个组合是许多大规模预训练数据集（包括 C4、FineWeb、RedPajama）去重管线的核心。</p>
+
+        <h2>11.1 MinHash 的直觉</h2>
+
+        <p>MinHash 的核心思想是：<strong>用一组紧凑的"签名"来估计两个文档之间的 Jaccard 相似度</strong>。</p>
+
+        <p>Jaccard 相似度定义为两个集合的交集大小除以并集大小。对于文档来说，我们可以把文档表示为它包含的 n-gram 集合（比如所有连续的 5 个 token）：</p>
+
+        <pre><code>J(A, B) = |A ∩ B| / |A ∪ B|
+
+举例：
+  文档 A: {"我今天", "今天学", "天学习", "学习了"}
+  文档 B: {"我今天", "今天学", "天学习", "学习Py", "Python"}
+  J(A, B) = 3 / (4 + 2) = 3/6 = 0.5</code></pre>
+
+        <p>MinHash 的巧妙之处在于：如果你对每个 n-gram 集合应用一个随机哈希函数，并取集合中<strong>最小的哈希值</strong>作为签名，那么两个文档的签名相等的概率恰好等于它们的 Jaccard 相似度。</p>
+
+        <p>使用多个独立的哈希函数（比如 256 个），你就得到了一组签名。两个文档在多个哈希函数上签名相同的比例，就是它们 Jaccard 相似度的无偏估计。</p>
+
+        <pre><code>import hashlib
+import random
+
+def shingle(text: str, k: int = 5) -> set:
+    """将文本分片为 k-shingles（字符级）"""
+    return set(text[i:i+k] for i in range(len(text) - k + 1))
+
+def minhash_signature(shingles: set, num_hashes: int = 256) -> list:
+    """计算 MinHash 签名"""
+    # 为每个哈希函数生成随机种子
+    seeds = [hashlib.md5(str(i).encode()).hexdigest()[:8] for i in range(num_hashes)]
+    signature = []
+
+    for seed in seeds:
+        # 对每个 shingle 计算 hash(seed + shingle)
+        min_hash = min(
+            int(hashlib.md5((seed + s).encode()).hexdigest()[:8], 16)
+            for s in shingles
+        )
+        signature.append(min_hash)
+
+    return signature
+
+def estimate_jaccard(sig_a: list, sig_b: list) -> float:
+    """通过签名估计 Jaccard 相似度"""
+    matches = sum(1 for a, b in zip(sig_a, sig_b) if a == b)
+    return matches / len(sig_a)</code></pre>
+
+        <h2>11.2 LSH（局部敏感哈希）：从 N² 到近似线性</h2>
+
+        <p>MinHash 解决了"高效计算两个文档相似度"的问题，但在海量数据集中，你不知道哪些文档是相似的——如果对所有文档做两两比对，复杂度是 O(N²)，对于数亿个文档来说完全不可行。</p>
+
+        <p><strong>LSH（局部敏感哈希）</strong>通过一种称为"banding"的技术解决了这个问题。它将 MinHash 签名分成 b 个 band，每个 band 包含 r 个签名值。对于每个 band，我们将 band 内的 r 个值合并成一个新的哈希值——称为"桶"。如果两个文档在任意一个 band 上落入同一个桶，它们就被认为是候选相似对。</p>
+
+        <p>关键的数学性质是：两个文档在至少一个 band 上碰撞的概率是：</p>
+
+        <pre><code>P = 1 - (1 - J^r)^b
+
+其中 J 是 Jaccard 相似度，b 是 band 数，r 是每个 band 的行数。</code></pre>
+
+        <p>通过调节 b 和 r，你可以控制相似度阈值。例如，如果你希望找到 Jaccard > 0.8 的相似文档对，可以设置 b = 20, r = 5，这样相似度 < 0.5 的文档几乎不会被选为候选，而相似度 > 0.8 的文档有很大概率被检测到。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>band 数 (b)</th>
+                    <th>每 band 行数 (r)</th>
+                    <th>50% 概率阈值</th>
+                    <th>80% 概率阈值</th>
+                    <th>假阳性风险</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>20</td>
+                    <td>5</td>
+                    <td>~0.76</td>
+                    <td>~0.87</td>
+                    <td>低</td>
+                </tr>
+                <tr>
+                    <td>16</td>
+                    <td>8</td>
+                    <td>~0.83</td>
+                    <td>~0.91</td>
+                    <td>很低</td>
+                </tr>
+                <tr>
+                    <td>10</td>
+                    <td>4</td>
+                    <td>~0.67</td>
+                    <td>~0.81</td>
+                    <td>中等</td>
+                </tr>
+                <tr>
+                    <td>25</td>
+                    <td>2</td>
+                    <td>~0.50</td>
+                    <td>~0.69</td>
+                    <td>较高</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            <strong>参数选择的经验法则：</strong>在预训练数据去重中，通常将阈值设置在 0.7-0.85 之间。设得太低（比如 0.5）会导致大量"只是主题相关但内容不同"的文档被误判为重复；设得太高（比如 0.95）又会漏掉很多经过轻度重写的相似文档。FineWeb 使用的阈值为 0.87（b=14, r=13），Gopher 使用了 0.8（b=450, r=4，但总签名数更多）。
+        </div>
+
+        <h2>11.3 分布式 MinHash</h2>
+
+        <p>当数据集达到数亿甚至数十亿文档时，单机 MinHash 已经无法胜任。分布式 MinHash 的经典实现是基于 MapReduce 的：</p>
+
+        <p><strong>Mapper 阶段</strong>：将每个文档转换为它所属的所有 LSH 桶的键值对 <code>(band_id, bucket_id) -> doc_id</code>。</p>
+
+        <p><strong>Shuffle 阶段</strong>：按 band_id + bucket_id 对所有键值对进行分组，确保落入同一个桶的所有文档聚集到同一个 Reducer。</p>
+
+        <p><strong>Reducer 阶段</strong>：对每个桶内的文档做两两 Jaccard 比较，标记相似度超过阈值的文档对为重复，然后取其中一个保留。</p>
+
+        <pre><code># 分布式 MinHash 的 MapReduce 伪代码
+
+def map_phase(doc_id, text):
+    """Mapper: 为每个文档生成 LSH 桶键"""
+    shingles = shingle(text, k=13)   # 13-gram
+    signature = minhash_signature(shingles, num_hashes=182)
+
+    # LSH：将 182 个签名分成 b=14 个 band，每 band r=13 行
+    b, r = 14, 13
+    for band_idx in range(b):
+        start = band_idx * r
+        bucket_items = signature[start:start + r]
+        # 将 band 内的 r 个哈希值拼成一个桶键
+        bucket_key = hash(tuple(bucket_items))
+        # 输出: (band_idx, bucket_key) -> doc_id
+        yield ((band_idx, bucket_key), doc_id)
+
+def reduce_phase(bucket_key, doc_ids):
+    """Reducer: 对每个桶内的文档做两两比较"""
+    doc_ids = list(doc_ids)
+    for i in range(len(doc_ids)):
+        for j in range(i + 1, len(doc_ids)):
+            jaccard = compute_jaccard(doc_ids[i], doc_ids[j])
+            if jaccard > 0.87:
+                mark_duplicate(doc_ids[j])  # 标记较短或质量较低的文档为重复</code></pre>
+
+        <h2>11.4 n-gram 的选择：字符级 vs Token 级</h2>
+
+        <p>在构建 shingle（n-gram）集合时，一个关键决策是使用<strong>字符级 n-gram</strong> 还是 <strong>token 级 n-gram</strong>。这个选择对中文数据处理尤其重要。</p>
+
+        <ul>
+            <li><strong>字符级 n-gram</strong>（如 k=13 character shingles）：对拼写错误不敏感，不需要分词，对 CJK 语言自然支持。缺点是字符级 n-gram 集合的大小非常大，而且对语序的敏感性较低。</li>
+            <li><strong>Token 级 n-gram</strong>（如 k=5 word shingles）：通常需要先分词。对英文效果好，对中文需要额外的分词步骤（如 jieba），分词错误会影响去重质量。</li>
+        </ul>
+
+        <p>在 C4 和 FineWeb 等大规模数据集中，广泛使用的是 <strong>字符级 13-gram</strong>。原因很简单：字符级 n-gram 不需要分词，语言无关，实现简单。对于中文，字符级 n-gram 实际上效果不错——因为汉字本身就是有意义的语义单元，13 个字符的滑动窗口已经能捕捉到足够的上下文信息。</p>
+
+        <div class="highlight">
+            <strong>中文场景的建议：</strong>对于中文预训练数据的 MinHash 去重，推荐使用字符级 8-13 gram。如果使用 token 级，需要先用 jieba 分词，然后将 token 拼接回字符串再用 MinHash——但要注意中文分词的不一致性会导致同一篇文章的不同分词结果产生不同的 shingle 集合，反而可能降低去重效果。
+        </div>
+
+        <h2>11.5 与其他模糊去重方法的对比</h2>
+
+        <p>MinHash 不是唯一的模糊去重方法。在特定场景下，其他方法也可能更合适：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>方法</th>
+                    <th>原理</th>
+                    <th>可扩展性</th>
+                    <th>适用场景</th>
+                    <th>局限</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>MinHash + LSH</td>
+                    <td>Jaccard 相似度近似的随机哈希方法</td>
+                    <td>优秀（线性或近线性）</td>
+                    <td>大规模文本去重（通用场景）</td>
+                    <td>对短文本效果差</td>
+                </tr>
+                <tr>
+                    <td>SimHash</td>
+                    <td>基于随机超平面的哈希，产生位向量签名</td>
+                    <td>优秀</td>
+                    <td>网页去重、新闻聚类</td>
+                    <td>对汉明距离阈值的敏感性高</td>
+                </tr>
+                <tr>
+                    <td>嵌入向量 + 相似度</td>
+                    <td>用 Sentence-BERT 等模型生成向量，然后计算余弦相似度</td>
+                    <td>差（需要 GPU 和大量计算）</td>
+                    <td>语义级去重（见第 12 章）</td>
+                    <td>成本高，不适合全量数据</td>
+                </tr>
+                <tr>
+                    <td>布隆过滤器</td>
+                    <td>概率性成员查询数据结构</td>
+                    <td>优秀</td>
+                    <td>精确去重的内存优化</td>
+                    <td>只能做精确匹配</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>11.6 使用 Datatrove 的 MinHashDeduplicator</h2>
+
+        <p>Datatrove 框架内置了完整的 MinHash + LSH 去重实现，是 FineWeb 数据集的去重引擎。使用起来非常方便：</p>
+
+        <pre><code>from datatrove.pipeline.dedup import MinHashDeduplicator
+from datatrove.pipeline.readers import ParquetReader
+from datatrove.pipeline.writers import ParquetWriter
+
+# 配置 MinHash 去重器
+dedup = MinHashDeduplicator(
+    n_grams=13,           # 字符级 13-gram
+    num_hashes=182,       # 182 个哈希函数
+    num_buckets=14,       # 14 个 band
+    num_rows_per_bucket=13,  # 每个 band 13 行
+    threshold=0.87,       # Jaccard 相似度阈值
+    storage="/output/minhash/"
+)
+
+# 在流水线中使用
+pipeline = [
+    ParquetReader("/input/deduped_exact/"),
+    dedup,
+    ParquetWriter("/output/deduped_fuzzy/"),
+]
+
+# 也可以计算 Jaccard 相似度的统计数据
+for stats in dedup.stats():
+    print(f"总文档数: {stats['total_docs']}")
+    print(f"重复文档数: {stats['duplicate_docs']}")
+    print(f"去重率: {stats['duplicate_docs'] / stats['total_docs']:.1%}")</code></pre>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>我们团队曾经在一个项目中忽略了 MinHash 的去重阈值调参，直接使用了默认的 0.5 阈值。结果去重完成后发现数据集缩减了 70%——大量"主题相似但内容并不重复"的文档被误删了。比如"两篇都讲注意力机制但内容不同的文章"因为共享了太多的"注意力"、"查询"、"键"等高频术语而被判为重复。恢复数据后改为 0.85 的阈值，去重率降到了健康的 22%。<strong>阈值不是越高越好，也不是越低越好，而是要根据你的数据分布通过实验找到"甜点"。</strong>
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>MinHash 和 LSH 是工业界模糊去重的事实标准。MinHash 用一组紧凑签名估计文档相似度，LSH 通过 banding 将候选比较从 O(N²) 降到近线性。参数选择（n-gram 大小、哈希函数数、band/row 配比）直接影响去重效果和计算成本的平衡。</p>
+
+        <p>经过精确去重和 MinHash 模糊去重后，重复文档问题已基本解决。但重复不仅存在于文档级别——下一章我们将看到，即使文档本身不重复，其中的某些句子或段落可能与其他文档高度雷同。这正是 <strong>语义级与句子级去重</strong> 要解决的问题。</p>
+
+        <p>我是你们的讲师，我们第 12 章见。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

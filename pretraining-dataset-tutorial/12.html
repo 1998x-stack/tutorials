@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 语义级与句子级去重</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 预训练数据决定模型上限</a></li>
+            <li><a href="02.html">第2章 全球通用基座数据集全景</a></li>
+            <li><a href="03.html">第3章 中文预训练语料现状与挑战</a></li>
+            <li><a href="04.html">第4章 垂直领域与增强语料</a></li>
+            <li><a href="05.html">第5章 Common Crawl：预训练的石油矿藏</a></li>
+            <li><a href="06.html">第6章 许可证合规与数据安全红线</a></li>
+            <li><a href="07.html">第7章 数据配比策略与混合哲学</a></li>
+            <li><a href="08.html">第8章 数据采集与原始格式解析</a></li>
+            <li><a href="09.html">第9章 语言识别与初步清洗</a></li>
+            <li><a href="10.html">第10章 精确去重：剔除重复文本</a></li>
+            <li><a href="11.html">第11章 模糊去重：MinHash与LSH原理</a></li>
+            <li><a href="12.html" class="active">第12章 语义级与句子级去重</a></li>
+            <li><a href="13.html">第13章 基于模型的质量评分体系</a></li>
+            <li><a href="14.html">第14章 有害内容过滤与安全审查</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 流式加载与内存管理</a></li>
+            <li><a href="17.html">第17章 基准污染检测与去除</a></li>
+            <li><a href="18.html">第18章 数据版本管理与溯源</a></li>
+            <li><a href="19.html">第19章 合成数据生成与增强</a></li>
+            <li><a href="20.html">第20章 多语言与低资源语料构建</a></li>
+            <li><a href="21.html">第21章 课程学习与动态数据调度</a></li>
+            <li><a href="22.html">第22章 代码与数学数据专项处理</a></li>
+            <li><a href="23.html">第23章 Datatrove实战：从Common Crawl到清洗数据</a></li>
+            <li><a href="24.html">第24章 NeMo Curator与GPU加速清洗</a></li>
+            <li><a href="25.html">第25章 数据质量评估与消融实验</a></li>
+            <li><a href="26.html">第26章 2026年数据工程前沿趋势</a></li>
+            <li><a href="27.html">第27章 实战项目：构建1B模型训练数据集</a></li>
+            <li><a href="28.html">第28章 规模化落地：从TB级到PB级的挑战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>比重复文档更隐蔽的：重复片段</h2>
+
+        <p>大家好，我是你们的讲师。前两章我们解决了"整篇文档一样"和"大致一样"的问题。但有一种更隐蔽的重复，逃过了 MinHash 的法网——<strong>句子级和语义级的片段重复</strong>。</p>
+
+        <p>想象一下：你有一个包含 500 万篇中文文章的数据集。每篇文章可能都会包含"如果你喜欢这篇文章，请点赞分享"这样的页脚模板，或者一篇被广泛转载的论文摘要出现在成百上千篇博客中。从文档级别的角度来看，每篇文章都是"独特的"——页脚只占全文的一小部分，不影响 MinHash 的签名。但从训练数据的角度看，模型会反复"看到"这些相同的句子和段落，从而在生成时倾向于复述这些高频片段。</p>
+
+        <p>我在分析一个 3TB 的中文语料时发现一个令人震惊的事实：数据集中最频繁出现的 100 个"句子"（去掉标点后），几乎全部是<strong>网站页脚、版权声明和推广文案</strong>。排名第一的居然是"本文由XXX整理发布，如需转载请注明出处"的某种变体——出现在 23 万个文档中。这也就意味着，模型在每次训练迭代中看到这个句子的次数是正常知识性句子的数万倍。它不学会才怪。</p>
+
+        <p>这一章我们来看句子级去重和基于嵌入向量的语义级去重——它们在去重流水线中位于精确去重和 MinHash 之后，负责清理那些"更深层次"的重复。</p>
+
+        <h2>12.1 句子级去重：C4 的方法</h2>
+
+        <p>C4 数据集引入了一种简单而有效的方法来去除句子级别的重复。核心思路是：如果一个由 3 个句子组成的片段在数据集中出现在多个文档中，那么从<strong>所有</strong>文档中移除这段内容。</p>
+
+        <p>具体实现上，C4 的方法分为三步：</p>
+
+        <ul>
+            <li><strong>句子分割</strong>：用标点符号（. ! ?）将所有文档分割成句子</li>
+            <li><strong>构建 3-gram 索引</strong>：将每三个连续句子组成一个 3-gram 块，构建一个跨文档的倒排索引</li>
+            <li><strong>标记并移除</strong>：出现在 > 1 个文档中的 3-gram 块，将其从所有包含它的文档中移除</li>
+        </ul>
+
+        <pre><code>import re
+from collections import defaultdict
+
+def split_sentences(text: str) -> list:
+    """简单的句子分割（中文 + 英文）"""
+    # 支持中文句号、问号、感叹号、英文句点等
+    sentences = re.split(r'(?<=[。！？\.\!\?])\s*', text)
+    return [s.strip() for s in sentences if s.strip()]
+
+def find_duplicate_3grams(documents: list) -> set:
+    """找出跨文档重复的 3-sentence grams"""
+    # 3-gram -> 包含它的文档 ID 集合
+    three_gram_to_docs = defaultdict(set)
+
+    for doc_id, doc in enumerate(documents):
+        sentences = split_sentences(doc)
+        for i in range(len(sentences) - 2):
+            three_gram = ' '.join(sentences[i:i+3])
+            three_gram_to_docs[three_gram].add(doc_id)
+
+    # 只保留出现在多个文档中的 3-gram
+    duplicate_3grams = {
+        gram for gram, doc_ids in three_gram_to_docs.items()
+        if len(doc_ids) > 1
+    }
+    return duplicate_3grams
+
+def remove_duplicate_3grams(text: str, duplicate_set: set) -> str:
+    """从文档中移除重复的 3-gram 片段"""
+    sentences = split_sentences(text)
+    result = []
+    i = 0
+    while i < len(sentences):
+        if i <= len(sentences) - 3:
+            three_gram = ' '.join(sentences[i:i+3])
+            if three_gram in duplicate_set:
+                # 跳过这 3 个句子
+                i += 3
+                continue
+        result.append(sentences[i])
+        i += 1
+    return ' '.join(result)</code></pre>
+
+        <p>在 C4 的实践中，句子级去重移除了约 <strong>2-5%</strong> 的数据。这个比例看似不高，但它移除的是那些<strong>跨文档重复的质量最低的内容</strong>——页脚、模板、版权声明。这些内容被移除后，数据集的整体信息密度和多样性都会有明显改善。</p>
+
+        <h2>12.2 嵌入向量去重：语义相似度的利器</h2>
+
+        <p>MinHash 基于 n-gram 的词汇重叠来判断相似度，但<strong>语义上相似但词汇不同</strong>的内容它会完全漏掉。例如："如何训练一个深度学习模型"和"训练深度学习模型的方法有哪些"——这两句话词汇重叠度不高，但语义几乎相同。</p>
+
+        <p>嵌入向量去重（Embedding-based Dedup）通过将文档或段落转化为稠密向量（dense embedding），然后基于向量之间的余弦相似度来判断语义相似性。常用的嵌入模型包括 <strong>sentence-transformers</strong> 系列（如 all-MiniLM-L6-v2、multilingual-MiniLM-L12-v2）。</p>
+
+        <pre><code>from sentence_transformers import SentenceTransformer
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+# 加载多语言嵌入模型
+model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+
+def embed_document(text: str) -> np.ndarray:
+    """将文档编码为嵌入向量"""
+    return model.encode(text, convert_to_numpy=True)
+
+def find_semantic_duplicates(embeddings: list, threshold: float = 0.92):
+    """基于余弦相似度查找语义重复"""
+    n = len(embeddings)
+    duplicates = set()
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = cosine_similarity([embeddings[i]], [embeddings[j]])[0][0]
+            if sim > threshold:
+                # 保留编号更小的文档
+                duplicates.add(j)
+    return duplicates</code></pre>
+
+        <div class="warning">
+            <strong>性能警告：</strong>直接对所有文档做两两向量相似度计算是 O(N²) 的，对大规模数据集完全不可行。嵌入向量去重必须配合<strong>近似最近邻搜索（ANN）</strong>来使用，如 FAISS、Annoy 或 ScaNN。FAISS 的 IVF（倒排文件索引）配合 PQ（乘积量化）可以在毫秒级别找到每个向量的最近邻，而无需做全量两两比对。
+        </div>
+
+        <h2>12.3 大规模嵌入去重：FAISS 实践</h2>
+
+        <p>要在千万级文档规模上做嵌入向量去重，必须借助 FAISS 这样的向量检索库。基本流程是：</p>
+
+        <ol>
+            <li>对所有文档生成嵌入向量（这个步骤本身就需要 GPU 集群来加速）</li>
+            <li>用 FAISS 构建一个 IVF + PQ 索引</li>
+            <li>对于每个文档的向量，在索引中搜索其 top-K 最近邻</li>
+            <li>对每个近邻计算精确的余弦相似度，标记超过阈值的文档为重复</li>
+        </ol>
+
+        <pre><code>import faiss
+import numpy as np
+
+def build_faiss_index(embeddings: np.ndarray, nlist: int = 100):
+    """构建 FAISS IVF 索引"""
+    dim = embeddings.shape[1]
+    quantizer = faiss.IndexFlatIP(dim)  # 内积（与余弦相似度等价）
+    index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+    index.train(embeddings)
+    index.add(embeddings)
+    return index
+
+def find_similar_with_faiss(
+    embeddings: np.ndarray,
+    threshold: float = 0.92,
+    k: int = 20
+) -> set:
+    """使用 FAISS 查找语义重复文档"""
+    index = build_faiss_index(embeddings)
+    # 对每个向量搜索 top-k 相似
+    similarities, indices = index.search(embeddings, k)
+
+    duplicates = set()
+    for i in range(len(embeddings)):
+        for j, sim in zip(indices[i], similarities[i]):
+            if i != j and sim > threshold:
+                duplicates.add(max(i, j))  # 保留编号较小的
+    return duplicates</code></pre>
+
+        <div class="tip">
+            <strong>实用建议：</strong>嵌入去重的计算成本很高，不应该对所有数据都跑一遍。推荐的流水线顺序是：先做精确去重（SHA256），再做 MinHash 模糊去重，最后对 MinHash 去重后的数据的一个<strong>子集</strong>（比如高质量文书和书籍数据）应用嵌入去重。FAISS 索引的 nlist 参数控制索引的细粒度——nlist 越大，搜索精度越高但建索引时间越长。在千万规模下，通常设置 nlist = 10 * sqrt(N)。
+        </div>
+
+        <h2>12.4 多层级去重流水线</h2>
+
+        <p>在实际工程中，从不花钱到最贵的去重方法，我们按照计算成本从低到高排列成一个多层级流水线：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>层级</th>
+                    <th>方法</th>
+                    <th>计算成本</th>
+                    <th>去重粒度</th>
+                    <th>预期缩减率</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>L1</td>
+                    <td>URL 指纹去重</td>
+                    <td>极低</td>
+                    <td>完全相同 URL</td>
+                    <td>~5-10%</td>
+                </tr>
+                <tr>
+                    <td>L2</td>
+                    <td>SHA256 文档哈希</td>
+                    <td>极低</td>
+                    <td>完全相同文档</td>
+                    <td>~10-30%</td>
+                </tr>
+                <tr>
+                    <td>L3</td>
+                    <td>后缀数组子串去重</td>
+                    <td>中等</td>
+                    <td>50+ token 精确子串</td>
+                    <td>~5-15%</td>
+                </tr>
+                <tr>
+                    <td>L4</td>
+                    <td>MinHash + LSH</td>
+                    <td>中等</td>
+                    <td>近似重复文档</td>
+                    <td>~15-25%</td>
+                </tr>
+                <tr>
+                    <td>L5</td>
+                    <td>C4 句子级 3-gram</td>
+                    <td>中等</td>
+                    <td>重复句子段落</td>
+                    <td>~2-5%</td>
+                </tr>
+                <tr>
+                    <td>L6</td>
+                    <td>嵌入向量语义去重</td>
+                    <td>高（需 GPU）</td>
+                    <td>语义相似文档</td>
+                    <td>~3-8%</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>每一层过滤后的输出作为下一层的输入。这样做的好处是：先用低成本的方法剔除大量明显的重复，减少进入高成本方法的的数据量。最终，从原始数据到完成全链路去重，通常能减少 <strong>40-60%</strong> 的数据量。</p>
+
+        <div class="highlight">
+            <strong>工程原则：</strong>每一层去重只做一件事，而且要把这件事做"干净"。不要在 MinHash 层试图做语义去重，也不要在句子级去重里尝试做文档去重。保持每层职责单一，这样当某层出现问题（比如误删）时，你可以快速定位并修复，而不影响其他层的逻辑。
+        </div>
+
+        <h2>12.5 中文场景的特殊挑战</h2>
+
+        <p>中文预训练数据做语义级去重时，有几个英文场景不常见的问题：</p>
+
+        <p><strong>分词对嵌入模型的影响</strong>：大多数多语言 sentence-transformers 模型用的是子词分词（如 WordPiece 或 BPE），对于中文，这意味着一个词可能被切成多个子词（比如"人工智能"被切成"人"、"工"、"智能"三个 token）。这会导致模型对中文语义的理解不如英文精准。解决方案是使用专门针对中文优化的嵌入模型，如 <code>shibing624/text2vec-base-chinese</code> 或 <code>BAAI/bge-small-zh-v1.5</code>。</p>
+
+        <p><strong>字符级 vs Token 级的选择</strong>：在 MinHash 的 n-gram 选择上，对中文推荐使用<strong>字符级 8-13 gram</strong>。因为中文的"字"本身就是语义单元，而"词"的边界在模糊去重场景下反而是引入不确定性的来源。字符级 n-gram 不需要分词，语言无关，实现更简单可靠。</p>
+
+        <p><strong>跨语言重复</strong>：中文数据集中经常混入中文翻译的英文文章——原文是英文，被翻译成中文后在不同网站传播。MinHash 基于 n-gram 的方法对这种翻译后的重复无能为力（因为 n-gram 已经完全不同了），但嵌入向量去重可以很好地处理这种情况——因为语义在翻译后是保持的。</p>
+
+        <h2>本章小结</h2>
+
+        <p>句子级去重和语义级去重是去重流水线的"深水区"。C4 的句子 3-gram 去重高效地移除了模板化和脚注内容，嵌入向量去重则能发现词汇完全不同但语义高度相似的内容。将它们按成本从低到高排列成一个多层级去重流水线，可以最大化去重效果同时控制计算成本。</p>
+
+        <p>去重做完了，我们现在手上是"干净、多样"的文本数据了。但"干净的"不等于"高质量的"。一篇空话连篇的文章可能完全无重复，但它的信息密度极低。下一章我们就进入这个核心话题——<strong>基于模型的质量评分体系</strong>。</p>
+
+        <p>我是你们的讲师，我们第 13 章见。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

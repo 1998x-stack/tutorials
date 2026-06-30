@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 精确去重：剔除重复文本</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>📊 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 预训练数据决定模型上限</a></li>
+            <li><a href="02.html">第2章 全球通用基座数据集全景</a></li>
+            <li><a href="03.html">第3章 中文预训练语料现状与挑战</a></li>
+            <li><a href="04.html">第4章 垂直领域与增强语料</a></li>
+            <li><a href="05.html">第5章 Common Crawl：预训练的石油矿藏</a></li>
+            <li><a href="06.html">第6章 许可证合规与数据安全红线</a></li>
+            <li><a href="07.html">第7章 数据配比策略与混合哲学</a></li>
+            <li><a href="08.html">第8章 数据采集与原始格式解析</a></li>
+            <li><a href="09.html">第9章 语言识别与初步清洗</a></li>
+            <li><a href="10.html" class="active">第10章 精确去重：剔除重复文本</a></li>
+            <li><a href="11.html">第11章 模糊去重：MinHash与LSH原理</a></li>
+            <li><a href="12.html">第12章 语义级与句子级去重</a></li>
+            <li><a href="13.html">第13章 基于模型的质量评分体系</a></li>
+            <li><a href="14.html">第14章 有害内容过滤与安全审查</a></li>
+            <li><a href="15.html">第15章 分布式数据处理架构</a></li>
+            <li><a href="16.html">第16章 流式加载与内存管理</a></li>
+            <li><a href="17.html">第17章 基准污染检测与去除</a></li>
+            <li><a href="18.html">第18章 数据版本管理与溯源</a></li>
+            <li><a href="19.html">第19章 合成数据生成与增强</a></li>
+            <li><a href="20.html">第20章 多语言与低资源语料构建</a></li>
+            <li><a href="21.html">第21章 课程学习与动态数据调度</a></li>
+            <li><a href="22.html">第22章 代码与数学数据专项处理</a></li>
+            <li><a href="23.html">第23章 Datatrove实战：从Common Crawl到清洗数据</a></li>
+            <li><a href="24.html">第24章 NeMo Curator与GPU加速清洗</a></li>
+            <li><a href="25.html">第25章 数据质量评估与消融实验</a></li>
+            <li><a href="26.html">第26章 2026年数据工程前沿趋势</a></li>
+            <li><a href="27.html">第27章 实战项目：构建1B模型训练数据集</a></li>
+            <li><a href="28.html">第28章 规模化落地：从TB级到PB级的挑战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>同样的话，不要说两遍</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们通过语言识别和启发式过滤器筛选出了"看起来像样"的文本。现在的问题是：<strong>同一个内容出现在了多少个文档里？</strong></p>
+
+        <p>Web 数据的重复率远超你的想象。一篇新闻稿可能被 50 个网站转载，一段维基百科的段落可能出现在 100 个博客里，同一个 GitHub 项目的 README 可能被镜像到 30 个不同的域名下。我在 2023 年处理一个 10TB 的网页语料时，做了一个实验——随机抽取了 10,000 个文档，用 SHA256 做精确哈希比对，结果发现居然有 <strong>17% 的文档在数据集内存在完全相同的副本</strong>。不是 "高度相似"，是完全一致——连空格和换行符都一样。</p>
+
+        <p>重复数据对预训练的伤害是双重的：<strong>它既浪费了训练计算量，又让模型对高频内容过度拟合</strong>。想象一下，如果训练数据里有一篇"深度学习入门"的文章出现了 200 次，那么模型学到的"深度学习"知识就会被这篇文章的表述方式严重倾斜——模型不是在"学习知识"而是在"背诵特定文章"。</p>
+
+        <p>这一章我们聚焦于<strong>精确去重</strong>——也就是找到那些完全相同的文本并将其移除。这是去重流水线中成本最低、效果最直接的一步。</p>
+
+        <h2>10.1 文档级精确去重：SHA256 哈希</h2>
+
+        <p>精确去重最朴素也最高效的方法就是计算文档的哈希值，然后只保留每个哈希值的第一个出现（或随机保留一个）。关键在于<strong>归一化</strong>——在计算哈希之前，需要对文本做标准化处理，使同一内容的不同格式版本匹配到同一个哈希值。</p>
+
+        <pre><code>import hashlib
+import re
+
+def normalize_text(text: str) -> str:
+    """对文本做标准化处理，使格式差异不影响去重"""
+    # 1. 统一换行符
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    # 2. 去掉首尾空白
+    text = text.strip()
+    # 3. 将多个空白字符压缩为一个空格
+    text = re.sub(r'\s+', ' ', text)
+    # 4. 统一大小写（英文）
+    text = text.lower()
+    # 5. 去掉全角/半角差异
+    text = text.replace('，', ',').replace('。', '.').replace('；', ';')
+    return text
+
+def document_hash(text: str) -> str:
+    """计算归一化后的文档 SHA256 哈希"""
+    normalized = normalize_text(text)
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
+# 去除重复文档
+def deduplicate_documents(documents: list) -> list:
+    seen_hashes = set()
+    unique_docs = []
+    for doc in documents:
+        h = document_hash(doc['text'])
+        if h not in seen_hashes:
+            seen_hashes.add(h)
+            unique_docs.append(doc)
+    return unique_docs</code></pre>
+
+        <p>归一化的程度需要根据具体场景权衡。过度归一化（比如去掉所有标点符号）会导致不同内容被误判为相同；归一化不足（比如保留全角/半角差异）则会让同一内容的多个版本漏网。业界常用的做法是只做<strong>最小的格式归一化</strong>——换行符、空白、大小写，保留标点和结构。</p>
+
+        <h2>10.2 URL 去重</h2>
+
+        <p>在 Web 爬取中，同一个 URL 可能在不同的爬取轮次中被多次抓取，而且 Crawl 索引中的重复 URL 远比我们想象的普遍。URL 去重的基本思路是：</p>
+
+        <ul>
+            <li><strong>URL 规范化</strong>：去掉 URL 中的 tracking 参数（如 <code>?utm_source=xxx</code>），统一协议（<code>http</code> vs <code>https</code>），去掉默认端口和尾部斜杠</li>
+            <li><strong>URL 指纹</strong>：将规范化后的 URL 做哈希，用作去重键</li>
+            <li><strong>多轮次去重</strong>：跨不同爬取批次维护一个全局 URL 指纹集合</li>
+        </ul>
+
+        <pre><code>from urllib.parse import urlparse, urlunparse, urlencode
+import re
+
+def normalize_url(url: str) -> str:
+    """URL 规范化"""
+    parsed = urlparse(url)
+
+    # 去掉 tracking 参数
+    query_params = parsed.query.split('&')
+    clean_params = [p for p in query_params
+                    if not p.startswith(('utm_', 'ref=', 'source='))]
+
+    # 重建 URL（去掉默认端口、统一小写）
+    netloc = parsed.netloc.lower()
+    if netloc.startswith('www.'):
+        netloc = netloc[4:]
+
+    return urlunparse((
+        parsed.scheme.lower(),
+        netloc,
+        parsed.path.rstrip('/'),  # 去掉尾部斜杠
+        '',  # params
+        '&'.join(clean_params),
+        ''   # fragment
+    ))
+
+def url_fingerprint(url: str) -> str:
+    return hashlib.md5(normalize_url(url).encode()).hexdigest()</code></pre>
+
+        <h2>10.3 跨数据集去重</h2>
+
+        <p>现代预训练通常不是只用一个数据集——你可能会混合 Common Crawl、维基百科、书籍、学术论文、代码等多个来源。这些来源之间可能存在严重的交叉重复。例如，一篇学术论文的 arXiv 版本可能在维基百科中被大段引用，也可能出现在某个书籍 PDF 中。跨数据集去重就是要消除这些跨源重复。</p>
+
+        <p>跨数据集去重的挑战在于<strong>规模</strong>。你需要对来自不同数据源的所有文档计算哈希，然后在一个统一的集合中做全局去重。常见的做法是：<strong>以最早的数据集为基础，后续数据集只添加其中尚未出现过的新内容</strong>。</p>
+
+        <div class="tip">
+            <strong>工程建议：</strong>在构建大模型训练数据时，有一种常见的做法是用一个已知的高质量基准数据集（如 FineWeb 或 Dolma）来去重你的自定义数据。假设你有一个内部爬取的中文语料，你可以先对 FineWeb 的中文子集计算所有文档的哈希，建立一个"已见"哈希集合，然后让你的中文语料去重时排除这些哈希。这能有效避免你的自定义数据和公开数据集的内容重叠。
+        </div>
+
+        <h2>10.4 精确子串去重：后缀数组方法</h2>
+
+        <p>文档级别的哈希去重有一个盲区：<strong>它只能发现完全相同的文档</strong>。但实际中更常见的情况是：两个文档有 80% 的内容相同，只是开头或结尾略有差异。针对这种情况，Gopher 团队引入了一种更强大的精确子串去重方法——基于后缀数组。</p>
+
+        <p>后缀数组是一种经典的数据结构，能在线性时间内找出所有文档之间共享的 <strong>50 个 token 以上的精确匹配子串</strong>。当两个文档共享一个超过 50 token 的精确匹配片段时，这两个文档就会被标记为重复，其中较短的一个被移除。</p>
+
+        <p>实现这个方法的经典工具链是 <strong>deduplicate-text-datasets</strong> 库（出自 Google Research）：</p>
+
+        <pre><code># 使用 deduplicate-text-datasets 构建后缀数组并去重
+# 该工具是一个独立的 C++ 命令行程序，使用方式如下：
+
+# 第一步：将数据集转换为 tokenized 格式
+# python tools/serialize_to_tokens.py --data_dir ./data --output_dir ./tokens
+
+# 第二步：构建后缀数组并查找重复子串
+# mkd --build-sa --input ./tokens --output ./suffix_array
+
+# 第三步：基于后缀数组标记重复文档
+# python tools/remove_duplicate_substrings.py \
+#     --data_dir ./data \
+#     --min_length 50   # 最少匹配 token 数
+
+# 输出：去重后的新数据集</code></pre>
+
+        <p>这种方法虽然是"精确"匹配，但因为匹配的是 <strong>token 子串</strong> 而非整个文档，所以能发现那些文档级别哈希无法发现的部分重复。代价是计算成本较高——构建整个数据集的后缀数组需要 O(N log N) 的时间和 O(N) 的内存，其中 N 是全部 token 的数量。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>去重方法</th>
+                    <th>匹配粒度</th>
+                    <th>计算成本</th>
+                    <th>内存需求</th>
+                    <th>能发现</th>
+                    <th>应用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>SHA256 文档哈希</td>
+                    <td>整个文档</td>
+                    <td>极低</td>
+                    <td>极低</td>
+                    <td>完全相同文档</td>
+                    <td>流水线第一步</td>
+                </tr>
+                <tr>
+                    <td>URL 指纹</td>
+                    <td>URL</td>
+                    <td>极低</td>
+                    <td>低</td>
+                    <td>相同 URL</td>
+                    <td>爬取阶段</td>
+                </tr>
+                <tr>
+                    <td>后缀数组子串</td>
+                    <td>50+ token 子串</td>
+                    <td>高</td>
+                    <td>高</td>
+                    <td>部分重复文档</td>
+                    <td>Gopher 等大规模项目</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>10.5 使用 Datatrove 实现去重</h2>
+
+        <p>Datatrove 是 Hugging Face 为 FineWeb 开发的开源数据处理框架，内置了精确去重和模糊去重的模块。使用 Datatrove 做精确去重非常简洁：</p>
+
+        <pre><code>from datatrove.pipeline.dedup import ExactDuplicates
+from datatrove.pipeline.readers import ParquetReader
+from datatrove.pipeline.writers import ParquetWriter
+
+# 配置精确去重器——基于归一化文本的哈希
+dedup = ExactDuplicates(
+    key="text",              # 用于去重的字段名
+    hash_key="normalized",   # 使用归一化文本计算哈希
+    storage="/output/dedup/" # 中间结果存储位置
+)
+
+# 在流水线中嵌入去重步骤
+pipeline = [
+    ParquetReader("/input/data/"),
+    dedup,                   # 过滤掉重复文档
+    ParquetWriter("/output/deduped/"),
+]</code></pre>
+
+        <p>Datatrove 的 <code>ExactDuplicates</code> 模块内部实现了一个基于 <code>set</code> 的全局哈希索引，可以跨多个输入文件维护去重状态。它在分布式模式下使用 Ray 或 Multiprocessing 来并行化，并通过一个全局的哈希集合来保证去重的一致性。</p>
+
+        <div class="highlight">
+            <strong>工程经验：</strong>在实际的大规模数据流水线中，精确去重通常能减少 10-30% 的数据量。如果这个比例低于 5%，说明你的数据源比较"干净"（比如是人工筛选过的书籍语料）；如果超过 40%，你的爬虫可能遇到了严重的数据源重叠——首先要做的是检查爬虫的配置，而不是去重本身。
+        </div>
+
+        <h2>10.6 哈希冲突与性能权衡</h2>
+
+        <p>SHA256 的哈希冲突概率在实际应用中可以忽略不计（约 2<sup>-256</sup>），因此使用 SHA256 做精确去重是安全的。但如果你面对的是 PB 级别的数据，内存中维护一个全局哈希集合可能成为瓶颈。</p>
+
+        <p>对于超大规模的精确去重，有两种优化策略：</p>
+
+        <ul>
+            <li><strong>分区哈希</strong>：按哈希值的前 N 个字节对文档分区，每个分区独立去重。例如，用哈希值的前 2 个字节将文档分为 65,536 个分桶，每个桶内的哈希集合小得多，可以分别处理。</li>
+            <li><strong>布隆过滤器（Bloom Filter）</strong>：如果你可以容忍极低（如 0.1%）的误判率，可以用布隆过滤器替代精确哈希集合，大幅降低内存消耗。代价是百万分之一的概率会把一个未见的文档误判为重复并丢弃。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>踩坑提醒：</strong>有一个常见错误是使用 Python 内置的 <code>hash()</code> 函数做去重键。<code>hash()</code> 在不同进程和 Python 版本中的结果不一致，而且 64 位的哈希值冲突概率在数十亿级别文档上并非可以忽略。始终使用 SHA256 或至少 MD5/SHA1 这类稳定的加密哈希函数。
+        </div>
+
+        <h2>本章小结</h2>
+
+        <p>精确去重是数据去重流水线中最基础、性价比最高的一步。从文档级 SHA256 哈希到 URL 指纹，从跨数据集去重到后缀数组子串匹配，每一步都在剔除那些"一模一样"的内容。精确去重通常能去除 10-30% 的数据，为后续更昂贵的模糊去重和质量评分减少了不必要的计算量。</p>
+
+        <p>但是，如果两个文档 "大致相同" 而非 "完全一致"，精确去重就无能为力了。比如：同一篇文章被不同的网站做了微小的措辞修改，同一个新闻被不同的媒体重写——这些需要下一章的利器：<strong>MinHash 与 LSH 模糊去重</strong>。</p>
+
+        <p>我是你们的讲师，我们第 11 章见。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

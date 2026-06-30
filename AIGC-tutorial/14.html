@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 视频扩散模型 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html" class="active">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第14章 视频扩散模型</h2>
+
+        <p>大家好，我是你们的讲师。如果说 2022-2023 年是"文生图"的年代，那么 2024-2026 年就是"文生视频"的爆发期。OpenAI 的 Sora、字节跳动的 Seedance、腾讯的混元视频、HunyuanVideo、CogVideoX……一波又一波的文生视频模型将 AI 生成的内容从静态图像推向动态影像。</p>
+
+        <p>但视频生成远比图像生成困难。多了一个"时间维度"，意味着模型不仅要理解空间上的内容（是什么、在哪里），还要理解时间上的演化（接下来会发生什么）。这一章，我们将系统性地讲解视频扩散模型的架构设计、关键挑战、主流模型对比，以及训练和部署中的实战经验。</p>
+
+        <h3>14.1 从图像到视频：核心挑战</h3>
+
+        <p>将图像扩散模型扩展到视频领域，面临三个核心挑战：</p>
+
+        <table>
+            <tr><th>挑战</th><th>描述</th><th>影响</th></tr>
+            <tr><td>帧间一致性</td><td>相邻帧之间的物体位置、形状、颜色必须连贯变化，不能出现突变</td><td>物体闪烁、消失/重生、颜色跳变</td></tr>
+            <tr><td>时序连贯性</td><td>物体的运动轨迹在长时间范围内必须合理（物理规律）</td><td>违背重力、运动卡顿、物体漂移</td></tr>
+            <tr><td>计算量激增</td><td>视频有 T 帧，每帧都需要处理，计算量是图像的 T 倍</td><td>训练动辄成千上万 GPU 天，推理显存爆炸</td></tr>
+        </table>
+
+        <p>早期方法（2022-2023）的解决思路是：在预训练的 2D 图像扩散模型上，加入"时序层"（Temporal Layers）来建模帧间关系。这种"从 2D 扩展到 3D"的思路至今仍是主流范式之一。</p>
+
+        <div class="tip">
+            <strong>💡 直觉理解：</strong>视频扩散模型可以看作是一个"三维扩散"问题——空间维度（H×W）加上时间维度（T）。三维卷积和时序注意力就是用来处理这个新增的时间维度的。从图像模型初始化视频模型的权重（"膨胀"技术）是训练视频扩散模型的标配做法。
+        </div>
+
+        <h3>14.2 时空架构设计</h3>
+
+        <p>视频扩散模型的核心架构有两种主要路线：<strong>3D U-Net</strong> 和 <strong>3D DiT</strong>。</p>
+
+        <h4>3D U-Net：时空卷积 + 时序注意力</h4>
+        <p>这是 Video Diffusion Model（VDM）和早期 Stable Video Diffusion 使用的架构。它在标准 2D U-Net 的基础上，在每一层加入：</p>
+        <ul>
+            <li><strong>3D 卷积</strong>：将 2D 卷积替换为 3D 卷积（核从 3×3 变为 3×3×3），同时处理空间和时间维度</li>
+            <li><strong>时序自注意力（Temporal Self-Attention）</strong>：在空间注意力之后，额外加一层作用于时间维度的自注意力——同一像素位置在不同帧之间做注意力</li>
+            <li><strong>帧间交叉注意力</strong>：将第一帧作为"参考帧"，其余帧通过交叉注意力与参考帧对齐</li>
+        </ul>
+
+        <pre><code># 3D U-Net Block 简化结构（空间+时间）
+def video_unet_block(x, t_emb, cond):
+    # 空间处理（2D 卷积 + 空间自注意力）
+    x = SpatialResBlock(x, t_emb)      # 3D Conv (kernel=1×3×3)
+    x = SpatialSelfAttention(x)        # 同一帧内跨空间位置
+
+    # 时序处理（时域卷积 + 时序自注意力）
+    x = TemporalResBlock(x, t_emb)      # 3D Conv (kernel=3×1×1)
+    x = TemporalSelfAttention(x)        # 同一位置跨帧
+
+    # 条件注入（文本/图像）
+    x = CrossAttention(x, cond)
+    return x</code></pre>
+
+        <h4>3D DiT：视频扩散 Transformer</h4>
+        <p>2024-2025 年的新模型（如 Sora、HunyuanVideo、CogVideoX）更倾向于使用 3D DiT 架构。它将视频切分为<strong>时空 patch（Spatial-Temporal Patches）</strong>，然后用 Transformer 统一处理所有 token。</p>
+
+        <ul>
+            <li><strong>3D patchify</strong>：将视频卷切成大小为 p_t × p_h × p_w 的时空块，展平为 token 序列</li>
+            <li><strong>3D RoPE</strong>：在位置编码中同时编码空间和时间位置信息</li>
+            <li><strong>级联架构</strong>：先低分辨率生成，再级联超分和时间插帧</li>
+        </ul>
+
+        <h3>14.3 文生视频模型对比</h3>
+
+        <p>截至 2026 年中的主流文生视频模型概览：</p>
+
+        <table>
+            <tr><th>模型</th><th>架构</th><th>最大分辨率</th><th>最大时长</th><th>推理速度</th><th>开源</th></tr>
+            <tr><td>Sora (OpenAI)</td><td>DiT + Diffusion Transformer</td><td>1920×1080</td><td>60s</td><td>实时（sCM）</td><td>否</td></tr>
+            <tr><td>HunyuanVideo (腾讯)</td><td>3D DiT + DoubleStream</td><td>1280×720</td><td>15s</td><td>3-5 min（H100）</td><td>是</td></tr>
+            <tr><td>CogVideoX (智谱)</td><td>3D VAE + DiT</td><td>1280×720</td><td>10s</td><td>2-3 min（A100）</td><td>是</td></tr>
+            <tr><td>Seedance 2.5 (字节)</td><td>MM-DiT + Flow Matching</td><td>4K (3840×2160)</td><td>30s</td><td>5-8 min</td><td>否</td></tr>
+            <tr><td>可灵 3.0 (快手)</td><td>3D VAE + DiT</td><td>2048×1152</td><td>30s</td><td>1-2 min</td><td>否</td></tr>
+            <tr><td>Emu3 (Meta/团队)</td><td>自回归 Token 预测</td><td>多种分辨率</td><td>灵活长度</td><td>逐 token 生成</td><td>部分开源</td></tr>
+        </table>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>从表中可以看出几个趋势：几乎所有 2024 年后的高质量视频模型都选择了 DiT 架构（而非 U-Net）；Flow Matching 正在替代传统的 DDPM 噪声预测目标成为标配；开源模型（HunyuanVideo、CogVideoX）的质量正在快速追赶闭源模型，这推动了整个生态的发展。
+        </div>
+
+        <h3>14.4 常用数据集与评估标准</h3>
+
+        <p>视频生成模型的训练和评估需要专门的数据集和指标：</p>
+
+        <h4>常用数据集</h4>
+        <ul>
+            <li><strong>WebVid-10M</strong>：约 1000 万条文本-视频对，从互联网抓取，是训练视频扩散模型最常用的数据集之一</li>
+            <li><strong>HD-VILA-100M</strong>：1 亿条文本-视频对，分辨率更高，时长更长</li>
+            <li><strong>Panda-70M</strong>：7000 万条高质量视频片段，由 InternVideo 团队整理</li>
+            <li><strong>UCF-101 / Kinetics-600</strong>：学术基准数据集，用于动作识别和视频理解，也被用于生成评估</li>
+        </ul>
+
+        <h4>VBench 评估标准</h4>
+        <p>VBench 是当前最权威的文生视频综合评估框架，包含 16 个维度的指标：</p>
+
+        <table>
+            <tr><th>评估维度</th><th>说明</th><th>典型得分范围</th></tr>
+            <tr><td>Subject Consistency</td><td>主体在帧间是否保持一致的外观</td><td>0.90 - 0.99</td></tr>
+            <tr><td>Background Consistency</td><td>背景是否连贯</td><td>0.90 - 0.99</td></tr>
+            <tr><td>Temporal Flickering</td><td>帧间的闪烁程度</td><td>0.90 - 0.99</td></tr>
+            <tr><td>Motion Smoothness</td><td>运动是否流畅自然</td><td>0.80 - 0.99</td></tr>
+            <tr><td>Dynamic Degree</td><td>视频的运动幅度</td><td>0.30 - 0.80</td></tr>
+            <tr><td>Appearance Style</td><td>视觉风格的匹配度</td><td>0.15 - 0.30</td></tr>
+            <tr><td>Spatial Relationship</td><td>空间关系的合理性</td><td>0.50 - 0.90</td></tr>
+            <tr><td>Text-to-Video Alignment</td><td>文本描述与视频内容的一致性</td><td>0.50 - 0.85</td></tr>
+            <tr><td>Overall Impression</td><td>综合人类评价</td><td>0.50 - 0.90</td></tr>
+        </table>
+
+        <div class="tip">
+            <strong>💡 评估建议：</strong>VBench 的 16 个维度覆盖了视频质量的大部分方面，但要注意——<strong>自动化的 VBench 分数不完全等同于人类的主观观感</strong>。统计学研究发现，"Subject Consistency"和"Background Consistency"对人类的整体满意度影响最大，这两个维度应该重点关注。
+        </div>
+
+        <h3>14.5 视频生成的实际应用与限制</h3>
+
+        <p>尽管视频生成在 2025-2026 年取得了惊人的进展，但它仍然面临一些本质性的限制：</p>
+
+        <ul>
+            <li><strong>时长限制</strong>：即使是 Sora 也只能稳定生成 60 秒的视频。超过这个限度，帧间一致性会快速下降。这与扩散模型本身的设计有关——自回归地逐段生成长视频会累积误差。</li>
+            <li><strong>物理规律理解不足</strong>：视频模型经常违反常识物理——物体应该落下却飘在空中，倒水时水应该向下流却向上飞。这是因为训练数据中存在大量"不自然"的视频（广告特效、CG 动画等），模型没有真正理解物理规律。</li>
+            <li><strong>计算成本极高</strong>：训练一个 Sora 级别的视频模型需要数千张 H100 连续训练数周。推理生成一段 10 秒的 720p 视频也需要数分钟的高端 GPU 时间。</li>
+            <li><strong>文本理解能力弱</strong>：相比图像生成，视频生成中文本 prompt 的遵循度要差得多，特别是涉及"先后顺序"（"先 A 后 B"）和"因果关系"（"因为 A 所以 B"）的文本。</li>
+        </ul>
+
+        <h3>14.6 视频扩散训练中的显存管理</h3>
+
+        <p>显存管理是视频扩散模型训练和推理中最头疼的问题之一。视频需要同时处理多个帧，显存占用比图像呈线性增长。</p>
+
+        <pre><code># 以 CogVideoX 训练为例的显存占用
+# batch_size=1, num_frames=49, resolution=480×720
+
+# 输入数据:
+#   latent [1, 49, 16, 40, 60] → ~12 GB (fp16)
+# 模型参数:
+#   DiT 3B params → ~6 GB (fp16)
+# 优化器状态:
+#   AdamW + 梯度 → ~24 GB
+# 中间激活值（最吃显存的部分）:
+#   Transformer activation memory → ~20 GB（使用activation offloading可降到 ~8 GB）
+#
+# 总显存估算: 12 + 6 + 24 + 20 = ~62 GB（单卡不够！）
+# 典型配置: 8×A100 80G，分别加载模型分片 + ZeRO-3 + activation offloading</code></pre>
+
+        <div class="warning">
+            <strong>⚠️ 真实的踩坑故事：</strong>我曾在 4×A100 80G 上尝试微调一个视频扩散模型，结果反复 OOM（Out of Memory）。排查时发现，我设置的帧数（49 帧 + 1 帧参考帧）正好让 activation memory 超过了单卡的承载能力。我尝试了各种方法：gradient checkpointing、activation offloading、降低 batch size 到 1……都不够。最后解决方法是：<strong>将帧数从 49 降到 25</strong>，同时使用 DeepSpeed ZeRO-3 将模型参数均衡分片到 4 张卡上。这个经历让我深刻认识到：<strong>视频扩散训练的显存优化没有银弹——你需要同时使用梯度检查点、ZeRO 分片、activation offloading 和精确的帧数选择，缺一不可</strong>。在开始训练之前，最好先用一个"显存预算计算器"预估不同配置的显存占用，而不是盲目尝试。
+        </div>
+
+        <p>视频扩散模型的快速发展正在重塑内容创作行业——从短视频制作到电影特效，从广告生成到虚拟主播。虽然它还有诸多限制，但可以预见的是，随着 DiT 架构的成熟和算力成本的下降，高质量视频生成的门槛将越来越低。</p>
+
+        <p>下一章，我们将回到图像生成领域的一个关键基础组件——CLIP 图文对比学习模型。它是 SD 中文本编码的核心，也是 ControlNet、IP-Adapter 等条件注入技术的基础。理解 CLIP 的工作原理，将帮助你更深入地理解整个 AIGC 生态中"图文对齐"的根本机制。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

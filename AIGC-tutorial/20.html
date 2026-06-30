@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 Flow Matching整流流 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html" class="active">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第20章 Flow Matching整流流</h2>
+
+        <p>大家好，我是你们的讲师。在上一章中，我们看到了 FLUX 和 SD3 使用 Rectified Flow 替代了传统的扩散去噪过程。但 Rectified Flow 并非凭空出现的——它是 <strong>Flow Matching（流匹配）</strong> 这个大框架中的一个特例。而 Flow Matching 本身，又是 <strong>连续归一化流（Continuous Normalizing Flow, CNF）</strong> 的一种高效训练方法。</p>
+
+        <p>这一章我们将站在理论的高度，把第 8 章的 DDPM 扩散理论、第 10 章的 Stable Diffusion 和第 19 章的 FLUX/SD3 串起来。你会发现，这些看似截然不同的模型，本质上都可以用 Flow Matching 的统一语言来描述。理解了这个框架，你就掌握了整个扩散生成模型家族的核心密码。</p>
+
+        <h3>20.1 从扩散到 Flow</h3>
+
+        <p>2015 年，Sohl-Dickstein 等人首次将非平衡热力学中的扩散过程引入生成模型。2020 年的 DDPM 则是这一思想的集大成者：前向过程逐渐给数据加噪直到变成纯高斯噪声，逆向过程通过学习去噪来生成样本。</p>
+
+        <p>但如果我们把扩散过程放在 <strong>连续时间</strong> 的视角下看，它的本质是一个 <strong>随机微分方程（SDE）</strong>：</p>
+
+        <pre><code># 扩散过程的连续时间形式（SDE）
+# 前向过程：
+# dx = f(x, t)dt + g(t)dw
+#
+# 逆向过程（通过 Fokker-Planck 方程可推出 ODE 形式）：
+# dx = [f(x, t) - 1/2 * g(t)^2 * ∇_x log p_t(x)] dt
+#
+# 这个确定性 ODE 就是概率流 ODE（Probability Flow ODE）
+# 它将噪声分布映射到数据分布</code></pre>
+
+        <p>这个概率流 ODE 告诉我们：即使原本是一个随机过程，我们也可以用<strong>确定性轨迹</strong>把噪声变换成数据。这也暗示了另一种可能性——与其通过扩散加噪再去噪这个间接途径，为什么我们不直接设计一条从噪声到数据的 <strong>直线轨迹</strong> 呢？这正是 Flow Matching 的出发点。</p>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>扩散模型 → 概率流 ODE → Flow Matching，这是一条连续的认知链。DDPM 和 Flow Matching 的区别不在于"哪个更好"，而在于"DDPM 选择了一条弯的路，Flow Matching 选择了一条直的路"。弯路的优点是理论推导更成熟，直路的优点是推理效率更高。
+        </div>
+
+        <h3>20.2 连续归一化流（CNF）基础</h3>
+
+        <p>连续归一化流（CNF）的核心思想很简单：用一个<strong>关于时间 t 的常微分方程（ODE）</strong>来定义一个可逆的变换，将初始分布 p_0（通常是高斯噪声）映射到目标分布 p_1（数据分布）。</p>
+
+        <p>具体来说，CNF 定义了一个速度场（Vector Field）<code>v_θ(x, t)</code>，它告诉我们在时间 t、位置 x 处，"粒子"应该朝哪个方向运动：</p>
+
+        <pre><code># CNF 的 ODE 定义
+#
+# dz/dt = v_θ(z_t, t)      # 速度场驱动状态变化
+# z_0 ~ p_0 = N(0, I)      # 初始分布：标准高斯噪声
+# z_1 ~ p_1 ≈ p_data       # 最终分布：数据分布
+#
+# 生成过程：给定 z_0，求解 ODE 到 t=1 得到 z_1
+# 似然计算：通过 instantaneous change of variables 公式</code></pre>
+
+        <p>CNF 的优势是概念优雅——一个连续的确定性变换就能实现分布转换。但实际的训练非常困难，因为我们需要知道每个时刻的速度场 v_θ 应该输什么值。传统的 CNF 训练需要求解昂贵的 ODE 前向过程，这使得它在 2018-2022 年间无法大规模应用。</p>
+
+        <h3>20.3 Rectified Flow</h3>
+
+        <p>Rectified Flow 是 Flow Matching 家族中最具实际影响力的成员。它的思想极其简洁：</p>
+
+        <p>给定一对数据点 <code>(x_0, x_1)</code>，其中 <code>x_0 ∼ N(0, I)</code>（噪声），<code>x_1 ∼ p_data</code>（真实数据），我们定义线性插值路径：</p>
+
+        <pre><code>x_t = (1 - t) * x_0 + t * x_1,   t ∈ [0, 1]</code></pre>
+
+        <p>沿着这条路径，速度（即 x_t 对 t 的导数）是常数：</p>
+
+        <pre><code>d(x_t)/dt = x_1 - x_0</code></pre>
+
+        <p>训练目标就是让神经网络预测这个速度：</p>
+
+        <pre><code>L = E_{x_0, x_1, t} [ || v_θ(x_t, t) - (x_1 - x_0) ||^2 ]</code></pre>
+
+        <div class="tip">
+            <strong>💡 直觉理解：</strong>想象你站在位置 x_0（噪声），想去位置 x_1（图像）。线性插值路径就是"从起点直线走到终点"。Rectified Flow 就是训练一个模型，告诉它"无论你当前在哪里、在哪个时间点，你都应该沿着 x_1 - x_0 的方向走"。推理时，模型沿着自己预测的方向一步一步走向 x_1。
+        </div>
+
+        <p>更精彩的是"整流"（Rectify）的递归过程：训练完第一轮模型后，我们可以用模型生成的样本替换真实数据，重新配对后再次训练——这个过程能让轨迹变得更直。理论上，重复这个"Reflow"过程无限次，轨迹会变成完美的直线，此时一步就能完成生成。</p>
+
+        <h3>20.4 Flow Matching 损失函数</h3>
+
+        <p>Flow Matching 的完整理论框架比 Rectified Flow 更一般化。设 <code>p_t(x)</code> 是时间 t 时的概率密度，我们希望学习一个速度场 <code>v_θ(x, t)</code> 来使概率密度沿着 ODE 演化。Flow Matching 的目标函数是：</p>
+
+        <pre><code># 无条件 Flow Matching 损失
+L_FM = E_{t ∼ U[0,1], x ∼ p_t(x)} [ || v_θ(x, t) - u_t(x) ||^2 ]
+
+# 其中 u_t(x) 是"真实"速度场，但我们不知道它的闭式解
+
+# 条件 Flow Matching 损失（关键创新！）
+L_CFM = E_{t, x_1, x ∼ p_t(x|x_1)} [ || v_θ(x, t) - u_t(x|x_1) ||^2 ]
+
+# 这里 u_t(x|x_1) 是给定终点的条件速度场
+# 即 u_t(x|x_1) = (x_1 - x_0) / (1 - t) 对于线性路径</code></pre>
+
+        <p>条件 Flow Matching 的伟大之处在于：通过引入条件信息，我们将一个无法直接计算的"全局速度场"问题，转化成了一个容易计算的"局部条件速度场"问题。而这个转化不改变最优解——条件 Flow Matching 和无条件 Flow Matching 共享同一个最优解 <code>v_θ*</code>。</p>
+
+        <p>换句话说，训练时只需要关注每一对 (x_0, x_1) 的局部路径，最终的 v_θ 学会了整个分布上的最优速度场——这就是为什么它能生成高质量的样本。</p>
+
+        <table>
+            <tr><th>方法</th><th>损失函数形式</th><th>路径类型</th><th>特点</th></tr>
+            <tr><td>DDPM</td><td>|| ε_θ(x_t, t) - ε ||²</td><td>扩散加噪路径</td><td>弯曲、随机</td></tr>
+            <tr><td>Rectified Flow</td><td>|| v_θ(x_t, t) - (x_1 - x_0) ||²</td><td>线性插值路径</td><td>直线、确定</td></tr>
+            <tr><td>Flow Matching (general)</td><td>|| v_θ(x_t, t) - u_t(x|x_1) ||²</td><td>任意可微路径</td><td>通用框架</td></tr>
+            <tr><td>Stochastic Interpolant</td><td>|| s_θ(x_t, t) - target ||²</td><td>可带随机性插值</td><td>混合方案</td></tr>
+        </table>
+
+        <h3>20.5 与 DDPM 的对比</h3>
+
+        <p>让我们从几个关键维度系统比较 DDPM 和 Flow Matching：</p>
+
+        <table>
+            <tr><th>对比维度</th><th>DDPM</th><th>Flow Matching (Rectified Flow)</th></tr>
+            <tr><td>前向过程</td><td>逐步加噪: x_t = √ᾱ_t * x_0 + √(1-ᾱ_t) * ε</td><td>线性插值: x_t = (1-t)x_0 + t*x_1</td></tr>
+            <tr><td>训练目标</td><td>预测噪声 ε</td><td>预测速度 v</td></tr>
+            <tr><td>轨迹曲率</td><td>高（加噪路径是弯曲的）</td><td>低（插值路径是直的）</td></tr>
+            <tr><td>最优推理步数</td><td>50-1000 步（DDPM）<br>20-50 步（DDIM）</td><td>4-28 步（直接）<br>1 步（整流后理论极限）</td></tr>
+            <tr><td>训练稳定性</td><td>良好（有成熟的噪声调度理论）</td><td>良好（避免了对噪声方差的精细调度）</td></tr>
+            <tr><td>生成质量</td><td>优秀（已到 SOTA 水准）</td><td>同等或更优（轨迹更直 → 累积误差更小）</td></tr>
+            <tr><td>理论基础</td><td>完备（SDE + Score Matching）</td><td>较新但发展迅速</td></tr>
+        </table>
+
+        <p>从实践中来看，Flow Matching 在少步数场景下的优势非常显著：用 4 步推理时，Rectified Flow 生成的人脸还能保持五官清晰，而 DDPM 用 4 步采样基本是模糊一片。但在 50 步以上时，两者质量相当。</p>
+
+        <div class="warning">
+            <strong>⚠️ 一个真实踩坑故事：</strong>2024 年底，我尝试将一个 DDPM 训练的模型用 Rectified Flow 的调度器来做推理——我以为"反正都是去噪，调度器应该通用"。结果输出一片混乱。原因是 DDPM 的噪声调度和 Rectified Flow 的路径定义完全不一样：DDPM 的噪声方差随时间变化（有 ᾱ_t 调度），而 Rectified Flow 的路径是简单的线性插值。两者的时间步语义也不匹配——DDPM 的 t 表示"加噪程度"，Rectified Flow 的 t 表示"从噪声到数据的进度百分比"。<strong>调度器和模型必须配套使用，混用等于乱来。</strong>
+        </div>
+
+        <h3>20.6 2026 年的现状</h3>
+
+        <p>截至 2026 年中，Flow Matching 已经不算"新"技术了——它已经成为图像和视频生成模型的事实标准训练范式。回顾一下关键时间线：</p>
+
+        <ul>
+            <li><strong>2022 年：</strong>Flow Matching 论文发表（Lipman et al.），Rectified Flow（Liu et al.），Stochastic Interpolants（Albergo et al.）同一时期提出。</li>
+            <li><strong>2023 年：</strong>理论验证阶段——小规模实验证明 Flow Matching 可以生成高质量图像，但社区关注度仍远低于 DDPM。</li>
+            <li><strong>2024 年：</strong>SD3 和 FLUX 采用 Rectified Flow 作为训练目标——直接导致整个文生图领域的范式转移。</li>
+            <li><strong>2025 年：</strong>几乎所有新发布的扩散类模型都默认使用 Flow Matching。国产模型（如可灵、混元视频）也全面转向 Flow Matching 路线。</li>
+            <li><strong>2026 年：</strong>Flow Matching 的变体（如 sCM、Consistency Flow）在实时生成领域取得突破。现在"Flow Matching 还是 DDPM"已经不是一个问题了——答案是"看你要几步推理：少步数选 Flow，多步数两可"。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>🌟 总结：</strong>Flow Matching 统一了扩散模型、归一化流和得分匹配三个领域。如果你只用一句话来概括它的意义——"把弯弯曲曲的扩散路径掰直了，用更少的步数到达终点。"下一章，我们将把这些理论工具投入实战——学习如何使用 ControlNet、LoRA 和 IP-Adapter 来精准控制生成的内容。
+        </div>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

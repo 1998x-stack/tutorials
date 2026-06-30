@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 Stable Diffusion架构 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html" class="active">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第10章 Stable Diffusion架构</h2>
+
+        <p>大家好，我是你们的讲师。如果说 DDPM 是扩散模型的"理论基础"，DDIM 和 LDM 是"关键突破"，那么 <strong>Stable Diffusion（SD）</strong>就是让扩散模型"走向大众"的里程碑。2022 年 8 月，Stability AI 将 SD 开源后，整个 AIGC 生态被彻底点燃——设计师、开发者、艺术家、甚至普通用户都能在自己的电脑上运行文生图模型。</p>
+
+        <p>这一章，我们将解剖 SD 的完整架构。你将看到三个核心模块——VAE、U-Net、CLIP——如何协同工作，以及 SD 从 1.0 到 3.0 经历了怎样的技术演进。理解 SD 架构是下一阶段学习 ControlNet、LoRA、模型微调等高级技术的必要前提。</p>
+
+        <h3>10.1 整体架构：三模块协同</h3>
+
+        <p>Stable Diffusion 不是一个单一的神经网络，而是三个模块的协同系统：</p>
+
+        <table>
+            <tr><th>模块</th><th>功能</th><th>输入</th><th>输出</th></tr>
+            <tr><td>CLIP Text Encoder</td><td>将文本 prompt 编码为 77×768 的条件特征</td><td>文本（最多 77 tokens）</td><td>文本嵌入序列 + pooled 向量</td></tr>
+            <tr><td>U-Net（含 Cross-Attention）</td><td>在潜空间去噪，接收文本条件</td><td>含噪潜变量 + 时间步 t + 文本嵌入</td><td>预测的噪声 ε_θ</td></tr>
+            <tr><td>VAE Decoder</td><td>将去噪后的潜变量解码为像素图像</td><td>64×64×4 潜特征图</td><td>512×512×3 RGB 图像</td></tr>
+        </table>
+
+        <p>推理时的工作流程：文本 prompt → CLIP 编码 → 随机噪声 → U-Net 多步去噪（条件于文本） → VAE 解码 → 最终图像。</p>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>SD 的架构设计体现了"分而治之"的思想——CLIP 负责"理解语义"，U-Net 负责"生成内容"，VAE 负责"解码呈现"。每个模块各司其职，可以独立优化和替换。这种模块化设计是 SD 生态如此繁荣的根本原因。
+        </div>
+
+        <h3>10.2 VAE 模块：8 倍压缩的感知压缩器</h3>
+
+        <p>LDM（第 9 章）的核心思想被 SD 直接继承：用 VAE 将 512×512×3 的图像压缩为 64×64×4 的潜表示，压缩比约为 48 倍（512×512×3 / 64×64×4 ≈ 48）。</p>
+
+        <p>VAE 在 SD 中的关键参数和特点：</p>
+        <ul>
+            <li><strong>下采样因子 f = 8</strong>：输入 512 → 潜空间 64（经过 3 次 2× 下采样）</li>
+            <li><strong>潜变量通道数 = 4</strong>：每个 64×64 位置有 4 个通道的浮点数</li>
+            <li><strong>KL 正则化</strong>：训练时施加小的 KL 惩罚，使潜变量接近标准高斯分布</li>
+            <li><strong>缩放因子</strong>：潜变量乘以一个常数（SD 1.x/2.x 使用 0.18215）以控制方差</li>
+        </ul>
+
+        <p>VAE 的编码器和解码器都是卷积架构，编码器使用 stride=2 的卷积实现下采样，解码器使用转置卷积实现上采样。</p>
+
+        <pre><code># VAE Encoder 简化结构（通道数示意）
+# 输入: [1, 3, 512, 512]
+# Conv2D(3→128, 3×3, stride=1) → ResBlock(128→128)
+# Conv2D(128→256, 3×3, stride=2) → ResBlock(256→256)    # 256×256
+# Conv2D(256→512, 3×3, stride=2) → ResBlock(512→512)    # 128×128
+# Conv2D(512→512, 3×3, stride=2) → ResBlock(512→512)    # 64×64
+# Conv2D(512→8, 3×3) → split into mean + logvar (各4通道)
+# 输出: [1, 4, 64, 64]（采样后）</code></pre>
+
+        <h3>10.3 U-Net 结构</h3>
+
+        <p>U-Net 是 SD 中真正的"主力"，它负责在潜空间中执行多步去噪。SD 的 U-Net 结构遵循经典的"下采样-瓶颈-上采样"设计，并加入了残差连接和跳跃连接（Skip Connections）。</p>
+
+        <p>SD 1.x 的 U-Net 主要参数：</p>
+        <ul>
+            <li><strong>总参数量</strong>：约 860M（占 SD 1.5 全部权重的 80%+）</li>
+            <li><strong>基础通道数</strong>：320（后续阶段乘 1, 2, 4, 4）</li>
+            <li><strong>下采样阶段</strong>：4 个阶段（64→32→16→8 分辨率）</li>
+            <li><strong>残差块（ResBlock）</strong>：GroupNorm + SiLU + Conv 的标准设计</li>
+            <li><strong>跳跃连接</strong>：下采样路径的每个阶段输出都通过跳跃连接与上采样路径对应阶段拼接</li>
+        </ul>
+
+        <p>U-Net 的不同分辨率阶段对应不同的作用：低分辨率阶段（8×8）关注全局语义和高层概念，高分辨率阶段（64×64）关注纹理、光照和局部细节。Cross-Attention 层通常部署在低分辨率阶段，因为那里有更丰富的语义信息。</p>
+
+        <div class="tip">
+            <strong>💡 直觉理解：</strong>U-Net 的对称结构类似于一个"编码器-解码器"——编码器逐步提取高层语义特征，解码器将这些语义特征逐步还原为精细的空间结构。跳跃连接的作用是让解码器能直接访问编码器各层的细粒度空间信息，避免信息在瓶颈处丢失。
+        </div>
+
+        <h3>10.4 Cross-Attention 机制</h3>
+
+        <p>Cross-Attention 是 SD 实现"文生图"的核心机制。它将 CLIP 编码的文本特征注入到 U-Net 的中间层：</p>
+
+        <pre><code># Cross-Attention 的计算公式
+Q = W_Q · φ(x_t)     # 来自 U-Net 中间层的特征图
+K = W_K · τ( prompt )  # 来自 CLIP 的文本嵌入
+V = W_V · τ( prompt )  # 来自 CLIP 的文本嵌入
+
+Attention(Q, K, V) = softmax(Q · K^T / √d) · V</code></pre>
+
+        <p>这里的 φ(x_t) 是 U-Net 的中间特征，τ(prompt) 是 CLIP Text Encoder 输出的 77×768 文本嵌入。Q（Query）来自图像侧，K（Key）和 V（Value）来自文本侧——这就是"Cross-Attention"名称的由来：注意力不再发生在图像特征内部（Self-Attention），而是跨越了图像和文本两个模态。</p>
+
+        <p>每个注意力头的输出会经过一个线性投影后与输入相加（残差连接），使得模型可以选择性地"关注"文本中对应位置的语义信息。例如，生成 "a red apple on a blue table" 时，不同区域的像素会通过 Cross-Attention 找到对应的语义 token。</p>
+
+        <h3>10.5 SD 版本演进对比</h3>
+
+        <p>从 2022 年 8 月的 SD 1.0 到 2024 年的 SD 3.0，SD 经历了多次重大迭代：</p>
+
+        <table>
+            <tr><th>版本</th><th>发布时间</th><th>U-Net 参数量</th><th>文本编码器</th><th>训练数据</th><th>核心改进</th></tr>
+            <tr><td>SD 1.4/1.5</td><td>2022.08</td><td>860M</td><td>CLIP ViT-L (77 tokens)</td><td>LAION-5B</td><td>奠定基础，生态爆发点</td></tr>
+            <tr><td>SD 2.1</td><td>2022.12</td><td>865M</td><td>OpenCLIP ViT-H (77 tokens)</td><td>LAION-5B（过滤后）</td><td>更好的 NSFW 过滤，提升分辨率鲁棒性</td></tr>
+            <tr><td>SDXL</td><td>2023.07</td><td>2.6B</td><td>双编码器：CLIP ViT-bigG + OpenCLIP ViT-bigG</td><td>内部数据</td><td>原生 1024×1024、双文本编码器、更好的构图</td></tr>
+            <tr><td>SDXL Turbo</td><td>2023.11</td><td>2.6B</td><td>同上</td><td>同上</td><td>对抗式蒸馏，1-4步生成</td></tr>
+            <tr><td>SD 3.0</td><td>2024.06</td><td>8B (MM-DiT)</td><td>三编码器：CLIP + T5-XXL + CLIP</td><td>内部数据</td><td>MM-DiT 架构替代 U-Net，Flow Matching</td></tr>
+        </table>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>SD 的演进路线揭示了几个趋势：模型越来越大（860M → 8B），文本理解能力越来越强（单 CLIP → 双 CLIP → CLIP + T5），架构从 U-Net 向 DiT 迁移。SD 3.0 的 MM-DiT 架构是自 SD 1.0 以来最重大的架构变革——我们将在第 13 章和第 19 章详细分析。
+        </div>
+
+        <h3>10.6 完整推理管线</h3>
+
+        <p>将上述所有部分串联起来，SD 的一次完整推理流程如下：</p>
+
+        <pre><code>1. 文本编码: text_emb = CLIP( prompt )           # → [1, 77, 768]
+2. 初始噪声: latents = randn([1, 4, 64, 64])     # 潜空间高斯噪声
+3. 循环去噪（DDIM scheduler, 50步）:
+   for t in reversed(range(50)):
+     noise_pred = UNet(latents, t, text_emb)      # → [1, 4, 64, 64]
+     latents = scheduler.step(noise_pred, t, latents)
+4. VAE 解码: image = VAE_Decoder(latents)         # → [1, 3, 512, 512]
+5. 后处理: image = (image.clamp(-1,1) + 1) / 2   # 归一化到 [0,1]</code></pre>
+
+        <p>在 Diffusers 库中，上述流程可以用不到 30 行代码实现——但这背后是 VAE、U-Net、CLIP、Scheduler 四个组件的精密协作。</p>
+
+        <div class="warning">
+            <strong>⚠️ 真实的踩坑故事：</strong>在我第一次尝试将 SD 集成到生产服务时，遇到了一个非常诡异的问题：同样的 prompt 和 seed，在本地笔记本上和服务器上生成的图像不一样。排查了三天才发现——两个环境中的 Diffusers 版本不同，导致采样器对时间步的计算方式有细微差异。后来我学会了一条铁律：<strong>生产环境的依赖版本必须和开发环境完全锁定</strong>，特别是 diffusers、transformers 和 torch 这三件套。一个微小的版本差异可能导致生成结果完全不同，这在评测和 A/B 测试中是灾难性的。
+        </div>
+
+        <p>掌握了 SD 的架构后，下一章我们将深入文本条件注入机制——CLIP 编码器、CFG（Classifier-Free Guidance）和 Negative Prompt 是如何让 SD 理解并严格执行你的 prompt 的。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 可控生成实战 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html" class="active">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第21章 可控生成实战</h2>
+
+        <p>大家好，我是你们的讲师。经过前面 20 章的理论学习，我们已经掌握了扩散模型、Flow Matching、DiT 等一系列核心技术。但有一个问题始终悬而未决：<strong>如何精确控制模型生成的内容？</strong> 写 prompt 只能控制"大概的方向"，如果你想让画面中的人物摆出特定姿势、保持某个角色的固定形象、或者模仿一张参考图的风格——仅仅靠写 prompt 是不行的。</p>
+
+        <p>这一章是纯实战章节。我们会系统学习三种最常用的可控生成技术：<strong>ControlNet</strong>（空间条件控制）、<strong>LoRA</strong>（模型微调）和 <strong>IP-Adapter</strong>（图像风格迁移）。这三种技术各有分工，也经常需要组合使用。我会手把手带你看代码、调参数、修 bug。</p>
+
+        <h3>21.1 可控生成的需求</h3>
+
+        <p>可控生成要解决的核心问题可以概括为三个"指定"：</p>
+
+        <ul>
+            <li><strong>指定姿势：</strong>人物做出特定的动作（站立、奔跑、举手等），对应的工具有 ControlNet-OpenPose。</li>
+            <li><strong>指定构图：</strong>元素的相对位置和深度关系符合要求，对应的工具有 ControlNet-Depth、ControlNet-Canny。</li>
+            <li><strong>指定风格：</strong>生成图像具有特定的视觉风格（如水墨风、赛博朋克、宫崎骏风格），对应的工具有 LoRA、IP-Adapter。</li>
+        </ul>
+
+        <p>这三种需求可以单独出现，也经常同时出现——比如"让图中的人物做这个姿势，同时保持这个角色的外观，还要有水墨风格"。此时就需要多条件组合使用。</p>
+
+        <table>
+            <tr><th>控制需求</th><th>推荐工具</th><th>控制精度</th><th>是否需要训练</th></tr>
+            <tr><td>固定姿势/骨架</td><td>ControlNet-OpenPose</td><td>高（可精确到手指关节）</td><td>否（下载预训练模型即可）</td></tr>
+            <tr><td>边缘/线条构图</td><td>ControlNet-Canny</td><td>中（取决于边缘检测质量）</td><td>否</td></tr>
+            <tr><td>深度/空间布局</td><td>ControlNet-Depth</td><td>中高</td><td>否</td></tr>
+            <tr><td>固定角色外观</td><td>LoRA</td><td>高</td><td>是（约 5-20 张图训练）</td></tr>
+            <tr><td>固定视觉风格</td><td>LoRA / IP-Adapter</td><td>中高</td><td>否（IP-Adapter）或需少量训练</td></tr>
+            <tr><td>参考图风格迁移</td><td>IP-Adapter</td><td>中</td><td>否</td></tr>
+        </table>
+
+        <h3>21.2 ControlNet 实战</h3>
+
+        <p>ControlNet（2023, Zhang et al.）的核心思想是：在不修改预训练模型权重的前提下，通过一个<strong>可训练的条件注入网络</strong>来控制生成过程。这个条件注入网络会锁定原始模型的所有参数，只训练一个并行的"副本"来接收条件输入（如骨架图、深度图）。</p>
+
+        <p>我们用 Diffusers 来实现 ControlNet-Canny：</p>
+
+        <pre><code>import torch
+from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+from diffusers.utils import load_image
+import cv2
+import numpy as np
+
+# 加载 ControlNet 模型
+controlnet = ControlNetModel.from_pretrained(
+    "lllyasviel/control_v11p_sd15_canny",
+    torch_dtype=torch.float16
+)
+
+pipe = StableDiffusionControlNetPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5",
+    controlnet=controlnet,
+    torch_dtype=torch.float16
+).to("cuda")
+
+# 准备 Canny 边缘图
+image = load_image("input.jpg")
+image = np.array(image)
+image = cv2.Canny(image, 100, 200)
+image = image[:, :, None]
+image = np.concatenate([image, image, image], axis=2)
+control_image = Image.fromarray(image)
+
+# 生成
+result = pipe(
+    "a beautiful girl, anime style, detailed background",
+    image=control_image,
+    num_inference_steps=20,
+    guidance_scale=7.5,
+    controlnet_conditioning_scale=0.8,  # 控制强度
+).images[0]</code></pre>
+
+        <p>几个重要的参数：</p>
+
+        <ul>
+            <li><strong>controlnet_conditioning_scale：</strong>条件控制强度，0-1 之间。0.8 是常用值，太低则控制不足，太高则可能破坏图像自然度。</li>
+            <li><strong>guess_mode=False：</strong>如果开启，模型会尝试"猜测"缺失的区域，适用于条件图像不完整的情况。</li>
+            <li><strong>Canny 阈值：</strong>100/200 是一般值，阈值越低边缘越密集，越容易保留细节但也可能引入噪声。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>💡 实战建议：</strong>ControlNet 的不同类型需要不同的条件预处理。OpenPose 需要用姿态检测模型（如 OpenPose 或 DWPose）提取骨架，Depth 需要用 MiDaS 或 Depth Anything 预测深度图，Scribble 则可以直接用用户的涂鸦作为输入。Diffusers 提供了 <code>controlnet_aux</code> 库来处理这些预处理。
+        </div>
+
+        <h3>21.3 LoRA 微调</h3>
+
+        <p>LoRA（Low-Rank Adaptation, 2021）最初是为大语言模型微调设计的，但它很快被引入到扩散模型社区并大放异彩。其核心思想是：<strong>用低秩矩阵分解来近似预训练权重的增量更新</strong>。</p>
+
+        <p>具体来说，对于一个权重矩阵 <code>W ∈ R^(d×k)</code>，我们不直接更新 W，而是学习两个低秩矩阵 <code>A ∈ R^(d×r)</code> 和 <code>B ∈ R^(r×k)</code>，使得 <code>W' = W + α * A @ B / r</code>。这里的 r（秩）非常小（通常 4-64），所以需要更新的参数量只有原参数的 0.1%-1%。</p>
+
+        <pre><code># 使用 diffusers 的 LoRA 训练（简化示例）
+from diffusers import StableDiffusionXLPipeline
+from diffusers.training_utils import train_lora
+
+# 加载模型
+pipe = StableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    torch_dtype=torch.float16
+).to("cuda")
+
+# LoRA 配置
+lora_config = {
+    "rank": 16,           # 秩，越大→更多参数→更强表达力
+    "alpha": 32,          # 缩放因子
+    "target_modules": [   # 目标模块
+        "q_proj", "v_proj", "k_proj", "out_proj"
+    ],
+}
+
+# 训练数据：5-20 张目标风格的图片
+dataset = load_style_images("my_style/")
+
+# 训练超参数
+training_args = {
+    "learning_rate": 1e-4,
+    "batch_size": 1,
+    "num_epochs": 100,
+    "resolution": 1024,
+    "seed": 42,
+}
+
+# 训练并保存 LoRA 权重
+train_lora(pipe, dataset, **training_args)
+pipe.save_lora_weights("my_style_lora.safetensors")</code></pre>
+
+        <p>训练 LoRA 的几个关键经验：</p>
+
+        <ul>
+            <li><strong>数据量：</strong>5-20 张高质量、内容一致的图片 > 200 张杂乱图片。数据质量 > 数据数量。</li>
+            <li><strong>Rank 选择：</strong>风格类任务 r=16 足够，人物面部 r=32-64，超写实细节可能需要 r=128。</li>
+            <li><strong>学习率：</strong>1e-4 是通常起点。如果训练不稳定（loss 震荡），降到 5e-5。</li>
+            <li><strong>触发词：</strong>在训练时使用一个独特的触发词（如 "my_style"），推理时在 prompt 中包含它来激活 LoRA。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>⚠️ 真实踩坑——LoRA 训练数据准备：</strong>我第一次训练角色 LoRA 的时候，用了 50 张同一个动漫角色的图片。结果训练出来的 LoRA 无论如何都生成不出像样的角色——五官总是变形。排查后发现两个问题：第一，50 张图片中有 10 张是全身远景，面部只有几十个像素，这完全不够模型学习面部细节。第二，我没有做背景裁剪，大量背景噪声干扰了训练。最终我只选了 12 张高清面部特写（经过人工裁剪和对齐），重新训练后效果立竿见影。<strong>训练 LoRA 的第一原则：确保每张图片都清晰展示了你想学习的内容。</strong>
+        </div>
+
+        <h3>21.4 IP-Adapter</h3>
+
+        <p>IP-Adapter（2023, TencentARC）提供了一个不同于 LoRA 的"风格控制"思路：<strong>用参考图像而不是 prompt 来控制生成风格</strong>。它的核心机制是<strong>解耦交叉注意力（Decoupled Cross-Attention）</strong>。</p>
+
+        <p>传统 Cross-Attention 中，图像特征查询（Q）只与文本键值（K, V）做注意力。IP-Adapter 额外引入了一个"图像特征"分支：</p>
+
+        <pre><code># 解耦交叉注意力示意图
+# 原始: Attn(Q_img, K_txt, V_txt)  ← 文本条件
+# IP-Adapter: Attn(Q_img, [K_txt; K_img], [V_txt; V_img])
+#             ↑ 同时注入文本条件 + 图像特征
+#
+# 其中 K_img, V_img 来自 IP-Adapter 的 Image Encoder
+# 它将参考图像编码为一组"图像 token"
+
+# Diffusers 中使用 IP-Adapter
+from diffusers import StableDiffusionXLPipeline
+pipe = StableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    torch_dtype=torch.float16
+).to("cuda")
+
+pipe.load_ip_adapter(
+    "h94/IP-Adapter",
+    subfolder="sdxl_models",
+    weight_name="ip-adapter-plus_sdxl_vit-h.safetensors"
+)
+
+# 设置图像条件
+image = load_image("reference_style.jpg")
+pipe.set_ip_adapter_scale(0.6)  # 风格迁移强度
+
+result = pipe(
+    prompt="a beautiful landscape, with a river and mountains",
+    ip_adapter_image=image,
+    num_inference_steps=20,
+).images[0]</code></pre>
+
+        <p>IP-Adapter 的 <code>scale</code> 参数控制参考图像的影响程度：0.3-0.5 是微妙影响（保留内容采用风格），0.6-0.8 是强烈影响（内容也可能跟着参考图走），1.0 以上可能完全照搬参考图的构图。</p>
+
+        <div class="highlight">
+            <strong>🌟 实战技巧：</strong>IP-Adapter + prompt + LoRA 三者叠加时，建议先单独确定每个工具的最优参数，再逐步叠加。一个常见的失败模式是：IP-Adapter 把参考图的色彩风格翻倍了，加上 LoRA 又把角色特征翻倍了，结果生成图像"两头都过"——既不像是参考图的风格，角色也变形了。我的经验公式是：叠加使用时，每个工具的控制强度降低到单独使用时的 60%-70%。
+        </div>
+
+        <h3>21.5 多条件组合使用</h3>
+
+        <p>实际项目中最常见的场景是多种控制条件同时使用。比如做一个"指定角色在指定场景中做指定姿势"的生成：</p>
+
+        <pre><code># 多条件组合：ControlNet + LoRA + IP-Adapter
+from diffusers import StableDiffusionXLControlNetPipeline, ControlNetModel
+
+# 1. 加载 ControlNet（空间控制）
+controlnet = ControlNetModel.from_pretrained(
+    "diffusers/controlnet-canny-sdxl-1.0"
+)
+
+pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    controlnet=controlnet,
+    torch_dtype=torch.float16
+).to("cuda")
+
+# 2. 加载 LoRA（角色外观）
+pipe.load_lora_weights("my_character_lora.safetensors")
+
+# 3. 加载 IP-Adapter（风格参考）
+pipe.load_ip_adapter("h94/IP-Adapter", subfolder="sdxl_models")
+
+# 参数设置
+control_image = load_image("pose_condition.png")
+style_image = load_image("style_reference.jpg")
+
+pipe.set_ip_adapter_scale(0.4)       # 风格强度适度降低
+# ControlNet 强度 0.7
+result = pipe(
+    prompt="my_character in a cyberpunk city, neon lights, rain",  # 包含 LoRA 触发词
+    image=control_image,              # ControlNet 条件
+    ip_adapter_image=style_image,     # IP-Adapter 条件
+    controlnet_conditioning_scale=0.7,
+    num_inference_steps=25,
+).images[0]</code></pre>
+
+        <h3>21.6 多条件冲突与解决方案</h3>
+
+        <p>多条件组合使用最头疼的问题是<strong>条件冲突</strong>——ControlNet 要求人物举手，LoRA 要求人物是站姿，IP-Adapter 想带出参考图的坐姿特征。模型面对矛盾的信号会在中间值上"妥协"，结果就是关节扭曲或者风格混乱。</p>
+
+        <p>以下是我在多次实践中总结的解决策略：</p>
+
+        <table>
+            <tr><th>冲突类型</th><th>表现</th><th>解决方案</th></tr>
+            <tr><td>ControlNet vs. LoRA 姿势冲突</td><td>关节扭曲、身体变形</td><td>降低 ControlNet 强度到 0.5-0.6，或选择与目标姿势相似的 ControlNet 条件图</td></tr>
+            <tr><td>IP-Adapter vs. LoRA 风格冲突</td><td>角色特征丢失、颜色过曝</td><td>IP-Adapter scale 降到 0.3-0.4，或移除 IP-Adapter 只用 LoRA</td></tr>
+            <tr><td>ControlNet vs. IP-Adapter 构图冲突</td><td>画面割裂、物体错位</td><td>确保 ControlNet 条件图和 IP-Adapter 参考图的构图一致</td></tr>
+            <tr><td>三者同时过强</td><td>生成结果偏离预期很远</td><td>使用 <code>disable_cfg</code> 或降低 CFG scale，给模型更多"自由发挥"空间</td></tr>
+        </table>
+
+        <div class="warning">
+            <strong>⚠️ 一个经典的踩坑经历：</strong>在一次商业项目中，客户要求"生成这个角色在某部动漫风格中做特定的战斗动作"。我同时使用了角色 LoRA + 动漫风格 IP-Adapter + OpenPose ControlNet。结果角色的面部完全错位——LoRA 要求的面部被 IP-Adapter 的风格特征覆盖了。整整花了两天才找到根因：IP-Adapter 的 ViT-H 图像编码器会提取参考图中的面部特征，即使我们只想要风格。最终方案是把 IP-Adapter 换成了"仅风格"模式（<code>ip_adapter_model.load_ip_adapter("h94/IP-Adapter", subfolder="sdxl_models", weight_name="ip-adapter_sdxl.safetensors")</code>，使用基础版而非 plus 版本），并将 scale 降到 0.35。LoRA 的主体控制力就恢复了。<strong>如果你的 LoRA 训练的特征被其他组件覆盖了，优先排查 IP-Adapter 的强度，它是最容易"喧宾夺主"的一个。</strong>
+        </div>
+
+        <p>可控生成是一个非常依赖实战经验的技术领域——你可能在一个项目里花 80% 的时间调参数，真正生成只占 20%。但一旦掌握了 ControlNet、LoRA 和 IP-Adapter 的协同技巧，你就可以做到"指哪打哪"的精确控制。</p>
+
+        <p>下一章，我们将从图像生成扩展到视频生成——看看 Sora、混元视频等前沿模型如何将 DiT 和 Flow Matching 的技术用于视频领域，以及文生视频面临的核心挑战。</p>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 DDPM加速与改进 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html" class="active">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第9章 DDPM加速与改进</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们深入了 DDPM 的数学，最终发现一个令人沮丧的事实：高质量生成需要 1000 步推理，而这在实际应用中几乎不可用。许多人戏称扩散模型的采样速度为"龟速生成"——这不是没有道理的。</p>
+
+        <p>但好消息是，研究者们在 2021-2023 年间提出了一系列惊艳的工作来解决这个问题。这一章我们要介绍三个关键的改进方向：<strong>DDIM</strong> 改变了采样的随机过程，<strong>LDM</strong> 将扩散从像素空间转移到潜空间，而 <strong>Improved DDPM</strong> 则从噪声调度和方差学习等细节入手提升质量。理解这些改进，你才能真正理解 Stable Diffusion 等实用系统为什么能跑得那么快。</p>
+
+        <h3>9.1 DDIM：去随机化，保持质量</h3>
+
+        <p>DDIM（Denoising Diffusion Implicit Models）的核心洞察非常巧妙：DDPM 的采样之所以需要 1000 步，是因为它的 Markov 性质要求每一步必须"小步走"。但如果我们可以<strong>打破 Markov 链</strong>，直接从 x_t"跳到"x_{t-Δt} 呢？</p>
+
+        <p>DDIM 的关键在于，它保留了 DDPM 的<strong>前向过程</strong>不变（保证训练好的去噪网络仍然适用），但在<strong>反向过程</strong>中采用了一个非 Markov 的公式：</p>
+
+        <pre><code>x_{t-1} = √(ᾱ_{t-1}) · f_θ(x_t, t) + √(1 - ᾱ_{t-1} - σ_t²) · ε_θ(x_t, t) + σ_t · ε_t</code></pre>
+
+        <p>其中 f_θ(x_t, t) 是通过预测的噪声反推出的"预测的 x₀"。当 σ_t = 0 时，这个反向过程变成<strong>确定性</strong>的——相同的初始噪声 x_T 总是生成相同的输出，这使得 DDIM 具有了类似 GAN 的"隐空间插值"能力。</p>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>DDIM 告诉我们，扩散模型的 Markov 链假设并不是必需的。只要保持前向过程的边缘分布 q(x_t|x₀) 不变，我们可以自由设计反向过程的采样轨迹。这类似于用不同的 ODE 求解器解同一个方程——殊途同归，但效率和性质截然不同。
+        </div>
+
+        <p>DDIM 的采样步数与质量的关系：</p>
+
+        <table>
+            <tr><th>采样器</th><th>步数</th><th>CIFAR-10 FID</th><th>确定性</th><th>潜空间插值</th></tr>
+            <tr><td>DDPM</td><td>1000</td><td>3.17</td><td>否</td><td>不支持</td></tr>
+            <tr><td>DDIM</td><td>100</td><td>4.04</td><td>是</td><td>支持</td></tr>
+            <tr><td>DDIM</td><td>50</td><td>4.67</td><td>是</td><td>支持</td></tr>
+            <tr><td>DDIM</td><td>10</td><td>13.36</td><td>是</td><td>支持</td></tr>
+        </table>
+
+        <p>可以看到，DDIM 在 50-100 步时能保持与 DDPM 1000 步相当的质量，但速度提升了 10-20 倍。不过到了 10 步以下，DDIM 的质量也开始显著下降——这催生了后来的 DPMSolver 等更先进的 ODE 求解器方法（第 12 章详谈）。</p>
+
+        <h3>9.2 Latent Diffusion Model（LDM）：转战潜空间</h3>
+
+        <p>如果说 DDIM 是对"采样路径"的优化，那么 LDM（即 Stable Diffusion 的前身）则是对<strong>操作空间</strong>的彻底变革。它的思想极其朴素但非常有效：<strong>在像素空间做扩散太慢了，为什么不先压缩到潜空间，然后在潜空间里做扩散？</strong></p>
+
+        <p>LDM 的完整流程：</p>
+        <ol>
+            <li><strong>感知压缩</strong>：用一个预训练的 VAE（详见第 3 章）将 512×512 的 RGB 图像编码为 64×64×4 的潜特征图（压缩比约 8×）</li>
+            <li><strong>潜空间扩散</strong>：在压缩后的潜空间上训练标准的 DDPM/DDIM</li>
+            <li><strong>解码</strong>：用 VAE 解码器将去噪后的潜特征图还原为像素空间的图像</li>
+        </ol>
+
+        <p>这个看似简单的改动带来了巨大的收益：</p>
+        <ul>
+            <li><strong>计算量大幅下降</strong>：64×64×4 的潜空间只有 512×512×3 像素空间的约 1/48 的维度</li>
+            <li><strong>语义压缩</strong>：VAE 自动去除了像素级别的"无关细节"，保留的是高层语义信息——扩散模型因此更容易学到语义层面的分布</li>
+            <li><strong>灵活性</strong>：同一套扩散架构可以与不同的条件机制（文本、图像、分割图等）结合</li>
+        </ul>
+
+        <h3>9.3 VQ-VAE 与 KL-VAE：两种感知压缩方案</h3>
+
+        <p>LDM 使用的感知压缩器有两种主要选择：</p>
+
+        <table>
+            <tr><th>特性</th><th>VQ-VAE</th><th>KL-VAE（LDM 所用）</th></tr>
+            <tr><td>潜空间类型</td><td>离散的 codebook 索引</td><td>连续的高斯分布</td></tr>
+            <tr><td>正则化</td><td>矢量量化（VQ）</td><td>KL 散度（让潜变量接近 N(0,I)）</td></tr>
+            <tr><td>压缩效果</td><td>强压缩但可能导致信息丢失</td><td>温和压缩，保留了像素级细节</td></tr>
+            <tr><td>下游兼容性</td><td>离散潜变量需要特殊处理</td><td>直接适配高斯扩散过程</td></tr>
+            <tr><td>LDM 的选择</td><td>未采用</td><td>✅ 采用 KL-VAE 作为感知压缩器</td></tr>
+        </table>
+
+        <p>为什么 LDM 选择 KL-VAE 而非 VQ-VAE？原因很简单：扩散模型天然假设潜变量服从高斯分布——VQ-VAE 的离散潜变量与扩散模型的连续噪声建模之间存在不匹配。而 KL-VAE 的连续潜变量正好与扩散过程"门当户对"。</p>
+
+        <div class="tip">
+            <strong>💡 深入理解：</strong>VQ-VAE 并非不能用，它启发了一整个分支——DALL·E 和 VQ-Diffusion 等模型用 VQ-VAE 的离散潜空间配合自回归或扩散模型进行生成。但如果你要构建"纯高斯扩散"路线，KL-VAE 是更自然的选择。
+        </div>
+
+        <h3>9.4 层级式扩散</h3>
+
+        <p>除了 LDM 的单级潜空间扩散，还有一种"由粗到细"的层级式方法——级联扩散模型（Cascaded Diffusion Models）。它的思路类似于 Progressive Growing GAN：先在一个低分辨率版本上生成，然后逐步超分到高分辨率。</p>
+
+        <p>Google 的 Cascaded Diffusion Models（CDM）在 ImageNet 上训练了两个级联的扩散模型：</p>
+        <ul>
+            <li><strong>Base 模型</strong>：在 64×64 的低分辨率上生成</li>
+            <li><strong>SR 模型</strong>：条件于低分辨率图像，超分到 256×256 甚至 1024×1024</li>
+        </ul>
+
+        <p>级联扩散的一个关键技巧是<strong>条件增强</strong>（Conditioning Augmentation）——在将低分辨率图像输入超分模型时，对低分辨率图像加入随机噪声或高斯模糊。这个看似反直觉的操作实际上大幅提升了超分模型的鲁棒性，因为它让 SR 模型在推理时能容忍 Base 模型生成的不完美低分辨率结果。</p>
+
+        <h3>9.5 Improved DDPM</h3>
+
+        <p>OpenAI 的 Improved DDPM（2021）是对原始 DDPM 的精细打磨，主要贡献包括：</p>
+
+        <ul>
+            <li><strong>余弦噪声调度</strong>：将线性调度替换为余弦调度，避免后期噪声过强，使模型在更多的时间步上有"有意义的学习信号"</li>
+            <li><strong>学习方差 Σ_θ</strong>：原始 DDPM 固定方差为 σ_t²，Improved DDPM 让网络同时预测均值和方差——均值仍然预测噪声 ε，方差则通过插值 v 和 (1-v) 在两个边界之间学习</li>
+            <li><strong>混合损失</strong>：L_simple（MSE）+ λ · L_vlb（完整的变分下界），让模型在高 SNR（信噪比）区域也能准确建模</li>
+        </ul>
+
+        <pre><code># Improved DDPM 的方差学习简化示意
+# 模型预测两个值: ε_θ 和 v_θ
+# 方差通过 v_θ 在两个边界之间插值:
+Σ_θ(x_t, t) = exp(v · log β_t + (1 - v) · log β̃_t)
+
+# 其中 β_t 是前向过程噪声系数
+# β̃_t = (1 - ᾱ_{t-1}) / (1 - ᾱ_t) · β_t 是另一个边界</code></pre>
+
+        <p>Improved DDPM 带来的提升是显著的：在 ImageNet 64×64 上，FID 从 3.26（原始 DDPM）降低到了 2.15，且可以只用 100 步生成质量尚可的样本。</p>
+
+        <div class="warning">
+            <strong>⚠️ 真实的踩坑故事：</strong>我曾经在一个 LDM 项目中尝试自行修改潜空间的缩放因子（scaling factor），想通过调整它来改变生成图像的对比度。我天真地以为"缩放因子越小，生成图像越柔和"——结果当我将缩放因子从默认的 0.18215 改为 0.5 时，生成的所有图像都变成了灰蒙蒙的一片，细节完全丢失。排查了两天才发现原因：VAE 的潜空间分布统计特性是固定的，缩放因子必须匹配 VAE 训练时使用的归一化策略。错误的缩放因子会导致扩散模型在"错误的尺度"上做去噪，生成结果自然异常。这个教训是：<strong>不要随意修改潜空间的缩放因子，除非你完全理解 VAE 的统计特性</strong>。
+        </div>
+
+        <p>DDPM 的这些改进方向最终汇聚成了 Stable Diffusion——它结合了 LDM 的潜空间扩散、Improved DDPM 的调度优化，以及 CLIP 文本编码实现了文生图能力。下一章，我们将详解 Stable Diffusion 的完整架构。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

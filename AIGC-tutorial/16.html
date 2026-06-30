@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第16章 条件注入与控制 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html" class="active">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第16章 条件注入与控制</h2>
+
+        <p>大家好，我是你们的讲师。如果你用 Stable Diffusion 生成过图片，你一定遇到过这种情况：同一个 prompt，每次生成的结果都不一样。有时候你想要一只"蓝色的猫"，但模型给你了一只"蹲着的蓝猫"——它很努力地理解了你的描述，但最终画面里有哪些元素、元素怎么摆放，它"自由发挥"的空间太大了。</p>
+
+        <p>在实际应用中，我们往往需要更<strong>精确的控制</strong>：不仅要知道"画什么"，还要知道"画在哪"、"什么姿势"、"什么构图"。这就涉及到生成模型中最核心的工程问题之一——<strong>条件注入</strong>（Conditioning）。从最简单的文本条件到 ControlNet 的结构条件，再到 IP-Adapter 的图像条件，这一章我们把条件控制的完整谱系走一遍。</p>
+
+        <h3>16.1 Cross-Attention 条件注入</h3>
+
+        <p>在 U-Net 和 DiT 架构中，最常见的条件注入方式就是 <strong>Cross-Attention</strong>（交叉注意力）。具体来说，在去噪模型的每一层中，模型的中间特征（作为 Query）与条件嵌入（作为 Key 和 Value）进行交叉注意力计算。</p>
+
+        <p>在 Stable Diffusion 中，流程是这样的：用户的 prompt 文本首先经过 CLIP Text Encoder 编码，得到一组 token 级别的文本特征（shape 为 [77, 768]）。然后 U-Net 的每个 Cross-Attention 层使用这些文本特征作为 K 和 V，U-Net 中间特征图作为 Q，计算注意力输出。这样，文本语义就"注入"到了图像的生成过程中。</p>
+
+        <pre><code># Cross-Attention 注入伪代码
+# x: U-Net 中间特征 (B, C, H, W)  -> flatten to (B, H*W, C)
+# text_emb: CLIP 文本特征 (B, 77, 768)
+
+def cross_attention(x, text_emb):
+    Q = x @ W_q                 # Query 来自图像特征
+    K = text_emb @ W_k           # Key 来自文本特征
+    V = text_emb @ W_v           # Value 来自文本特征
+
+    attn_score = Q @ K.T / sqrt(d_k)
+    attn_weight = softmax(attn_score, dim=-1)
+    out = attn_weight @ V
+
+    return out @ W_o</code></pre>
+
+        <p>你可能会问：为什么用文本特征做 K/V，而不是 Q？直觉上，Q 是"当前去噪位置想知道什么信息"，K/V 是"文本能提供什么信息"。如果我们反过来，让文本做 Q、图像做 K/V，注意力就变成了"文本在关注图像的哪个区域"——这更适合图文检索，而不是条件生成。</p>
+
+        <div class="tip">
+            <strong>💡 设计理念：</strong>Cross-Attention 的精妙之处在于"不改变主干网络的结构"。不管文本特征是什么样的（prompt 长度可变、不同语言），U-Net 始终保持一致的输入输出形状。这种解耦设计使得 SD 可以在不修改 U-Net 的前提下切换不同的文本编码器。
+        </div>
+
+        <h3>16.2 AdaLN-Zero：DiT 的条件机制</h3>
+
+        <p>当架构从 U-Net 演进到 DiT（Diffusion Transformer）后，条件注入的方式也发生了变化。DiT 没有使用 Cross-Attention，而是采用了 <strong>AdaLN-Zero</strong>（Adaptive Layer Norm with Zero Initialization）机制。</p>
+
+        <p>AdaLN-Zero 的核心思想是：用条件嵌入（timestep embedding + class embedding 或 text embedding）来预测 LayerNorm 的 <strong>缩放</strong>（scale）和 <strong>移位</strong>（shift）参数，同时额外增加一个 <strong>门控</strong>（gate）参数。关键技巧是——所有残差分支的参数初始化为零。</p>
+
+        <p>数学上，对于 DiT 中的一个 Transformer block，AdaLN-Zero 的操作如下：</p>
+
+        <pre><code># AdaLN-Zero 机制伪代码
+# x: token 特征
+# c: 条件嵌入 (timestep + text/class embedding)
+
+def adaLn_zero_block(x, c):
+    # 用条件嵌入预测 6 个参数
+    scale, shift, gate = mlp(c)  # 每个都是向量
+
+    # 自适应 LayerNorm
+    x_norm = layer_norm(x) * (1 + scale) + shift
+
+    # 主计算（注意力 + FFN）
+    x_out = attention(x_norm)
+
+    # 门控残差连接（gate 初始化为 0）
+    x = x + gate * x_out
+
+    return x</code></pre>
+
+        <p>关键在 <strong>gate 初始化为 0</strong> 这个设计。当训练开始时，gate=0 意味着残差分支的输出被完全阻塞，整个模型退化为一个恒等映射加上 MLP——这保证了训练的稳定起步。随着训练的进行，gate 逐渐增大，条件信息逐步"流入"主干网络。</p>
+
+        <div class="highlight">
+            <strong>🌟 设计哲学对比：</strong>Cross-Attention 是"外部注入"——文本信息作为独立的 K/V 进入模型；AdaLN-Zero 是"内部调制"——条件信息通过调控 LN 参数来微调特征计算。前者更适合稠密的 token 级别控制（文本描述），后者更适合稀疏的条件控制（类别标签、timestep）。DiT 之所以选择 AdaLN-Zero 而非 Cross-Attention，是因为 DiT 作为 Transformer，每个 patch token 已经包含了丰富的空间信息，条件信号只需要做"全局调制"而无需逐 token 注入。
+        </div>
+
+        <h3>16.3 ControlNet：结构条件控制的里程碑</h3>
+
+        <p>2023 年 2 月，张吕敏（Lvmin Zhang）发表了 ControlNet，这是条件控制领域最 impactful 的工作之一。ControlNet 的核心思想是：<strong>复制预训练 U-Net 的编码器部分的权重，作为可训练的条件控制分支</strong>。</p>
+
+        <p>具体做法：</p>
+
+        <ul>
+            <li>复制 Stable Diffusion U-Net 的编码器（encoder）部分的全部权重，形成一个"可训练副本"</li>
+            <li>在这个副本的输入端和输出端各插入一个<strong>零卷积层</strong>（Zero Convolution）——这是一个 1×1 卷积，权重初始化为零，偏置也初始化为零</li>
+            <li>训练时，只有这个副本 + 零卷积的参数被更新，原始 U-Net 被冻结</li>
+        </ul>
+
+        <p>零卷积的设计非常巧妙：在训练开始时，零卷积输出全零，所以控制分支对主网络的贡献为零——主网络完全不受干扰。随着训练推进，零卷积逐渐学习到非零权重，控制信息开始发挥作用。这种"<strong>从零开始学习控制</strong>"（Learning from Zero）的 paradigm，保证了不会因为新条件的加入而破坏预训练模型的先验知识。</p>
+
+        <div class="warning">
+            <strong>⚠️ 踩坑实录：ControlNet 权重过大导致的条件湮灭</strong><br><br>
+            2023 年我在做一个"基于 Canny 边缘控制的产品图生成"项目时，遇到了一个奇怪的问题：当我把 ControlNet 的 conditioning scale 从 1.0 调到 1.5 时，生成的图片确实严格遵循了 Canny 边缘的轮廓，但<strong>所有图像的色彩都变成了灰蒙蒙的</strong>，纹理细节大量丢失——仿佛模型的"创造力"被完全压制了。<br><br>
+            后来才发现问题：conditioning scale 并非越大越好。过高的 scale 会让控制分支的信号主导生成过程，导致主分支（承载了绝大部分视觉先验知识）的输出被淹没。更合理的做法是：对于结构明确的控制条件（如 Canny 边缘、深度图），scale 设置在 0.6-1.0 之间即可；对于模糊条件（如姿态骨架），可以适当调高到 1.2-1.5。最终我把 scale 设为 0.8，色彩和纹理问题立即消失了。<br><br>
+            <strong>教训：ControlNet 的权重是"剂量"——太少没效果，太多会中毒。</strong>
+        </div>
+
+        <h3>16.4 IP-Adapter：解耦的图像条件控制</h3>
+
+        <p>ControlNet 专注于结构条件控制（边缘、深度、姿态），但如果我们要用一张<strong>参考图像</strong>来控制生成内容的风格或外观呢？这就是 <strong>IP-Adapter</strong>（Image Prompt Adapter）要解决的问题。</p>
+
+        <p>IP-Adapter 的核心创新是<strong>解耦的交叉注意力</strong>（Decoupled Cross-Attention）：在原有文本 Cross-Attention 层旁边，增加一个并行的图像 Cross-Attention 层。文本条件走原来的路径，图像条件走新增的路径，两条路径的输出相加后送入后续层。</p>
+
+        <p>这样设计的好处：</p>
+
+        <ul>
+            <li><strong>不冲突：</strong>文本条件和图像条件有各自独立的注意力路径，互相不影响</li>
+            <li><strong>可组合：</strong>多个 IP-Adapter 可以同时使用（如一张参考风格 + 一张参考人脸）</li>
+            <li><strong>轻量：</strong>只增加少量参数（约 22M 参数），训练速度快，推理开销小</li>
+        </ul>
+
+        <h3>16.5 条件控制方法对比</h3>
+
+        <p>我们把目前主流条件控制方法放在一张表里对比：</p>
+
+        <table>
+            <tr><th>方法</th><th>条件类型</th><th>注入方式</th><th>是否需训练</th><th>参数量</th><th>代表作</th></tr>
+            <tr><td>Cross-Attention</td><td>文本</td><td>文本特征 K/V 注入</td><td>预训练内置</td><td>—</td><td>Stable Diffusion</td></tr>
+            <tr><td>AdaLN-Zero</td><td>条件嵌入</td><td>scale/shift/gate 调制</td><td>预训练内置</td><td>—</td><td>DiT, SD3, FLUX</td></tr>
+            <tr><td>ControlNet</td><td>结构条件</td><td>复制编码器 + 零卷积</td><td>需单独训练</td><td>~350M</td><td>Canny, Depth, OpenPose</td></tr>
+            <tr><td>T2I-Adapter</td><td>结构条件</td><td>轻量适配器 + 特征注入</td><td>需单独训练</td><td>~80M</td><td>Color, Sketch, Seg</td></tr>
+            <tr><td>IP-Adapter</td><td>图像条件</td><td>解耦 Cross-Attention</td><td>需单独训练</td><td>~22M</td><td>风格迁移, 人脸保持</td></tr>
+            <tr><td>InstantID / PhotoMaker</td><td>身份保持</td><td>嵌入融合 + 注意力注入</td><td>需单独训练</td><td>~50M</td><td>ID 保持生成</td></tr>
+        </table>
+
+        <div class="highlight">
+            <strong>🌟 选择指南：</strong><br>
+            • 需要精确控制画面构图（边线、深度）→ <strong>ControlNet</strong><br>
+            • 需要参考图像风格但保留文本控制 → <strong>IP-Adapter</strong><br>
+            • 需要保持特定人脸/身份 → <strong>InstantID / PhotoMaker</strong><br>
+            • 需要轻量级结构控制 → <strong>T2I-Adapter</strong><br>
+            • 需要同一场景同时使用多种控制 → <strong>多个 ControlNet + IP-Adapter 组合</strong>
+        </div>
+
+        <h3>16.6 实战踩坑：多条件融合的权重平衡</h3>
+
+        <p>在实际项目中，我们常常需要同时使用多个条件控制。比如一个电商场景：用 Canny ControlNet 控制产品轮廓 + IP-Adapter 控制品牌风格 + 文本 prompt 描述产品细节。这时候最头疼的问题就是——<strong>权重怎么设？</strong></p>
+
+        <p>我们经常会遇到这样的问题：提示词写了"红色高跟鞋"，但 ControlNet 给出的边缘轮廓是一双靴子，IP-Adapter 的风格是"复古风"——最终结果可能是"红色的复古靴子"，完全忽略了"高跟鞋"这个文本指令。为什么？因为 ControlNet 的结构控制太强了，把文本的语义引导给覆盖了。</p>
+
+        <p>解决方案是：先确定各条件的<strong>优先级</strong>。通常结构条件（Canny、Depth）权重设为 0.6-0.8，图像风格条件（IP-Adapter）设为 0.5-0.7，文本条件保持全强度（CFG scale 负责调节）。先跑一个小 batch 测试各条件的独立影响，再逐步叠加——<strong>条件控制的核心原则是：一次只调一个变量</strong>。</p>
+
+        <p>条件控制让我们能够精确地引导生成模型的输出，但更精细的控制也带来了更大的计算开销。当模型的参数量从 0.6B 膨胀到 8B、甚至 80B 时，单卡训练和推理已经变得不切实际。下一章，我们将深入分布式训练与推理的工程挑战——FSDP、Flash Attention、模型量化，看看大模型时代我们如何用工程手段突破计算瓶颈。</p>
+
+        <div class="footer-nav">
+            <a href="15.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="17.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

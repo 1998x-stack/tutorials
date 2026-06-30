@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 生成质量评估指标 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html" class="active">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第7章 生成质量评估指标</h2>
+
+        <p>大家好，我是你们的讲师。前六章我们走过了概率基础→VAE→GAN→自回归的完整路线，每种模型都有自己的优势和局限。现在你可能会问一个非常实际的问题：<strong>"我怎么知道我训练的生成模型好不好？"</strong></p>
+
+        <p>这个问题比看起来要复杂得多。生成模型的评估是一个持续的开放难题——不像分类任务那样有单一的准确率指标。"好"可以指"看起来逼真"、"覆盖了所有模式"、"跟文本描述匹配"、"用户喜欢"——甚至这些维度之间还在互相冲突。这一章我们来逐个拆解当前最主流的评估指标，它们的数学含义、使用场景和常见陷阱。</p>
+
+        <h3>7.1 为什么需要多个评估指标</h3>
+
+        <p>生成质量是多维度的，没有任何一个指标能覆盖所有方面：</p>
+
+        <table>
+            <tr><th>维度</th><th>含义</th><th>代表指标</th><th>可能被忽略的另一个维度</th></tr>
+            <tr><td>保真度（Fidelity）</td><td>单张图像是否逼真</td><td>FID, IS</td><td>多样性——可能只生成好看的但不覆盖所有类别</td></tr>
+            <tr><td>多样性（Diversity）</td><td>是否覆盖所有模式</td><td>Recall, Coverage</td><td>保真度——覆盖全了但有些图质量差</td></tr>
+            <tr><td>图文对齐</td><td>生成内容是否符合文本描述</td><td>CLIP Score, BLIP-VQA</td><td>美学质量——图文匹配但构图难看</td></tr>
+            <tr><td>人类偏好</td><td>用户觉得好不好</td><td>ELO 评分, A/B 胜率</td><td>一致性——人工评估噪声很大</td></tr>
+            <tr><td>效率</td><td>生成速度、计算成本</td><td>推理时间, 参数量</td><td>质量——速度快但质量差也没用</td></tr>
+        </table>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>在 AI 生成领域有一个著名的"不可能三角"——<strong>质量、多样性、速度</strong>三者无法兼得。BigGAN 的 truncation trick 就是牺牲多样性换取保真度的经典例子。作为研究人员或工程师，你需要根据具体场景决定"哪个维度更重要"。
+        </div>
+
+        <h3>7.2 Inception Score (IS)</h3>
+
+        <p>Inception Score 是 2016 年由 Salimans 等人提出的最早广泛使用的生成质量指标之一。它基于预训练的 Inception v3 网络，核心思想是：</p>
+
+        <ul>
+            <li><strong>好的生成图像应该"清晰可辨"</strong>：Inception 网络对生成的图像应该输出高置信度的类别预测（条件标签分布 P(y|x) 的熵小）</li>
+            <li><strong>好的生成模型应该覆盖所有类别</strong>：整体上的类别分布应该均匀（边际分布 P(y) 的熵大）</li>
+        </ul>
+
+        <pre><code>IS = exp(E_x[KL(P(y|x) || P(y))])
+
+其中：
+  P(y|x) —— 给定图像 x 时 Inception 预测的类别概率分布
+  P(y)   —— 所有生成图像的平均类别分布
+
+直观理解：
+  - 每个样本都被 Inception 以高置信度分到某个类别（P(y|x) 很尖）
+  - 但所有样本平均来看分布在各类别中（P(y) 很均匀）
+  → IS 值越大越好</code></pre>
+
+        <p><strong>局限性</strong>（非常严重）：</p>
+        <ul>
+            <li>IS 只评估"有多少类物体被识别出来"，不评估内容是否合理——生成一张对抗性噪声也能得到高 IS</li>
+            <li>高度依赖 Inception 的类别体系（1000 个 ImageNet 类别），不适用于域外数据（医学图像、抽象艺术）</li>
+            <li>对多样性不敏感——只生成 1000 个"完美样本"（每个类别各一个）也能得到很高的 IS</li>
+            <li>IS 不能检测模式坍塌——模型只生成 1 类也能得高分（如果那 1 类的质量足够好）</li>
+        </ul>
+
+        <div class="warning">
+            <strong>⚠️ 一个真实的踩坑故事：</strong>2019 年我在发表一篇 GAN 论文时，审稿人质疑我的 IS 测试不够公正。我意识到我在计算 IS 时用了生成器和 Inception 在<strong>同一个数据集</strong>上训练的——这导致了严重的 bias：Inception 对生成器擅长的那几类特别"自信"。
+            正确的做法是：<strong>IS 和 Inception 的训练数据必须完全隔离</strong>，且生成样本必须和 Inception 的训练数据属于同一个域。审稿人逼着我用不同训练的 Inception 重新算了所有 IS——分值下降了 30%，但更有说服力了。
+            这个教训是：自动评估指标到处都是坑，理解每个指标的假设是避免学术造假（和论文被拒）的前提。
+        </div>
+
+        <h3>7.3 Frechet Inception Distance (FID)</h3>
+
+        <p>FID（Heusel et al., 2017）是目前使用最广泛的生成质量指标，也是学术界和工业界的"标配"。它比 IS 更全面，因为它同时比较了<strong>真实图像和生成图像的分布距离</strong>。</p>
+
+        <p>计算步骤：</p>
+        <ol>
+            <li>用 Inception v3 的倒数第二层（池化层，2048 维向量）提取所有真实图像和生成图像的特征</li>
+            <li>假设特征服从多维高斯分布，计算两个分布的均值和协方差</li>
+            <li>计算两个多维高斯分布之间的 Frechet 距离（也叫 Wasserstein-2 距离）</li>
+        </ol>
+
+        <pre><code>FID = ||μ_r - μ_g||² + Tr(Σ_r + Σ_g - 2(Σ_r Σ_g)^{½})
+
+其中：
+  μ_r, Σ_r —— 真实图像特征的均值和协方差
+  μ_g, Σ_g —— 生成图像特征的均值和协方差
+  Tr —— 矩阵的迹（对角线元素和）
+
+FID 越小越好。经验阈值：
+  - FID &lt; 10：生成质量优秀
+  - FID 10-30：生成质量良好
+  - FID &gt; 50：生成质量较差</code></pre>
+
+        <p><strong>FID 的优缺点总结</strong>：</p>
+        <table>
+            <tr><th>优点</th><th>缺点</th></tr>
+            <tr><td>同时评估保真度和多样性（两个分布的距离）</td><td>高斯分布假设可能不成立（特征分布可能多模态）</td></tr>
+            <tr><td>对模式坍塌比 IS 更敏感</td><td>需要大量样本才能稳定计算（通常需要 10K+）</td></tr>
+            <tr><td>不依赖 ImageNet 类别体系</td><td>同样受限于 Inception 特征（不适用于所有域）</td></tr>
+            <tr><td>和人类判断的相关性比 IS 好</td><td>小样本下方差大，结果不可信</td></tr>
+        </table>
+
+        <div class="tip">
+            <strong>💡 FID 使用实践：</strong>如果你要比较两个模型的 FID，确保：（1）使用相同数量的样本（推荐 10,000-50,000 张）；（2）使用相同的预处理（特别是图像缩放和中心裁剪）；（3）计算多次取平均值，报告标准差。我的经验是，同一个模型跑 3 次 FID，两次之间可能有 0.5-1.0 的波动——小于这个差值的变化不一定是模型改进带来的。
+        </div>
+
+        <h3>7.4 CLIP Score</h3>
+
+        <p>FID 和 IS 都只评估"图像本身的质量"，但无法回答"生成的图像是否匹配文本描述"这个关键问题。随着文生图模型成为主流（2022 年后），<strong>图文对齐度</strong>成了最受关注的评估维度之一。</p>
+
+        <p>CLIP Score 的计算非常简单：</p>
+
+        <pre><code>CLIP Score = E[cosine_similarity(CLIP_text(prompt), CLIP_image(image))]
+
+其中：
+  - CLIP_text 将文本 prompt 映射到联合嵌入空间
+  - CLIP_image 将图像映射到同一联合嵌入空间
+  - cosine_similarity 度量两者的对齐程度
+
+分数范围通常在 0-1（或 0-100，取决于具体实现），越高越好。</code></pre>
+
+        <p><strong>CLIP Score 的优缺点</strong>：</p>
+        <ul>
+            <li>优点：计算快、不依赖参考图像（只需要 prompt）、通用性强</li>
+            <li>缺点：对视觉细节不敏感（CLIP 是粗粒度的）——生成的图可能 CLIP Score 很高但实际构图很差</li>
+            <li>缺点：<strong>CLIP 偏好"过度一致性"</strong>——如果一张图里放了太多和 prompt 相关的东西，CLIP Score 反而更高，但这可能牺牲了构图美感</li>
+        </ul>
+
+        <p>在实际评测中，CLIP Score 通常和 FID 一起使用——FID 保证"像真实图像"，CLIP Score 保证"跟 prompt 匹配"。这正是 Artificial Analysis、T2I-CompBench 等评测平台的常见做法。</p>
+
+        <h3>7.5 人类偏好评估</h3>
+
+        <p>尽管自动指标越来越成熟，最终决定生成模型好坏的是<strong>人类用户的感受</strong>。人类评估的主流方法有两种：</p>
+
+        <p><strong>A/B 测试（Pairwise Comparison）</strong>：给人类标注员同时展示两张图像和对应的 prompt，让他们选择"哪张更符合 prompt"或"哪张质量更好"。这是最可靠的方法，但成本高、速度慢。</p>
+
+        <p><strong>ELO 评分系统</strong>：源自国际象棋的评分系统，现在被广泛用于 AI 模型评测。Artificial Analysis 是文生图领域最知名的 ELO 排行平台，其工作方式是：</p>
+        <ul>
+            <li>用户投票："模型 A 和模型 B，哪个更好？"</li>
+            <li>胜者从败者那里获得 ELO 分数</li>
+            <li>差距大时输赢分差大，差距小时分差小</li>
+            <li>新模型初始 ELO 为 1000 或 1200</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>ELO 评分无法直接告诉你"这个模型有多好"——它只告诉你"这个模型相对其他模型有多好"。当你在论文中看到"Model X 达到了 1200 ELO"时，一定要问清楚"这个 ELO 是在什么数据集、什么对手模型、多少投票下算出来的"。不同的 ELO 榜单之间不具有可比性。
+        </div>
+
+        <p><strong>ImageReward / Pick-a-Pic 等评分模型</strong>：2023 年后出现了基于人类偏好训练的打分模型——它们试图用神经网络模拟人类评估。虽然不如真实人类准确，但可以在研发迭代中做快速粗略的评估。截至 2026 年，这类模型已经相当成熟，但仍然无法完全取代真实的人类评估。</p>
+
+        <h3>7.6 指标对比总结与使用场景指南</h3>
+
+        <p>每个指标都有最适合的场景和最不该用的场景。这里给出一个实战指南：</p>
+
+        <table>
+            <tr><th>场景</th><th>首要指标</th><th>辅助指标</th><th>注意事项</th></tr>
+            <tr><td>比较两个文生图模型</td><td>FID + CLIP Score</td><td>人类 A/B 测试</td><td>确保 prompt 集合覆盖广泛</td></tr>
+            <tr><td>训练过程中监控进度</td><td>FID（每 1K 步算一次）</td><td>生成样本可视化</td><td>不要只看 FID，肉眼观察同样重要</td></tr>
+            <tr><td>检测模式坍塌</td><td>FID + Recall 指标</td><td>IS</td><td>生成 10K 样本，统计类别分布</td></tr>
+            <tr><td>评估图像-文本对齐</td><td>CLIP Score</td><td>BLIP-VQA</td><td>准备细粒度的 prompt（包含对象、属性、关系）</td></tr>
+            <tr><td>论文实验 SOTA 对比</td><td>FID + 人类评估</td><td>IS, Precision/Recall</td><td>必须使用官方或广泛认可的评测代码</td></tr>
+            <tr><td>产品级模型选择</td><td>ELO 评分 + 用户留存</td><td>FID, CLIP Score</td><td>最终指标是用户付费率和活跃度</td></tr>
+        </table>
+
+        <div class="warning">
+            <strong>⚠️ 第二个踩坑故事：</strong>2023 年我在做一个图像增强项目时，模型在 FID 指标上取得了显著提升（从 35 降到了 22），我非常兴奋，觉得终于找到了正确的方案。结果我把前后生成的图给同事做盲测——同事无一例外地选择了"FID 更差"的旧版本！原来我优化的是 FID 中的"全局分布匹配"，但过度的平滑处理让图像失去了锐利的边缘。这个教训让我形成了铁律：<strong>任何自动指标提升，都必须配合至少一次人工盲测来验证。指标永远比人眼更容易被"欺骗"。</strong>
+        </div>
+
+        <p>到这里为止，第一部分的七章内容全部完成。我们已经完整覆盖了生成模型的基础理论（概率基础、VAE、GAN、自回归）和评估方法。从第 8 章开始，我们将进入本教程最核心的部分——<strong>扩散模型</strong>。这个 2022-2026 年统治了图像和视频生成的范式，有着丰富的数学推导和工程实现。第 8 章我们首先从 DDPM（Denoising Diffusion Probabilistic Models）的完整数学推导开始——理解"正向加噪"和"反向去噪"这对因果过程是如何工作的。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

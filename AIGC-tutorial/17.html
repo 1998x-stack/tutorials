@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第17章 分布式训练与推理 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html" class="active">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第17章 分布式训练与推理</h2>
+
+        <p>大家好，我是你们的讲师。在 AIGC 的世界里，模型参数量正在以近乎疯狂的速度增长：2022 年的 Stable Diffusion 1.4 只有约 0.86B 参数，2023 年的 SDXL 涨到了 2.6B，2024 年的 FLUX.1 达到了 12B，而 2025 年的自回归统一模型参数量动辄几十 B 甚至上百 B。更不用说视频生成模型——处理时空维度的数据，显存消耗是图像模型的数十倍。</p>
+
+        <p>面对这样的规模，单卡训练和推理已经成为历史。这一章，我们聚焦于生成模型<strong>训练和推理的工程挑战</strong>——FSDP 如何让超大模型训练成为可能？PipeFusion 如何用流水线并行推理 DiT？Flash Attention 和模型量化如何让每秒生成更多图像？这些工程优化，决定了你的模型是只能在实验室跑 demo，还是能真正部署到生产环境服务百万用户。</p>
+
+        <h3>17.1 生成模型的显存挑战</h3>
+
+        <p>让我们先看清问题的规模。以 Diffusion Transformer 为例，训练过程中显存的消耗主要由以下几部分组成：</p>
+
+        <table>
+            <tr><th>消耗项</th><th>DiT-XL/2 (0.6B)</th><th>FLUX.1 (12B)</th><th>说明</th></tr>
+            <tr><td>模型权重 (FP32)</td><td>~2.4 GB</td><td>~48 GB</td><td>12B × 4 bytes</td></tr>
+            <tr><td>梯度</td><td>~2.4 GB</td><td>~48 GB</td><td>与权重等量</td></tr>
+            <tr><td>优化器状态 (AdamW)</td><td>~4.8 GB</td><td>~96 GB</td><td>m + v 两个动量和</td></tr>
+            <tr><td>中间激活 (Activations)</td><td>~8-16 GB</td><td>~80-160 GB</td><td>随 batch size 和序列长度变化</td></tr>
+            <tr><td>总计</td><td>~17-25 GB</td><td>~272-352 GB</td><td>单卡 H100 (80GB) 远远不够</td></tr>
+        </table>
+
+        <p>可以看到，对于 12B 参数的模型，即使忽略中间激活，仅权重+梯度+优化器状态就需要 192GB 显存——这已经超过了单张 H100 的 80GB。必须使用分布式策略。</p>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>传统分布式训练中，最简单的方案是 DDP（Distributed Data Parallel）——每张卡存一份完整的模型副本，前向 + 反向传播后 all-reduce 梯度。但 DDP 的问题是：<strong>每张卡都要存完整模型</strong>，单卡放不下的模型，DDP 也无能为力。这就需要更激进的显存节省策略——FSDP 就是答案。
+        </div>
+
+        <h3>17.2 FSDP：全分片数据并行</h3>
+
+        <p><strong>FSDP</strong>（Fully Sharded Data Parallel，全分片数据并行）是 PyTorch 在 2023 年推出的分布式训练策略，它解决了 DDP 的"每卡存全量"问题。核心思想极度简单：<strong>把模型权重、梯度、优化器状态分片到所有 GPU 上，只在需要时才 gather</strong>。</p>
+
+        <p>FSDP 的工作流程：</p>
+
+        <ul>
+            <li><strong>前向传播前：</strong>从所有 GPU 上 gather 完整的权重 → 每个设备上执行前向计算 → 前向完成后释放其他 GPU 的权重</li>
+            <li><strong>反向传播前：</strong>重新 gather 权重 → 执行反向传播计算梯度</li>
+            <li><strong>反向传播后：</strong>对梯度做 reduce-scatter（分布到各设备）→ 每个设备只更新自己分片对应部分的参数</li>
+        </ul>
+
+        <p>这种"gather → 计算 → 释放"的模式，让 FSDP 在训练大型模型时可以将单卡显存占用降低数倍。代价是通信开销增加了——gather 和 scatter 操作需要额外的 all-gather 和 reduce-scatter 通信。</p>
+
+        <pre><code># FSDP 基本使用示例（伪代码）
+import torch
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+model = DiT_XL_2()  # 0.6B 参数的 DiT 模型
+
+# 包装模型为 FSDP
+model = FSDP(
+    model,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,  # 权重+梯度+优化器状态全分片
+    auto_wrap_policy=transformer_auto_wrap_policy,  # 自动包装 Transformer block
+    mixed_precision=MixedPrecision(
+        param_dtype=torch.bfloat16,   # 参数用 BF16 存储
+        reduce_dtype=torch.bfloat16,  # 梯度用 BF16 通信
+        buffer_dtype=torch.bfloat16,
+    ),
+)
+
+# 训练循环与普通模型相同
+for batch in dataloader:
+    loss = model(batch)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()</code></pre>
+
+        <p>FSDP 提供了三种分片策略：<strong>FULL_SHARD</strong>（全分片，最省显存但通信最多）、<strong>HYBRID_SHARD</strong>（混合分片，节点内分片 + 节点间复制）、<strong>SHARD_GRAD_OP</strong>（仅分片梯度和优化器状态，不分片权重）。实践中，HYBRID_SHARD 往往是最优选择——它在通信开销和显存节省之间取得了很好的平衡。</p>
+
+        <div class="tip">
+            <strong>💡 实战经验：</strong>用 FSDP 训练扩散模型时，有一个容易被忽视的细节——<strong>和 BN（BatchNorm）的冲突</strong>。在扩散模型的 U-Net 中，部分实现使用了 GroupNorm 或 BatchNorm。如果使用 BatchNorm，FSDP 的分片会导致 BN 统计信息的计算不准确。解决方案是：要么把 BN 替换为 GN（GroupNorm），要么在 FSDP 包装时排除 BN 层。SD 系列模型已经全部使用 GroupNorm，所以这个问题在新模型中不太常见。
+        </div>
+
+        <h3>17.3 PipeFusion：DiT 的流水线并行推理</h3>
+
+        <p>训练可以用 FSDP 解决，但推理呢？对于超大 DiT 模型（如 FLUX.1 的 12B 参数），即使是用 FP16 精度，单张 GPU 也无法完整加载模型进行推理。而推理阶段没有优化器状态和梯度，主要的显存瓶颈是<strong>模型权重 + KV cache</strong>。</p>
+
+        <p><strong>PipeFusion</strong> 是一个专门为 DiT 设计的 patch 级流水线并行推理框架。它的核心思路是：</p>
+
+        <ul>
+            <li>把 DiT 的水平方向（layer 维度）切分到多张 GPU 上——<strong>流水线并行</strong>（Pipeline Parallelism）</li>
+            <li>同时把空间维度（patch 维度）也做切分——<strong>patch 级并行</strong></li>
+            <li>通过异步 prefetch 技术隐藏通信开销</li>
+        </ul>
+
+        <p>PipeFusion 的独特之处在于"patch-level"的并行：传统流水线并行是把模型的不同 layer 放在不同 GPU 上，但 DiT 的自注意力机制需要所有 patch 的完整特征图才能计算——如果只分 layer 不分 patch，GPU 间必须传输完整特征图，通信量巨大。PipeFusion 把 patch 也切分，每个 GPU 只处理一部分 patch，然后用 all-to-all 通信交换注意力计算所需的数据，大幅降低了单次通信的数据量。</p>
+
+        <table>
+            <tr><th>并行策略</th><th>切分维度</th><th>适用场景</th><th>通信模式</th></tr>
+            <tr><td>DDP / FSDP</td><td>数据 (batch)</td><td>训练</td><td>All-Reduce / All-Gather</td></tr>
+            <tr><td>Tensor Parallel (TP)</td><td>层内参数</td><td>训练 + 推理</td><td>All-Reduce (高频)</td></tr>
+            <tr><td>Pipeline Parallel (PP)</td><td>层间</td><td>训练 + 推理</td><td>P2P (低频, 大消息)</td></tr>
+            <tr><td>PipeFusion</td><td>层间 + patch</td><td>DiT 推理</td><td>All-to-All</td></tr>
+        </table>
+
+        <h3>17.4 Flash Attention</h3>
+
+        <p>如果说 FSDP 和 PipeFusion 是"横向扩展"（用更多 GPU 存更大模型），那么 <strong>Flash Attention</strong> 就是"纵向优化"（让单次计算更快、更省显存）。</p>
+
+        <p>Flash Attention 是 Tri Dao 在 2022 年提出的高效注意力实现，它的核心技巧是：<strong>利用 GPU 的 SRAM（共享内存，速度极快但容量极小）做分块计算</strong>（tiling），避免将完整的 N×N 注意力矩阵写回到 HBM（高带宽内存）中。</p>
+
+        <p>传统注意力计算的瓶颈在于：计算 S = QKᵀ（shape N×N）后，这个巨大的中间矩阵必须写入 HBM，然后再读出来做 softmax。对于 N=4096（DiT 处理 64×64 图像的 patch 数），注意力矩阵大小为 4096×4096×2 bytes ≈ 33MB——虽然单看不大，但如果在每一层、每个 head 上反复读写，累积的 HBM 访问量非常可观。</p>
+
+        <div class="highlight">
+            <strong>🌟 量化的提升：</strong>Flash Attention 2 在不同配置下，训练速度提升约 2-4x，显存节省约 5-10x。对于 DiT-XL/2 的训练，使用 Flash Attention 可以将最大 batch size 从 32 提升到 128（在相同的显存预算下），大幅提高训练吞吐量。到了 2026 年，Flash Attention 几乎成为所有 Transformer 训练的默认配置——如果你还在手动实现注意力层，是时候升级了。
+        </div>
+
+        <h3>17.5 模型量化</h3>
+
+        <p>除了分布式和算法优化，<strong>模型量化</strong>（Model Quantization）是另一个重要的加速手段。量化的核心思想：用更少 bit 来表示模型参数，从而减少显存占用和计算量。</p>
+
+        <table>
+            <tr><th>精度</th><th>位宽</th><th>显存节省 (vs FP32)</th><th>典型场景</th><th>质量影响</th></tr>
+            <tr><td>FP32</td><td>32 bit</td><td>基线</td><td>训练主精度</td><td>—</td></tr>
+            <tr><td>FP16 / BF16</td><td>16 bit</td><td>50%</td><td>训练 + 推理</td><td>几乎无损</td></tr>
+            <tr><td>INT8</td><td>8 bit</td><td>75%</td><td>推理</td><td>轻微退化 (~0.1 CLIP Score)</td></tr>
+            <tr><td>INT4</td><td>4 bit</td><td>87.5%</td><td>端侧推理</td><td>可见退化 (~0.3-0.5 CLIP Score)</td></tr>
+        </table>
+
+        <div class="warning">
+            <strong>⚠️ 踩坑实录：INT4 量化导致的人脸生成崩塌</strong><br><br>
+            2024 年我在部署一个 FLUX.1 图像生成服务时，为了降低推理成本，我决定对模型做 INT4 量化，把单卡推理显存需求从 80GB 降到 24GB，这样就能用消费级显卡（RTX 4090）做服务了。量化后的模型在大部分场景下表现正常——风景、建筑、静物生成质量令人满意。但在人脸生成上，问题爆发了：<strong>所有生成的人脸都出现了"硅胶感"</strong>，皮肤纹理完全丢失，眼睛呈现不自然的反光。<br><br>
+            排查后发现问题出在量化的粒度上：FLUX.1 对参数精度极其敏感，尤其是在前几层（负责编码低频结构特征）和后几层（负责输出高频纹理细节）。解决方案是使用混合精度量化——对敏感层保留 FP16，对非敏感层用 INT4。实际测试下来，混合精度方案只比全 INT4 多用了 4GB 显存，但人脸质量完全恢复了。<br><br>
+            <strong>教训：量化不是"一刀切"——理解模型不同部分对精度的敏感性，做针对性的混合精度量化，才是工程落地的最佳实践。</strong>
+        </div>
+
+        <h3>17.6 推理加速框架</h3>
+
+        <p>除了量化，还有几个重要的推理加速工具值得了解：</p>
+
+        <ul>
+            <li><strong>ONNX Runtime：</strong>微软推出的跨平台推理引擎，支持模型导出为 ONNX 格式后做图优化和算子融合。适合需要跨平台部署的场景。</li>
+            <li><strong>TensorRT：</strong>NVIDIA 的推理优化框架，支持 FP16/INT8/INT4 量化、层融合、Kernel Auto-Tuning。对于扩散模型，TensorRT 可以实现 1.5-2x 的推理加速。</li>
+            <li><strong>vLLM + DistServe：</strong>原本用于 LLM 推理加速的框架，现在也扩展到了扩散模型。DistServe 支持扩散模型的<strong>请求级并行</strong>（Request-level Parallelism），通过 batching 多个请求的 denoising 步骤来摊销计算开销。</li>
+        </ul>
+
+        <p>在实际生产中，通常的策略是：用 FSDP 做大规模训练，用 TensorRT 或 ONNX Runtime 做单卡推理优化，用 PipeFusion 或 DistServe 做分布式推理部署。没有银弹，只有根据你的<strong>模型大小、部署硬件、延迟要求和成本预算</strong>做针对性选型。</p>
+
+        <div class="tip">
+            <strong>💡 2026 年的最佳实践建议：</strong><br>
+            • 训练 ≤ 3B 参数模型 → FSDP with BF16 + Flash Attention on 8×H100<br>
+            • 训练 3B-30B 参数模型 → FSDP with Hybrid Shard + Activation Checkpointing<br>
+            • 推理部署（在线服务）→ TensorRT + INT8/FP16 混合精度 + KV Cache 优化<br>
+            • 推理部署（高吞吐离线）→ PipeFusion 或 DistServe on multi-GPU<br>
+            • 端侧部署 → INT4 量化 + ONNX Runtime + 知识蒸馏<br>
+            • 始终记住：<strong>先 profile，再优化。</strong>花一天时间分析瓶颈在哪里，比花一周盲目调参有效得多。
+        </div>
+
+        <p>有了分布式训练和推理能力，我们终于可以把大模型"跑起来"了。但"跑起来"只是第一步——生成的结果质量如何？遇到肢体畸形、色彩偏移、多指缺指等问题要怎么系统性地解决？下一章，我们将进入质量调优的世界——从常见失败模式到 LoRA 微调，从 DPO 对齐到 A/B 评测，系统地学习如何把生成质量从"能用"提升到"惊艳"。</p>
+
+        <div class="footer-nav">
+            <a href="16.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="18.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

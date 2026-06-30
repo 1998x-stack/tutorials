@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第26章 自回归统一模型 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html" class="active">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第26章 自回归统一模型</h2>
+
+        <p>大家好，我是你们的讲师。如果你在过去两年里关注过生成模型的进展，你应该注意到一个有趣的现象：当所有人都在谈论扩散模型时，自回归路线悄无声息地杀了一个回马枪。2025 年，智源研究院在 Nature 上发表了 Emu3——一个用"预测下一个 token"统一了图像、视频、文本生成与理解的模型。紧接着 2026 年，OmniGen-AR 把这个范式的边界推到了"任意模态到任意模态"。</p>
+
+        <p>这一章，我们来看为什么"next-token prediction"这个最早出现在语言模型中的朴素思想，突然具备了挑战扩散模型统治地位的能力。这不是历史的倒退，而是范式的升维。</p>
+
+        <h3>26.1 自回归路线复兴的背景</h3>
+
+        <p>扩散模型在 2022-2025 年间毫无疑问是图像和视频生成的主导范式。但它的局限性也日益明显：</p>
+
+        <ul>
+            <li><strong>速度瓶颈：</strong>即使使用了 DDIM、DPM-Solver 等加速采样器，扩散模型仍然需要数十步迭代。实时生成（如视频通话背景替换、交互式 AI 创作）对延迟的要求极其苛刻。</li>
+            <li><strong>架构割裂：</strong>文本生成用 Transformer（自回归），图像生成用 U-Net 或 DiT（扩散），视频生成又需要额外的时序模块——每种模态各有一套专门的模型架构和训练流程。</li>
+            <li><strong>"理解"与"生成"的分离：</strong>GPT-4o 这种多模态模型虽然能理解图像，但无法生成图像；Stable Diffusion 能生成图像，但无法理解其中的语义内容。这种割裂意味着额外的工程复杂度和推理成本。</li>
+        </ul>
+
+        <p>而自回归路线提供了一张反方向的"药方"：如果所有模态都能被离散化为同一套 token 序列，那一个 Transformer 模型就可以同时完成理解和生成——因为"理解"本质上也是预测缺失的 token。</p>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>"预测下一个 token"这个范式如此强大，是因为它不需要为每种模态设计专门的损失函数或训练目标。文本的 next-token prediction、图像的 next-patch prediction、视频的 next-frame prediction——它们在数学形式上完全可以统一。这就是自回归统一路线的根基。
+        </div>
+
+        <h3>26.2 Emu3：智源研究院的 Nature 级工作</h3>
+
+        <p>Emu3 的核心贡献可以用一句话概括：<strong>把图像和视频也变成"token 序列"，然后用一个标准的因果 Transformer（causal Transformer）做 next-token prediction</strong>。这个"原来如此"的简单想法，之所以等到 2025 年才实现，关键在于图像和视频的离散化（tokenization）一直没有找到足够好的方案。</p>
+
+        <p>Emu3 的技术方案分解为三步：</p>
+
+        <ul>
+            <li><strong>第一步：视觉 tokenization。</strong>使用改进的 VQ-GAN（Vector Quantized GAN）将图像切分为 16×16 的 patch，每个 patch 映射到离散 codebook 中的一个 token。对于 256×256 的图像，这产生了 16×16 = 256 个离散 token。</li>
+            <li><strong>第二步：视频 tokenization。</strong>在图像 tokenization 的基础上引入时间维度，将视频帧序列也离散化为 token 序列，视频帧之间的时序关系通过自回归建模自然捕获——不需要额外的时序注意力模块。</li>
+            <li><strong>第三步：统一预训练。</strong>将文本 token、图像 token、视频 token 混合在一个序列中，训练一个标准的 causal Transformer 做 next-token prediction。训练完成后，模型既能做文本续写（理解），也能做图像生成和视频生成。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>💡 技术细节：</strong>Emu3 使用的 VQ-GAN codebook 大小为 65536（2^16），每个 token 对应 16 bit 的信息。这意味着 256×256 的图像被编码为 256 个离散整数，压缩率惊人。相比之下，Stable Diffusion 的 VAE 将图像压缩到潜空间的连续特征图，两者在对齐语言模型 token space 方面，离散化方案自然更优——语言本身的 token 也是离散的整数 ID。
+        </div>
+
+        <h3>26.3 "预测下一个 token"统一生成与理解</h3>
+
+        <p>Emu3 最令人兴奋的地方不是生成质量超过了哪个扩散模型，而是它证明了<strong>理解和生成可以被同一个模型、同一个损失函数完成</strong>。</p>
+
+        <p>考虑一个简单的例子：输入序列是 ["一张", "猫", "的", "照片", "&lt;img&gt;", "tok₁", "tok₂", ..., "tok₂₅₆", "&lt;/img&gt;"]。模型在训练时，如果看到文本前缀就预测下一个图像 token——这是"文生图"；如果看到图像前缀就预测下一个文本 token——这是"图像描述"；如果遮住中间的图像 token，让模型根据上下文预测——这就是"图像修复"。</p>
+
+        <p>同样的 Transformer，不同的任务只取决于你如何排列和掩码 token 序列。这正是"统一"二字的含义。</p>
+
+        <table>
+            <tr><th>范式</th><th>输入</th><th>预测目标</th><th>对应任务</th></tr>
+            <tr><td>文生图</td><td>文本 token 序列</td><td>图像 token 序列</td><td>文生图、文生视频</td></tr>
+            <tr><td>图生文</td><td>图像 token 序列</td><td>文本 token 序列</td><td>图像描述、VQA</td></tr>
+            <tr><td>图文混合</td><td>部分图文 token</td><td>剩余 token</td><td>多模态理解</td></tr>
+            <tr><td>视频预测</td><td>前 N 帧 token</td><td>后 M 帧 token</td><td>视频续帧、视频预测</td></tr>
+        </table>
+
+        <div class="warning">
+            <strong>⚠️ 一个真实的踩坑故事：</strong>我曾在 2025 年初尝试复现 Emu3 的视觉 tokenization 部分。结果卡了整整两周——生成的图像总是出现明显的"棋盘格伪影"（checkerboard artifacts）。深入排查后发现，问题出在 VQ-GAN 的 codebook collapse（大部分 codebook entry 未被使用）。解决方案是引入 codebook 的重新初始化机制（codebook reset）和承诺损失（commitment loss）的权重调优。这个经历让我深刻认识到：自回归统一模型的"概念"很美，但让视觉 tokenizer 稳定工作，本身就是一篇论文的工作量。
+        </div>
+
+        <h3>26.4 OmniGen-AR：任意到任意模态生成</h3>
+
+        <p>如果说 Emu3 证明了"统一是可能的"，那么 2026 年的 OmniGen-AR 证明了"统一是可以实战的"。OmniGen-AR 的全称是 Omni-modal Generative Auto-Regressive model，它将自回归统一范式的输入输出模态从"文本+图像+视频"扩展到了<strong>文本、图像、视频、音频、3D、代码</strong>六大模态。</p>
+
+        <p>OmniGen-AR 的关键技术创新：</p>
+
+        <ul>
+            <li><strong>混合粒度 tokenization：</strong>不同模态的信息密度差异巨大——音频需要细粒度 token（如 50Hz 帧率），图像可以使用粗粒度 token（如 16×16 patch）。OmniGen-AR 为每种模态设计了独立的 tokenizer，但共享同一套 Transformer 的 embedding 空间。</li>
+            <li><strong>模态路由注意力（Modality-Routed Attention）：</strong>在 Transformer 的自注意力层中引入模态感知的路由机制，让来自同模态的 token 之间具有更高的注意力权重——这显著提升了多模态混合序列的生成质量。</li>
+            <li><strong>渐进式训练策略：</strong>先单模态预训练，再双模态对齐，最后统一微调。这种 curriculum learning 策略避免了多模态训练中的"模态竞争"问题（即模型偏向某种模态而忽略其他）。</li>
+        </ul>
+
+        <pre><code># OmniGen-AR 伪代码：多模态统一训练循环示意
+for batch in dataloader:
+    # 1. 混合采样：从各模态数据集中按比例采样
+    text_tokens = text_tokenizer(batch["text"])       # [B, L_t]
+    image_tokens = img_tokenizer(batch["image"])       # [B, L_i]
+    audio_tokens = audio_tokenizer(batch["audio"])     # [B, L_a]
+
+    # 2. 拼接为统一序列（带模态标识符）
+    unified_seq = concat_with_modality_ids(
+        [text_tokens, image_tokens, audio_tokens],
+        modality_ids=[0, 1, 2]  # 0=text, 1=image, 2=audio
+    )
+
+    # 3. 模态路由自注意力
+    output = modality_routed_transformer(unified_seq)
+
+    # 4. 损失：所有 token 的交叉熵（next-token prediction）
+    loss = cross_entropy(output[:, :-1], unified_seq[:, 1:])
+    loss.backward()</code></pre>
+
+        <h3>26.5 离散化方法：VQ-VAE / VQ-GAN</h3>
+
+        <p>自回归统一模型的基石是<strong>离散 tokenization</strong>——把连续信号（图像像素、视频帧、音频波形）转换为离散整数序列。目前主流的方法是 VQ-VAE 和 VQ-GAN：</p>
+
+        <table>
+            <tr><th>方法</th><th>提出年份</th><th>编码器</th><th>量化方式</th><th>感知损失</th><th>GAN 判别器</th></tr>
+            <tr><td>VQ-VAE</td><td>2017</td><td>CNN/ResNet</td><td>最近邻查找</td><td>无</td><td>无</td></tr>
+            <tr><td>VQ-VAE-2</td><td>2019</td><td>层级式 CNN</td><td>层级最近邻</td><td>无</td><td>无</td></tr>
+            <tr><td>VQ-GAN</td><td>2021</td><td>CNN/Transformer</td><td>最近邻查找</td><td>有 (LPIPS)</td><td>有</td></tr>
+            <tr><td>ViT-VQGAN</td><td>2022</td><td>ViT</td><td>最近邻查找</td><td>有 (LPIPS)</td><td>有</td></tr>
+            <tr><td>FSQ (免编码本)</td><td>2024</td><td>任意</td><td>四舍五入量化</td><td>可选</td><td>可选</td></tr>
+        </table>
+
+        <p>从表中可以看到一个趋势：<strong>量化方法本身越来越简单</strong>（FSQ 甚至完全去掉了可学习的 codebook），但生成质量却越来越高。这背后的逻辑是：随着 Transformer backbone 规模的增大，它有能力自己"消化"粗糙量化带来的信息损失——关键在于 codebook size 和 embedding 维度的匹配。</p>
+
+        <div class="tip">
+            <strong>💡 实践建议：</strong>如果你要在自己的项目中使用 VQ tokenizer，建议从 VQ-GAN 开始。它的 GAN 判别器损失能显著提升重建图像的锐度。codebook size 建议设为 16384（2^14）或 65536（2^16），embedding 维度设为 256 或 512。codebook loss 的权重 β 通常设为 0.25——如果生成的图像出现模糊，尝试增大到 0.5；如果 codebook 使用率低（很多 entry 从未被选中），尝试降低 commitment loss 权重。
+        </div>
+
+        <h3>26.6 自回归 vs 扩散的对比与融合趋势</h3>
+
+        <p>站在 2026 年中这个时间节点回望，自回归和扩散两条路线的竞争与融合已经非常清晰：</p>
+
+        <table>
+            <tr><th>对比维度</th><th>自回归模型</th><th>扩散模型</th></tr>
+            <tr><td>生成速度</td><td>慢（串行逐 token）</td><td>中（数十步去噪，可加速）</td></tr>
+            <tr><td>推理时延</td><td>随序列长度线性增长</td><td>固定步数，与分辨率弱相关</td></tr>
+            <tr><td>统一多模态能力</td><td>天然支持（同一 token 空间）</td><td>需要额外设计（每模态独立架构）</td></tr>
+            <tr><td>高分辨率生成</td><td>困难（长序列推理成本高）</td><td>成熟（潜空间扩散）</td></tr>
+            <tr><td>训练稳定性</td><td>高（标准交叉熵）</td><td>中（需要噪声调度技巧）</td></tr>
+            <tr><td>数学似然</td><td>可精确计算</td><td>只能近似（ELBO）</td></tr>
+            <tr><td>编辑/控制灵活性</td><td>低（序列难以局部修改）</td><td>高（可通过 latent 操作精确控制）</td></tr>
+        </table>
+
+        <p>目前可以看到的融合趋势包括：</p>
+        <ul>
+            <li><strong>扩散 + 自回归：</strong>MAR（Masked Auto-Regressive）模型在扩散的去噪过程中引入自回归的先验信息</li>
+            <li><strong>离散扩散：</strong>D3PM、MaskGIT 等模型将扩散过程定义在离散 token 空间上，结合了两者的优点</li>
+            <li><strong>混合架构：</strong>在前几轮使用扩散做"粗粒度生成"，后几轮使用自回归做"细粒度精修"</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>不要纠结"哪个路线最终会赢"。实际工程中，Google 的 Gemini 和 OpenAI 的 GPT-5 都在探索"自回归理解 + 扩散生成"的混合架构——<strong>理解用自回归（因为需要长程依赖），生成用扩散（因为质量和控制更重要）</strong>。两条路线的融合才是真正的大趋势。
+        </div>
+
+        <p>总结来说，自回归统一模型代表了一个极具吸引力的愿景：一个模型，一个损失函数，统一所有模态的理解与生成。虽然目前在高分辨率生成和推理效率上仍落后于扩散模型，但它的统一性优势是不可忽视的。下一章，我们将从另一个方向探讨实时生成——既然自回归太慢，扩散几步太多，那有没有办法把生成压缩到"一步"完成？</p>
+
+        <div class="footer-nav">
+            <a href="25.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="27.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

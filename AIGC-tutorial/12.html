@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 采样策略与调度 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html" class="active">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第12章 采样策略与调度</h2>
+
+        <p>大家好，我是你们的讲师。如果你用过 ComfyUI 或 Automatic1111 WebUI，你一定见过采样器下拉菜单中那一长串名字：Euler、Euler a、Heun、DPM++ 2M、DPM++ SDE、DDIM、UniPC……面对二十多种采样器，初学者往往会不知所措。</p>
+
+        <p>这一章，我们将从数学视角理解这个问题的本质：<strong>扩散模型的采样过程本质上是在解一个常微分方程（ODE）或随机微分方程（SDE）</strong>。不同的采样器只是用不同的数值方法去"离散化"求解这个微分方程。理解了这一点，你就能理性地选择采样器、步数和参数，而不是靠试错。</p>
+
+        <h3>12.1 ODE 视角下的扩散逆过程</h3>
+
+        <p>扩散模型的反向过程可以看作是一个"概率流 ODE"（Probability Flow ODE）的积分过程。DDIM 论文揭示了一个关键洞察：扩散模型的反向去噪过程，本质上是在求解一个从噪声分布到数据分布的确定性 ODE。</p>
+
+        <p>这个概率流 ODE 的形式如下：</p>
+
+        <pre><code>dx / dt = f(t) · x - (1/2) · g(t)² · ∇_x log p_t(x)
+
+其中 f(t) 和 g(t) 由噪声调度 β_t 决定
+∇_x log p_t(x) 是"得分函数"（score function），由 ε_θ 近似: ∇_x log p_t(x) ≈ - ε_θ(x_t, t) / √(1 - ᾱ_t)</code></pre>
+
+        <p>这个视角的革命性在于：它将"随机去噪"转化为了"确定性 ODE 求解"问题。一旦是 ODE，我们就可以使用各种高效的数值求解器——Euler 法、Runge-Kutta 法、多步法等等。</p>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>把采样看作 ODE 求解后，离散化步数和求解器精度就成了两个独立的维度。步数少但求解器精度高（如 DPMSolver++ 2M）可以比步数多但求解器简单（如 Euler）取得更好的效果。这就像用高阶 Runge-Kutta 方法可以比 Euler 方法用更少的步数达到同样的精度。
+        </div>
+
+        <h3>12.2 离散化求解器对比</h3>
+
+        <p>主流的采样求解器可以分为几大类：</p>
+
+        <table>
+            <tr><th>求解器</th><th>类型</th><th>推荐步数</th><th>随机性</th><th>特点</th></tr>
+            <tr><td>DDIM</td><td>隐式欧拉</td><td>20-100</td><td>确定性</td><td>经典、稳定、可插值</td></tr>
+            <tr><td>Euler</td><td>一阶显式</td><td>20-50</td><td>确定性</td><td>最简单的 ODE 求解器</td></tr>
+            <tr><td>Euler a</td><td>一阶加噪声</td><td>20-50</td><td>随机性（祖先采样）</td><td>Euler + 每一步加噪声</td></tr>
+            <tr><td>Heun</td><td>二阶（改进欧拉）</td><td>20-30</td><td>确定性</td><td>精度高于 Euler，但需要两倍计算</td></tr>
+            <tr><td>DPM++ 2M</td><td>二阶多步</td><td>10-30</td><td>确定性</td><td>效率高、推荐日常使用</td></tr>
+            <tr><td>DPM++ SDE</td><td>二阶 + SDE</td><td>10-30</td><td>随机性</td><td>细节更丰富，但稍微慢一些</td></tr>
+            <tr><td>DPMSolver++</td><td>数据预测多步</td><td>10-20</td><td>确定性</td><td>SDXL 推荐采样器</td></tr>
+            <tr><td>LCM</td><td>蒸馏专用</td><td>1-4</td><td>确定性</td><td>极速推理，质量有限</td></tr>
+        </table>
+
+        <p>DPM++ 系列求解器（特别是 DPM++ 2M 和 DPM++ SDE）是当前最主流的采样器。它们基于扩散模型的特殊结构设计了专门的 ODE 求解公式，比通用的 ODE 求解器（如 Euler、Heun）在相同步数下精度更高。</p>
+
+        <h3>12.3 Ancestral Sampling：引入随机性的采样器</h3>
+
+        <p>在 DPM++ 等确定性求解器中，每一步的更新是确定的——给定相同的初始噪声，生成结果完全相同。但有些采样器（名称中带 "a" 或 "SDE"）会在每一步采样中加入随机噪声。</p>
+
+        <p>Ancestral Sampling 的核心思想是：在每一步更新后，再加入一个小的随机扰动：</p>
+
+        <pre><code># Euler a 的简化流程（带祖先噪声）
+for t in reversed(range(steps)):
+    # 1. 预测噪声
+    pred = ε_θ(x_t, t)
+    # 2. 沿梯度方向走一步（确定性更新）
+    x_mean = x_t + step_size(pred, t)
+    # 3. 加入随机噪声（祖先采样）
+    x_{t-1} = x_mean + σ_t · ε,  ε ∼ N(0, I)</code></pre>
+
+        <p>加入随机噪声的效果是：</p>
+        <ul>
+            <li><strong>更高的多样性</strong>：同一 prompt 和 seed 也可能产生不同的结果</li>
+            <li><strong>更好的细节</strong>：随机性有助于模型跳出"局部最优"，产生更丰富的纹理</li>
+            <li><strong>代价</strong>：某些场景下会引入不必要的噪声导致质量下降</li>
+        </ul>
+
+        <div class="tip">
+            <strong>💡 实用建议：</strong>选择确定性采样器（DPM++ 2M、DDIM）还是随机性采样器（Euler a、DPM++ SDE）取决于你的目标：如果你在批量生成需要可复现的结果（比如生产环境），用确定性采样器。如果你在做艺术探索希望更多的"意外惊喜"，用随机性采样器。
+        </div>
+
+        <h3>12.4 步数 vs 质量</h3>
+
+        <p>步数和质量的关系是采样中最重要的权衡。我们可以用一张对比表来直观展示：</p>
+
+        <table>
+            <tr><th>步数</th><th>Euler</th><th>DPM++ 2M</th><th>DPM++ SDE</th><th>LCM</th></tr>
+            <tr><td>1</td><td>❌ 完全不可用</td><td>❌ 不可用</td><td>❌ 不可用</td><td>✅ 可用但细节少</td></tr>
+            <tr><td>4</td><td>❌ 严重噪声</td><td>⚠️ 能看但不精细</td><td>⚠️ 能看但不精细</td><td>✅ 质量尚可</td></tr>
+            <tr><td>10</td><td>⚠️ 低质量</td><td>✅ 可接受质量</td><td>✅ 可接受质量</td><td>✅ 最优（蒸馏条件）</td></tr>
+            <tr><td>20</td><td>⚠️ 中等</td><td>✅ 高质量</td><td>✅ 高质量</td><td>❌ 过拟合退化</td></tr>
+            <tr><td>50</td><td>✅ 高质量</td><td>✅ 最佳质量</td><td>✅ 最佳质量</td><td>❌ 退化</td></tr>
+        </table>
+
+        <p>从表中可以总结出几个实用规则：</p>
+        <ul>
+            <li><strong>速度优先（SDXL）</strong>：DPM++ 2M Karras, 15-20 步</li>
+            <li><strong>质量优先（SD 1.5）</strong>：DPM++ 2M Karras, 30-50 步</li>
+            <li><strong>极速（实时场景）</strong>：LCM 或 SDXL Turbo, 1-4 步</li>
+            <li><strong>艺术探索</strong>：Euler a 或 DPM++ SDE, 20-30 步（利用随机性产生多样性）</li>
+        </ul>
+
+        <h3>12.5 LCM：蒸馏扩散模型为几步生成</h3>
+
+        <p>LCM（Latent Consistency Model）是 2023 年提出的一种"扩散模型蒸馏"方法，目标是将预训练的扩散模型蒸馏为只需要 1-4 步就能生成的"一致性模型"。</p>
+
+        <p>LCM 的核心思想是：<strong>训练一个网络 f_θ(x_t, t) 直接输出 x₀ 的估计（或者跳过所有中间步骤），使得从任意时间步 t 出发，一步就能跳回到 x₀。</strong></p>
+
+        <p>训练 LCM 的损失函数：</p>
+        <pre><code>L_CM = E[ λ(t) · d( f_θ(x_{t_{n+1}}, t_{n+1}), f_θ⁻(x̂_t^{φ}, t_n) ) ]
+
+其中：
+  - f_θ⁻ 是目标网络（EMA 更新）
+  - x̂_t^{φ} 是使用数值求解器从 t_{n+1} 到 t_n 的一步估计
+  - d(·) 是距离函数（通常使用 MSE 或 LPIPS）</code></pre>
+
+        <p>LCM 的惊艳之处在于：</p>
+        <ul>
+            <li><strong>超低延迟</strong>：1-4 步生成，比原始扩散模型快 250-1000 倍</li>
+            <li><strong>无需特殊硬件</strong>：蒸馏在普通 GPU 上即可完成，生成的 LCM LoRA 可以叠加在其他模型上</li>
+            <li><strong>兼容性</strong>：LCM LoRA 权重可以加载到绝大多数 SD 1.5 和 SDXL 模型上</li>
+        </ul>
+
+        <div class="warning">
+            <strong>⚠️ 真实的踩坑故事：</strong>有次我把 LCM 用在了一个微调的动漫风格模型上，结果生成的人物脸部出现了奇怪的"蜂窝状"纹理。起初我以为是模型出了问题，后来发现 LCM 在蒸馏过程中对"高频细节"的建模不充分——LCM 擅长捕捉全局结构但牺牲了局部纹理的多样性。解决方法是使用 LCM 生成一张"底图"，然后用 ControlNet Tile + 原始采样器做精细化的方式，或者使用更新的 TCD（Trajectory Consistency Distillation）方法。这个教训是：<strong>LCM 适合快速原型验证和实时交互场景，但追求最高质量时还是需要用全步数采样</strong>。
+        </div>
+
+        <h3>12.6 采样参数实用指南</h3>
+
+        <p>综合以上所有内容，我整理了一份适用于不同场景的采样参数选择指南：</p>
+
+        <table>
+            <tr><th>场景</th><th>采样器</th><th>步数</th><th>CFG</th><th>说明</th></tr>
+            <tr><td>日常文生图（SDXL）</td><td>DPM++ 2M Karras</td><td>20</td><td>5-7</td><td>最佳质量/速度平衡</td></tr>
+            <tr><td>日常文生图（SD 1.5）</td><td>DPM++ 2M Karras</td><td>30</td><td>7-8</td><td>SD 1.5 需要更多步数</td></tr>
+            <tr><td>高质量输出</td><td>DPM++ SDE Karras</td><td>30-50</td><td>5-8</td><td>SDE 的随机性改善细节</td></tr>
+            <tr><td>实时预览</td><td>LCM</td><td>4</td><td>1-2</td><td>LCM 对 CFG 不敏感</td></tr>
+            <tr><td>批量实验（高吞吐）</td><td>DPM++ 2M Karras</td><td>15</td><td>6-7</td><td>减少步数换取吞吐</td></tr>
+            <tr><td>图像翻译 / img2img</td><td>Euler a</td><td>20-30</td><td>7-8</td><td>Euler a 的随机性适合编辑</td></tr>
+            <tr><td>视频帧生成</td><td>DPM++ 2M</td><td>15-20</td><td>5-7</td><td>确定性保证帧间一致性</td></tr>
+        </table>
+
+        <div class="highlight">
+            <strong>🌟 最终建议：</strong>采样器的选择没有绝对正确的答案。我的建议是记住三组常用配置：<strong>高质量</strong>（DPM++ 2M Karras 30步 CFG 7）、<strong>快速</strong>（DPM++ 2M Karras 15步 CFG 6）、<strong>极速</strong>（LCM 4步 CFG 1.5）。这三组配置覆盖了 90% 的日常需求。当遇到特定问题时，再根据本章的知识去调试具体的采样器参数。
+        </div>
+
+        <p>下一章，我们将探讨扩散模型的最新架构变革——DiT（Diffusion Transformer），它用 Transformer 取代了经典的 U-Net 架构，并在 SD 3.0 和 FLUX 中成为新的标准。</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

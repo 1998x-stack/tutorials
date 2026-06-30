@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 自回归生成模型 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html" class="active">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第6章 自回归生成模型</h2>
+
+        <p>大家好，我是你们的讲师。前面两章我们看的 GAN 家族是"隐式"生成模型——它们不显式定义概率分布，而是通过对抗训练来逼近真实分布。这一章我们要看的<strong>自回归模型</strong>（Autoregressive Models）走的是另一条路：<strong>显式计算数据的概率分布</strong>，把联合概率分解为条件概率的连乘。</p>
+
+        <p>你可能觉得"条件概率连乘"是个数学上很朴素的思想，但它在 NLP 中催生了 GPT 系列、在图像中催生了 PixelCNN，更在 2025-2026 年迎来了一个重要的复兴——Emu3、OmniGen-AR 等模型证明"next-token prediction"可以统一图像、视频和文本的生成与理解。这个趋势可能会深刻影响未来五年 AIGC 的格局。</p>
+
+        <h3>6.1 自回归生成的基本思想</h3>
+
+        <p>自回归模型的核心思想非常简洁：<strong>将联合概率分布分解为条件概率的连乘</strong>。</p>
+
+        <pre><code>对于一个序列 x = (x₁, x₂, ..., x_T)，自回归分解为：
+  P(x) = P(x₁) · P(x₂ | x₁) · P(x₃ | x₁, x₂) · ... · P(x_T | x₁, ..., x_{T-1})
+       = ∏_{t=1}^{T} P(x_t | x_{&lt;t})
+
+其中 x_{&lt;t} 表示位置 t 之前的所有 token</code></pre>
+
+        <p>这个等式利用了概率论的链式法则，是精确的（不是近似）。这意味着只要你能准确建模每个条件概率 P(x_t | x_{&lt;t})，你就能精确地写出整个序列的概率。</p>
+
+        <p>生成时，你从左到右逐 token 生成：先预测 x₁，然后以 x₁ 为条件预测 x₂，再以 x₁,x₂ 为条件预测 x₃，直到序列结束。</p>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>自回归模型和扩散模型的根本区别在于"生成顺序"。自回归是<strong>顺序生成</strong>（从左到右），扩散模型是<strong>迭代精炼</strong>（从噪声到样本）。这种区别导致了它们在速度和灵活性上的不同取舍。
+        </div>
+
+        <h3>6.2 PixelCNN：逐像素生成图像</h3>
+
+        <p>把自回归思想用在图像上有一个直接的挑战：图像是二维的，像素之间的依赖关系是空间性的而非序列性的。PixelCNN（van den Oord et al., 2016）用了一个聪明的办法——<strong>掩码卷积</strong>（Masked Convolution）。</p>
+
+        <p>核心想法很简单：当预测当前像素时，只允许它"看到"已经生成的像素（左方和上方），不能"偷看"还没生成的像素。通过把卷积核的对应位置设为零（加掩码），就实现了这个"因果约束"。</p>
+
+        <pre><code>Mask A（第一个卷积层用）：
+  [0, 0, 0]
+  [0, 1, 0]
+  [0, 0, 0]     ← 只有中心像素可以看自己（但看不到后面的）
+
+Mask B（后续层用）：
+  [0, 0, 0]
+  [0, 1, 1]
+  [0, 1, 1]     ← 可以看到左方和上方的像素</code></pre>
+
+        <p>PixelCNN 的生成过程是逐像素进行的——从左上角开始，一个像素一个像素地往右下角推。虽然理论上很优雅，但实际速度非常慢：生成一张 256×256 的图像需要 65,536 次前向传播。</p>
+
+        <table>
+            <tr><th>模型</th><th>年份</th><th>架构核心</th><th>生成速度</th><th>备注</th></tr>
+            <tr><td>PixelRNN</td><td>2016</td><td>LSTM 行级建模</td><td>极慢</td><td>开创性工作</td></tr>
+            <tr><td>PixelCNN</td><td>2016</td><td>掩码卷积</td><td>慢</td><td>并行训练，串行生成</td></tr>
+            <tr><td>Gated PixelCNN</td><td>2016</td><td>门控残差块</td><td>慢</td><td>质量大幅提升</td></tr>
+            <tr><td>PixelCNN++</td><td>2017</td><td>离散 logistic 混合分布</td><td>慢</td><td>CIFAR-10 上 SOTA</td></tr>
+            <tr><td>Image Transformer</td><td>2018</td><td>自注意力替代卷积</td><td>慢</td><td>Transformer 引入图像生成</td></tr>
+        </table>
+
+        <h3>6.3 Transformer 解码器架构</h3>
+
+        <p>2017 年 Transformer 的提出彻底改变了自回归模型的格局。Transformer 解码器中的<strong>因果掩码</strong>（Causal Masking）完美地实现了自回归约束：</p>
+
+        <pre><code>因果掩码（上三角矩阵）：
+  token₁: [1, 0, 0, 0, ...]    ← 只能看自己
+  token₂: [1, 1, 0, 0, ...]    ← 能看到 token₁ 和自己
+  token₃: [1, 1, 1, 0, ...]    ← 能看到 token₁,₂ 和自己
+  ...
+
+在 attention 中，将上三角的注意力分数设为 -∞（softmax 后变为 0），
+确保每个 token 只能 attend 到之前（包括自己）的 token。</code></pre>
+
+        <p>Transformer 相比 PixelCNN 的核心优势在于：</p>
+        <ul>
+            <li><strong>长距离依赖建模</strong>：自注意力可以捕获图像中任意两个像素之间的关系（卷积只能看到局部）</li>
+            <li><strong>并行训练</strong>：训练时所有 token 的位置可以同时计算（teacher forcing），只生成时串行</li>
+            <li><strong>统一的架构</strong>：同样的 decoder 架构可以处理文本、图像、音频（只需要不同的 tokenizer）</li>
+        </ul>
+
+        <p>GPT 系列就是纯 Transformer 解码器架构的最成功案例——从 GPT-1 (2018) 到 GPT-4 (2023)，再到 2025-2026 年的 GPT-5，一条"next-token prediction + scaling"的路线从未偏移。</p>
+
+        <div class="tip">
+            <strong>💡 视觉自回归的两个关键问题：</strong>（1）图像怎么变成序列？Image GPT 和 VQGAN 的做法是把图像量化成离散 token（类似 codebook 中的编号），然后用这些 token 的序列做自回归。（2）选择什么顺序？光栅扫描（raster scan）是最常用的——从左上角到右下角逐行生成。但理论上任何顺序都可以，不同的顺序会影响生成质量。
+        </div>
+
+        <h3>6.4 非自回归生成（NAR）</h3>
+
+        <p>自回归生成的最大痛点是<strong>生成速度</strong>——因为是串行的，生成一篇 2048 个 token 的文章需要 2048 次推理。对于实时应用，这显然不够。</p>
+
+        <p>非自回归生成（Non-Autoregressive Generation, NAR）的目标是：<strong>一次性并行生成所有 token</strong>。主要策略包括：</p>
+
+        <ul>
+            <li><strong>迭代精炼（Iterative Refinement）</strong>：先用近似方法一次性生成所有 token，然后通过多轮迭代修正。这其实和扩散模型的思想非常接近——从粗到细逐步精炼。</li>
+            <li><strong>掩码预测（Masked Prediction）</strong>：类似 BERT 的填空——随机遮掩部分 token，预测被遮掩的 token。通过多轮掩码迭代，可以逐步生成完整序列。</li>
+            <li><strong>CTC 解码</strong>：Connectionist Temporal Classification 直接预测整个序列的联合分布，去除 token 之间的因果依赖。</li>
+        </ul>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>NAR 的思想和扩散模型有异曲同工之妙。扩散模型本质上也是一个"迭代精炼"的过程——从纯噪声开始，逐步去噪到清晰图像。把自回归的串行生成和扩散的迭代精炼结合起来，是 2025-2026 年的重要研究方向之一。
+        </div>
+
+        <h3>6.5 自回归 vs 扩散的对比</h3>
+
+        <p>这是一个在 2025-2026 年被反复讨论的话题。两种范式各有优劣：</p>
+
+        <table>
+            <tr><th>对比维度</th><th>自回归模型</th><th>扩散模型</th></tr>
+            <tr><td>生成质量</td><td>高（尤其是文本领域统治级）</td><td>高（图像/视频领域当前最先进）</td></tr>
+            <tr><td>生成速度</td><td>慢（串行解码，但 KV cache 优化后尚可）</td><td>慢（去噪步数多，但 sCM/蒸馏已大幅加速）</td></tr>
+            <tr><td>训练方式</td><td>简单的 next-token prediction</td><td>噪声预测/得分匹配</td></tr>
+            <tr><td>似然计算</td><td>精确可计算（链式法则）</td><td>需要近似</td></tr>
+            <tr><td>统一多模态</td><td>天然支持（文本+图像 token 化）</td><td>需要适配（潜空间不同）</td></tr>
+            <tr><td>全局一致性</td><td>可能"头重脚轻"（前面 token 没生成好会影响后面）</td><td>天生全局（整图同步去噪）</td></tr>
+        </table>
+
+        <p>实际选择取决于场景：做聊天机器人 → 自回归（GPT 系）；做文生图 → 扩散模型（SD 系）；做统一多模态理解和生成 → 自回归（Emu3 系）在 2026 年看起来更有优势。</p>
+
+        <h3>6.6 2025-2026 趋势：自回归的复兴</h3>
+
+        <p>2024 年底到 2026 年，自回归模型在视觉生成领域经历了一场"复兴"：</p>
+
+        <ul>
+            <li><strong>Emu3（Meta, Nature 2025）</strong>：证明只用 next-token prediction 就能统一图像、视频和文本的生成与理解。没有扩散模型、没有 VAE 编码器，一个纯自回归 Transformer 架构完成所有任务。这篇工作在 Nature 上发表，标志着视觉自回归获得了学术界最高认可。</li>
+            <li><strong>OmniGen-AR 系列</strong>：在 Emu3 的基础上进一步改进，支持任意比例的图像和视频生成，完全统一的架构。</li>
+            <li><strong>LlamaGen（2024）</strong>：用 LLM 风格的训练方法（next-token prediction + scaling law）训练视觉自回归模型，证明视觉 token 遵循和语言 token 相似的 scaling 规律。</li>
+            <li><strong>VAR（Visual Autoregressive Modeling, 2024）</strong>：提出"next-scale prediction"替代"next-pixel prediction"——先预测低分辨率轮廓，再逐级精炼到高分辨率。这种"由粗到细"的生成方式在速度和效果上都取得了显著提升。</li>
+        </ul>
+
+        <div class="warning">
+            <strong>⚠️ 一个真实的踩坑故事：</strong>2024 年底，我在尝试复现视觉自回归模型时，最大的坑是图像 tokenizer 的选择。Image tokenizer 的压缩率直接决定了你的序列长度——Stable Diffusion 的 VAE 把 512 图像压缩到 32×32=1024 个隐变量，但这是连续值，不是离散 token。用 VQGAN 做离散量化后，codebook 的大小和维度就成了新的超参数。我当时用了一个很小的 codebook（512），结果重建质量很差，生成的一看就是"拼凑"的。换成 codebook size=16384 后，重建质量才达到可用水平。这个教训是：<strong>视觉自回归的瓶颈往往不在生成模型本身，而在 tokenizer 的压缩和重建质量上。</strong>
+        </div>
+
+        <p>到了 2026 年，自回归和扩散两条路线出现了<strong>融合趋势</strong>：扩散模型中使用自回归的 MaskGIT 风格迭代解码，自回归中使用扩散式的"粗到细"多尺度生成（如 VAR），以及像 MAR（Masked Autoregressive）这样的混合架构。边界越来越模糊，目的都是取两者的长处。</p>
+
+        <div class="tip">
+            <strong>💡 推荐阅读：</strong>如果你对这个方向感兴趣，建议按顺序读这几篇论文：PixelCNN (2016) → Image Transformer (2018) → VQGAN (2021) → LlamaGen (2024) → VAR (2024) → Emu3 (Nature, 2025)。这六篇论文串联起了视觉自回归的完整进化史。
+        </div>
+
+        <p>从下一章开始，我们的视角会稍微转一下——不再讨论某个具体的生成模型，而是讨论一个非常实用的主题：<strong>如何评估生成质量</strong>。无论是 VAE、GAN、扩散模型还是自回归模型，你最终都需要回答一个问题：我生成的样本到底好不好？第 7 章将介绍 IS、FID、CLIP Score 等指标的优劣和正确使用方法。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

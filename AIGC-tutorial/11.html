@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 文本条件注入 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html" class="active">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第11章 文本条件注入</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们了解了 Stable Diffusion 的三模块架构，其中 CLIP Text Encoder 负责将文本 prompt 转化为条件信号注入 U-Net。但具体的注入机制是什么？为什么 "a cat" 和 "a dog" 会产生截然不同的生成结果？为什么输入一个"负面提示"（Negative Prompt）可以去掉你不想要的内容？</p>
+
+        <p>这一章我们深入<strong>文本条件注入</strong>（Text Conditioning）的底层机制。我们将从最基础的 Classifier Guidance 讲起，再到今天成为行业标准的 Classifier-Free Guidance（CFG），最后解析 CLIP 编码器和 Negative Prompt 的工作原理。理解这些机制，你才能真正理解为什么同一个 prompt 在不同的 CFG 尺度下会产生天差地别的结果。</p>
+
+        <h3>11.1 Classifier Guidance：最初的条件控制</h3>
+
+        <p>在 CFG 被提出之前，扩散模型的条件生成主要依赖 Classifier Guidance。核心思路是：训练一个额外的分类器（比如 ImageNet 分类器），在采样过程中用分类器的梯度来"引导"生成结果朝着目标类别方向偏移。</p>
+
+        <p>具体来说，Classifier Guidance 修改噪声预测为：</p>
+
+        <pre><code>ε̂_θ(x_t, t, y) = ε_θ(x_t, t) - s · √(1 - ᾱ_t) · ∇_{x_t} log p_φ(y | x_t)</code></pre>
+
+        <p>其中 ∇_{x_t} log p_φ(y | x_t) 是分类器 p_φ 对 x_t 的梯度（指向目标类别 y 的方向），s 是 guidance scale（控制引导强度）。</p>
+
+        <p>这种方法有两个问题：</p>
+        <ol>
+            <li><strong>需要额外训练分类器</strong>——而且这个分类器要能处理含噪图像（噪声在不同时间步的分布不同，分类器需要适配所有噪声级别）</li>
+            <li><strong>分类器近似有误差</strong>——分类器是在有偏的样本上训练的，它的梯度可能不是最优的引导方向</li>
+        </ol>
+
+        <div class="tip">
+            <strong>💡 历史背景：</strong>Classifier Guidance 虽然现在很少直接使用，但它的思想深刻影响了后续的方法。CFG 可以看作是一种"无分类器的隐式分类器梯度"——它通过比较条件预测和无条件预测的差异来获得"引导方向"，而不需要真正的分类器。
+        </div>
+
+        <h3>11.2 Classifier-Free Guidance（CFG）</h3>
+
+        <p>CFG 在 2021 年被提出（Ho & Salimans），核心思想非常简单却极其优雅：<strong>在训练时，随机丢弃条件信息（用空文本替代 prompt），让同一个模型同时学会"条件预测"和"无条件预测"两种能力。在推理时，通过插值来调节条件控制的强度。</strong></p>
+
+        <p>CFG 的噪声预测公式：</p>
+
+        <pre><code>ε̂_θ(x_t, t, y) = ε_θ(x_t, t, ∅) + w · ( ε_θ(x_t, t, y) - ε_θ(x_t, t, ∅) )
+
+其中：
+  ε_θ(x_t, t, y)  = 条件预测（给定 prompt y）
+  ε_θ(x_t, t, ∅)  = 无条件预测（空 prompt）
+  w                = CFG 尺度</code></pre>
+
+        <p>当 w = 1 时，ε̂ = 条件预测，即标准的条件生成。当 w > 1 时，模型在"条件预测-无条件预测"的方向上外推，相当于在无条件分布的基础上向条件方向"推了一把"，从而更严格地遵守 prompt。</p>
+
+        <p>CFG 的巧妙之处在于：整个过程<strong>不需要额外的分类器，不需要额外的梯度计算</strong>——只需要在推理时对同一个模型做两次前向传播（或者用 batch 并行一次做两个预测），然后做一次线性插值。</p>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>CFG 范式从根本上改变了条件生成的方式。它用"条件预测减去无条件预测"来近似 Classifier Guidance 中的"分类器梯度"方向——这个差向量捕捉了"prompt 想要什么"的信息。w 越大，模型就越倾向于采样那些"更符合 prompt"的 region，但代价是多样性下降。
+        </div>
+
+        <h3>11.3 CFG 尺度 w 的选择</h3>
+
+        <p>CFG 尺度 w 是最重要的推理超参数之一。它的选择直接影响生成质量：</p>
+
+        <table>
+            <tr><th>CFG 尺度</th><th>效果</th><th>典型应用场景</th></tr>
+            <tr><td>w = 1.0</td><td>完全条件生成，prompt 相关性最低</td><td>参考基线，几乎不用</td></tr>
+            <tr><td>w = 2.0 - 4.0</td><td>多样性高，prompt 关联较弱，但有意外惊喜</td><td>艺术创作、探索性生成</td></tr>
+            <tr><td>w = 5.0 - 8.0</td><td>最常用的区间，好的 prompt 遵守度 + 合理多样性</td><td>默认配置（SD 默认 7.5）</td></tr>
+            <tr><td>w = 9.0 - 12.0</td><td>强 prompt 遵守，但多样性降低，可能出现过饱和</td><td>需要严格遵循 prompt 的场景</td></tr>
+            <tr><td>w = 15.0+</td><td>色彩过饱和、伪影、不自然</td><td>不推荐使用</td></tr>
+        </table>
+
+        <p>不同版本 SD 对 CFG 尺度的敏感度不同。SD 1.5 的最佳 CFG 通常在 7.5 左右，SDXL 的最佳 CFG 在 5.0-7.0 之间，而 SD 3.0 和 FLUX 对 CFG 的敏感度更低，通常用较小的值即可获得良好的 prompt 遵守。</p>
+
+        <h3>11.4 CLIP Text Encoder</h3>
+
+        <p>CLIP（Contrastive Language-Image Pre-training）是一个多模态模型，它的 Text Encoder 承担着将自然语言 prompt 转化为可供 U-Net 使用的条件特征向量的任务。我们在第 15 章会深入剖析 CLIP 的完整训练方式，这一章我们聚焦它在 SD 中的具体角色。</p>
+
+        <p>CLIP Text Encoder 在 SD 中的工作细节：</p>
+        <ul>
+            <li><strong>最大序列长度</strong>：77 tokens——超过的文本会被截断。这就是为什么长 prompt 开头部分更重要的原因</li>
+            <li><strong>输出格式</strong>：一个 [77, 768] 的嵌入序列（每个 token 对应一个 768 维向量）和一个 pooled 的 [768] 向量（[EOS] token 的输出）</li>
+            <li><strong>Pooler 输出</strong>：SD 的 U-Net 不同层会使用不同粒度的文本特征——Cross-Attention 使用的就是完整的 token 序列输出，而非 pooled 向量</li>
+            <li><strong>冻结 vs 微调</strong>：标准 SD 训练中 CLIP Text Encoder 是冻结的（不参与训练），只有 U-Net 更新权重</li>
+        </ul>
+
+        <pre><code># CLIP Text Encoder 在 SD 推理中的使用
+from transformers import CLIPTokenizer, CLIPTextModel
+
+tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
+
+# tokenize + encode
+prompt = "a cute cat sitting on a mat, digital art"
+tokens = tokenizer(prompt, padding="max_length", max_length=77,
+                   return_tensors="pt", truncation=True)
+text_emb = text_encoder(tokens.input_ids)[0]  # → [1, 77, 768]
+
+# text_emb 被送入 U-Net 的 Cross-Attention 层</code></pre>
+
+        <div class="warning">
+            <strong>⚠️ 真实的踩坑故事：</strong>我曾在一个项目中被要求生成"一段长文本描述的产品宣传图"。我写了一个 200 多字的 prompt，满怀期待地输入 SD，结果生成的图像完全忽略了后半段 prompt。百思不得其解后才发现——CLIP 的上下文长度限制是 77 tokens，后半部分被悄无声息地截断了。Diffusers 和 ComfyUI 都不会给出任何警告信息。后来我学会了两个策略：一是使用 SDXL，它支持更长的上下文并使用了双编码器；二是对于长 prompt，将最重要的描述放在前 70 个 token 以内（留一些 buffer 给起始和结束 token）。
+        </div>
+
+        <h3>11.5 Negative Prompt 的原理</h3>
+
+        <p>Negative Prompt（负面提示）是 Stable Diffusion 生态中一个非常"神奇"的功能——你告诉模型"不要在图像中出现的元素"，它就能真的避免生成这些元素。背后的原理其实非常简单：</p>
+
+        <p>当你在 WebUI 或 ComfyUI 中输入 Negative Prompt 时，实际上替换了 CFG 公式中的"无条件预测"部分：</p>
+
+        <pre><code>ε̂_θ(x_t, t, y_pos, y_neg) = ε_θ(x_t, t, y_neg) + w · (ε_θ(x_t, t, y_pos) - ε_θ(x_t, t, y_neg))</code></pre>
+
+        <p>也就是说，原来的"无条件预测" ε_θ(x_t, t, ∅) 被替换成了"负面条件预测" ε_θ(x_t, t, y_neg)。效果是：模型不仅朝向正向 prompt 引导，还同时<strong>远离</strong>负向 prompt 引导的区域。</p>
+
+        <p>常用的 Negative Prompt 包括：</p>
+        <ul>
+            <li><strong>质量相关</strong>："bad quality, blurry, ugly, poorly drawn"</li>
+            <li><strong>结构相关</strong>："extra fingers, deformed hands, bad anatomy"</li>
+            <li><strong>风格相关</strong>："watermark, text, signature"</li>
+        </ul>
+
+        <h3>11.6 CFG 过高的踩坑</h3>
+
+        <p>CFG 尺度过大带来的问题是真实项目中最常见的"新手失误"之一。让我们看一个典型的现象：</p>
+
+        <p>设 CFG=20，你生成一张"落日海滩"的图片。结果得到了一个色彩极度饱和、边缘出现奇怪高亮、天空变成橙红色的"色块拼贴画"。这是因为过高的 CFG 尺度迫使模型在每一步采样中过度外推，导致噪声预测的方差被放大，最终生成结果偏离了自然图像的流形。</p>
+
+        <div class="warning">
+            <strong>⚠️ 真实的踩坑故事：</strong>在一次公司内部的设计评审中，设计师向我抱怨 Stable Diffusion 生成的图像色彩"像塑料一样"。我去看了他的配置——CFG=18，采样器用 Euler A，步数 20。我告诉他："你的 CFG 太高了。"他将信将疑地降到 7.5，生成结果立刻变得自然柔和。他惊讶地说："原来不是模型的问题，是我参数的问题。"这个经历让我明白：<strong>很多对扩散模型的负面评价，实际源于错误的推理参数配置</strong>。在误判模型能力之前，先检查你的 CFG、采样器、步数这三个最关键的参数。
+        </div>
+
+        <p>理解了文本条件注入之后，下一章我们将探讨采样策略——DPMSolver、Euler、LCM 等采样器如何以更少的步骤实现快速生成，以及如何在采样质量和速度之间做选择。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

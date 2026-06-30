@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第19章 FLUX与SD3 — AIGC生成模型教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 生成模型概述</a></li>
+            <li><a href="02.html">第2章 概率生成理论基础</a></li>
+            <li><a href="03.html">第3章 VAE变分自编码器</a></li>
+            <li><a href="04.html">第4章 GAN对抗生成网络奠基</a></li>
+            <li><a href="05.html">第5章 GAN的演进</a></li>
+            <li><a href="06.html">第6章 自回归生成模型</a></li>
+            <li><a href="07.html">第7章 生成质量评估指标</a></li>
+            <li><a href="08.html">第8章 DDPM扩散数学理论</a></li>
+            <li><a href="09.html">第9章 DDPM加速与改进</a></li>
+            <li><a href="10.html">第10章 Stable Diffusion架构</a></li>
+            <li><a href="11.html">第11章 文本条件注入</a></li>
+            <li><a href="12.html">第12章 采样策略与调度</a></li>
+            <li><a href="13.html">第13章 DiT扩散Transformer</a></li>
+            <li><a href="14.html">第14章 视频扩散模型</a></li>
+            <li><a href="15.html">第15章 CLIP图文对比学习</a></li>
+            <li><a href="16.html">第16章 条件注入与控制</a></li>
+            <li><a href="17.html">第17章 分布式训练与推理</a></li>
+            <li><a href="18.html">第18章 质量调优与Debug</a></li>
+            <li><a href="19.html" class="active">第19章 FLUX与SD3</a></li>
+            <li><a href="20.html">第20章 Flow Matching整流流</a></li>
+            <li><a href="21.html">第21章 可控生成实战</a></li>
+            <li><a href="22.html">第22章 文生视频前沿</a></li>
+            <li><a href="23.html">第23章 Diffusers框架深入</a></li>
+            <li><a href="24.html">第24章 ComfyUI工作流</a></li>
+            <li><a href="25.html">第25章 模型部署与服务化</a></li>
+            <li><a href="26.html">第26章 自回归统一模型</a></li>
+            <li><a href="27.html">第27章 实时生成新范式</a></li>
+            <li><a href="28.html">第28章 综合项目</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第19章 FLUX与SD3</h2>
+
+        <p>大家好，我是你们的讲师。2024 年的夏天，AIGC 领域迎来了两件大事：6 月 Stability AI 发布了 Stable Diffusion 3（SD3），8 月 Black Forest Labs（前 Stability AI 核心团队出走创立）发布了 FLUX.1。这两个模型彻底改变了文生图领域的格局——它们不约而同地抛弃了之前统治了两年的 U-Net 架构，转向了全新的 <strong>MM-DiT（Multi-Modal Diffusion Transformer）</strong> 架构，并使用 <strong>Rectified Flow</strong> 替代传统扩散过程。</p>
+
+        <p>如果你还在用 SDXL 或者 SD 1.5，那么这一章将是一次"从 2D 到 3D"的认知跃迁。我们会深入拆解 MM-DiT 的双流设计原理、Rectified Flow 的训练机制、T5 文本编码器为何比 CLIP 更强，以及 FLUX 和 SD3 之间的微妙差异。</p>
+
+        <h3>19.1 2024 年架构升级概览</h3>
+
+        <p>在 SDXL 时代（2023），标准流程是：CLIP 编码文本 → U-Net 在潜空间去噪 → VAE 解码。U-Net 的骨干是 CNN 层叠着 Cross-Attention 层——本质上是一个卷积主导的网络，Transformer 只是辅助性的条件注入模块。</p>
+
+        <p>但 2024 年的"升级配方"完全不同了：</p>
+
+        <table>
+            <tr><th>维度</th><th>SDXL（2023）</th><th>SD3 / FLUX（2024）</th></tr>
+            <tr><td>骨干网络</td><td>U-Net（CNN + Cross-Attention）</td><td>MM-DiT（纯 Transformer）</td></tr>
+            <tr><td>文本编码器</td><td>CLIP-L / CLIP-G</td><td>CLIP-L + T5-XXL（双编码器）</td></tr>
+            <tr><td>训练目标</td><td>噪声预测（epsilon-prediction）</td><td>Rectified Flow（速度预测）</td></tr>
+            <tr><td>潜空间</td><td>VAE 4 通道</td><td>VAE 16 通道（SD3）/ 同 SDXL（FLUX）</td></tr>
+            <tr><td>参数规模</td><td>~2.6B</td><td>8B（SD3）/ 12B（FLUX）</td></tr>
+            <tr><td>推理步数</td><td>20-50 步</td><td>4-28 步（视调度器而定）</td></tr>
+        </table>
+
+        <div class="highlight">
+            <strong>🌟 核心洞察：</strong>这次架构升级的本质是"全面 Transformer 化"。不仅去噪网络从 CNN 换成了 Transformer，连文本编码器也从 CLIP（~1B 参数级别）换成了 T5-XXL（11B 参数）。"更大、更统一、更灵活"是 2024 年文生图模型的关键词。
+        </div>
+
+        <h3>19.2 MM-DiT 双流设计</h3>
+
+        <p>MM-DiT 的核心创新可以用一句话概括：<strong>文本和图像分别走各自的参数流，只在注意力层进行信息交换</strong>。</p>
+
+        <p>为什么需要双流？之前的 Cross-Attention 方案（如 SDXL）中，文本作为 Key/Value 注入到图像 Query 中，这意味着文本和图像共享同一套参数。这种设计的隐含假设是"文本和图像可以共用同一个表示空间"——但实际并非如此：文本是离散的符号序列，图像是连续的像素矩阵，它们的统计特性有本质差异。</p>
+
+        <p>MM-DiT 的做法是：</p>
+
+        <ul>
+            <li>设文本 token 序列为 <code>T ∈ R^(N_t × d)</code>，图像 patch 序列为 <code>I ∈ R^(N_i × d)</code>。两者各自经过独立的参数矩阵 <code>W_t</code> 和 <code>W_i</code> 做 QKV 投影。</li>
+            <li>在 Self-Attention 层，将文本和图像 token <strong>拼接</strong>起来做统一注意力计算：<code>Attn([T; I])</code>。这样两者虽然参数独立，但仍能通过注意力交互互相影响。</li>
+            <li>每个 MM-DiT Block 的输出会分别更新文本流和图像流的状态。</li>
+        </ul>
+
+        <p>用伪代码来理解这个过程：</p>
+
+        <pre><code>class MMDiTBlock(nn.Module):
+    def __init__(self, dim):
+        # 双流 QKV 投影
+        self.img_qkv = nn.Linear(dim, dim * 3)
+        self.txt_qkv = nn.Linear(dim, dim * 3)
+
+    def forward(self, img_tokens, txt_tokens):
+        # 双流各自计算 QKV
+        img_q, img_k, img_v = self.img_qkv(img_tokens).chunk(3, dim=-1)
+        txt_q, txt_k, txt_v = self.txt_qkv(txt_tokens).chunk(3, dim=-1)
+
+        # 拼接后做统一注意力
+        q = torch.cat([txt_q, img_q], dim=1)
+        k = torch.cat([txt_k, img_k], dim=1)
+        v = torch.cat([txt_v, img_v], dim=1)
+
+        attn_out = scaled_dot_product_attention(q, k, v)
+
+        # 拆分为文本和图像两部分
+        txt_out, img_out = attn_out.split([txt_len, img_len], dim=1)
+        return img_out, txt_out</code></pre>
+
+        <div class="tip">
+            <strong>💡 为什么这很重要：</strong>双流设计让文本和图像各自保留了独立的表示空间，同时通过共享注意力实现了信息的充分交互。实验表明，MM-DiT 对复杂 prompt 的理解能力（如"一个红色的立方体放在蓝色的桌子左侧，右侧有一盏黄色的灯"）显著优于 Cross-Attention 方案。
+        </div>
+
+        <h3>19.3 Rectified Flow 训练目标</h3>
+
+        <p>传统扩散模型（如 DDPM）学习的是"预测噪声"——给定加噪图像 <code>x_t</code>，模型预测噪声 <code>ε</code>，然后通过 <code>x_0 = x_t - σ_t * ε</code> 去噪。这个过程的前向路径是一条弯曲的随机路径。</p>
+
+        <p>Rectified Flow 换了一种思路：<strong>我们直接学习从噪声到数据的直线路径</strong>。给定数据点 <code>x_1</code>（即真实图像）和噪声 <code>x_0</code>（高斯噪声），定义线性插值路径 <code>x_t = (1-t) * x_0 + t * x_1</code>。模型 <code>v_θ</code> 预测的是"速度"（即路径的切线方向）：</p>
+
+        <pre><code># Rectified Flow 训练伪代码
+def rectified_flow_loss(model, x_1, text_embed):
+    x_0 = torch.randn_like(x_1)           # 采样高斯噪声
+    t = torch.rand(batch_size, 1, 1, 1)    # 采样时间步
+
+    # 线性插值路径
+    x_t = (1 - t) * x_0 + t * x_1
+    # 目标速度（也就是路径切线）
+    target = x_1 - x_0                     # 常数速度
+
+    # 模型预测速度
+    pred = model(x_t, t, text_embed)
+    return mse_loss(pred, target)</code></pre>
+
+        <p>这样做的好处显而易见：由于路径是直线，从噪声到数据的映射是一条最短路径。推理时，只需要沿着这条直线走很少的步数（甚至 4 步就能出合理结果），而不需要像 DDPM 那样绕弯子。</p>
+
+        <div class="highlight">
+            <strong>🌟 关键洞察：</strong>Rectified Flow 的核心贡献不是"新的网络架构"，而是"更好的训练目标"。它把扩散模型的训练从"猜噪声"简化成了"猜速度"。路径更直→推理更快→质量更高——这是 2024 年所有主流文生图模型的全新标配。
+        </div>
+
+        <h3>19.4 T5-XXL 文本编码器</h3>
+
+        <p>SD3 和 FLUX 都同时使用两个文本编码器：<strong>CLIP-L</strong>（用于粗粒度理解）和 <strong>T5-XXL</strong>（用于细粒度理解）。我们来对比一下：</p>
+
+        <table>
+            <tr><th>编码器</th><th>参数量</th><th>最大 token 长度</th><th>特点</th></tr>
+            <tr><td>CLIP-L</td><td>~427M</td><td>77</td><td>图文对比训练，擅长风格和语义对齐</td></tr>
+            <tr><td>T5-XXL</td><td>~11B</td><td>512</td><td>纯文本预训练，擅长理解长文本和复杂指令</td></tr>
+        </table>
+
+        <p>T5-XXL 的加入带来了质的飞跃。在 SDXL 时代，模型经常忽略 prompt 中的细节——比如"红色背景上的白色字体"可能生成白底红字。因为 CLIP 只有 77 个 token 的限制，复杂描述会被截断。有了 T5-XXL 的 512 token 支持，模型可以"逐字读完"你的全部描述。</p>
+
+        <p>实际操作中，T5-XXL 的推理开销不容忽视——11B 参数的编码器推理一次就需要数秒和数 GB 显存。FLUX 支持在推理前缓存文本 embedding，复用缓存可以避免重复编码的开销。</p>
+
+        <h3>19.5 FLUX vs SD3 对比</h3>
+
+        <p>SD3 和 FLUX 虽然在核心技术路线上高度相似（MM-DiT + Rectified Flow + T5），但在架构细节、开源策略和社区生态上存在显著差异。</p>
+
+        <table>
+            <tr><th>对比维度</th><th>Stable Diffusion 3</th><th>FLUX.1</th></tr>
+            <tr><td>研发团队</td><td>Stability AI</td><td>Black Forest Labs（原 Stability 核心成员）</td></tr>
+            <tr><td>模型版本</td><td>SD3-Medium（~2.5B）<br>SD3-Large（~8B）</td><td>FLUX.1-dev（~12B, 开源）<br>FLUX.1-pro（闭源）<br>FLUX.1-schnell（蒸馏版, 4步）</td></tr>
+            <tr><td>VAE 通道数</td><td>16 通道</td><td>4 通道（兼容 SDXL VAE）</td></tr>
+            <tr><td>开源策略</td><td>仅开源 Medium 版本<br>部分权重需申请</td><td>dev 版本完全开源<br>schnell 版 Apache 2.0</td></tr>
+            <tr><td>社区生态</td><td>Diffusers 官方集成</td><td>ComfyUI 原生支持<br>社区 LoRA 极多</td></tr>
+            <tr><td>生成质量</td><td>自然场景较好</td><td>字体/人手/构图更优</td></tr>
+            <tr><td>推理速度（1024×1024）</td><td>~5 秒（Medium, 28步）</td><td>~3 秒（schnell, 4步）</td></tr>
+        </table>
+
+        <p>从实际使用体感来看，FLUX.1-dev 在文字渲染、人手结构和复杂构图上略优于 SD3，这得益于更大的参数量和更好的训练数据。但 SD3 的 Medium 版本对显存更友好，而且有 Diffusers 的原生支持，集成更为方便。</p>
+
+        <div class="warning">
+            <strong>⚠️ 真实踩坑——显存爆炸：</strong>我第一次在 24GB 的 RTX 4090 上跑 FLUX.1-dev，直接 OOM。后来才发现 FLUX 的完整推理流程需要约 28-32GB 显存（FP16）。MM-DiT 的显存消耗大约是 SDXL 的 2-3 倍，原因有二：一是双流注意力需要同时保留文本和图像两套 KV Cache；二是参数量从 2.6B 暴增到 12B。最终的解决方案是使用 FP8 量化（借助 bitsandbytes）+ 开启 <code>enable_attention_slicing()</code> + 使用 4 步 schnell 版。如果你只有 16GB 显存，建议直接使用 SD3-Medium 或 FLUX-schnell 的 FP8 版本。
+        </div>
+
+        <h3>19.6 部署优化经验</h3>
+
+        <p>将 FLUX/SD3 部署到生产环境时，以下几个优化点值得注意：</p>
+
+        <ul>
+            <li><strong>T5 编码器缓存：</strong>T5-XXL 的推理是计算瓶颈。如果输入 prompt 不变，建议将 T5 embedding 缓存到磁盘，避免重复推理。</li>
+            <li><strong>FP8 / FP4 量化：</strong>FLUX.1-dev 的 12B 参数在 FP16 下需要约 24GB 显存。使用 FP8 量化可降至约 12GB，速度几乎不变。</li>
+            <li><strong>vLLM 集成：</strong>2025 年以来，vLLM 已经支持 FLUX 的连续批处理推理，吞吐量比逐条推理提升 3-5 倍。</li>
+            <li><strong>多 GPU 切分：</strong>利用 <code>device_map="auto"</code> 将 MM-DiT 的不同层分配到不同 GPU 上。</li>
+        </ul>
+
+        <pre><code># FLUX 生产部署优化示例（使用 FP8）
+from diffusers import FluxPipeline
+import torch
+
+pipe = FluxPipeline.from_pretrained(
+    "black-forest-labs/FLUX.1-schnell",
+    torch_dtype=torch.bfloat16,
+)
+
+# FP8 量化
+pipe.transformer.to(torch.float8_e4m3fn)
+pipe.text_encoder_2.to(torch.float8_e4m3fn)
+
+pipe.enable_attention_slicing()
+pipe.to("cuda")
+
+# 缓存文本 embedding
+with torch.no_grad():
+    cached_embeds = pipe.encode_prompt("你的 prompt")
+    torch.save(cached_embeds, "prompt_cache.pt")</code></pre>
+
+        <p>到此为止，我们已经深入剖析了 FLUX 和 SD3 的核心技术——MM-DiT 双流架构、Rectified Flow 训练范式、T5 编码器带来的文本理解飞跃。下一章，我们将从更高的理论视角审视这些模型背后的统一框架：<strong>Flow Matching（整流流）</strong>。你会发现，无论是 DDPM、SD3 还是 FLUX，它们都可以被理解为一个连续归一化流在不同约束下的特殊形式。</p>
+
+        <div class="footer-nav">
+            <a href="18.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="20.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

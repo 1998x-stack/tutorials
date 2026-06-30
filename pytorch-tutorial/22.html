@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第22章 FSDP与大模型训练 — PyTorch 实战教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html" class="active">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第22章 FSDP与大模型训练</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们讲了DDP——把数据分到多卡上并行训练。但DDP有一个前提：完整的模型必须能装进单张显卡。如果你的模型是Llama-70B（700亿参数，以FP16计就要140GB显存），就算你用最新的H100（80GB），也装不下。这时候DDP就无能为力了——你连一份模型都放不下，怎么在每个卡上复制一份？</p>
+
+        <p>这就引出了本章的主角：<strong>FSDP（Fully Sharded Data Parallel）</strong>。FSDP的核心思想很简单：既然模型太大装不进单卡，那把模型也"切片"，每张卡只保存一部分参数，需要的时候再通过通信把其他卡上的参数取过来。听起来像分布式文件系统？没错，思路确实类似。</p>
+
+        <h2>22.1 大模型训练的显存瓶颈</h2>
+
+        <p>一个大型模型的显存消耗由四部分组成：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>组件</th>
+                    <th>说明</th>
+                    <th>占用量（Llama-7B, FP16为例）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>模型参数</strong></td>
+                    <td>所有weight和bias</td>
+                    <td>~14GB（7B * 2 bytes）</td>
+                </tr>
+                <tr>
+                    <td><strong>梯度</strong></td>
+                    <td>反向传播计算的梯度，与参数大小相同</td>
+                    <td>~14GB</td>
+                </tr>
+                <tr>
+                    <td><strong>优化器状态</strong></td>
+                    <td>Adam需要存储momentum和variance（各4 bytes）</td>
+                    <td>~56GB（7B * 8 bytes）</td>
+                </tr>
+                <tr>
+                    <td><strong>激活值</strong></td>
+                    <td>前向传播中的中间结果，用于反向传播</td>
+                    <td>取决于batch size和序列长度，通常10-30GB</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>总合起来，Llama-7B在FP16下训练需要大概100GB左右的显存。一张A100（80GB）勉强够用batch_size=1，而Llama-70B则需要将近1TB——没有任何单卡能装下。</p>
+
+        <p>FSDP的思路是：把参数、梯度、优化器状态都分片到各卡上，每卡只保存 <code>1 / WORLD_SIZE</code> 的份额。在需要的时候，通过 <strong>all-gather</strong> 通信把完整的参数收集回来。</p>
+
+        <h2>22.2 FSDP1 vs FSDP2</h2>
+
+        <p>PyTorch的FSDP经历了两代API演变：</p>
+
+        <ul>
+            <li><strong>FSDP1</strong>（<code>torch.distributed.fsdp.FullyShardedDataParallel</code>）：类DDP的包装方式，用 <code>FullyShardedDataParallel</code> 包裹模型。参数分片由框架自动管理。优点是兼容性好，大部分现有模型可以无缝切换。缺点是wrap策略不够灵活，必须对整个模型或子模块做统一的sharding。</li>
+            <li><strong>FSDP2</strong>（<code>torch.distributed._composable.fsdp.fully_shard</code>）：新一代API，基于composable API设计。可以对模型的不同部分使用不同的sharding策略。更灵活，性能更好。缺点是相对较新，部分旧版PyTorch不支持。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>小贴士：</strong>如果你在用PyTorch 2.4+，建议直接上FSDP2（fully_shard）。新的composable API在性能和灵活性上都优于FSDP1，而且代码写起来更自然。如果你的项目还在用PyTorch 2.0-2.3，FSDP1也是完全可以用的选择。
+        </div>
+
+        <h2>22.3 FSDP2 实战：fully_shard</h2>
+
+        <p>FSDP2的使用模式是：对模型的每一层（例如Transformer的每一个block）分别调用 <code>fully_shard</code>，最后对整个模型调用一次。这样每一层内部的参数会被分配到一个通信组内，层与层之间可以流水执行。</p>
+
+        <pre><code>from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+import torch.nn as nn
+
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, n_heads):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(dim, n_heads)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim),
+        )
+        self.layernorm1 = nn.LayerNorm(dim)
+        self.layernorm2 = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        x = x + self.attention(self.layernorm1(x), self.layernorm1(x), self.layernorm1(x))[0]
+        x = x + self.mlp(self.layernorm2(x))
+        return x
+
+class BigModel(nn.Module):
+    def __init__(self, num_blocks=32, dim=4096, n_heads=32):
+        super().__init__()
+        self.embed = nn.Embedding(32000, dim)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(dim, n_heads) for _ in range(num_blocks)
+        ])
+        self.norm = nn.LayerNorm(dim)
+        self.output = nn.Linear(dim, 32000)
+
+    def forward(self, tokens):
+        x = self.embed(tokens)
+        for block in self.blocks:
+            x = block(x)
+        x = self.norm(x)
+        return self.output(x)
+
+# 创建模型
+model = BigModel()
+
+# FSDP2: 逐层shard
+for block in model.blocks:
+    # 每个transformer block单独shard
+    fully_shard(block)
+
+# 最后对整个模型shard
+fully_shard(model)
+
+# 设置混合精度策略
+mp_policy = MixedPrecisionPolicy(
+    param_dtype=torch.bfloat16,    # 参数用BF16存储
+    reduce_dtype=torch.float32,    # 梯度all-reduce用FP32
+)
+# 在optimizer中应用混合精度
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+# 训练循环与单卡代码一致
+for batch in dataloader:
+    tokens = batch.to(device)
+    logits = model(tokens)
+    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()</code></pre>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>有个朋友想用LoRA微调Llama-70B，他有一张80GB的A100，觉得用LoRA应该够了——毕竟LoRA只训练少量参数。但他忘了：LoRA虽然只更新少量参数，但完整的前向传播仍然需要加载全部70B参数！加载Llama-70B到FP16就需要140GB，而A100只有80GB，直接OOM。最后他用4张A100配合FSDP2，把参数分片到4张卡上，每卡只占35GB参数，再加上LoRA的额外开销，总算跑起来了。这个故事的教训是：LoRA解决的是<strong>梯度更新</strong>的显存问题，但解决不了<strong>参数加载</strong>的显存问题。大模型训练必须FSDP。
+        </div>
+
+        <h2>22.4 混合精度策略</h2>
+
+        <p>FSDP的 <code>MixedPrecisionPolicy</code> 有三个关键参数：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>参数</th>
+                    <th>作用</th>
+                    <th>推荐值</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>param_dtype</code></td>
+                    <td>参数在内存中存储的精度</td>
+                    <td><code>torch.bfloat16</code>（节省一半显存）</td>
+                </tr>
+                <tr>
+                    <td><code>reduce_dtype</code></td>
+                    <td>all-reduce通信时梯度的精度</td>
+                    <td><code>torch.float32</code>（避免梯度精度损失）</td>
+                </tr>
+                <tr>
+                    <td><code>output_dtype</code></td>
+                    <td>前向传播计算中使用的精度</td>
+                    <td>通常与 <code>param_dtype</code> 保持一致</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>使用BF16 + FP32的组合是最常见的。BF16节省了参数存储的显存，而FP32保证了梯度通信的精度。</p>
+
+        <h2>22.5 分片检查点（Sharded Checkpointing）</h2>
+
+        <p>FSDP训练中，每个进程只保存模型的一部分参数。如果每个进程单独保存自己的分片，恢复时也需要同样数量的GPU。这在使用不同数量GPU恢复训练时很麻烦。</p>
+
+        <p>PyTorch提供了 <code>distributed state_dict</code> 来管理分片检查点：</p>
+
+        <pre><code>from torch.distributed.checkpoint import save, load
+from torch.distributed.checkpoint.state_dict import (
+    get_state_dict,
+    set_state_dict,
+)
+
+# 保存
+state_dict = {
+    "model": model.state_dict(),
+    "optimizer": optimizer.state_dict(),
+}
+save(state_dict, checkpoint_id="path/to/checkpoint")
+
+# 加载
+state_dict = {
+    "model": model.state_dict(),
+    "optimizer": optimizer.state_dict(),
+}
+load(state_dict, checkpoint_id="path/to/checkpoint")
+model.load_state_dict(state_dict["model"])
+optimizer.load_state_dict(state_dict["optimizer"])</code></pre>
+
+        <p>这种方式的优点是可以从不同数量的GPU上恢复——比如用8卡训练，用4卡也可以加载检查点继续训练。</p>
+
+        <h2>22.6 什么时候需要 TP 和 PP？</h2>
+
+        <p>FSDP不是万能的。当模型继续增大到数百亿甚至上万亿参数时，光靠FSDP可能还不够。这时候需要引入其他并行策略：</p>
+
+        <ul>
+            <li><strong>Tensor Parallelism（TP）</strong>：把一个层的计算切分到多张卡上。例如，一个巨大的线性层 <code>Y = XW</code>，可以把 <code>W</code> 按列切分到多卡上，每卡只做部分计算，最后all-reduce结果。典型的应用是Megatron-LM的列并行和行并行。</li>
+            <li><strong>Pipeline Parallelism（PP）</strong>：把模型按层分成多个阶段（stage），每个阶段放在不同的卡上。数据以micro-batch的形式在stage之间流水传递。</li>
+        </ul>
+
+        <p>一般来说，在模型规模上的选择策略是：</p>
+        <ul>
+            <li>模型能装进单卡 → DDP即可</li>
+            <li>模型稍大于单卡 → FSDP</li>
+            <li>模型远大于单卡且单层就很大 → FSDP + TP</li>
+            <li>模型超级大且有深层次结构 → FSDP + TP + PP（俗称3D并行）</li>
+        </ul>
+
+        <h2>22.7 主流方案对比</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>方案</th>
+                    <th>参数分片</th>
+                    <th>梯度分片</th>
+                    <th>优化器状态分片</th>
+                    <th>通信量</th>
+                    <th>易用性</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>DDP</td>
+                    <td>否（每卡完整副本）</td>
+                    <td>否（每卡完整梯度）</td>
+                    <td>否（每卡完整状态）</td>
+                    <td>每个参数每个step一次all-reduce</td>
+                    <td>★★★★★</td>
+                </tr>
+                <tr>
+                    <td>FSDP2</td>
+                    <td>是（每卡 1/N）</td>
+                    <td>是（每卡 1/N）</td>
+                    <td>是（每卡 1/N）</td>
+                    <td>每个参数每个step两次all-gather + 一次reduce-scatter</td>
+                    <td>★★★★</td>
+                </tr>
+                <tr>
+                    <td>DeepSpeed ZeRO-3</td>
+                    <td>是（每卡 1/N）</td>
+                    <td>是（每卡 1/N）</td>
+                    <td>是（每卡 1/N）</td>
+                    <td>与FSDP类似，但实现细节不同</td>
+                    <td>★★★★</td>
+                </tr>
+                <tr>
+                    <td>Megatron-LM</td>
+                    <td>是（TP+PP切分）</td>
+                    <td>是</td>
+                    <td>是</td>
+                    <td>较高（需要TP内部all-reduce + PP通信）</td>
+                    <td>★★★</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>对于大部分用户，FSDP2是性价比最高的选择。DeepSpeed ZeRO-3在性能上可以和FSDP2媲美，但需要额外安装DeepSpeed库。Megatron-LM则更适用于超大规模模型训练（100B+），配置复杂度也更高。</p>
+
+        <div class="highlight">
+            <strong>下章预告：</strong>模型训练好了，怎么把它部署到生产环境？下一章我们进入模型部署与导出环节，学习如何把PyTorch模型导出为TorchScript、ONNX，以及如何用TensorRT进行推理优化，让模型真正为产品服务。
+        </div>
+
+        <div class="footer-nav">
+            <a href="21.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="23.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

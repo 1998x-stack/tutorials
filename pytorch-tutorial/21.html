@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第21章 分布式训练入门 — PyTorch 实战教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html">第20章 自定义层与算子</a></li>
+            <li><a href="21.html" class="active">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第21章 分布式训练入门</h2>
+
+        <p>大家好，我是你们的讲师。让我们面对一个现实：现在的模型越来越大，单卡训练已经不够用了。BERT-large有3.4亿参数，Llama-70B有700亿参数，而你手头只有8张40GB的A100。怎么把模型和数据分配到多张卡上，让它们协同工作？这就是分布式训练要解决的问题。</p>
+
+        <p>很多人一听到"分布式"就觉得很复杂——要配置网络、管理进程通信、处理同步问题。好消息是，PyTorch的分布式工具链在过去几年里变得越来越易用。这一章我们从最基础的Why和What讲起，然后用一个实际的2-GPU例子，带你把DDP（Distributed Data Parallel）跑通。</p>
+
+        <h2>21.1 为什么要分布式？</h2>
+
+        <p>分布式训练的动机可以概括为三个词：<strong>内存</strong>、<strong>速度</strong>、<strong>规模</strong>。</p>
+
+        <ul>
+            <li><strong>内存</strong>：一个大模型可能本身就需要几十GB显存放参数，加上梯度、优化器状态、激活值，单卡根本装不下。分布式可以把模型切分到多张卡的显存里。</li>
+            <li><strong>速度</strong>：如果单卡一个batch要1秒，理论上8卡可以把batch size放大到8倍（global batch size），或者在每个卡上放一个小batch并行计算，一次迭代的时间可以降到1/8（理想情况下）。</li>
+            <li><strong>规模</strong>：想在合理时间内完成训练，需要更大的计算资源。分布式是从单卡到大规模集群的必经之路。</li>
+        </ul>
+
+        <h2>21.2 三种并行策略</h2>
+
+        <p>根据你要并行的是什么，分布式训练分为三种主要策略：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>策略</th>
+                    <th>如何切分</th>
+                    <th>通信量</th>
+                    <th>典型场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Data Parallel</strong><br>（数据并行）</td>
+                    <td>每卡一份完整模型，数据切分到各卡</td>
+                    <td>每步all-reduce梯度（通信量与模型大小成正比）</td>
+                    <td>模型能装进单卡，但需要更大吞吐的场景</td>
+                </tr>
+                <tr>
+                    <td><strong>Model Parallel</strong><br>（模型并行）</td>
+                    <td>模型的不同层放在不同卡上，数据逐层流水</td>
+                    <td>每层forward/backward传输激活和梯度</td>
+                    <td>模型太大装不进单卡，但层与层可以自然切分</td>
+                </tr>
+                <tr>
+                    <td><strong>Pipeline Parallel</strong><br>（流水线并行）</td>
+                    <td>模型按层分成多个stage，每个stage在一张卡上，micro-batch流水执行</td>
+                    <td>stage之间传输激活和梯度（需处理bubble）</td>
+                    <td>模型非常大且层数深，可以分成多个stage</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这一章我们重点讲数据并行（DDP），因为它是最常用、最易上手的分布式训练方式。模型并行和流水线并行在下一章FSDP中会涉及。</p>
+
+        <h2>21.3 分布式训练的核心概念</h2>
+
+        <p>在写代码之前，先理解几个关键概念。所有分布式训练都围绕 <code>torch.distributed</code> 包展开：</p>
+
+        <ul>
+            <li><strong>WORLD</strong>：所有参与训练的进程（process）构成一个"世界"。<code>WORLD_SIZE</code> 就是进程总数。</li>
+            <li><strong>RANK</strong>：每个进程在world中的唯一编号，从0到WORLD_SIZE-1。RANK=0通常是主进程（负责打印日志、保存checkpoint等）。</li>
+            <li><strong>LOCAL_RANK</strong>：进程在本地机器上的编号。如果你有2台机器各4卡，LOCAL_RANK是0-3，而RANK是0-7。</li>
+            <li><strong>MASTER_ADDR / MASTER_PORT</strong>：RANK=0进程的地址和端口，其他进程通过它建立通信。</li>
+            <li><strong>BACKEND</strong>：通信后端。GPU训练一般用 <code>nccl</code>（NVIDIA Collective Communication Library），CPU用 <code>gloo</code>。</li>
+        </ul>
+
+        <p>初始化的标准代码：</p>
+
+        <pre><code>import torch.distributed as dist
+
+def setup(rank, world_size):
+    dist.init_process_group(
+        backend="nccl",           # GPU训练用nccl
+        init_method="env://",     # 从环境变量读取MASTER_ADDR等
+        rank=rank,
+        world_size=world_size
+    )
+    torch.cuda.set_device(rank)   # 每个进程绑定一张卡
+
+def cleanup():
+    dist.destroy_process_group()</code></pre>
+
+        <h2>21.4 DistributedSampler：正确的数据分配</h2>
+
+        <p>在数据并行中，每个进程只处理全局batch的一部分。如果直接用普通的 <code>DataLoader</code>，每个进程都会加载完整的数据集——等于每个batch被重复处理了 <code>WORLD_SIZE</code> 次。</p>
+
+        <p><code>DistributedSampler</code> 解决了这个问题：它确保每个进程拿到数据集中不相交的一个子集，并且会在每个epoch自动shuffle。</p>
+
+        <pre><code>from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader
+
+dataset = YourDataset(...)
+sampler = DistributedSampler(
+    dataset,
+    num_replicas=world_size,
+    rank=rank,
+    shuffle=True,
+    seed=42
+)
+dataloader = DataLoader(dataset, batch_size=32, sampler=sampler)
+
+for epoch in range(num_epochs):
+    sampler.set_epoch(epoch)  # 每个epoch必须调用，保证不同epoch的shuffle不同
+    for batch in dataloader:
+        # 训练代码
+        pass</code></pre>
+
+        <div class="tip">
+            <strong>小贴士：</strong>每个epoch一定要调用 <code>sampler.set_epoch(epoch)</code>。否则每个epoch的数据shuffle顺序都一样，模型可能会学到一些伪相关。这个问题在分布式训练中很容易被忽略。
+        </div>
+
+        <h2>21.5 DDP：Distributed Data Parallel</h2>
+
+        <p>DDP（<code>torch.nn.parallel.DistributedDataParallel</code>）是PyTorch推荐的数据并行方案。它会把模型复制到每张卡上，然后在每次反向传播时自动执行gradient all-reduce——把所有卡上的梯度求和后再平均，确保每个卡的模型参数更新一致。</p>
+
+        <p>DDP的工作机制可以概括为：</p>
+        <ol>
+            <li>每张卡用自己的数据子集做前向传播，计算loss。</li>
+            <li>每张卡独立做反向传播，计算梯度。</li>
+            <li>DDP在反向传播结束后自动触发 <strong>all-reduce</strong> 操作：所有卡的梯度求和取平均。</li>
+            <li>每张卡用平均后的梯度更新自己的模型参数。</li>
+            <li>因为初始参数相同、梯度相同，所有卡的模型保持同步。</li>
+        </ol>
+
+        <pre><code>from torch.nn.parallel import DistributedDataParallel as DDP
+
+model = YourModel().to(rank)
+model = DDP(model, device_ids=[rank])
+
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+for batch in dataloader:
+    inputs, labels = batch
+    inputs, labels = inputs.to(rank), labels.to(rank)
+
+    outputs = model(inputs)
+    loss = criterion(outputs, labels)
+
+    optimizer.zero_grad()
+    loss.backward()    # DDP在这里自动执行梯度all-reduce
+    optimizer.step()</code></pre>
+
+        <p>注意：DDP只用包裹一次model。所有后续操作——定义optimizer、前向传播、反向传播——都和单卡代码完全一样！这也是DDP最大的优点：侵入性极小。</p>
+
+        <h2>21.6 torchrun：启动分布式训练</h2>
+
+        <p>以前启动分布式训练需要手动用 <code>torch.distributed.launch</code> 或者 <code>mp.spawn</code>，非常麻烦。现在推荐的方式是使用 <code>torchrun</code>：</p>
+
+        <pre><code># 在2张卡上运行训练脚本
+torchrun --nproc_per_node=2 train.py</code></pre>
+
+        <p><code>torchrun</code> 会自动帮你设置以下环境变量：</p>
+        <ul>
+            <li><code>LOCAL_RANK</code>、<code>RANK</code>、<code>WORLD_SIZE</code>、<code>MASTER_ADDR</code>、<code>MASTER_PORT</code></li>
+            <li><code>LOCAL_WORLD_SIZE</code>（本机上的进程数）</li>
+        </ul>
+
+        <p>因此你的 <code>train.py</code> 入口只需要从环境变量读取这些值：</p>
+
+        <pre><code>import os
+import torch
+import torch.distributed as dist
+
+def main():
+    local_rank = int(os.environ["LOCAL_RANK"])
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+
+    model = YourModel().cuda(local_rank)
+    model = DDP(model, device_ids=[local_rank])
+
+    # ... 其余训练代码
+
+    dist.destroy_process_group()
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+        <p>用 <code>torchrun</code> 启动：</p>
+
+        <pre><code>torchrun --nproc_per_node=2 train.py</code></pre>
+
+        <div class="highlight">
+            <strong>完整2-GPU训练示例：</strong><br>
+            <code>torchrun --nproc_per_node=2 --master_port=29500 train.py</code> 启动后，<code>train.py</code> 中每个进程会自动拿到自己的RANK和LOCAL_RANK。每张卡上的batch_size=32，全局batch_size=64。loss curve和单卡基本一致，但训练速度接近2倍。
+        </div>
+
+        <h2>21.7 DDP 常见陷阱</h2>
+
+        <p>DDP虽然看起来简单，但有几个容易踩的坑：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>问题</th>
+                    <th>现象</th>
+                    <th>解决方案</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>broadcast_buffers=False</code></td>
+                    <td>BN的running_mean/var不同步，多卡推理结果不一致</td>
+                    <td>设置 <code>DDP(model, broadcast_buffers=True)</code></td>
+                </tr>
+                <tr>
+                    <td><code>find_unused_parameters=True</code> 缺失</td>
+                    <td>模型中有参数没有参与loss计算（如预训练模型的特征提取器被冻结），DDP报错</td>
+                    <td>设置 <code>DDP(model, find_unused_parameters=True)</code></td>
+                </tr>
+                <tr>
+                    <td>batch_size设置错误</td>
+                    <td>每个进程设置了全局batch size而不是per-GPU batch size</td>
+                    <td>per-GPU batch_size = global_batch_size / world_size</td>
+                </tr>
+                <tr>
+                    <td>使用 nn.DataParallel</td>
+                    <td>DataParallel是单进程多线程，不支持 torch.compile，性能差</td>
+                    <td>不要用 DataParallel，用 DDP + torchrun</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>有个朋友刚开始做分布式训练，听说PyTorch有 <code>nn.DataParallel</code>（注意，不是DistributedDataParallel），觉得名字挺像就用上了。DataParallel确实可以多卡训练，但它的实现是单进程多线程——一个进程内创建一个线程做前向，然后用一个线程做all-reduce。这导致三个问题：第一，GIL限制了多线程的计算并行；第二，不支持 <code>torch.compile</code>；第三，只能用在一台机器上。等模型从ResNet-50换到ViT-large之后，DataParallel直接OOM了。最后换成DDP + torchrun，不仅速度翻了3倍，而且代码还更简洁了。现在PyTorch官方已经明确说DataParallel是legacy，新项目不应该使用。
+        </div>
+
+        <div class="highlight">
+            <strong>下章预告：</strong>DDP解决了"数据太大"的问题，但解决不了"模型太大"的问题。当你的模型大到单卡连参数都放不下时，就需要更激进的手段——FSDP（Fully Sharded Data Parallel）。下一章我们进入大模型训练的世界，看看怎么把Llama-70B这样的巨无霸在多卡上跑起来。
+        </div>
+
+        <div class="footer-nav">
+            <a href="20.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="22.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

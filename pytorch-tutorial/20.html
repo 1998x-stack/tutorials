@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第20章 自定义层与算子 — PyTorch 实战教程</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🔥 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 初识PyTorch</a></li>
+            <li><a href="02.html">第2章 张量操作基础</a></li>
+            <li><a href="03.html">第3章 张量运算与广播</a></li>
+            <li><a href="04.html">第4章 自动求导机制</a></li>
+            <li><a href="05.html">第5章 构建第一个神经网络</a></li>
+            <li><a href="06.html">第6章 损失函数与优化器</a></li>
+            <li><a href="07.html">第7章 完整训练流程</a></li>
+            <li><a href="08.html">第8章 数据加载与预处理</a></li>
+            <li><a href="09.html">第9章 卷积神经网络</a></li>
+            <li><a href="10.html">第10章 循环神经网络与注意力</a></li>
+            <li><a href="11.html">第11章 模型保存与加载</a></li>
+            <li><a href="12.html">第12章 训练技巧与调参</a></li>
+            <li><a href="13.html">第13章 模型评估与可视化</a></li>
+            <li><a href="14.html">第14章 迁移学习</a></li>
+            <li><a href="15.html">第15章 混合精度训练</a></li>
+            <li><a href="16.html">第16章 训练陷阱与调试</a></li>
+            <li><a href="17.html">第17章 性能优化基础</a></li>
+            <li><a href="18.html">第18章 可复现性与实验管理</a></li>
+            <li><a href="19.html">第19章 torch.compile深度解析</a></li>
+            <li><a href="20.html" class="active">第20章 自定义层与算子</a></li>
+            <li><a href="21.html">第21章 分布式训练入门</a></li>
+            <li><a href="22.html">第22章 FSDP与大模型训练</a></li>
+            <li><a href="23.html">第23章 模型部署与导出</a></li>
+            <li><a href="24.html">第24章 Profiling与性能分析</a></li>
+            <li><a href="25.html">第25章 PyTorch生态系统</a></li>
+            <li><a href="26.html">第26章 PyTorch前沿发展</a></li>
+            <li><a href="27.html">第27章 实战项目：图像分类全流程</a></li>
+            <li><a href="28.html">第28章 课程总结与学习路线</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第20章 自定义层与算子</h2>
+
+        <p>大家好，我是你们的讲师。在上一章我们学会了用 <code>torch.compile</code> 榨取性能，但你有没有想过这样一个问题：当你需要实现一个PyTorch没有内置的操作时该怎么办？或者内置的实现对你来说不够快、显存占用太高？这时候，你就需要掌握自定义层和算子的能力了。</p>
+
+        <p>自定义层和算子是区分"PyTorch用户"和"PyTorch高级用户"的分水岭。前者只会组合已有的积木，后者能自己造积木。这一章我们从最简单的 <code>nn.Module</code> 自定义开始，一步步深入到 <code>autograd.Function</code> 的反向传播自定义，最后到C++/CUDA扩展的编写。</p>
+
+        <h2>20.1 自定义 nn.Module 层</h2>
+
+        <p>大部分时候，你不需要从零写一个算子。PyTorch提供了上百个基础操作，你只需要把它们组合起来。自定义 <code>nn.Module</code> 就是这种组合的正式方式。</p>
+
+        <pre><code>import torch
+import torch.nn as nn
+
+class MyDenseLayer(nn.Module):
+    """一个带LayerNorm和Dropout的自定义全连接层"""
+    def __init__(self, in_features, out_features, dropout=0.1):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.layernorm = nn.LayerNorm(out_features)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = self.linear(x)
+        x = self.layernorm(x)
+        x = torch.relu(x)
+        return self.dropout(x)</code></pre>
+
+        <p>什么时候该写自定义 <code>nn.Module</code>？总结三条：</p>
+        <ul>
+            <li>你需要将一组操作打包成一个逻辑单元（比如上面的"线性+归一化+激活+Dropout"）。</li>
+            <li>你需要在 <code>forward</code> 中加入非标准的控制流（比如条件分支，但要小心graph break）。</li>
+            <li>你需要在 <code>__init__</code> 中注册可学习参数（<code>nn.Parameter</code>）。</li>
+        </ul>
+
+        <div class="tip">
+            <strong>小贴士：</strong>尽量用现有op组合来实现新功能。PyTorch的aten操作经过了充分优化，组合的开销通常远小于自己写一个naive实现。只有在确定组合实现确实成为瓶颈时，才考虑走下面的路。
+        </div>
+
+        <h2>20.2 自定义反向传播：autograd.Function</h2>
+
+        <p>当你需要自定义反向传播逻辑时——比如你想实现一个内存效率更高的梯度计算，或者在forward中用了某个不支持自动求导的外部操作——就需要使用 <code>torch.autograd.Function</code>。</p>
+
+        <p>下面是一个自定义ReLU的实现，虽然PyTorch有内置的，但用来演示 <code>autograd.Function</code> 的接口非常清晰：</p>
+
+        <pre><code>import torch
+
+class MyReLU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input):
+        """前向传播：计算ReLU，保存mask用于反向"""
+        ctx.save_for_backward(input)
+        return input.clamp(min=0)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """反向传播：mask掉梯度中对应输入为负的位置"""
+        input, = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input[input < 0] = 0
+        return grad_input
+
+# 使用方式
+input = torch.randn(4, 4, requires_grad=True)
+output = MyReLU.apply(input)  # 注意是 .apply 不是直接调用
+output.sum().backward()</code></pre>
+
+        <p><code>ctx</code> 对象（context）至关重要：</p>
+        <ul>
+            <li><code>ctx.save_for_backward()</code> 保存反向传播需要的中间张量。</li>
+            <li><code>ctx.mark_non_differentiable()</code> 标记某些输出不需要梯度。</li>
+            <li><code>ctx.set_materialize_grads(False)</code> 在反向传播中节省显存（高级用法）。</li>
+        </ul>
+
+        <p>什么时候需要自定义backward？常见场景包括：</p>
+        <ul>
+            <li><strong>显存优化</strong>：forward时丢弃某些中间结果，backward时重新计算（时间换空间）。这在训练超大模型时非常关键。</li>
+            <li><strong>数值技巧</strong>：重新排列梯度计算顺序以获得更好的数值稳定性。</li>
+            <li><strong>不可微操作</strong>：在forward中使用了采样等不可微操作，需要在backward中用替代梯度（如Straight-Through Estimator）。</li>
+        </ul>
+
+        <h2>20.3 C++/CUDA 扩展</h2>
+
+        <p>当纯Python实现无法满足性能要求时，就需要用C++或CUDA来写算子了。PyTorch提供了 <code>torch.utils.cpp_extension</code> 让这个过程变得相当简单。</p>
+
+        <p>最轻量的方式是使用 <code>load_inline</code>——把C++/CUDA源码以字符串形式嵌入Python脚本，即时编译：</p>
+
+        <pre><code>from torch.utils.cpp_extension import load_inline
+
+# C++源码
+cpp_source = """
+#include &lt;torch/extension.h&gt;
+
+torch::Tensor custom_add(torch::Tensor a, torch::Tensor b) {
+    return a + b;
+}
+"""
+
+# 编译并加载
+custom_ops = load_inline(
+    name="custom_ops",
+    cpp_sources=[cpp_source],
+    functions=["custom_add"],
+    verbose=True
+)
+
+# 使用
+result = custom_ops.custom_add(a, b)</code></pre>
+
+        <p>对于需要GPU加速的场景，可以写CUDA kernel并通过 <code>load_inline</code> 的 <code>cuda_sources</code> 参数传入：</p>
+
+        <pre><code>cuda_source = """
+#include &lt;torch/extension.h&gt;
+
+__global__ void vec_add_kernel(float* out, const float* a, const float* b, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx &lt; n) out[idx] = a[idx] + b[idx];
+}
+
+torch::Tensor vec_add_cuda(torch::Tensor a, torch::Tensor b) {
+    auto out = torch::zeros_like(a);
+    int n = a.numel();
+    vec_add_kernel&lt;&lt;&lt;(n + 255) / 256, 256&gt;&gt;&gt;(
+        out.data_ptr&lt;float&gt;(), a.data_ptr&lt;float&gt;(), b.data_ptr&lt;float&gt;(), n
+    );
+    return out;
+}
+"""</code></pre>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>方法</th>
+                    <th>开发成本</th>
+                    <th>性能上限</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>纯Python组合（nn.Module）</td>
+                    <td>低</td>
+                    <td>中等</td>
+                    <td>大部分日常需求</td>
+                </tr>
+                <tr>
+                    <td>autograd.Function</td>
+                    <td>中等</td>
+                    <td>高（可优化显存）</td>
+                    <td>需要自定义梯度的场景</td>
+                </tr>
+                <tr>
+                    <td>load_inline C++ 扩展</td>
+                    <td>中高</td>
+                    <td>高</td>
+                    <td>CPU算子融合，调用第三方C库</td>
+                </tr>
+                <tr>
+                    <td>完整CUDA kernel</td>
+                    <td>高</td>
+                    <td>最高</td>
+                    <td>高性能GPU算子，融合kernel</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>20.4 让自定义算子兼容 torch.compile</h2>
+
+        <p>如果你的自定义算子要和 <code>torch.compile</code> 配合使用，需要做一些额外的工作。默认情况下，TorchDynamo不认识你的自定义操作，会直接产生graph break。为了让编译图认识它们，需要注册fake tensor实现和autograd规则：</p>
+
+        <pre><code>import torch.library
+
+# 注册一个fake tensor实现（告诉编译器这个操作的输出shape/type）
+@torch.library.register_fake("myops::custom_relu")
+def _(input):
+    return input.new_empty(input.shape)  # 输出shape与输入相同
+
+# 注册autograd规则
+@torch.library.register_autograd("myops::custom_relu", backward_op="myops::custom_relu_backward")
+def _(ctx, input):
+    ctx.save_for_backward(input)
+    return input.clamp(min=0)</code></pre>
+
+        <p>有了这些注册信息，<code>torch.compile</code> 就能在你的自定义算子周围正确构建计算图，而不会触发graph break。这样你既能享受自定义算子的性能优势，又能享受 <code>torch.compile</code> 的全局优化。</p>
+
+        <div class="warning">
+            <strong>踩坑故事：</strong>之前有个团队做推荐系统的特征交叉模块，发现PyTorch的EmbeddingBag实现不够快。他们写了一个自定义CUDA kernel，把多个特征查找和求和融合在一起，速度直接提升了10倍！但这个kernel没有注册fake tensor实现，导致一用 <code>torch.compile</code> 就graph break。最后加上 <code>register_fake</code> 和 <code>register_autograd</code> 后，既拿到了自定义kernel的10x加速，又享受了编译图的额外优化，整体加速比达到了12x。这个故事的教训是：自定义算子不是最终答案，和编译框架的配合才是。
+        </div>
+
+        <div class="highlight">
+            <strong>下章预告：</strong>当一个模型大到单卡装不下、训练慢到无法忍受时，你需要的是分布式训练。下一章我们进入分布式世界，从数据并行到模型并行，从 <code>torchrun</code> 到DDP，把单机多卡训练的完整流程讲透。
+        </div>
+
+        <div class="footer-nav">
+            <a href="19.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="21.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

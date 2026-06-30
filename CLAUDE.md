@@ -10,7 +10,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 
 ## Active Tutorials
 
-### AI / 数据科学 (20)
+### AI / 数据科学 (21)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
 | `machine-learning-tutorial/` | 机器学习 | 28 | `https://1998x-stack.github.io/machine-learning-tutorial/` |
@@ -34,6 +34,7 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 | `llm-agent-engineering-tutorial/` | 大模型工程实践：Agent框架 | 28 | `https://1998x-stack.github.io/llm-agent-engineering-tutorial/` |
 | `multi-agent-systems-tutorial/` | 多自主智能体系统 | 28 | `https://1998x-stack.github.io/multi-agent-systems-tutorial/` |
 | `aigc-tutorial/` | AIGC生成模型 | 28 | `https://1998x-stack.github.io/aigc-tutorial/` |
+| `Bert-tutorial/` | BERT模型系列 | 28 | `https://1998x-stack.github.io/Bert-tutorial/` |
 | `pretraining-dataset-tutorial/` | LLM预训练数据集 | 28 | `https://1998x-stack.github.io/pretraining-dataset-tutorial/` |
 | `dataset-analysis-tutorial/` | 数据集分析与实战 | 28 | `https://1998x-stack.github.io/dataset-analysis-tutorial/` |
 | `post-training-dataset-tutorial/` | 后训练数据集分析与构建流程 | 28 | `https://1998x-stack.github.io/post-training-dataset-tutorial/` |

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第3章 源码整体架构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html" class="active">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第3章 源码整体架构</h1>
+
+        <p>大家好，我是你们的讲师。经过前两章的"热身"——历史概览和编译体系——现在我们终于要正式走进 SQLite 的核心源码了。这一章我们站在高处，把 SQLite 的整个架构"拍一张卫星照片"，这样后续每深入一个模块时，你都知道它在大图中的位置。</p>
+
+        <h2>优雅的分层架构</h2>
+
+        <p>SQLite 最让我佩服的设计特点之一就是它的 <strong>分层架构</strong>。整个数据库引擎从 SQL 语句输入到数据落盘，中间经过恰好 10 层管道，每层各司其职，层与层之间有清晰的接口边界。</p>
+
+        <p>我们从顶层到底层来认识这 10 层：</p>
+
+        <pre><code>┌──────────────────────────────────────────────┐
+│                用户 SQL 语句                    │
+├──────────────────────────────────────────────┤
+│ 1. Tokenizer   词法分析器 (tokenize.c)        │
+│    ├ 将 "SELECT * FROM t" 拆成 token 流       │
+│ 2. Parser      Lemon解析器 (parse.y)          │
+│    ├ 将 token 流构建为语法分析树 (Parse Tree)  │
+│ 3. Code Gen   代码生成器 (expr.c, where.c)    │
+│    ├ 将语法树编译为 VDBE 字节码               │
+│ 4. VDBE        虚拟机执行引擎 (vdbe.c)        │
+│    ├ 逐条执行字节码指令 (Op)                  │
+│ 5. B-Tree      存储引擎 (btree.c)             │
+│    ├ 管理数据页的增删改查 (表 + 索引)          │
+│ 6. Pager       页缓存与事务 (pager.c)         │
+│    ├ 管理脏页刷新、事务提交与回滚              │
+│ 7. VFS        虚拟文件系统 (os_unix.c等)      │
+│    ├ 抽象 read/write/sync 系统调用            │
+│ 8. OS          操作系统层                     │
+├──────────────────────────────────────────────┤
+│              磁盘上的数据库文件                 │
+└──────────────────────────────────────────────┘</code></pre>
+
+        <p>这套架构最核心的设计哲学是 <strong>"每层只知下层，不越级调用"</strong>。VDBE 不知道 SQL 语法是什么，它只管执行 Op 指令；B-Tree 不关心事务的具体细节，它只负责把数据页塞给 Pager。这种严格的接口隔离，使得每一层都可以独立测试、独立优化、独立替换。</p>
+
+        <p>举个例子：如果你想替换 SQLite 的存储引擎（比如用 LevelDB 替代 B-Tree），理论上你只需要把 B-Tree 层替换掉，上面的 VDBE 和 Parser 完全不用动。虽然实际上很少有人这么做，但这种"可插拔"的设计思想让 SQLite 的架构非常干净。</p>
+
+        <div class="highlight">
+            <strong>理解分层架构是读懂 SQLite 源码的钥匙。</strong> 当你看到一个函数调用链时，如果能在脑中映射出"这是从第几层到第几层的调用"，你就能快速判断它是核心逻辑还是边缘路径。这种"层感"需要刻意练习，但一旦建立，阅读效率会有质的飞跃。
+        </div>
+
+        <h2>src/ 目录文件映射</h2>
+
+        <p>第 1 章我们简单浏览了目录结构，现在我们来深入 <code>src/</code> 目录，了解每个核心文件的具体职责。把这些文件按照前面提到的"10 层管线"来归类，就是下面这张表：</p>
+
+        <table>
+            <thead>
+                <tr><th>分层</th><th>文件</th><th>代码行数（约）</th><th>核心职责</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Tokenizer</td><td><code>tokenize.c</code></td><td>~8K</td><td>SQL 关键字与标识符的词法分析</td></tr>
+                <tr><td>Parser</td><td><code>parse.y</code></td><td>~10K</td><td>Lemon 语法文件，定义 SQL 语法规则</td></tr>
+                <tr><td>Code Gen</td><td><code>expr.c</code></td><td>~65K</td><td>表达式编译——WHERE、SET 等子句的字节码生成</td></tr>
+                <tr><td>Code Gen</td><td><code>where.c</code></td><td>~100K</td><td>查询规划器——生成最优数据访问路径</td></tr>
+                <tr><td>Code Gen</td><td><code>insert.c</code></td><td>~30K</td><td>INSERT/UPDATE/DELETE 的字节码生成</td></tr>
+                <tr><td>Code Gen</td><td><code>select.c</code></td><td>~45K</td><td>SELECT 语句的字节码生成</td></tr>
+                <tr><td>VDBE</td><td><code>vdbe.c</code></td><td>~230K</td><td>字节码虚拟机——整个库最大的文件</td></tr>
+                <tr><td>VDBE</td><td><code>vdbeapi.c</code></td><td>~25K</td><td>VDBE 对外 API——sqlite3_step 等</td></tr>
+                <tr><td>VDBE</td><td><code>vdbeaux.c</code></td><td>~30K</td><td>VDBE 辅助——程序准备、绑定参数</td></tr>
+                <tr><td>B-Tree</td><td><code>btree.c</code></td><td>~215K</td><td>B-Tree 存储引擎——表与索引的核心</td></tr>
+                <tr><td>Pager</td><td><code>pager.c</code></td><td>~70K</td><td>页缓存、事务提交/回滚、WAL 模式</td></tr>
+                <tr><td>Pager</td><td><code>wal.c</code></td><td>~55K</td><td>WAL 写前日志的独立实现</td></tr>
+                <tr><td>VFS</td><td><code>os_unix.c</code></td><td>~40K</td><td>Unix/Linux 平台 VFS 实现</td></tr>
+                <tr><td>VFS</td><td><code>os_win.c</code></td><td>~45K</td><td>Windows 平台 VFS 实现</td></tr>
+                <tr><td>共享</td><td><code>sqliteInt.h</code></td><td>~12K</td><td>内部数据结构与宏定义——一切的基础</td></tr>
+                <tr><td>共享</td><td><code>malloc.c</code></td><td>~20K</td><td>内存分配器——Lookaside/Scratch pool</td></tr>
+            </tbody>
+        </table>
+
+        <p>从行数上你能看出一些有趣的事情：<code>vdbe.c</code> 是当之无愧的"巨无霸"，230K 行里塞满了各种 opcode 的实现逻辑；<code>where.c</code> 的 100K 行则反映了查询规划这个问题的复杂度；而 <code>tokenize.c</code> 只有 8K 行——词法分析器在所有模块里是最简单的。</p>
+
+        <div class="tip">
+            💡 <strong>阅读顺序建议：</strong> 先读短文件（tokenize.c → select.c → insert.c），再读长文件（expr.c → where.c → btree.c），最后啃最难的（pager.c → vdbe.c）。这和"先易后难"的学习节奏一致，也能让你更快地获得正反馈。
+        </div>
+
+        <h2>头文件依赖网络</h2>
+
+        <p>SQLite 的头文件组织非常精妙。它没有把所有东西塞进一个"超级头文件"（尽管 amalgamation 最终会合并所有 .c，但 .h 仍保持分离），而是分成了三个层级的头文件体系。</p>
+
+        <p><strong>第一层：<code>sqlite3.h</code></strong>（公共 API 头文件）</p>
+        <p>这是 SQLite 的对外接口。所有你作为 SQLite 使用者能调用的函数——<code>sqlite3_open()</code>、<code>sqlite3_prepare_v2()</code>、<code>sqlite3_step()</code>、<code>sqlite3_finalize()</code>——都在这。它不包含任何内部实现细节，只暴露了稳定的 API 签名。这个文件是 <code>sqlite.h.in</code> 模板经过 <code>configure</code> 替换版本号之后生成的。</p>
+
+        <p><strong>第二层：<code>sqliteInt.h</code></strong>（内部实现头文件）</p>
+        <p>这是 SQLite 源码阅读的 <strong>重中之重</strong>。几乎所有核心数据结构的定义都在这里：<code>sqlite3</code>（数据库连接）、<code>Table</code>（表元数据）、<code>Index</code>（索引元数据）、<code>Select</code>（SELECT 语句）、<code>Expr</code>（表达式树节点）、<code>Parse</code>（编译上下文）等等。它还包括了大量辅助宏、工具函数声明、全局变量声明。如果你要改 SQLite 的行为，八成要从修改 <code>sqliteInt.h</code> 开始。</p>
+
+        <p><strong>第三层：模块内部头文件</strong></p>
+        <p>每个核心模块有自己的内部头文件，该模块私有的数据结构定义在其中：</p>
+
+        <pre><code>┌────────────────────────────────────────────┐
+│               sqlite3.h                     │
+│            (公共API, 对外接口)               │
+├────────────────────────────────────────────┤
+│               sqliteInt.h                   │
+│   (核心数据结构: sqlite3, Table, Expr...)    │
+├─────────────┬───────────────┬───────────────┤
+│  vdbeInt.h  │  btreeInt.h   │  pagerInt.h   │
+│  (Vdbe, Op) │ (BtShared,    │ (Pager,       │
+│  (Mem,      │  MemPage,     │  PgHdr)       │
+│  VdbeCursor)│  BtCursor)    │               │
+├─────────────┴───────────────┴───────────────┤
+│               os.h / mutex.h / pcache.h     │
+│           (VFS抽象层, 互斥锁, 页缓存)         │
+└─────────────────────────────────────────────┘</code></pre>
+
+        <ul>
+            <li><strong><code>vdbeInt.h</code></strong> — VDBE 内部结构：<code>Vdbe</code>（虚拟机）、<code>Op</code>（字节码指令）、<code>Mem</code>（内存值）、<code>VdbeCursor</code>（游标）。</li>
+            <li><strong><code>btreeInt.h</code></strong> — B-Tree 内部结构：<code>BtShared</code>（共享缓存状态）、<code>MemPage</code>（内存页）、<code>BtCursor</code>（B-Tree 游标）。</li>
+            <li><strong><code>pager.h</code></strong> — Pager 结构：<code>Pager</code>（页面管理器）、<code>PgHdr</code>（页头部元数据）。</li>
+        </ul>
+
+        <h2>生成文件的角色</h2>
+
+        <p>SQLite 源码树中有几个文件不是手写的，而是由代码生成器（code generator）自动产生的。理解这些生成文件，有助于你判断"哪些代码可以直接读，哪些代码需要去看生成脚本"。</p>
+
+        <table>
+            <thead>
+                <tr><th>生成文件</th><th>源文件/脚本</th><th>生成方式</th><th>作用</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>parse.c</code> / <code>parse.h</code></td><td><code>parse.y</code> + <code>tool/lemon.c</code></td><td>Lemon LALR(1) 解析器生成</td><td>SQL 语法解析表</td></tr>
+                <tr><td><code>opcodes.h</code> / <code>opcodes.c</code></td><td><code>vdbe.c</code> + <code>tool/mkopcodeh.tcl</code></td><td>TCL 脚本提取 opcode 定义</td><td>VDBE 指令集枚举</td></tr>
+                <tr><td><code>keywordhash.h</code></td><td><code>tool/mkkeywordhash.c</code></td><td>C 程序生成完美哈希表</td><td>SQL 关键字的快速查找</td></tr>
+                <tr><td><code>sqlite3.h</code></td><td><code>sqlite.h.in</code> + <code>configure</code></td><td>Autoconf 替换版本宏</td><td>公共 API 头文件</td></tr>
+                <tr><td><code>sqlite3.c</code></td><td><code>tool/mksqlite3c.tcl</code></td><td>TCL 脚本合并分散源码</td><td>Amalgamation 合并版</td></tr>
+            </tbody>
+        </table>
+
+        <p>最有意思的是 <code>opcodes.h</code> 的生成方式。它不是手写的，而是通过 <code>tool/mkopcodeh.tcl</code> 从 <code>vdbe.c</code> 的源码注释中提取出来的。在 <code>vdbe.c</code> 中，每个 opcode 的实现前面都有一段注释，格式类似于：</p>
+
+        <pre><code>/* Opcode: Column P1 P2 P3 P4 P5 *//* Synopsis: ...
+**
+** 从第 P1 行读取列 P2 的值。
+** 将结果写入栈顶寄存器。
+*/
+case OP_Column: {
+    // 实现代码...
+    break;
+}</code></pre>
+
+        <p>生成脚本解析这些注释，自动提取 opcode 名称、参数数量、操作数含义，然后生成 <code>opcodes.h</code> 中的枚举定义和 <code>opcodes.c</code> 中的名称字符串表。这种"代码即文档、文档即代码"的做法，保证了 opcode 定义和实现之间永远同步。</p>
+
+        <div class="highlight">
+            <strong>一个小发现：</strong> <code>keywordhash.h</code> 是用 C 程序生成代码的典型案例。<code>mkkeywordhash.c</code> 的原理是分析当前 SQLite 支持的所有关键词，计算一个完美哈希函数（perfect hash function）——使得每个关键词映射到哈希表的唯一位置，没有冲突。这意味着 SQLite 的关键字查找是 O(1) 的。如果你添加了一个新的 SQL 关键字，需要重新运行这个程序生成新的哈希表。
+        </div>
+
+        <h2>如何入手阅读源码</h2>
+
+        <p>有了架构全景图，现在我们来看一个实际的 SQL 执行流，把这些概念串起来。假设你执行了这样一条 SQL：</p>
+
+        <pre><code>SELECT name FROM users WHERE age > 18;</code></pre>
+
+        <p>这条语句在 SQLite 内部经历了以下旅程：</p>
+
+        <ol>
+            <li><strong>sqlite3_prepare_v2()</strong> — 编译 SQL。内部调用 <code>sqlite3ParserParse()</code>（Lemon 生成的解析器），生成语法树。然后调用 <code>sqlite3Select()</code> → <code>sqlite3WhereBegin()</code> 等代码生成函数，把语法树翻译成 VDBE 字节码。</li>
+            <li><strong>sqlite3_step()</strong> — 逐行执行。VDBE 虚拟机从程序计数器（pc）指向的第一条 opcode 开始，逐条解释执行。遇到 <code>OP_Column</code> 从行中提取列值，遇到 <code>OP_Ge</code> 做比较判断。</li>
+            <li><strong>VDBE 调用 B-Tree</strong> — 当需要读取表数据时，VDBE 通过 <code>sqlite3BtreeCursor()</code> 打开游标，通过 <code>sqlite3BtreeNext()</code> 逐行遍历。</li>
+            <li><strong>B-Tree 调用 Pager</strong> — 当需要读取磁盘页时，B-Tree 通过 <code>sqlite3PagerGet()</code> 请求 Pager 返回指定页号的数据。</li>
+            <li><strong>Pager 调用 VFS</strong> — 如果页不在缓存中，Pager 通过 VFS 层的 <code>xRead()</code> 方法发起磁盘 I/O 请求。</li>
+        </ol>
+
+        <p>你看，一条简单的 SQL 从顶层的 SQL 语句到底层的磁盘 I/O，恰好穿过了我们之前说的所有 8 层（实际涉及了 Tokenizer → Parser → Code Gen → VDBE → B-Tree → Pager → VFS → OS）。</p>
+
+        <p>对于刚刚开始阅读源码的同学，我建议你从以下四个关键入口函数开始追踪：</p>
+
+        <table>
+            <thead>
+                <tr><th>函数</th><th>所在文件</th><th>作用</th><th>适合理解</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>sqlite3_prepare_v2()</code></td><td><code>prepare.c</code></td><td>SQL 编译入口</td><td>前端编译流程</td></tr>
+                <tr><td><code>sqlite3_step()</code></td><td><code>vdbeapi.c</code></td><td>逐行执行入口</td><td>VDBE 执行模型</td></tr>
+                <tr><td><code>sqlite3BtreeOpen()</code></td><td><code>btree.c</code></td><td>B-Tree 引擎初始化</td><td>存储引擎启动</td></tr>
+                <tr><td><code>sqlite3PagerOpen()</code></td><td><code>pager.c</code></td><td>Pager 初始化</td><td>页缓存与事务系统</td></tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            💡 <strong>实战建议：</strong> 打开你本地的源码，用 <code>gdb</code> 或 <code>lldb</code> 在上述四个函数上设置断点，然后执行一条简单的 SQL。观察调用栈（bt/backtrace 命令），亲眼验证我们说的这个"10层管线"是怎么跨文件调用的。一次"断点追踪"比读十遍架构图都有效。
+        </div>
+
+        <p>好了，第 3 章我们完成了 SQLite 源码的"地形勘察"。从 10 层管线到 src 目录的文件映射，从头文件的依赖网络到生成文件的角色，再到实际的 SQL 执行流追踪——你现在应该对整个代码库有了一个立体的、有层次感的认识。</p>
+
+        <p>下一章我们进入"地基"层面——<strong>核心数据结构</strong>。我们将解剖 sqlite3 连接对象、Parse 编译上下文、Table/Index 数据模式、Select/Expr 查询树和 Vdbe/Op 执行态这五大核心结构。理解这些数据结构，你就拿到了解锁 SQLite 全部源码的钥匙。第 4 章见。</p>
+
+        <div class="footer-nav">
+            <a href="02.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="04.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 调试基础设施</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html" class="active">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第7章 调试基础设施</h1>
+
+        <p>大家好，我是你们的讲师。前六章里我们读了很多代码，了解了 SQLite 的分层架构、核心数据结构和内存管理。但说实话，读源码光靠眼睛看是不够的——你需要能用工具"跑"代码、"看"代码的运行时状态。这就是调试基础设施的价值所在。</p>
+
+        <p>SQLite 的调试工具链可能是所有开源数据库中最完善的。从编译时开启的 assert 和跟踪输出，到 CLI 中的各种自省命令，再到 gdb 里可以直接调用的可视化打印函数——SQLite 为了让开发者能"看清"它的内部运行状态，下了非常大的功夫。这一章我们逐个介绍这些利器。</p>
+
+        <h2>开启调试模式</h2>
+
+        <p>所有调试功能的前提是开启 <code>SQLITE_DEBUG</code> 编译宏。在第 2 章我们简单提过这个选项，现在来看看它在调试者眼中到底打开了什么：</p>
+
+        <pre><code># 编译调试版本
+gcc -O0 -g -DSQLITE_DEBUG \
+    -DSQLITE_ENABLE_EXPLAIN_COMMENTS \
+    -DSQLITE_ENABLE_TREETRACE \
+    -DSQLITE_ENABLE_WHERETRACE \
+    sqlite3.c -o sqlite3-debug</code></pre>
+
+        <p>开启 <code>SQLITE_DEBUG</code> 后，以下能力被激活：</p>
+        <ul>
+            <li>所有的 <code>assert()</code> 检查被启用（发布版本中 assert 被预处理器移除）。</li>
+            <li><code>testcase()</code> 宏开始工作——它会记录哪些边界情况被覆盖到了。</li>
+            <li><code>sqlite3ShowExpr()</code>、<code>sqlite3ShowSelect()</code> 等可视化函数可以被调用。</li>
+            <li>CLI 的调试命令（如 <code>.eqp trace</code>、<code>.treetrace</code>）变为可用。</li>
+            <li>VDBE 的跟踪输出和统计计数被启用。</li>
+        </ul>
+
+        <p>调试版本与发布版本的差异是显著的：</p>
+
+        <table>
+            <thead>
+                <tr><th>特性</th><th>发布版本（Release）</th><th>调试版本（Debug）</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>优化级别</td><td>-O2</td><td>-O0（推荐）</td></tr>
+                <tr><td>二进制大小</td><td>~900 KB</td><td>~1.5 MB</td></tr>
+                <tr><td>assert 检查</td><td>无</td><td>数千个</td></tr>
+                <tr><td>可视化打印函数</td><td>不存在</td><td>可用</td></tr>
+                <tr><td>跟踪跟踪输出</td><td>不存在</td><td>可用</td></tr>
+                <tr><td>执行速度</td><td>100%</td><td>通常为发布的 30-50%</td></tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            💡 <strong>最佳实践：</strong> 在你的工作目录中同时保留两个编译产物：<code>sqlite3-release</code>（用于日常的数据库操作）和 <code>sqlite3-debug</code>（用于调试和学习）。这样你可以在不影响日常使用的情况下随时启动调试会话。
+        </div>
+
+        <h2>AST 可视化打印</h2>
+
+        <p>当 SQLite 解析一条 SQL 语句时，它在内存中构建了一棵"抽象语法树"（AST）。这棵树的根节点是 <code>Select</code>（或 <code>Insert</code>、<code>Delete</code> 等），内部节点是 <code>Expr</code>，叶子节点是列引用和字面量。</p>
+
+        <p>抽象的东西很难直观理解。好在 SQLite 提供了几个函数，可以把这些结构以可读的文本形式打印出来：</p>
+
+        <pre><code>/* 打印 Expr 表达式树 */
+void sqlite3ShowExpr(const Expr *pExpr);
+
+/* 打印 Select 语句 */
+void sqlite3ShowSelect(const Select *p);
+
+/* 打印 ExprList */
+void sqlite3ShowExprList(const ExprList *pList);
+
+/* 更详细的树形打印（需 TREETRACE 支持） */
+void sqlite3TreeViewExpr(const Expr *pExpr, ...);
+void sqlite3TreeViewSelect(const Select *p, ...);</code></pre>
+
+        <p>这些函数只能在 <code>SQLITE_DEBUG</code> 模式下编译时存在。它们的输出格式如下（<code>sqlite3ShowSelect</code> 的示例输出）：</p>
+
+        <pre><code>SELECT (
+  op: TK_SELECT
+  selFlags: SF_Resolved
+  pEList:
+    ExprList (2):
+      Expr 0: op=TK_COLUMN, iTable=0, iColumn=1
+      Expr 1: op=TK_AGG_FUNCTION, zToken="count"
+  pSrc:
+    SrcList (1):
+      Src 0: zName="users", iCursor=0
+  pWhere:
+    Expr: op=TK_GT, pLeft=TK_COLUMN(iTable=0,iCol=2), pRight=TK_INTEGER(18)
+  pOrderBy: NULL
+  pGroupBy: NULL
+)</code></pre>
+
+        <p>这种可视化的价值怎么强调都不过分。当你调试一个复杂的查询时——比如有 5 表 JOIN、子查询、CASE WHEN——在脑中手动构建 AST 是非常容易出错的。但如果你在 <code>sqlite3Select()</code> 入口处设置断点，然后调用 <code>sqlite3ShowSelect(pParse->pSelect)</code>，编译后的 AST 结构就会在终端中一览无余。</p>
+
+        <div class="highlight">
+            <strong>调试器中的实战用法：</strong> 在 gdb 中，你不需要写一个特殊的脚本来调用这些函数。直接在断点处执行即可：
+            <pre><code>(gdb) break sqlite3Select
+(gdb) run "SELECT name, count(*) FROM users WHERE age > 18"
+(gdb) call sqlite3ShowSelect(pParse->pSelect)</code></pre>
+            终端上会立即打印出 AST 结构。这种"断点查看"的工作方式，比任何日志输出都更灵活，因为你可以在代码执行的任意时刻观察任意结构的状态。
+        </div>
+
+        <h2>VDBE 跟踪（.eqp trace）</h2>
+
+        <p>SQLite 的 CLI 工具提供了一个强大的调试命令——<code>.eqp</code>（EXPLAIN QUERY PLAN 的缩写）。它有三种模式：</p>
+
+        <pre><code>-- 模式 1: .eqp on —— 自动显示 EXPLAIN QUERY PLAN 输出
+sqlite> .eqp on
+sqlite> SELECT name FROM users WHERE age > 18;
+QUERY PLAN
+|--SCAN users
+--USE TEMP B-TREE FOR ORDER BY
+
+-- 模式 2: .eqp full —— 自动显示 EXPLAIN 完整字节码
+sqlite> .eqp full
+sqlite> SELECT name FROM users WHERE age > 18;
+addr  opcode         p1    p2    p3    p4             p5  comment
+----  -------------  ----  ----  ----  -------------  --  -------------
+0     Init           0     11    0                    0   Start at 11
+1     OpenRead       0     2     0     users          0   root=2
+2     Rewind         0     10    0                    0
+3     Column         0     1     1                    0   r[1]=name
+4     Column         0     2     2                    0   r[2]=age
+5     Ge             18    9     2     (BINARY)       81  if r[2]>=18 goto 9
+6     Rowid          0     3     0                    0   r[3]=rowid
+7     Copy           1     4     0                    0   r[4]=r[1]
+8     ResultRow      4     1     0                    0   output row
+9     Next           0     3     0                    0
+10    Halt           0     0     0                    0
+11    Transaction    0     0     0                    0
+12    Goto           0     1     0                    0
+
+-- 模式 3: .eqp trace —— 实时 VDBE 跟踪
+sqlite> .eqp trace
+sqlite> SELECT name FROM users WHERE age > 18;
+-- 每次执行 opcode 时输出一行跟踪信息
+-- 0x0100: OpenRead 0 2 0 users
+-- 0x0101: Rewind 0 10 0
+-- ...</code></pre>
+
+        <p><code>.eqp trace</code> 特别有价值——它不仅告诉你 VDBE 程序长什么样，还实时显示程序执行的 <strong>动态轨迹</strong>。你会看到每条指令被执行时的实际参数值，而不是计划阶段的静态信息。这对于理解 <code>if-then-else</code> 跳转逻辑、循环边界条件和条件分支的走向极为有用。</p>
+
+        <p>除了 <code>.eqp</code>，还有几个 VDBE 相关的 PRAGMA：</p>
+
+        <pre><code>PRAGMA vdbe_listing=ON;    -- 在每条 VDBE 程序被准备时打印完整清单
+PRAGMA vdbe_addoptrace=ON; -- 跟踪 opcode 的生成过程（代码生成阶段）
+PRAGMA vdbe_debug=ON;      -- 每条 VDBE 指令执行后触发调试断点</code></pre>
+
+        <div class="tip">
+            💡 <strong>理解 VDBE 跟踪输出：</strong> 每行跟踪输出的最左边是程序计数器（如 <code>0x0100</code>），高 16 位是语句编号，低 16 位是指令偏移。所以 <code>0x0103</code> 表示"第 1 条语句的第 3 条指令"。这个编号在调试多语句批处理时特别有用——你能清楚地看到当前正在执行的是哪条语句。
+        </div>
+
+        <h2>TREETRACE 与 WHERETRACE</h2>
+
+        <p>如果说 <code>.eqp trace</code> 是"微观"的指令级跟踪，那么 <code>.treetrace</code> 和 <code>.wheretrace</code> 就是"宏观"的优化器级诊断。它们只在启用了 <code>SQLITE_ENABLE_TREETRACE</code> 和 <code>SQLITE_ENABLE_WHERETRACE</code> 编译宏时可用。</p>
+
+        <p><strong>TREETRACE</strong> 跟踪查询规划器的树形搜索过程。语法是：</p>
+
+        <pre><code>sqlite> .treetrace 0xFF  -- bitmask: 开启所有跟踪类别
+sqlite> SELECT * FROM t1 JOIN t2 ON t1.x = t2.y WHERE t1.a > 5;
+
+-- 输出示例（简化）：
+-- WHERE-clause search
+--   query 0x5566: using table t1
+--     consider index idx_t1_a
+--       cost: 12.5
+--     consider full scan
+--       cost: 45.2
+--     best: index idx_t1_a, cost=12.5
+--   query 0x5567: using table t2
+--     consider index idx_t2_y
+--       cost: 3.2
+--     best: index idx_t2_y, cost=3.2
+--   total cost: 15.7
+--   plan: t1 INDEX idx_t1_a, t2 INDEX idx_t2_y</code></pre>
+
+        <p><code>.treetrace</code> 的参数是一个 bitmask（位掩码），不同的位控制不同类别的输出：</p>
+
+        <table>
+            <thead>
+                <tr><th>位掩码</th><th>类别</th><th>跟踪内容</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>0x001</td><td>WHERE 子句搜索</td><td>查询规划器如何评估每个候选索引</td></tr>
+                <tr><td>0x002</td><td>连接顺序搜索</td><td>多表 JOIN 的顺序排列搜索过程</td></tr>
+                <tr><td>0x004</td><td>子查询展平</td><td>子查询被重写为 JOIN 的过程</td></tr>
+                <tr><td>0x008</td><td>聚合下推</td><td>聚合操作被下推到子查询的优化</td></tr>
+                <tr><td>0x010</td><td>ORDER BY 优化</td><td>利用索引避免排序的决策过程</td></tr>
+                <tr><td>0x0FF</td><td>全开</td><td>以上所有类别</td></tr>
+            </tbody>
+        </table>
+
+        <p><strong>WHERETRACE</strong> 是 TREETRACE 的子集，专门跟踪 WHERE 子句的查询规划。它用 <code>.wheretrace</code> 命令控制，输出的是查询规划器在评估每个索引时的成本估算细节。</p>
+
+        <p>对于阅读查询规划器的源码来说，这两个工具的价值无法用语言形容。想象一下你在读 <code>src/where.c</code> 的 100K 行代码，一个函数有 5 层嵌套循环和十几个条件分支。与其盯着代码猜，不如打开 <code>.treetrace</code> 执行一条实际查询，亲眼看看代码走了哪些分支、做了哪些决策。</p>
+
+        <div class="highlight">
+            <strong>个人经验：</strong> 我在学习 SQLite 查询规划器时，花了两天时间读 <code>where.c</code> 的源代码，脑子里一团浆糊。后来我编译了一个带 <code>WHERETRACE</code> 的调试版，做了一组不同复杂度的查询（单表查询 → 两表 JOIN → 子查询 → 复杂 JOIN），把跟踪输出和代码对照着看。一天之内，我对查询规划器的理解就超过了前两天的两倍。这就是"跑起来看"比"坐着读"的效率差异。
+        </div>
+
+        <h2>调试器中的 SQLite</h2>
+
+        <p>除了 SQLite 自身提供的工具，标准的系统调试器（gdb/lldb）在调试 SQLite 时也有一些特殊的技巧。</p>
+
+        <p><strong>打印 VDBE 程序：</strong> 当你停在 VDBE 执行循环中时，可以打印当前程序的反汇编：</p>
+
+        <pre><code>(gdb) set $v = (Vdbe*)pStmt
+(gdb) printf "nOp=%d, pc=%d\n", $v->nOp, $v->pc
+nOp=24, pc=5
+(gdb) p *$v->aOp@5          -- 打印前 5 条指令
+(gdb) p $v->aOp[$v->pc]     -- 打印当前执行指令</code></pre>
+
+        <p><strong>打印 B-Tree 页结构：</strong></p>
+
+        <pre><code>(gdb) p *(MemPage*)(pPage->aData)
+(gdb) p pPage->pgno
+$2 = 2
+(gdb) p pPage->nCell
+$3 = 15</code></pre>
+
+        <p><strong>从 CLI 触发断点：</strong> SQLite 提供了一个隐藏命令 <code>test_breakpoint()</code>，可以在 CLI 中手动触发调试断点：</p>
+
+        <pre><code>sqlite> PRAGMA vdbe_debug=ON;
+sqlite> SELECT * FROM t;
+-- 每条 opcode 执行前会自动触发断点，
+-- 开发者在调试器中逐条单步执行 VDBE 指令</code></pre>
+
+        <p><strong>AddressSanitizer + SQLITE_DEBUG 的组合：</strong> 这是分析内存相关 bug 的最强组合。用 <code>-fsanitize=address</code> 编译 SQLite 调试版本，然后运行你的测试用例。ASAN 会检测缓冲区溢出、use-after-free、内存泄漏等错误，而 SQLITE_DEBUG 的 assert 会捕获逻辑错误。两者叠加，几乎覆盖了所有常见的 C 语言编码错误。</p>
+
+        <pre><code># AddressSanitizer + SQLITE_DEBUG 编译
+gcc -O1 -g -fsanitize=address \
+    -DSQLITE_DEBUG -DSQLITE_ENABLE_TREETRACE \
+    sqlite3.c -o sqlite3-asan-debug</code></pre>
+
+        <h2>性能分析工具</h2>
+
+        <p>调试不仅仅是"找 bug"，也包括"找瓶颈"。SQLite 提供了一套性能分析工具：</p>
+
+        <pre><code>-- PRAGMA stmt 显示 prepared statement 的统计信息
+sqlite> PRAGMA stmt;
+(0x5566): SELECT name FROM users WHERE age > 18
+  nLoop=15 nVisit=1500
+  SELECT id FROM orders WHERE uid=?
+  nLoop=1500 nVisit=3000</code></pre>
+
+        <p><code>sqlite3_status()</code> 是编程接口：</p>
+
+        <pre><code>int sqlite3_status(int op, int *pCurrent, int *pHighwater, int resetFlag);
+// op 可以是:
+//   SQLITE_STATUS_MEMORY_USED    — 内存使用量
+//   SQLITE_STATUS_MALLOC_COUNT   — malloc 调用次数
+//   SQLITE_STATUS_PAGECACHE_USED — page cache 使用量
+//   SQLITE_STATUS_LOOKASIDE_USED — lookaside 使用量
+//   SQLITE_STATUS_SCRATCH_USED   — scratch pool 使用量</code></pre>
+
+        <p>下面是一个调试工具速查表：</p>
+
+        <table>
+            <thead>
+                <tr><th>工具</th><th>启用前提</th><th>用法</th><th>最佳场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>sqlite3ShowExpr()</code></td><td><code>SQLITE_DEBUG</code></td><td>在 gdb 中调用</td><td>理解表达式编译过程</td></tr>
+                <tr><td><code>.eqp full</code></td><td>默认可用</td><td>CLI 命令</td><td>查看 VDBE 字节码</td></tr>
+                <tr><td><code>.eqp trace</code></td><td>默认可用</td><td>CLI 命令</td><td>实时 VDBE 执行跟踪</td></tr>
+                <tr><td><code>.treetrace</code></td><td><code>SQLITE_ENABLE_TREETRACE</code></td><td>CLI 命令</td><td>查询规划器调优</td></tr>
+                <tr><td><code>.wheretrace</code></td><td><code>SQLITE_ENABLE_WHERETRACE</code></td><td>CLI 命令</td><td>WHERE 索引选择分析</td></tr>
+                <tr><td><code>PRAGMA vdbe_debug</code></td><td><code>SQLITE_DEBUG</code></td><td>在 gdb 配合下使用</td><td>逐条 opcode 级调试</td></tr>
+                <tr><td><code>PRAGMA stmt</code></td><td>默认可用</td><td>SQL 命令</td><td>运行时性能统计</td></tr>
+                <tr><td><code>sqlite3_status()</code></td><td>默认可用</td><td>C 接口</td><td>程序化监控</td></tr>
+                <tr><td>ASAN + Debug</td><td>编译时</td><td>运行测试用例</td><td>内存错误检测</td></tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            ⚠️ <strong>性能分析的"盲人摸象"陷阱：</strong> 一个常见的误区是只用单条查询做性能分析。实际生产环境中，并发、缓存预热、WAL 检查点等外部因素对性能的影响往往比查询本身的优化更大。我见过一个案例：开发者花了三天优化一条查询，把执行时间从 100ms 降到了 5ms，但在生产环境中这条查询只占总负载的 0.1%，总吞吐量几乎没有变化。真正的瓶颈是另一个被忽略的批量写入操作。<strong>先测量，再优化——而且是测量真实场景，不是单一查询。</strong>
+        </div>
+
+        <p>好了，第 7 章我们走遍了 SQLite 的调试工具链。从编译调试版本开始，到 AST 可视化打印、VDBE 跟踪、查询规划器诊断、gdb 调试技巧，再到性能分析工具——你现在掌握了一套从"代码怎么看"到"代码怎么跑"再到"哪里跑得慢"的完整技能栈。</p>
+
+        <p>从下一章开始，我们将沿着"SQL 语句从输入到执行"的管线，逐层深入。第 8 章我们从头开始——<strong>词法分析器</strong>。SQLite 是怎么把 <code>SELECT * FROM t WHERE a > 1</code> 拆分成一个个 token 的？token 的内部表示是什么？关键字查找为什么是 O(1) 的？这些看似简单的问题背后，有非常精巧的实现。第 8 章见。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

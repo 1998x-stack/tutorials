@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第5章 内存管理机制</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html" class="active">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第5章 内存管理机制</h1>
+
+        <p>大家好，我是你们的讲师。数据库引擎每天都在和内存打交道——解析 SQL 需要临时内存、B-Tree 的页需要缓存、排序需要临时缓冲区。内存管理的好坏，直接影响数据库的性能和稳定性。</p>
+
+        <p>SQLite 没有使用 <code>malloc</code>/<code>free</code> 了事，而是构建了一套精密的、多级的内存管理体系。这套体系不仅考虑了分配效率，还特别关注了嵌入式场景下的内存碎片控制和可预测性。本章我们深入分析 SQLite 的内存管理源码，看看它是怎么做到的。</p>
+
+        <h2>自己动手的内存管理</h2>
+
+        <p>为什么一个数据库引擎需要自定义内存管理？直接的 <code>malloc()</code>/<code>free()</code> 有什么问题？</p>
+
+        <p>问题主要是三个：</p>
+
+        <ol>
+            <li><strong>碎片化</strong> — 标准 <code>malloc</code> 经过大量小对象的分配和释放后，堆空间会产生大量碎片。数据库的页缓存、SQL 表达式树等数据结构的大小往往是非常固定的，但 libc 的分配器并不知道这个模式。</li>
+            <li><strong>性能不确定性</strong> — <code>malloc</code> 在最坏情况下的耗时可能远高于平均情况（例如需要扫描空闲链表或触发系统级内存回收）。数据库事务需要可预测的延迟。</li>
+            <li><strong>平台差异</strong> — 不同的操作系统和 C 运行时的 <code>malloc</code> 实现差异很大。SQLite 需要在数十种平台上表现一致。</li>
+        </ol>
+
+        <p>SQLite 的解决方案是通过 <strong>可插拔的内存分配接口</strong>——<code>sqlite3_mem_methods</code>——来解耦内存分配策略和实际使用方。这个接口定义在 <code>src/sqlite3.h</code> 中：</p>
+
+        <pre><code>struct sqlite3_mem_methods {
+    void *(*xMalloc)(int);         /* malloc 功能 */
+    void (*xFree)(void*);          /* free 功能 */
+    void *(*xRealloc)(void*, int); /* realloc 功能 */
+    int (*xSize)(void*);           /* 返回分配块大小 */
+    int (*xRoundup)(int);          /* 返回向上取整后的分配大小 */
+    int (*xInit)(void*);           /* 初始化分配器 */
+    void (*xShutdown)(void*);      /* 关闭分配器 */
+    void *pAppData;                /* 分配器的私有数据 */
+};</code></pre>
+
+        <p>当你调用 <code>sqlite3_malloc(N)</code> 时，它最终调用的是当前安装的内存分配器的 <code>xMalloc</code> 方法。默认情况下，它使用 libc 的 <code>malloc</code>/<code>free</code>，但你可以通过 <code>sqlite3_config(SQLITE_CONFIG_MALLOC, &amp;myAllocator)</code> 替换为任何自定义分配器。</p>
+
+        <div class="highlight">
+            <strong>这个设计的影响：</strong> 可插拔分配器是 SQLite 能够被广泛应用于各种嵌入式环境的关键原因之一。例如，在 VxWorks 实时操作系统中，SQLite 可以使用操作系统原生的分区分配器（partition allocator）；在 Android 的 Bionic libc 中，可以使用 jemalloc；在内存极小的 MCU 上，可以使用固定大小的 slab 分配器。SQLite 核心代码不关心底层用的是哪个分配器，它只管调用 <code>sqlite3_malloc</code>。
+        </div>
+
+        <h2>Lookaside Allocator</h2>
+
+        <p>Lookaside 是 SQLite 内存管理中最"聪明"的设计之一。它的原理非常简单：<strong>每个数据库连接预分配一个固定大小的小对象池</strong>，用于满足绝大多数小型内存请求。</p>
+
+        <p>核心数据结构在 <code>sqliteInt.h</code> 中定义：</p>
+
+        <pre><code>typedef struct LookasideSlot {
+    struct LookasideSlot *pNext;  /* 空闲链表指针 */
+} LookasideSlot;
+
+typedef struct Lookaside {
+    LookasideSlot *pFree;         /* 空闲 slot 链表头 */
+    int nSlot;                    /* slot 总数 */
+    int nFree;                    /* 空闲 slot 数 */
+    int szSlot;                   /* 每个 slot 的大小（字节） */
+    int pStart;                   /* 缓冲区起始地址 */
+    int pEnd;                     /* 缓冲区结束地址 */
+    u8 bDisable;                  /* 是否禁用 */
+    u8 bMalloced;                 /* 是否由 malloc 分配 */
+} Lookaside;</code></pre>
+
+        <p>工作流程是这样的：</p>
+
+        <ol>
+            <li>在 <code>sqlite3_open()</code> 时，分配一个固定大小的缓冲区（默认 120 个 slot，每个 128 字节），构建空闲链表。</li>
+            <li>当需要分配一块较小的内存（大小 &lt;= szSlot）时，直接从空闲链表头部取下 slot，O(1) 时间内完成。</li>
+            <li>当释放内存时，将 slot 归还到空闲链表头部。</li>
+            <li>如果空闲链表为空（所有 slot 都在使用中），则回退到 <code>sqlite3Malloc()</code> 走常规分配路径。</li>
+        </ol>
+
+        <p>Lookaside 的数据就存储在 <code>sqlite3.lookaside</code> 中。它的命中率对不同工作负载差异很大：</p>
+
+        <table>
+            <thead>
+                <tr><th>工作负载</th><th>Lookaside 命中率</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>简单查询（SELECT 2 列）</td><td>&gt; 99%</td><td>几乎完全命中</td></tr>
+                <tr><td>复杂查询（5 表 JOIN）</td><td>~85%</td><td>部分表达式节点超出 slot 大小</td></tr>
+                <tr><td>大量 BLOB 写入</td><td>&lt; 10%</td><td>BLOB 数据远超 128B，几乎不命中</td></tr>
+                <tr><td>排序/临时表</td><td>&lt; 5%</td><td>排序缓存走的是独立的 Scratch Pool</td></tr>
+            </tbody>
+        </table>
+
+        <p>你可以通过 <code>PRAGMA lookaside(COUNT, SIZE)</code> 动态调整 lookaside 参数。如果将 COUNT 设为 0，则完全禁用 lookaside。在某些高并发场景下，关闭 lookaside 反而可以避免内存浪费——因为每个连接都持有独立的 slot 池，如果有 1000 个连接，每个池 120 个 slot × 128 字节，总计就是 15 MB 的"闲置"内存。</p>
+
+        <div class="tip">
+            💡 <strong>3.54.0 中的 lookaside 改进：</strong> 在最新的 SQLite 3.54.0 中，lookaside 的 slot 大小可以自动感知工作负载。如果检测到频繁分配超出 szSlot 大小的内存，系统会动态增加 slot 大小，而不是让这类请求全部回退到常规 malloc。这个改进在某些工作负载下将 lookaside 命中率提升了 10-15%。对应的源码修改主要在 <code>src/malloc.c</code> 的 <code>sqlite3LookasideUsed</code> 函数中。
+        </div>
+
+        <h2>Page Cache — 数据库的心脏</h2>
+
+        <p>如果说 lookaside 是"小打小闹"的优化，那么 Page Cache 就是 SQLite 内存管理中的"主力部队"。它负责缓存数据库的磁盘页，是保证数据库性能不坠的关键。</p>
+
+        <p>Page Cache 分为两层：<strong>PCache</strong>（上层抽象）和 <strong>PCache1</strong>（底层实现）。两者的关系是：</p>
+
+        <pre><code>┌──────────────────────────────────────────────┐
+│                  Pager                         │
+│  通过 sqlite3PagerGet() / sqlite3PagerUnref() │
+│  与页缓存交互                                  │
+├──────────────────────────────────────────────┤
+│                  PCache                        │
+│  通用页缓存接口, 管理 PgHdr 链表              │
+│  提供 LRU 淘汰策略                            │
+├──────────────────────────────────────────────┤
+│                  PCache1                       │
+│  具体的哈希表 + 链表实现                       │
+│  支持预分配 page buffer                       │
+├──────────────────────────────────────────────┤
+│               sqlite3_config                   │
+│  SQLITE_CONFIG_PAGECACHE 配置预分配缓冲区       │
+└──────────────────────────────────────────────┘</code></pre>
+
+        <p><code>PCache1</code> 的核心是哈希表 + 双向链表维护的 LRU 淘汰策略：</p>
+
+        <pre><code>struct PCache1 {
+    PgHdr1 *aHash[PCACHE1_HASH_MAX];  /* 页哈希表 */
+    PgHdr1 *pLruHead;                 /* LRU 链表头 |
+    PgHdr1 *pLruTail;                 /* LRU 链表尾 */
+    int nPage;                        /* 缓存页数量 */
+    int nHash;                        /* 哈希表大小 */
+    int nPurgeable;                   /* 可淘汰页数量 */
+    int nMax;                         /* 最大页数 */
+    int szPage;                       /* 页大小 */
+    ...
+};</code></pre>
+
+        <p>当需要读取一页时，Pager 调用 <code>sqlite3PagerGet(pPager, pgno, &amp;pPage)</code>。PCache 先通过哈希表查找页号：</p>
+
+        <ul>
+            <li>如果命中（hash hit），将页从 LRU 链表中移除，返回给调用者。</li>
+            <li>如果未命中（hash miss），分配新的 <code>PgHdr</code>，调用 VFS 从磁盘读取数据，插入哈希表和 LRU 链表。</li>
+            <li>如果缓存已满（达到 nMax），淘汰 LRU 链表尾部的页面（如果页面是"干净"的，直接丢弃；如果"脏"的，先写回磁盘）。</li>
+        </ul>
+
+        <p>这种设计使得频繁访问的热数据始终保留在缓存中，而冷数据会被自动淘汰——标准的 LRU 策略。</p>
+
+        <p>你可以通过 <code>sqlite3_config(SQLITE_CONFIG_PAGECACHE, buf, sz, N)</code> 为 Page Cache 预分配一个固定大小的缓冲区。这和 lookaside 异曲同工：用一个预先分配好的缓冲区来避免运行时的 <code>malloc</code> 调用。不过，Page Cache 的预分配可以很大（典型值是 2MB 到 32MB），而 lookaside 通常只有几十 KB。</p>
+
+        <div class="highlight">
+            <strong>对比一下两种缓存策略：</strong> Lookaside 是为"短生命周期的小对象"优化的——SQL 编译过程中产生的临时结构体，用完即丢。Page Cache 是为"长生命周期的大对象"优化的——数据库页可能被反复访问，需要精细的淘汰策略。两者的设计出发点不同，但共同的目标都是：<strong>减少对系统 malloc 的依赖</strong>。
+        </div>
+
+        <h2>Scratch Pool 与临时内存</h2>
+
+        <p>除了 lookaside 和 page cache，SQLite 还有第三种内存池——<strong>Scratch Pool</strong>。它专门用于排序操作（<code>ORDER BY</code>、<code>GROUP BY</code>）和临时表。</p>
+
+        <p>当你执行一个需要排序的查询时（比如 <code>SELECT * FROM t ORDER BY name</code>），SQLite 不会一次性把所有数据加载到内存中排序——数据量太大时内存会爆。它使用了一个"外部排序"策略：先将数据分块排序，每块写入磁盘上的临时文件，最后合并。</p>
+
+        <p>Scratch Pool 为这个过程的"内存工作区"提供服务：</p>
+
+        <pre><code>/* src/malloc.c 中的 scratch 相关实现 */
+static SQLITE_WSD struct Mem0Global {
+    sqlite3_mutex *mutex;         /* 全局互斥锁 */
+    sqlite3_mem_methods m;        /* 底层分配器 */
+    int nScratchFree;             /* 空闲 scratch 块数 */
+    void **ppScratchFree;         /* 空闲 scratch 链表 */
+    int nScratchSize;             /* 每块大小 */
+} mem0;</code></pre>
+
+        <p>通过 <code>sqlite3_config(SQLITE_CONFIG_SCRATCH, buf, sz, N)</code> 可以预分配 scratch pool。不过，在较新的版本中（3.50+），scratch pool 的实现已经被逐渐淡化——因为实际测试表明，大多数工作负载中它的命中率不如预期，而且预分配的内存如果不被使用就是一种浪费。取而代之的是，排序器（sorter）模块有了自己专用的内存管理。</p>
+
+        <p><code>sqlite3Malloc()</code> 函数的分级策略是：</p>
+        <ul>
+            <li>如果请求大小 &lt;= lookaside slot 大小 → 优先用 lookaside（如果启用且有空闲）</li>
+            <li>如果请求大小是页面大小 → 优先用 page cache pool</li>
+            <li>否则 → 回退到系统 <code>malloc()</code></li>
+        </ul>
+
+        <p>这种分级策略确保了"不同规模的内存请求走不同的通道"，既兼顾了小对象的速度，又保证了大对象的灵活性。</p>
+
+        <h2>内存统计与调试</h2>
+
+        <p>SQLite 提供了一套完善的内存统计接口，帮助你了解数据库实例的内存使用情况：</p>
+
+        <pre><code>sqlite3_int64 sqlite3_memory_used(void);       /* 当前已分配字节数 */
+sqlite3_int64 sqlite3_memory_highwater(int resetFlag); /* 峰值内存使用 */</code></pre>
+
+        <p>在 CLI 中，你可以通过 <code>.stats</code> 命令查看内存统计：</p>
+
+        <pre><code>sqlite> .stats
+Memory Used:         1234567 bytes
+Number of Malloc:    23456 times
+Number of Realloc:   3456 times
+Number of Free:      23400 times
+Current Memory:      1234567 bytes
+Peak Memory:        2345678 bytes</code></pre>
+
+        <p>对于更细致的调试需求，还有以下工具：</p>
+
+        <table>
+            <thead>
+                <tr><th>特性</th><th>启用方式</th><th>作用</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>内存使用统计</td><td><code>sqlite3_status()</code> API</td><td>查询各类内存池的使用量</td></tr>
+                <tr><td>软限制</td><td><code>PRAGMA soft_heap_limit=N</code></td><td>当内存使用超过限制时，尝试回收</td></tr>
+                <tr><td>硬限制</td><td><code>PRAGMA hard_heap_limit=N</code></td><td>严格限制，超过则返回 SQLITE_NOMEM</td></tr>
+                <tr><td>内存调试</td><td><code>SQLITE_MEMDEBUG</code> 编译</td><td>在内存分配的每个入口记录调用栈</td></tr>
+                <tr><td>泄漏检测</td><td><code>SQLITE_MEMDEBUG</code> + 退出时报告</td><td>检测未释放的分配块</td></tr>
+            </tbody>
+        </table>
+
+        <div class="warning">
+            ⚠️ <strong>一个 real-world 踩坑故事：</strong> 在我参与的一个物联网网关项目中，设备运行若干天后突然无法写入数据，返回的错误码是 <code>SQLITE_FULL</code>（不是 <code>SQLITE_NOMEM</code>）。一开始我们以为是磁盘满了，但检查后发现磁盘还有大量空间。经过漫长的排查，发现罪魁祸首是 <code>PRAGMA hard_heap_limit</code> 被设为了 8MB，而设备的内存碎片使得实际可用内存不到 4MB。每次写入操作需要解析 INSERT 语句、分配 B-Tree 页、写 WAL——一系列内存操作后触发了硬限制。解决方案是增大硬限制 + 在内存紧张时 <code>PRAGMA soft_heap_limit</code> 触发主动回收。教训是：<strong>硬限制只能在开发阶段用于安全保护，生产环境要结合内存监控动态调整</strong>。
+        </div>
+
+        <h2>内存分配的坑</h2>
+
+        <p>内存管理和错误处理是密切相关的。SQLite 中 <code>SQLITE_NOMEM</code> 错误的传播，是一个精心设计的"连锁反应"。</p>
+
+        <p>当某次内存分配失败时：</p>
+        <ol>
+            <li><code>sqlite3Malloc()</code> 返回 NULL。</li>
+            <li>调用者检查返回值，向上返回 <code>SQLITE_NOMEM</code>。</li>
+            <li>调用者的调用者继续向上传播。</li>
+            <li>最上层的 API（如 <code>sqlite3_step()</code>）最终将这个错误码返回给用户。</li>
+        </ol>
+
+        <p>在这个过程中，最关键的问题是：<strong>OOM 发生时已经分配的资源怎么办？</strong> 如果某个操作在分配第 3 块内存时失败，但前面 2 块已经分配成功并用了数据，那么这些"半成品"资源如何释放？</p>
+
+        <p>SQLite 的答案是：在每个可能会失败的分配点，如果失败，立即释放该操作已经持有的所有资源（通过 <code>sqlite3DbFree()</code>），然后返回错误。这个模式在源码中频繁出现：</p>
+
+        <pre><code>/* 典型的内存安全分配模式 */
+pNew = sqlite3DbMallocRaw(db, nByte);
+if( !pNew ){
+    sqlite3FreeExpr(db, pExpr);   /* 释放已分配的资源 */
+    return SQLITE_NOMEM;           /* 向上传播错误 */
+}</code></pre>
+
+        <p>这种"失败即回滚"的模式保证了：即使内存严重不足，SQLite 也不会产生悬挂指针或内存泄漏。数据库文件本身不会因为 OOM 而损坏（事务层面的原子性由 Pager 层保证），但连接句柄可能无法继续使用。</p>
+
+        <div class="highlight">
+            <strong>关键认知：</strong> SQLite 的 OOM 处理链并没有做什么"神奇"的事情。它遵循的就是最朴素的 C 语言规则——每次分配后检查返回值，失败时清理并返回。没有什么黑魔法。但这种朴素的做法需要极其严格的编码纪律才能在全库范围内贯彻始终。SQLite 的代码严格性就在这里——几十万行代码中，没有任何一行敢忽略 <code>malloc</code> 的返回值检查。
+        </div>
+
+        <p>好了，第 5 章我们深入了 SQLite 的内存管理世界。从可插拔分配器接口到 lookaside 的小对象缓存，从 Page Cache 的 LRU 淘汰到 Scratch Pool 的排序缓存，再到 OOM 时的优雅降级——你现在理解了为什么 SQLite 能在只有几 MB 内存的嵌入式设备上可靠运行。</p>
+
+        <p>下一章我们来聊一个看似不起眼但极其重要的主题——<strong>错误处理与断言</strong>。SQLite 的 rc 返回码传播链是怎么设计的？assert 在它代码中扮演什么角色？SQLITE_IOERR 和 SQLITE_BUSY 的区别背后是怎样的工程设计哲学？第 6 章见。</p>
+
+        <div class="footer-nav">
+            <a href="04.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="06.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

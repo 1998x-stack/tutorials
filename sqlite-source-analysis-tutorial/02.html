@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第2章 编译体系深度解析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html" class="active">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第2章 编译体系深度解析</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们拿到了 SQLite 的源码，打开了目录结构，心里有了个大概的地图。但光有源代码是跑不起来的——你得把它编译成可用的库才行。</p>
+
+        <p>SQLite 的编译系统和大多数 C 项目不太一样。一方面，它的构建选项极其丰富——定义了超过 200 个 <code>SQLITE_*</code> 编译宏，通过这些宏你可以像搭积木一样裁剪出任意规模的功能集。另一方面，它的"合并版"（Amalgamation）机制让编译变得异常简单——理论上你只需要 <code>cc sqlite3.c</code> 一个命令就能编译整个数据库。简单与复杂共存，这正是 SQLite 构建系统最迷人的地方。</p>
+
+        <p>这一章，我们会深入解剖 SQLite 的编译系统。学完之后，你不仅知道怎么编译 SQLite，还能根据你的需求——从嵌入式裁剪到桌面功能全开——自由定制编译配置。</p>
+
+        <h2>三剑客：三种编译方式</h2>
+
+        <p>SQLite 支持三种主要的编译方式，分别对应不同的使用场景。我们逐个来看。</p>
+
+        <h3>1. Autotools：Linux/macOS 标准方案</h3>
+
+        <p>如果你从 GitHub 或 Fossil 仓库克隆了完整的源码树，那么 Autotools 是最自然的选择。它是 Unix 世界的事实标准，几乎所有的 Linux 发行版都预装了 autoconf 工具链。</p>
+
+        <pre><code># 从源码树根目录开始
+./configure            # 检测系统特性，生成 Makefile
+make                   # 编译生成 sqlite3 可执行文件
+make sqlite3.c         # 生成合并版 sqlite3.c
+sudo make install      # 安装到系统路径</code></pre>
+
+        <p><code>configure</code> 脚本会做大量检测——你的编译器支持哪些 C99 特性、是否可用的线程库、是否支持 <code>usleep()</code> 和 <code>pread()</code> 等系统调用。检测结果被写入 <code>config.h</code> 中，后续编译会通过这个头文件自适应平台差异。</p>
+
+        <p>Autotools 的最大优点是"自动适配"。你在 x86 上跑 <code>configure</code>，它生成为 x86 优化的 Makefile；你交叉编译到 ARM，它也会正确识别。但缺点也很明显——你需要安装 autoconf、automake、libtool 全套工具链，而且 <code>configure</code> 执行一次就要好几十秒。</p>
+
+        <h3>2. Makefile.msc：Windows 官方方案</h3>
+
+        <p>Windows 平台的用户不用担心——SQLite 团队直接在源码树里放了一个 <code>Makefile.msc</code>，专门给 Microsoft Visual C++ 的 <code>nmake</code> 使用。</p>
+
+        <pre><code>nmake /f Makefile.msc          # 编译 sqlite3.exe
+nmake /f Makefile.msc sqlite3.c # 生成合并版</code></pre>
+
+        <p><code>Makefile.msc</code> 非常贴心——它检测环境变量中是否存在 <code>SETLOCAL</code>、是否启用了 <code>DYNAMIC_CRC_TABLE</code> 等 Windows 特有选项。和 Autotools 版的 Makefile 不同，它是手写的、独⽴的、不需要任何 autoconf 依赖。</p>
+
+        <p>不过 <code>Makefile.msc</code> 只支持 MSVC 编译器。如果你在 Windows 上想用 MinGW 或 Clang，那就需要走 CMake 路线了。</p>
+
+        <h3>3. CMake：跨平台的"第三条路"</h3>
+
+        <p>虽然 SQLite 官方没有将 CMake 作为一等支持，但社区（以及后来的官方仓库）提供了相当完备的 CMake 支持。从 3.20 版本左右开始，<code>CMakeLists.txt</code> 就已经被合入了主仓库。</p>
+
+        <pre><code>mkdir build && cd build
+cmake ..      # 配置
+cmake --build .  # 编译</code></pre>
+
+        <p>CMake 路线的最大好处是 <strong>统一体验</strong>——不管你是 Linux 的 gcc、macOS 的 clang、还是 Windows 的 MSVC，CMake 命令几乎完全一样。对于那些需要在多个平台上维护构建脚本的团队来说，CMake 比同时维护 Autotools + Makefile.msc 要省心得多。</p>
+
+        <div class="tip">
+            💡 <strong>我该用哪个？</strong> 简单建议：如果你是 Linux/macOS 上的开发者，用 Autotools（最标准）；如果你是 Windows 开发者，用 nmake /f Makefile.msc（官方支持最好）；如果你需要跨平台统一构建体验，用 CMake（最现代化）。本课程的示例会以 Autotools 为主，因为它在源码阅读场景中最常见。
+        </div>
+
+        <h2>编译选项深度解析</h2>
+
+        <p>SQLite 真正的力量在于它的 <strong>编译时配置</strong>。通过定义不同的 C 预处理器宏，你可以精确控制 SQLite 的功能集、性能特性和调试能力。理解这些选项，是定制 SQLite 的第一步。</p>
+
+        <h3>功能裁剪：SQLITE_OMIT_* 系列</h3>
+
+        <p>这是 SQLite 最庞大的一族编译选项。任何你不想要的功能，都可以通过定义对应的 <code>SQLITE_OMIT_*</code> 宏在编译时移除，从而减小二进制体积。</p>
+
+        <pre><code>// 编译时禁用事务（极端裁剪场景）
+-DSQLITE_OMIT_TRANSACTION
+// 禁用外键约束
+-DSQLITE_OMIT_FOREIGN_KEY
+// 禁用 VACUUM
+-DSQLITE_OMIT_VACUUM
+// 禁用触发器
+-DSQLITE_OMIT_TRIGGER
+// 禁用视图
+-DSQLITE_OMIT_VIEW</code></pre>
+
+        <p>有趣的是，<code>SQLITE_OMIT_*</code> 宏在源码中使用频率极高——几乎每个 SQLite 源文件的开头都有大量 <code>#ifndef SQLITE_OMIT_XXX</code> 条件编译块。这也就意味着，每多定义一个 <code>OMIT</code> 宏，编译器在预处理阶段就能跳过一大段代码，不仅减小了体积，也缩短了编译时间。</p>
+
+        <h3>功能启用：SQLITE_ENABLE_* 系列</h3>
+
+        <p>如果说 <code>OMIT_*</code> 是做减法，<code>ENABLE_*</code> 就是做加法。默认情况下，SQLite 只编译核心功能。大部分扩展模块需要通过这些宏显式启用：</p>
+
+        <table>
+            <thead>
+                <tr><th>宏定义</th><th>启用功能</th><th>典型场景</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>SQLITE_ENABLE_FTS5</code></td><td>全文搜索第5版</td><td>文本搜索应用</td></tr>
+                <tr><td><code>SQLITE_ENABLE_RTREE</code></td><td>R-Tree 空间索引</td><td>地理/空间数据</td></tr>
+                <tr><td><code>SQLITE_ENABLE_JSON1</code></td><td>JSON 函数支持</td><td>JSON 数据查询</td></tr>
+                <tr><td><code>SQLITE_ENABLE_MATH_FUNCTIONS</code></td><td>数学函数（sin/cos/log等）</td><td>科学计算场景</td></tr>
+                <tr><td><code>SQLITE_ENABLE_STAT4</code></td><td>高级统计信息</td><td>优化查询计划</td></tr>
+                <tr><td><code>SQLITE_ENABLE_GEOPOLY</code></td><td>地理多边形处理</td><td>GIS 应用</td></tr>
+                <tr><td><code>SQLITE_ENABLE_DBPAGE_VTAB</code></td><td>dbpage 虚拟表</td><td>数据库内省</td></tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>一个常见的误解是"功能越多越好"。</strong> 事实上，每启用一个 <code>ENABLE_*</code> 宏，都会引入几千到几万行新的 C 代码。对于嵌入式设备（如 IoT 传感器）来说，不必要的功能就是二进制体积的浪费。反之，对于桌面应用来说，FTS5 和 JSON1 几乎算是"标配"。
+        </div>
+
+        <h3>线程安全与缓存控制</h3>
+
+        <p>除了功能性的宏，还有几个影响 SQLite 运行时行为的关键选项：</p>
+
+        <ul>
+            <li><strong><code>SQLITE_THREADSAFE</code></strong> — 控制线程安全级别。0 表示完全不支持多线程，1 表示完全支持（默认），2 表示在运行时通过 <code>sqlite3_config()</code> 动态切换。在单进程嵌入式场景中设置为 0 可以省掉互斥锁的开销。</li>
+            <li><strong><code>SQLITE_DEFAULT_CACHE_SIZE</code></strong> — 每个数据库连接的默认页缓存大小。默认是 -2000（约 2000 页，每页 4KB 就是约 8MB 缓存）。</li>
+            <li><strong><code>SQLITE_DEFAULT_PAGE_SIZE</code></strong> — 默认页大小（4096 字节）。可配置为 512、1024、2048、4096、8192、16384、32768。</li>
+        </ul>
+
+        <h3>调试与诊断选项</h3>
+
+        <p>如果你是为了学习而不是生产使用 SQLite，下面的编译选项会让你的源码阅读体验好上十倍：</p>
+
+        <pre><code>-DSQLITE_DEBUG                  # 启用调试断言和跟踪
+-DSQLITE_ENABLE_EXPLAIN_COMMENTS # EXPLAIN 输出中添加注释
+-DSQLITE_ENABLE_TREETRACE        # 查询树跟踪（调试查询规划器）
+-DSQLITE_ENABLE_WHERETRACE       # WHERE 子句的详细优化跟踪</code></pre>
+
+        <div class="warning">
+            ⚠️ <strong>不要在发布版本中开启 SQLITE_DEBUG！</strong> 这个宏会使 SQLite 的二进制体积膨胀约 30%，并且在每条关键路径上插入大量的 assert 检查和日志输出，性能下降可能达到 50% 以上。它只适合在开发调试环境中使用。
+        </div>
+
+        <h2>合并版（Amalgamation）的生成内幕</h2>
+
+        <p>前面我多次提到"合并版"这个概念。现在我们来揭开它的神秘面纱。</p>
+
+        <p>合并版的生成脚本是 <code>tool/mksqlite3c.tcl</code>。它的工作逻辑非常直接：</p>
+
+        <ol>
+            <li>读取 <code>manifest</code> 文件（Fossil 仓库的清单文件），获取源文件列表及依赖顺序。</li>
+            <li>按依赖顺序依次读取每个 <code>src/*.c</code> 文件。</li>
+            <li>将文件中的 <code>#include "..."</code>（引号包含的头文件）替换为实际的头文件内容。</li>
+            <li>将处理后的所有文件内容拼接成一个巨大的 <code>sqlite3.c</code>。</li>
+            <li>同时生成 <code>sqlite3.h</code> 作为公共 API 头文件。</li>
+        </ol>
+
+        <p>这个过程本质上是一个"源到源"的转换——它不是编译，而是文本级别的拼接。但正是这个简单的拼接，带来了两个巨大的好处。</p>
+
+        <p><strong>第一个好处是编译优化。</strong> 当所有的 C 函数都在同一个翻译单元中时，编译器可以执行跨过程优化（IPO）和链接时优化（LTO）。具体来说：</p>
+
+        <ul>
+            <li>函数内联变得更激进 — 一个在 <code>btree.c</code> 中定义的函数，可以被 <code>pager.c</code> 中的调用点内联展开，因为编译器在同一个"视野"中。</li>
+            <li>常量传播更有效 — 跨模块的常量值可以被编译器直接折叠。</li>
+            <li>死代码消除更彻底 — 如果某个函数的所有调用者都在同一个文件中，编译器可以准确判断它是否真的被使用。</li>
+        </ul>
+
+        <p>实测数据显示，合并版比分散编译的性能高出 <strong>5-10%</strong>。SQLite 官方建议所有生产部署都使用合并版。</p>
+
+        <p><strong>第二个好处是部署简化。</strong> 只需要两个文件（<code>sqlite3.c</code> + <code>sqlite3.h</code>），任何 C/C++ 编译器都能编译。不需要 autoconf、CMake、Makefile——只需要 <code>cc sqlite3.c -o myapp</code> 就够了。这对于嵌入 SQLite 到其他项目来说极大降低了集成成本。</p>
+
+        <h2>自定义编译实战</h2>
+
+        <p>现在我们有了理论知识，来看三个真实的编译场景。</p>
+
+        <table>
+            <thead>
+                <tr><th>场景</th><th>编译命令</th><th>二进制大小</th><th>适用场景</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>嵌入式最小化</td>
+                    <td><code>cc -Os -DSQLITE_OMIT_TRIGGER -DSQLITE_OMIT_VIEW<br>-DSQLITE_OMIT_VIRTUALTABLE -DSQLITE_OMIT_FOREIGN_KEY<br>-DSQLITE_THREADSAFE=0 sqlite3.c -o sqlite3</code></td>
+                    <td>~400 KB</td>
+                    <td>IoT 设备、MCU</td>
+                </tr>
+                <tr>
+                    <td>桌面标准</td>
+                    <td><code>cc -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1<br>-DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_RTREE<br>sqlite3.c -o sqlite3 -lm</code></td>
+                    <td>~900 KB</td>
+                    <td>桌面应用、移动端</td>
+                </tr>
+                <tr>
+                    <td>学习调试</td>
+                    <td><code>cc -O0 -g -DSQLITE_DEBUG -DSQLITE_ENABLE_EXPLAIN_COMMENTS<br>-DSQLITE_ENABLE_TREETRACE -DSQLITE_ENABLE_WHERETRACE<br>sqlite3.c -o sqlite3</code></td>
+                    <td>~1.5 MB</td>
+                    <td>源码阅读、调试</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="tip">
+            💡 <strong>一个小窍门：</strong> 编译时加上 <code>-DHAVE_READLINE</code> 可以让 CLI 工具支持 readline 命令行编辑功能（历史记录、Tab 补全等）。不过需要链接 <code>-lreadline</code> 和 <code>-lncurses</code>。
+        </div>
+
+        <h2>编译时断言与编译期计算</h2>
+
+        <p>SQLite 源码中大量使用了 <strong>编译时断言</strong>（compile-time assertions）来确保数据结构的大小和布局符合预期。这些断言在编译期就完成检查，不会产生任何运行时开销。</p>
+
+        <p>核心宏定义在 <code>src/sqliteInt.h</code> 中：</p>
+
+        <pre><code>/* 编译时断言宏 */
+#define CTIMEASSERT(expr) extern void ct_assert(expr)
+
+/* 实际用法示例 */
+CTIMEASSERT( sizeof(sqlite3_int64)==8 );
+CTIMEASSERT( offsetof(Vdbe, aOp)==offsetof(Vdbe, pc)+sizeof(int) );
+CTIMEASSERT( sizeof(BtCursor)==sizeof(void*) * 8 + 40 );</code></pre>
+
+        <p>这些断言的意义在于——SQLite 在很多地方依赖特定的内存布局。例如，Vdbe 结构的 <code>aOp</code> 字段必须在 <code>pc</code> 字段之后的固定偏移位置。一旦有人在结构体中插入了新字段导致偏移变化，编译时断言会立即告警，避免出现只有在运行时才能发现的神秘崩溃。</p>
+
+        <p>此外，<code>SQLITE_MAX_*</code> 系列宏定义了 SQLite 的各种硬限制，这些限制在编译时固化：</p>
+
+        <pre><code>SQLITE_MAX_COLUMN        // 最多列数（默认 2000）
+SQLITE_MAX_SQL_LENGTH    // 最大 SQL 语句长度（默认 1,000,000）
+SQLITE_MAX_EXPR_DEPTH    // 最大表达式嵌套深度（默认 1000）
+SQLITE_MAX_COMPOUND_SELECT // 复合 SELECT 的最大数量（默认 500）
+SQLITE_MAX_VDBE_OP       // 单个程序的最大 VDBE 指令数（默认 250,000,000）</code></pre>
+
+        <p>这些限制不是拍脑袋定的。以 <code>SQLITE_MAX_EXPR_DEPTH</code> 为例，太小的值会导致复杂查询（如嵌套子查询）无法执行，太大的值又可能被恶意构造的超深嵌套 SQL 用于栈溢出攻击（CWE-121）。1000 这个值经过广泛测试，既不影响合法查询，又能防御典型的栈溢出攻击。</p>
+
+        <div class="highlight">
+            <strong>编译期计算是 SQLite 代码质量的一个重要特色。</strong> 很多项目只在运行时做条件判断，而 SQLite 倾向于把能确定的事情在编译期就确定下来。从常量表达式的求值，到数据结构的布局验证，再到编译时功能裁剪——这种"尽量在编译期解决问题"的哲学，是 SQLite 代码小而可靠的重要原因之一。
+        </div>
+
+        <p>好了，第 2 章到这里。我们花了大量篇幅讨论 SQLite 的编译体系——你可能觉得这和数据库引擎本身的运行没啥关系。但相信我，当你后续遇到"为什么这个函数没被编译进去"或者"为什么我的 SQLite 没有 FTS5 支持"这类问题时，今天学到的编译选项知识会让你少掉很多头发。</p>
+
+        <p>下一章，我们终于要走进 <code>src/</code> 目录了——从 10 层架构管线开始，到每个文件的分工映射，再到头文件的依赖网络，建立一个完整的源码"全貌图"。这是正式进入源码阅读前的最后一道"地形课"。准备好了吗？第 3 章见。</p>
+
+        <div class="footer-nav">
+            <a href="01.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="03.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

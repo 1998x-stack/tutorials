@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 核心数据结构</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🗄️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 概览与源码获取</a></li>
+            <li><a href="02.html">第2章 编译体系深度解析</a></li>
+            <li><a href="03.html">第3章 源码整体架构</a></li>
+            <li><a href="04.html" class="active">第4章 核心数据结构</a></li>
+            <li><a href="05.html">第5章 内存管理机制</a></li>
+            <li><a href="06.html">第6章 错误处理与断言</a></li>
+            <li><a href="07.html">第7章 调试基础设施</a></li>
+            <li><a href="08.html">第8章 词法分析器</a></li>
+            <li><a href="09.html">第9章 Lemon解析器与语法</a></li>
+            <li><a href="10.html">第10章 表达式编译</a></li>
+            <li><a href="11.html">第11章 VDBE虚拟机</a></li>
+            <li><a href="12.html">第12章 B-Tree存储引擎</a></li>
+            <li><a href="13.html">第13章 Pager与页缓存</a></li>
+            <li><a href="14.html">第14章 VFS抽象层</a></li>
+            <li><a href="15.html">第15章 原子提交与事务</a></li>
+            <li><a href="16.html">第16章 WAL模式深度解析</a></li>
+            <li><a href="17.html">第17章 锁机制与并发</a></li>
+            <li><a href="18.html">第18章 查询规划器</a></li>
+            <li><a href="19.html">第19章 内置函数实现</a></li>
+            <li><a href="20.html">第20章 虚拟表与扩展</a></li>
+            <li><a href="21.html">第21章 FTS全文搜索</a></li>
+            <li><a href="22.html">第22章 表达式索引与自修复</a></li>
+            <li><a href="23.html">第23章 CLI shell源码</a></li>
+            <li><a href="24.html">第24章 测试框架</a></li>
+            <li><a href="25.html">第25章 性能分析与优化</a></li>
+            <li><a href="26.html">第26章 SQLite WASM与JS绑定</a></li>
+            <li><a href="27.html">第27章 2026新特性源码解读</a></li>
+            <li><a href="28.html">第28章 实战：定制SQLite</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h1>第4章 核心数据结构</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们建立了 SQLite 源码的"地形图"——知道了哪个文件在哪个位置、完成什么功能。但建筑工地上光有地点图是不够的，你还得知道用什么"建筑材料"。</p>
+
+        <p>在 C 语言的项目中，"建筑材料"就是 <strong>数据结构</strong>。SQLite 的源码之所以被公认为高质量 C 代码的教科书，很大程度上得益于它精心设计的数据结构体系。本章我们深入分析五个核心结构体——它们覆盖了从数据库连接、SQL 编译、模式管理、查询表示到执行状态的完整生命周期。理解了这五个结构体，你就能读懂 SQLite 源码中 80% 的内部逻辑。</p>
+
+        <h2>sqlite3 — 万能的数据库连接</h2>
+
+        <p>所有 SQLite 操作的起点都是一个 <code>sqlite3</code> 对象。当你调用 <code>sqlite3_open()</code> 时，SQLite 分配并初始化这个庞大的结构体。它定义在 <code>src/sqliteInt.h</code> 中，是整个源码中最重要的"上帝对象"。</p>
+
+        <pre><code>struct sqlite3 {
+    sqlite3_vfs *pVfs;            /* VFS 层实例 */
+    int nDb;                      /* 数据库数量 */
+    Db *aDb;                      /* 数据库数组，aDb[0] 是 main */
+    int flags;                    /* 打开标志位 */
+    int errCode;                  /* 最近一次错误码 */
+    char *zErrMsg;                /* 错误消息字符串 */
+    Lookaside lookaside;          /* Lookaside 内存分配器 */
+    CollSeq *pDfltColl;           /* 默认排序规则 (BINARY) */
+    int nChange;                  /* 最近修改影响的行数 */
+    int nTotalChange;             /* 所有修改的影响行数总和 */
+    int openFlags;                /* sqlite3_open_v2 的标志 */
+    int nVDBe;                    /* 正在执行的 VDBE 数量 */
+    u8 mDbFlags;                  /* 数据库标志位 */
+    u8 dbOptFlags;                /* 优化标志位 */
+    int nSqlExec;                 /* 当前 SQL 语句数 */
+    Hash aModule;                 /* 注册的虚拟表模块 */
+    int nExtension;               /* 加载的扩展数 */
+    void **aExtension;            /* 扩展句柄数组 */
+    int nMaxSorterMmap;           /* 排序器最大 mmap 大小 */
+    sqlite3_mutex *mutex;         /* 连接级互斥锁 */
+    BusyHandler busyHandler;      /* 忙处理器回调 */
+    ...
+};</code></pre>
+
+        <p>这里有一个很重要的概念：<code>aDb[]</code> 是一个数组，每个元素代表一个附加的数据库。默认情况下只有 <code>aDb[0]</code>（main 数据库）和 <code>aDb[1]</code>（temp 临时数据库）。当你执行 <code>ATTACH 'file.db' AS db2</code> 时，SQLite 会在 <code>aDb[]</code> 中添加一个新元素。每个 <code>Db</code> 对象包含指向 B-Tree 的句柄 <code>pBt</code> 和数据库模式信息 <code>pSchema</code>。</p>
+
+        <div class="tip">
+            💡 <strong>冷知识：</strong> <code>sqlite3</code> 结构体有超过 100 个字段。你没有看错——确实超过 100 个。但这并不是设计缺陷。因为 <code>sqlite3</code> 本质上是整个数据库引擎的"上下文"，它必须持有所有模块的引用：VFS、缓存、互斥锁、错误状态、内置函数、统计信息等等。有趣的是，由于字段数量的膨胀，D. Richard Hipp 在 3.20.0 版本中专门进行了一次"减肥"——把一些不常用的字段移到了扩展结构体中。
+        </div>
+
+        <h2>Parse — 编译期的总指挥</h2>
+
+        <p><code>Parse</code> 结构体是 SQL 编译阶段的"临时中央政府"。它只在 <code>sqlite3_prepare_v2()</code> 调用期间存在，编译完成后就被释放。它定义同样在 <code>sqliteInt.h</code> 中。</p>
+
+        <pre><code>struct Parse {
+    sqlite3 *db;                  /* 所属数据库连接 */
+    int nErr;                     /* 错误数量 */
+    char *zErrMsg;                /* 错误消息 */
+    Token sLastToken;             /* 最近扫描的 token */
+    Vdbe *pVdbe;                  /* 正在生成的 VDBE 程序 */
+    int ckptMode;                 /* 检查点模式 */
+    u8 eOrconf;                   /* ON CONFLICT 策略 */
+    u8 disableTriggers;           /* 禁用触发器标志 */
+    Table *pNewTable;             /* CREATE TABLE 构建中的新表 */
+    Trigger *pNewTrigger;         /* CREATE TRIGGER 构建中的新触发器 */
+    Select *pSelect;              /* 当前 SELECT 语句 */
+    int nLabel;                   /* 标签数量 */
+    int *aLabel;                  /* 标签地址数组 */
+    ExprList *pConstExpr;         /* 常量表达式列表 */
+    int nMem;                     /* 使用的内存单元数 */
+    int nSet;                     /* 使用的集合数 */
+    int nTab;                     /* 使用的表游标数 */
+    int nCacheLine;               /* 缓存行大小 */
+    int nLoop;                    /* 嵌套循环层数 */
+    u8 explain;                   /* EXPLAIN 标志 */
+    ...
+};</code></pre>
+
+        <p>Parse 的生命周期非常清晰：</p>
+        <ol>
+            <li><strong>创建</strong> — <code>sqlite3ParseObjectInit()</code> 初始化 Parse 结构。</li>
+            <li><strong>SQL 分析</strong> — 调用 <code>sqlite3ParserParse()</code>（Lemon 生成的解析器）进行语法分析，Parse 结构被传递给解析器的回调函数，逐步填充。</li>
+            <li><strong>代码生成</strong> — 在解析过程中，解析器回调函数调用 <code>sqlite3Select()</code>、<code>sqlite3Insert()</code> 等代码生成器，这些生成器将 VDBE 指令追加到 <code>Parse-&gt;pVdbe</code> 指向的程序中。</li>
+            <li><strong>完成</strong> — <code>sqlite3ParseObjectFinish()</code> 或 <code>sqlite3ParseObjectReset()</code> 释放资源。</li>
+        </ol>
+
+        <p>这里有一个非常优雅的设计：当解析过程中遇到错误时，Parse 会继续工作但标记 <code>nErr &gt; 0</code>。后续的代码生成器函数通过检查 <code>Parse-&gt;nErr</code> 来判断是否需要提前终止。这种"优雅降级"（graceful degradation）的方式，让 SQLite 可以在一次 <code>prepare</code> 调用中报告多个语法错误，而不是遇到第一个错误就崩溃退出。</p>
+
+        <h2>Table 与 Index — 数据的骨架</h2>
+
+        <p>数据库的"表"和"索引"在内存中用 <code>Table</code> 和 <code>Index</code> 结构体表示。它们描述了数据库的模式（schema），是所有 DML 操作的基础。</p>
+
+        <pre><code>struct Table {
+    char *zName;                  /* 表名 */
+    int nCol;                     /* 列数 */
+    Column *aCol;                 /* 列信息数组 */
+    Index *pIndex;                /* 索引链表 */
+    Select *pSelect;              /* 视图的 SELECT 定义 */
+    FKey *pFKey;                  /* 外键链表 */
+    int tnum;                     /* B-Tree 根页号 */
+    u32 nRowEst;                  /* 估计行数 */
+    u8 keyConf;                   /* 主键冲突策略 */
+    u8 tabFlags;                  /* 表标志位 */
+    ExprList *pCheck;             /* CHECK 约束表达式列表 */
+    int nModuleArg;               /* 虚拟表参数数 */
+    char **azModuleArg;           /* 虚拟表参数字符串 */
+    int nCol;                     /* 列数 */
+    u16 iPKey;                    /* 主键列索引 */
+    ...
+};
+
+struct Index {
+    char *zName;                  /* 索引名 */
+    int nKeyCol;                  /* 索引列数 */
+    int *aiColumn;                /* 索引列在表中的序号 */
+    u8 *aSortOrder;               /* 排序方向 (ASC/DESC) */
+    int *aiRowLogEst;             /* 对数估计 */
+    Index *pNext;                 /* 属于同一表的下一个索引 */
+    Table *pTable;                /* 所属的表 */
+    int tnum;                     /* 该索引的 B-Tree 根页号 */
+    u8 bNoQuery;                  /* 索引是否覆盖查询 */
+    u8 bUnordered;                /* 无序索引标志 */
+    ...
+};</code></pre>
+
+        <p>关键要理解 <strong>Table.tnum</strong> 和 <strong>Index.tnum</strong> 的含义。在 SQLite 中，每个表和一个索引都对应一个独立的 B-Tree，由其根页号（root page number）标识。<code>tnum</code> 就是这个根页号。表的主键 B-Tree 的 key 是主键值、data 是整行数据；索引 B-Tree 的 key 是索引列值、data 是对应行的主键值。</p>
+
+        <p><code>Column</code> 结构体描述了单列的信息。SQLite 的类型系统用 <strong>affinity</strong>（类型亲和性）而不是严格的静态类型。每列有一个 <code>affinity</code> 字段（TEXT/NUMERIC/INTEGER/REAL/BLOB），它决定了 SQLite 如何在该列的数值上进行类型转换。</p>
+
+        <div class="highlight">
+            <strong>一个有趣的细节：</strong> SQLite 的 Table 结构也用于表示"视图"（view）和"虚拟表"（virtual table）。当 <code>pSelect != NULL</code> 时，这个 Table 实际上是一个视图；当 <code>pIndex 指向的是一个特殊的虚拟表索引</code> 时，说明这是一个虚拟表。相同的结构体在不同的上下文中有不同的含义——这是 C 语言中"联合体 + 类型标记"设计模式的典型应用。
+        </div>
+
+        <h2>Select 与 Expr — 查询的灵魂</h2>
+
+        <p>如果说 Table 和 Index 代表了"数据长什么样"，那么 <code>Select</code> 和 <code>Expr</code> 就代表了"你想怎么查数据"。它们是 SQL 查询在内存中的"活"的表现形式。</p>
+
+        <p><code>Select</code> 结构体包含了 SQL 查询的各个子句：</p>
+
+        <pre><code>struct Select {
+    ExprList *pEList;      /* SELECT 的列列表 */
+    u8 op;                 /* 操作类型: TK_UNION/TK_INTERSECT/TK_EXCEPT */
+    int nSelectRow;        /* 估计行数（对数尺度） */
+    u32 selFlags;          /* SF_* 标志 */
+    int iLimit, iOffset;   /* LIMIT 和 OFFSET 的寄存器号 */
+    Select *pNext;         /* UNION 链中的下一个 SELECT */
+    Select *pPrior;        /* 另一个链方向 */
+    SrcList *pSrc;         /* FROM 子句（表源） */
+    Expr *pWhere;          /* WHERE 子句表达式 */
+    ExprList *pGroupBy;    /* GROUP BY 子句 */
+    Expr *pHaving;         /* HAVING 子句 */
+    ExprList *pOrderBy;    /* ORDER BY 子句 */
+    Select *pOrderBy;      /* LIMIT/OFFSET */
+    ...
+};</code></pre>
+
+        <p>而 <code>Expr</code> 结构体是"表达式树"的节点：</p>
+
+        <pre><code>struct Expr {
+    u8 op;                 /* 操作符类型: TK_* 常量之一 */
+    u8 affinity;           /* 类型亲和性 */
+    u8 op2;                /* 辅助操作符类型 */
+    Expr *pLeft;           /* 左子树 */
+    Expr *pRight;          /* 右子树 */
+    ExprList *x.pList;     /* 参数列表（函数调用时） */
+    int iTable;            /* 表游标号（引用列时） */
+    int iColumn;           /* 列号（引用列时） */
+    Token span;            /* 原始 SQL 文本范围 */
+    char *zToken;          /* token 字符串（标识符/字面量） */
+    union {
+        int iValue;        /* 整数字面量 */
+        double rValue;     /* 浮点数字面量 */
+        FuncDef *pFunc;    /* 函数定义指针 */
+        ...
+    } u;
+    ...
+};</code></pre>
+
+        <p>Expr 的 <code>op</code> 字段可以是超过 100 种不同的值——从基本的 <code>TK_EQ</code>（等号）、<code>TK_GT</code>（大于）、<code>TK_PLUS</code>（加法），到复杂的 <code>TK_IN</code>（IN 子查询）、<code>TK_FUNCTION</code>（函数调用）、<code>TK_CASE</code>（CASE WHEN）。这一百多种操作符构成了 SQL 语义的全部基础。</p>
+
+        <p>辅助结构体如 <code>ExprList</code>（有序表达式列表，用于 SELECT 列、ORDER BY、GROUP BY）、<code>SrcList</code>（表源列表，用于 FROM 子句中的表/子查询）、<code>IdList</code>（标识符列表），都是围绕 Expr 和 Select 的"配角"。</p>
+
+        <div class="tip">
+            💡 <strong>如何快速上手：</strong> 如果你想验证对 Expr 树的理解，可以在调试版本中调用 <code>sqlite3ShowExpr()</code> 和 <code>sqlite3ShowSelect()</code> 函数——它们会将 Expr 树和 Select 结构以可读的文本形式打印出来。在 gdb 中，你可以这样用：<code>call sqlite3ShowExpr(myExprPtr)</code>。这是调试 SQL 编译逻辑的利器。
+        </div>
+
+        <h2>Vdbe 与 Op — 执行态的表示</h2>
+
+        <p>SQL 被编译成 VDBE 字节码后，就变成了 <code>Vdbe</code> 和 <code>Op</code> 的天下。<code>Vdbe</code> 代表"一个正在/等待执行的数据库程序"，<code>Op</code> 是程序中的单条指令。</p>
+
+        <pre><code>struct Vdbe {
+    sqlite3 *db;              /* 数据库连接 */
+    Op *aOp;                  /* 指令数组 */
+    Mem *aMem;                /* 内存单元数组（寄存器） */
+    int nMem;                 /* 内存单元数量 */
+    VdbeCursor **apCsr;       /* 游标数组 */
+    int nCursor;              /* 游标数量 */
+    int pc;                   /* 程序计数器（当前执行到的指令下标） */
+    int rc;                   /* 最近操作返回码 */
+    u8 errorAction;           /* 错误恢复动作 */
+    u8 minWriteFileFormat;    /* 最小兼容文件格式 */
+    bft expired;              /* 是否已过期 */
+    int nOp;                  /* 指令数量 */
+    int nOpAlloc;             /* aOp 数组已分配大小 */
+    ...
+};
+
+struct Op {
+    u8 opcode;                /* 指令操作码 */
+    u8 p5;                    /* 第5操作数（位标志） */
+    int p1;                   /* 操作数1 */
+    int p2;                   /* 操作数2 */
+    char *p3;                 /* 操作数3（字符串指针） */
+    int p4type;               /* p4 的类型 */
+    union {                   /* 操作数4（多种可能类型） */
+        int iValue;           /*   整数值 */
+        char *zValue;         /*   字符串 */
+        FuncDef *pFunc;       /*   函数指针 */
+        ...
+    } p4;
+    int cnt;                  /* 执行次数统计 */
+    char *zComment;           /* EXPLAIN 注释（调试用） */
+};</code></pre>
+
+        <p>VDBE 是一个典型的"寄存器式虚拟机"——<code>aMem[]</code> 是它的寄存器文件，每个 <code>Mem</code> 单元可以存储一个 SQL 值（整数、浮点、字符串、NULL 或 BLOB）。opcode 操作这些寄存器，完成数据加载、计算、比较和存储。</p>
+
+        <p>Op 的 <code>p1</code> 到 <code>p5</code> 五个操作数提供了灵活的参数化能力。不同的 opcode 对操作数有不同的解释：</p>
+
+        <table>
+            <thead>
+                <tr><th>Opcode</th><th>p1 含义</th><th>p2 含义</th><th>p3/p4 含义</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>OP_OpenRead</code></td><td>游标号</td><td>根页号</td><td>表名(p4)</td><td>打开表/索引游标</td></tr>
+                <tr><td><code>OP_Column</code></td><td>游标号</td><td>列号</td><td>—</td><td>读取某行的某列</td></tr>
+                <tr><td><code>OP_ResultRow</code></td><td>起始寄存器</td><td>列数</td><td>—</td><td>返回一行结果给用户</td></tr>
+                <tr><td><code>OP_Next</code></td><td>游标号</td><td>跳转地址</td><td>—</td><td>前进到下一行</td></tr>
+                <tr><td><code>OP_Ge</code></td><td>右操作数寄存器</td><td>跳转地址</td><td>—</td><td>大于等于跳转</td></tr>
+                <tr><td><code>OP_Function</code></td><td>参数数</td><td>结果寄存器</td><td>函数指针(p4)</td><td>调用内置函数</td></tr>
+                <tr><td><code>OP_Transaction</code></td><td>写事务标志</td><td>—</td><td>—</td><td>开始事务</td></tr>
+            </tbody>
+        </table>
+
+        <p>Vdbe 的 <code>pc</code>（程序计数器）指向 <code>aOp[]</code> 中当前正在执行的指令。在 <code>sqlite3_step()</code> 的每次调用中，VDBE 从 <code>pc</code> 开始执行指令，直到遇到 <code>OP_Halt</code>（语句结束）或 <code>OP_Yield</code>（暂停并让出控制权）。每次调用只执行一次循环，所以 <code>sqlite3_step()</code> 可以逐行返回数据。</p>
+
+        <div class="warning">
+            ⚠️ <strong>一个真实踩坑故事：</strong> 几年前我在做一个嵌入式项目时，遇到了一个诡异的 bug——一条 SELECT 查询在某些设备上返回了错误的结果。排查了三天后，发现原因是设备的内存非常有限，<code>SQLITE_MAX_VDBE_OP</code> 被我们的编译脚本设成了 10000。我们要查询的表有 JOIN + GROUP BY + ORDER BY，生成的 VDBE 程序超过了 10000 条指令，结果超出的指令被静默截断了！从此我养成了一个习惯：在项目中用 <code>EXPLAIN your_query</code> 查看生成的指令数量，并确保编译时的限制足够大。
+        </div>
+
+        <p>好了，第 4 章我们解剖了 SQLite 源码中最核心的五个数据结构。从数据库连接 <code>sqlite3</code> 到编译上下文 <code>Parse</code>，从表模式 <code>Table</code>、查询表示 <code>Select</code>/<code>Expr</code> 到执行态 <code>Vdbe</code>/<code>Op</code>——你已经掌握了 SQLite 源码中"谁是谁、谁管谁"的基本框架。后续每一章都会基于这些结构体展开。</p>
+
+        <p>下一章我们将进入一个"不直接产生 SQL 功能，但没有它整个数据库就跑不起来"的基础模块——<strong>内存管理机制</strong>。Lookaside Allocator、Page Cache、Scratch Pool——SQLite 的这套内存管理体系，值得每一个系统程序员学习。第 5 章见。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 概率与状态估计</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 机器人学概述</a></li>
+            <li><a href="02.html">第2章 线性代数基础</a></li>
+            <li><a href="03.html">第3章 微积分与优化基础</a></li>
+            <li><a href="04.html" class="active">第4章 概率与状态估计</a></li>
+            <li><a href="05.html">第5章 刚体运动与空间描述</a></li>
+            <li><a href="06.html">第6章 机器人机构学基础</a></li>
+            <li><a href="07.html">第7章 传感器与执行器</a></li>
+            <li><a href="08.html">第8章 正向运动学</a></li>
+            <li><a href="09.html">第9章 逆向运动学</a></li>
+            <li><a href="10.html">第10章 微分运动学与雅可比</a></li>
+            <li><a href="11.html">第11章 刚体动力学</a></li>
+            <li><a href="12.html">第12章 轨迹生成</a></li>
+            <li><a href="13.html">第13章 PID与反馈控制</a></li>
+            <li><a href="14.html">第14章 先进控制方法</a></li>
+            <li><a href="15.html">第15章 ROS 2核心编程</a></li>
+            <li><a href="16.html">第16章 机器人仿真</a></li>
+            <li><a href="17.html">第17章 MoveIt 2与运动规划</a></li>
+            <li><a href="18.html">第18章 机器人标定与参数辨识</a></li>
+            <li><a href="19.html">第19章 SLAM原理与实践</a></li>
+            <li><a href="20.html">第20章 路径与轨迹规划</a></li>
+            <li><a href="21.html">第21章 机器人视觉</a></li>
+            <li><a href="22.html">第22章 机器人学习</a></li>
+            <li><a href="23.html">第23章 机器人调试与诊断</a></li>
+            <li><a href="24.html">第24章 嵌入式与实时系统</a></li>
+            <li><a href="25.html">第25章 真机部署与集成</a></li>
+            <li><a href="26.html">第26章 人形与四足机器人</a></li>
+            <li><a href="27.html">第27章 具身智能与VLA大模型</a></li>
+            <li><a href="28.html">第28章 综合项目实战</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h2>第4章 概率与状态估计</h2>
+
+        <p>大家好，我是你们的讲师。回想一下你使用手机导航的经历——当你走在一条直路上时，GPS显示你的位置在路中间，但偶尔会跳来跳去，甚至穿过旁边的建筑物。这就是真实世界中的不确定性。机器人面临的问题比这严重得多：它的传感器噪声更大（毕竟消费级IMU的成本可能不到5美元），它的模型有误差（摩擦、柔性、温度漂移都很难精确建模），它甚至不知道自己在哪里——这一切的起点，就是"不确定性"。</p>
+
+        <p>这一章的主题是：当所有信息都有噪声时，机器人如何仍然能够可靠地工作？答案是用概率的语言来描述不确定性，用贝叶斯法则来融合信息，用滤波算法来持续追踪状态。如果说线性代数是机器人的"空间语言"，微积分是"变化语言"，那么概率论就是机器人应对真实世界的"生存语言"。</p>
+
+        <h3>4.1 为什么机器人需要概率</h3>
+
+        <p>在理想世界中，机器人不需要概率——如果你有一个完美的传感器，一个完美的数学模型，并且初始条件完全已知，你可以精确地预测机器人任何时刻的状态。但现实世界远非如此。</p>
+
+        <p>传感器噪声是第一个问题。一个消费级IMU的加速度计零偏稳定性大约在 \(0.1\,\text{mg}\) 左右，这意味着仅积分IMU数据来确定位置，每秒钟误差就会累积数厘米——10分钟后，你会发现自己已经"漂移"到了几米之外。相机和LiDAR的测量也受到光照、反射、遮挡等因素的影响。</p>
+
+        <p>执行器不确定性是第二个问题。你给电机发一个指令"转动30度"，但齿轮的背隙（backlash）、皮带的柔性、电机的响应延迟，都会导致实际转动角度与指令有偏差。在精密装配任务中，这种偏差可能超过允许的公差。</p>
+
+        <p>模型误差是第三个问题。你建立的动力学模型假设连杆是刚体、关节是无摩擦的——但实际上，连杆有柔性、关节有摩擦力、温度会影响材料属性。模型与真实系统之间的差异就是不确定性的来源。</p>
+
+        <div class="highlight">
+            <p><strong>核心理念</strong>："Probabilistic Robotics"的创始人Sebastian Thrun有句名言——"机器人永远不会知道自己的确切状态，但它可以维护一个关于状态的概率分布。"也就是说，机器人用置信度（Belief）代替确定性，用分布代替点估计。这个思维转变是理解现代机器人学的最重要一步。</p>
+        </div>
+
+        <p>我见过一个真实案例：某公司的一款AGV在仓库中运行，使用纯里程计（轮式编码器）导航，没有融合其他传感器。在平坦地面上，它工作得很好。但当仓库地面有轻微的坡度时，轮子打滑导致里程计误差快速累积，AGV开始撞货架。工程师花了三个月去"校准"运动模型，但始终无法彻底解决问题。直到他们加入了激光雷达和卡尔曼滤波融合——这是概率方法的一次胜利：你不必把模型变得绝对精确，而是用概率方法融合多个有噪声的信息源，得到比任何一个单独信息源都更可靠的状态估计。</p>
+
+        <h3>4.2 贝叶斯定理与机器人学</h3>
+
+        <p>贝叶斯定理是整个概率机器人的基石。它的形式非常简单：</p>
+
+        <pre><code>P(X | Z) = P(Z | X) * P(X) / P(Z)
+
+# 后验概率  =   似然    ×   先验   /   证据
+# (Posterior)   (Likelihood) (Prior) (Evidence)
+
+# 机器人学中的解读：
+# P(X | Z) —— 有了观测Z之后，对状态X的置信（后验）
+# P(Z | X) —— 如果状态是X，有多大可能得到观测Z（似然，由传感器模型给出）
+# P(X)     —— 没有观测之前，对状态X的已知信息（先验，由运动模型预测得到）
+# P(Z)     —— 归一化常数，确保概率和为1</code></pre>
+
+        <p>这个公式的美妙之处在于它提供了一个<strong>迭代更新</strong>的框架：</p>
+
+        <ul>
+            <li><strong>预测（Prediction）</strong>：根据运动模型，从上一时刻的后验预测当前时刻的先验：\(\overline{bel}(x_t) = \int P(x_t | u_t, x_{t-1}) \; bel(x_{t-1}) \, dx_{t-1}\)</li>
+            <li><strong>更新（Update）</strong>：用传感器观测修正先验，得到后验：\(bel(x_t) = \eta \, P(z_t | x_t) \, \overline{bel}(x_t)\)</li>
+        </ul>
+
+        <p>这就是<strong>贝叶斯滤波（Bayes Filter）</strong>——几乎所有机器人状态估计算法（卡尔曼滤波、粒子滤波、直方图滤波）的通用父框架。</p>
+
+        <div class="tip">
+            <p><strong>知识点</strong>：为什么叫"滤波"？因为我们要从含噪声的传感器数据中"过滤"出干净的状态信号——就像用滤网从沙子里筛出黄金一样。每一次预测-更新循环，置信度的不确定性要么减小（传感器信息足够好），要么至少不会增加太多（传感器信息不足时，运动模型本身会增加不确定性）。这就是滤波的本质：在不确定性的增长（运动）和缩减（观测）之间维持平衡。</p>
+        </div>
+
+        <h3>4.3 高斯分布与卡尔曼滤波</h3>
+
+        <p>在所有概率分布中，<strong>高斯分布（Gaussian Distribution）</strong>在机器人学中占据了统治地位——原因无他：便利性。高斯分布只需要两个参数（均值 \(\mu\) 和协方差 \(\Sigma\)）就可以完全描述，而且经过线性变换后仍然是高斯分布。当运动模型和观测模型都是线性高斯时，贝叶斯滤波就有了闭式解——这就是卡尔曼滤波器（Kalman Filter, KF）。</p>
+
+        <p>一维卡尔曼滤波的直觉可以用一个简单的例子理解。假设你在用一个超声传感器测量距离，传感器噪声的方差是 \(\sigma_z^2 = 0.1\) 米²。根据运动模型，你预测当前位置是 \(d_{pred} = 2.0\) 米，预测的不确定性是 \(\sigma_{pred}^2 = 0.2\) 米²。现在传感器读数是 \(z = 2.3\) 米。卡尔曼增益计算的是"更相信预测还是更相信观测"：</p>
+
+        <pre><code>卡尔曼增益 K    =   预测不确定性 / (预测不确定性 + 观测不确定性)
+                =   0.2 / (0.2 + 0.1)
+                =   0.667   (更相信观测，因为观测噪声更小)
+
+最优估计 d_opt  =   预测 + K × (观测 - 预测)
+                =   2.0 + 0.667 × (2.3 - 2.0)
+                =   2.2 米
+
+最优估计方差    =   (1 - K) × 预测不确定性
+                =   (1 - 0.667) × 0.2
+                =   0.067 米²  (比单独用预测或观测都更小)</code></pre>
+
+        <p>注意，最优估计的方差 \(0.067 \,\text{m}^2\) 比预测方差 \(0.2\,\text{m}^2\) 和观测方差 \(0.1\,\text{m}^2\) 都小——这就是融合的威力。</p>
+
+        <p>真实机器人系统通常使用<strong>扩展卡尔曼滤波（EKF）</strong>，因为机器人模型几乎总是非线性的。EKF的做法是在当前估计点对非线性函数做一阶泰勒展开（就是上一章学的Jacobian！），然后应用标准卡尔曼滤波框架。这虽然是一个近似，但在大多数情况下工作得很好。</p>
+
+        <h3>4.4 粒子滤波</h3>
+
+        <p>卡尔曼滤波假设状态分布是高斯分布——这是一个很强的假设。当分布是多模态的（比如机器人在一个对称的走廊里，可能在走廊的任何一侧），高斯分布就无法刻画了。这时我们需要<strong>粒子滤波（Particle Filter）</strong>，它用一组加权粒子来近似任意分布。</p>
+
+        <p>粒子滤波的核心思想是：用 \(N\) 个粒子 \(\{x_t^{[i]}, w_t^{[i]}\}_{i=1}^N\) 来表示置信度分布，其中每个粒子是一个假设的状态，权重表示该假设的可信度。算法步骤如下：</p>
+
+        <pre><code># 粒子滤波单次迭代（伪代码）
+def particle_filter_step(particles, control, observation):
+    # 1. 预测：对每个粒子施加运动模型 + 噪声
+    for i in range(N):
+        particles[i].state = motion_model(particles[i].state, control) + noise()
+
+    # 2. 更新：根据观测更新权重
+    for i in range(N):
+        particles[i].weight *= observation_model(observation, particles[i].state)
+
+    # 3. 归一化权重
+    normalize_weights(particles)
+
+    # 4. 重采样：根据权重重新采样粒子（权重大的粒子被复制，权重小的被淘汰）
+    particles = resample(particles)  # 低方差重采样或多项式重采样
+
+    # 重采样后，所有粒子的权重被重置为 1/N
+    return particles</code></pre>
+
+        <p>粒子滤波在机器人学中最著名的应用是<strong>蒙特卡洛定位（Monte Carlo Localization, MCL）</strong>——即用粒子滤波实现移动机器人的全局定位。给你一堆粒子，撒在整个地图上，让它们随着传感器数据逐步收敛到机器人的真实位置——这个过程非常直观，也很振奋人心。我曾在ROS中运行过MCL的演示：一开始粒子均匀分布在地图各处，随着机器人移动和激光雷达扫描匹配，粒子像被磁铁吸引一样聚集到正确位置，这个过程只用了大约10秒。亲眼看到它发生是非常有成就感的事情。</p>
+
+        <div class="warning">
+            <p><strong>避坑指南</strong>：粒子滤波有两个常见问题。一是"粒子耗尽"——当机器人位置偶然被重采样掉后，所有粒子都聚集在一个错误模式，无法恢复。解决方案是注入少量随机粒子（adaptive MCL的做法）。二是"计算量"——要获得好的近似需要数千个粒子，在嵌入式计算平台上可能达到100ms级别，影响控制循环的实时性。2026年的趋势是使用边缘TPU加速粒子滤波的权重计算，可以在 < 5ms 内处理 10,000 个粒子。</p>
+        </div>
+
+        <h3>4.5 概率分布与机器人应用</h3>
+
+        <p>下表总结了机器人学中常用的概率分布及其典型应用场景：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>分布类型</th>
+                    <th>表示方式</th>
+                    <th>参数</th>
+                    <th>典型应用</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>高斯分布</td>
+                    <td>解析（均值+协方差）</td>
+                    <td>\(\mu, \Sigma\)</td>
+                    <td>卡尔曼滤波、EKF、ICP</td>
+                    <td>单峰分布、线性/弱非线性系统</td>
+                </tr>
+                <tr>
+                    <td>均匀分布</td>
+                    <td>解析（范围）</td>
+                    <td>\(a, b\)</td>
+                    <td>全局初始化、随机重采样注入</td>
+                    <td>初始状态完全未知</td>
+                </tr>
+                <tr>
+                    <td>粒子集</td>
+                    <td>数值（N个粒子+权重）</td>
+                    <td>N, 粒子状态集合</td>
+                    <td>MCL定位、FastSLAM</td>
+                    <td>任意分布、多模态分布、强非线性</td>
+                </tr>
+                <tr>
+                    <td>直方图</td>
+                    <td>离散（网格+概率）</td>
+                    <td>网格分辨率</td>
+                    <td>栅格定位、占据栅格地图</td>
+                    <td>空间离散的贝叶斯滤波</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>4.6 实战：Python实现卡尔曼滤波</h3>
+
+        <p>下面我们用Python实现一个二维卡尔曼滤波器，用于追踪一个在平面上移动的机器人位置。假设我们只能观测到带噪声的位置（无法直接观测速度），卡尔曼滤波会同时估计位置和速度。</p>
+
+        <pre><code>import numpy as np
+import matplotlib.pyplot as plt
+
+# === 卡尔曼滤波器实现 ===
+class KalmanFilter2D:
+    def __init__(self, dt=0.1):
+        # 状态向量: [x, y, vx, vy]^T
+        self.x = np.zeros((4, 1))    # 初始状态
+        # 状态转移矩阵 (恒定速度模型)
+        self.A = np.array([[1, 0, dt, 0],
+                           [0, 1, 0, dt],
+                           [0, 0, 1, 0],
+                           [0, 0, 0, 1]])
+        # 控制输入矩阵
+        self.B = np.zeros((4, 1))
+        # 观测矩阵 (只观测位置)
+        self.H = np.array([[1, 0, 0, 0],
+                           [0, 1, 0, 0]])
+        # 过程噪声协方差
+        self.Q = np.eye(4) * 0.01
+        # 观测噪声协方差
+        self.R = np.eye(2) * 0.1
+        # 状态协方差
+        self.P = np.eye(4) * 1.0
+
+    def predict(self, u=None):
+        """预测步骤"""
+        if u is None:
+            u = np.zeros((4, 1))
+        self.x = self.A @ self.x + self.B @ u
+        self.P = self.A @ self.P @ self.A.T + self.Q
+        return self.x
+
+    def update(self, z):
+        """更新步骤：z 是观测值 [zx, zy]^T"""
+        y = z.reshape(-1, 1) - self.H @ self.x          # 残差
+        S = self.H @ self.P @ self.H.T + self.R          # 残差协方差
+        K = self.P @ self.H.T @ np.linalg.inv(S)         # 卡尔曼增益
+        self.x = self.x + K @ y                           # 更新状态
+        self.P = (np.eye(4) - K @ self.H) @ self.P       # 更新协方差
+        return self.x
+
+# === 模拟 ===
+dt = 0.1
+kf = KalmanFilter2D(dt)
+true_pos = np.array([0.0, 0.0])
+true_vel = np.array([0.5, 0.3])
+
+# 存储轨迹
+true_traj, obs_traj, est_traj = [], [], []
+
+for t in range(100):
+    # 真实运动
+    true_pos = true_pos + true_vel * dt
+    # 有噪声的观测
+    obs = true_pos + np.random.randn(2) * 0.3
+    # 卡尔曼滤波
+    kf.predict()
+    est = kf.update(obs)
+
+    true_traj.append(true_pos.copy())
+    obs_traj.append(obs.copy())
+    est_traj.append(est[:2].flatten())
+
+# 打印最终位置比较
+print(f"真实位置: {true_traj[-1]}")
+print(f"观测位置: {obs_traj[-1]}")
+print(f"估计位置: {est_traj[-1]}")
+print(f"估计速度: {kf.x[2:].flatten()}")</code></pre>
+
+        <p>你会发现卡尔曼滤波估计的位置比原始观测平滑得多——这就是"滤波"的效果。即使观测噪声很大（标准差0.3m），滤波后轨迹的误差仍然较小。而且，KF还给出了一阶信息（速度），这是我们从单个位置观测中"看不见"的——卡尔曼滤波实际上从位置的历史信息中推断出了速度。</p>
+
+        <p>好了，概率与状态估计的基础就讲完了。我们从"为什么需要概率"出发，学习了贝叶斯定理在滤波框架中的应用，深入讨论了卡尔曼滤波和粒子滤波两种核心算法，最后用Python实现了完整的卡尔曼滤波追踪示例。概率给了我们处理不确定性的框架，接下来我们将进入三维空间——<strong>刚体运动的数学描述</strong>。下一章见。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第6章 日志与统计系统</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html" class="active">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第6章 日志与统计系统</h1>
+
+        <p>大家好，我是你们的讲师。想象一个场景：你的线上 Memcached 集群突然延迟飙升，QPS 骤降——你第一步会做什么？我猜你会先 <code>telnet localhost 11211</code> 然后敲一句 <code>stats</code>。没错，统计数据就是运维人员的"生命线"。这一章我们就来看看 Memcached 的日志与统计系统——它们分别是 <code>logger.c</code> 和 <code>stats.c</code> 两个模块。</p>
+
+        <p>日志和统计虽然看似都是"输出信息"，但定位完全不同：日志关心的是"发生了什么异常"，统计关心的是"系统整体有多健康"。前者是对离散事件的记录，后者是对聚合指标的度量。Memcached 对两者都有精巧的实现——特别是它的异步日志系统设计值得你仔细琢磨。</p>
+
+        <h2>logger.c：环形缓冲 + 异步写</h2>
+
+        <p>在早期的 Memcached 版本中，日志输出是同步的——直接 <code>fprintf(stderr, ...)</code>。这在低负载时没有问题，但在高并发场景下，<code>fprintf</code> 的系统调用开销会显著拖慢 worker 线程。想象一下：你的 worker 线程每秒处理 10 万次请求，其中 1% 需要写日志——那就是每秒 1000 次 <code>write()</code> 系统调用，这绝对不是一个小数字。</p>
+
+        <p>1.5 版本引入的 <code>logger.c</code> 用一个非常优雅的方案解决了这个问题：<strong>环形缓冲区 + 后台线程异步写</strong>。</p>
+
+        <h3>核心数据结构</h3>
+
+        <pre><code>struct logger {
+    pthread_t thread_id;       // 后台写日志的线程
+    char *filename;            // 日志文件路径
+    int fd;                    // 日志文件 fd
+    struct logentry *buf;      // 环形缓冲区
+    int size;                  // 缓冲区大小（默认 50,000 条）
+    int read_pos;              // 消费者（写线程）读位置
+    int write_pos;             // 生产者（worker 线程）写位置
+    volatile bool enabled;     // 是否启用
+};</code></pre>
+
+        <p>关键设计思想：<strong>生产者无锁</strong>。Worker 线程调用 <code>logger_log()</code> 时，只需要原子地将日志条目追加到环形缓冲区的 <code>write_pos</code> 位置。没有锁竞争，没有系统调用，只是一个内存写操作——这在高并发路径上是至关重要的。</p>
+
+        <h3>工作流程</h3>
+
+        <pre><code>Worker 线程（生产者）         后台线程（消费者）
+      │                            │
+      │  logger_log()               │
+      │  └─► buf[write_pos] = msg   │
+      │  └─► write_pos++            │
+      │                            │  定期唤醒
+      │                            │  └─► while (read_pos != write_pos)
+      │                            │       └─► write(fd, buf[read_pos])
+      │                            │       └─► read_pos++
+      │                            │
+      │  (无锁，无系统调用)           │  (批量 write，减少 syscall)</code></pre>
+
+        <p>生产者（worker 线程）和消费者（日志线程）之间通过 <code>read_pos</code> 和 <code>write_pos</code> 两个指针来协调。当 <code>write_pos</code> 追上了 <code>read_pos</code>（缓冲区满了），新的日志条目会覆盖最旧的条目——这就是"环形"的含义。虽然会丢失日志，但这比阻塞 worker 线程要好得多。生产环境通常将缓冲区设得足够大（默认 5 万条），在正常负载下不会丢日志。</p>
+
+        <h2>日志级别</h2>
+
+        <p>Memcached 的日志系统有 4 个级别，通过 <code>verbose</code> 配置控制：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>级别</th>
+                    <th>对应参数</th>
+                    <th>输出内容</th>
+                    <th>线上推荐</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>LOG_DEBUG</code></td>
+                    <td><code>-vvv</code></td>
+                    <td>几乎所有内部事件，包括每次连接、每次命令</td>
+                    <td>不开启</td>
+                </tr>
+                <tr>
+                    <td><code>LOG_INFO</code></td>
+                    <td><code>-vv</code></td>
+                    <td>连接建立/关闭、get/set 操作摘要</td>
+                    <td>调试时临时开启</td>
+                </tr>
+                <tr>
+                    <td><code>LOG_WARNING</code></td>
+                    <td><code>-v</code></td>
+                    <td>异常情况：连接超时、内存吃紧、淘汰事件</td>
+                    <td>建议开启</td>
+                </tr>
+                <tr>
+                    <td><code>LOG_ERROR</code></td>
+                    <td>无条件</td>
+                    <td>系统级错误：内存分配失败、端口绑定失败</td>
+                    <td>始终输出</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>在源码中，日志宏的定义长这样：</p>
+
+        <pre><code>#define LOG_DEBUG   0
+#define LOG_INFO    1
+#define LOG_WARNING 2
+#define LOG_ERROR   3
+
+// 使用示例
+logger_log(LOG_WARNING, "Item %s expired from LRU", key);
+logger_log(LOG_INFO, "Client connected from %s", inet_ntoa(addr));</code></pre>
+
+        <p>注意 <code>LOG_ERROR</code> 是无条件输出的——即使你没有指定任何 <code>-v</code> 参数，系统级错误也会被记录。这确保关键错误永远不会被遗漏。</p>
+
+        <h2>stats 系统：三大统计体系</h2>
+
+        <p>Memcached 的统计系统由三个主要模块构成，分别对应三个不同的关注维度：</p>
+
+        <h3>stats_state：全局运行状态</h3>
+
+        <p><code>stats_state</code> 是一个全局结构体（定义在 <code>memcached.h</code> 中），包含系统级的计数器：</p>
+
+        <pre><code>struct stats_state {
+    uint64_t curr_items;        // 当前存储的 Item 数量
+    uint64_t total_items;       // 历史累计存储的 Item 数量
+    uint64_t curr_connections;  // 当前连接数
+    uint64_t total_connections; // 历史累计连接数
+    uint64_t connection_structures; // 分配过的连接结构体数量
+    uint64_t cmd_get;           // get 命令累计次数
+    uint64_t cmd_set;           // set 命令累计次数
+    uint64_t get_hits;          // get 命中次数
+    uint64_t get_misses;        // get 未命中次数
+    uint64_t evictions;         // 淘汰次数
+    uint64_t bytes_read;        // 累计读取字节数
+    uint64_t bytes_written;     // 累计写入字节数
+    // ...
+};</code></pre>
+
+        <p>这些计数器全部是 <code>uint64_t</code> 类型，理论上可以累计到 1.8e19——在可预见的未来不会溢出。几乎所有计数器都在 <code>memcached.c</code> 中通过 <code>STATS_LOCK()</code> 宏保护下原子更新。</p>
+
+        <h3>stats_slabs：Slab 级别的统计</h3>
+
+        <p>当我们执行 <code>stats slabs</code> 命令时，返回的是每个 slab class 的独立统计信息：</p>
+
+        <pre><code>stats slabs
+STAT 1:chunk_size 96
+STAT 1:chunks_per_page 10922
+STAT 1:total_pages 1
+STAT 1:total_chunks 10922
+STAT 1:used_chunks 5
+STAT 1:free_chunks 5
+STAT 1:free_chunks_end 10912
+STAT 1:mem_requested 400
+STAT 1:get_hits 1200
+STAT 1:cmd_set 5
+STAT 1:delete_hits 0
+STAT 1:evictions 0
+STAT 2:chunk_size 120
+...</code></pre>
+
+        <p>这些统计信息来自 <code>slabclass_t</code> 结构体中的 <code>stats</code> 字段。它对于调优非常关键——比如你可以通过 <code>free_chunks_end</code> 看某个 class 是否有大量未使用的 chunk 在 page 末尾（内存浪费），或者通过 <code>evictions</code> 看哪个 class 在频繁淘汰。</p>
+
+        <h3>stats_items：Item 级别的统计</h3>
+
+        <p><code>stats items</code> 返回的是每个 slab class 中 Item 的汇总信息，重点关注 LRU 相关的指标：</p>
+
+        <pre><code>stats items
+STAT items:1:number 5
+STAT items:1:age 3600
+STAT items:1:evicted 0
+STAT items:1:evicted_nonzero 0
+STAT items:1:evicted_time 0
+STAT items:1:reclaimed 10
+STAT items:1:outofmemory 0
+STAT items:1:tailrepairs 0</code></pre>
+
+        <p>其中 <code>age</code> 表示该 class 中最旧的 Item 在 LRU 队列中等待了多久（秒）——如果 <code>age</code> 很大但 <code>evictions</code> 很小，说明你的内存配置可能过多了；如果 <code>age</code> 很小且 <code>evictions</code> 很大，说明内存不够用了。</p>
+
+        <h2>stats 命令的执行流程</h2>
+
+        <p>当客户端通过 telnet 发送 <code>stats\r\n</code> 时，完整的处理链路如下：</p>
+
+        <pre><code>1. libevent 检测到 socket 可读
+2. drive_machine() 读取数据到 conn->rbuf
+3. try_read_command() 识别出 "stats" 命令
+4. dispatch_command() 匹配到 STAT 处理分支
+5. 调用 stats_handler() 收集统计数据
+6. 将统计结果格式化输出到 conn->wbuf
+7. libevent 触发可写事件，发送数据</code></pre>
+
+        <p>具体到 <code>stats_handler()</code> 的实现（位于 <code>stats.c</code>）：</p>
+
+        <pre><code>void stats_handler(conn *c, const char *args) {
+    char *sub command = args;
+
+    if (strcmp(subcommand, "reset") == 0) {
+        STATS_LOCK();
+        memset(&stats_state, 0, sizeof(stats_state));
+        STATS_UNLOCK();
+        out_string(c, "RESET");
+    } else if (strcmp(subcommand, "slabs") == 0) {
+        append_stats_slabs(c);
+    } else if (strcmp(subcommand, "items") == 0) {
+        append_stats_items(c);
+    } else if (strcmp(subcommand, "conns") == 0) {
+        append_stats_conns(c);
+    } else {
+        // 默认：输出所有全局统计
+        append_stats_state(c);
+    }
+}</code></pre>
+
+        <p>注意子命令的分发方式：<code>stats reset</code> 重置所有计数器，<code>stats slabs</code> 输出 slab 级统计，<code>stats items</code> 输出 Item 级统计，<code>stats conns</code> 输出每个连接的详细信息，不加子命令则输出全局状态。</p>
+
+        <h3>stats conns 的实现</h3>
+
+        <p><code>stats conns</code>（注意是复数 <code>conns</code>）是运维排查连接问题时非常有用的命令。它遍历所有活跃的连接结构体，输出每个连接的 fd、状态、读写缓冲区大小等信息：</p>
+
+        <pre><code>stats conns
+STAT 5:addr 127.0.0.1:54321
+STAT 5:state conn_read
+STAT 5:rbuf 4096
+STAT 5:rsize 4096
+STAT 5:wsize 0
+STAT 5:total_time 120
+STAT 6:addr 127.0.0.1:54322
+STAT 6:state conn_write
+...</code></pre>
+
+        <p>它的实现原理是在 <code>append_stats_conns()</code> 中遍历全局 <code>conns</code> 数组（所有连接结构体的指针数组），对每个非空连接输出其状态。遍历过程需要持有 <code>conn_lock</code>，因此在连接数很多（数万）时，<code>stats conns</code> 本身会有一定的性能开销。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我曾经在一个生产集群上执行 <code>stats conns</code>，结果命令卡住了将近 10 秒才返回。原因是集群有 3 万个连接，而 <code>stats conns</code> 在遍历过程中需要持有 <code>conn_lock</code>——这导致了所有新连接无法被 accept。从那以后，我养成了一个习惯：<strong>不在高峰期执行 <code>stats conns</code></strong>，尤其在连接数超过 5000 的实例上。
+        </div>
+
+        <h2>如何添加自定义 stats 指标</h2>
+
+        <p>如果你在修改 Memcached 源码做定制开发，很可能需要添加自己的统计指标。步骤很简单：</p>
+
+        <pre><code>// 步骤1: 在 stats_state 结构体中添加新字段（memcached.h）
+struct stats_state {
+    // ... 现有字段
+    uint64_t my_custom_counter;  // 新增
+};
+
+// 步骤2: 在 stat_defs 数组中添加定义（stats.c）
+#define STAT_MYCUSTOM 25
+static const char *stat_defs[] = {
+    // ... 现有定义
+    "my_custom_counter",   // 索引 25
+};
+
+// 步骤3: 在需要的地方更新计数器
+STATS_LOCK();
+stats_state.my_custom_counter++;
+STATS_UNLOCK();
+
+// 步骤4: stats 命令自动就会包含这个新指标</code></pre>
+
+        <p>更灵活的方式是利用 <code>EXTENSION_STAT</code> 机制——你可以注册一个回调函数，在 stats 输出时被自动调用。这样甚至不需要修改核心代码，非常适合通过动态加载模块来扩展。</p>
+
+        <div class="highlight">
+            <strong>动手练习：</strong>尝试给 Memcached 添加一个"每秒 get 请求数"的统计指标。提示：需要在 <code>stats_state</code> 中添加一个时间戳字段和一个计数器的组合，每次 <code>cmd_get</code> 更新时检查时间戳是否变化，如果变化了就把上一秒的计数值存入一个单独的字段。<code>stats</code> 命令会把这个新字段一并返回。尝试修改代码、重新编译、用 telnet 验证你的新统计指标。
+        </div>
+
+        <p>日志和统计系统是 Memcached 中"看不见的幕后工作者"——它们不直接参与核心的缓存逻辑，但没有它们，运维和调优将无从下手。读完这一章，你应该已经理解了环形缓冲区在日志系统中的应用、三大统计体系的各自定位，以及 stats 命令从接收到返回的完整链路。</p>
+
+        <p>下一章，我们将进入整个课程的重头戏——内存管理系统。我们会从 slab allocator 的设计哲学开始，理解为什么 Memcached 不用 malloc，以及它的三层内存模型背后藏着怎样的智慧。我们第 7 章见。</p>
+
+        <div class="footer-nav">
+            <a href="05.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="07.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

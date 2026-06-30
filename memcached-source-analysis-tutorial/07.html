@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第7章 内存管理概览：slab allocator设计哲学</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html" class="active">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第7章 内存管理概览：slab allocator设计哲学</h1>
+
+        <p>大家好，我是你们的讲师。从这一章开始，我们正式进入本课程最核心的部分——<strong>内存管理系统</strong>。如果说 Memcached 是一台汽车，那内存管理就是它的引擎。而 slab allocator 就是这个引擎的核心设计决策。</p>
+
+        <p>有一件事一直让我很感慨：很多用了好几年 Memcached 的开发者，从来不知道 <code>malloc</code> 在缓存场景下的表现有多糟糕。他们以为"内存管理就是 malloc/free"，直到某天线上的 Memcached 实例使用了 8GB 内存，但 RSS 却占到了 12GB——多出来的 4GB 全是碎片。这时候他们才开始问：Memcached 为什么要自己管理内存？这一章就从这个问题出发，带你理解 slab allocator 的设计哲学。</p>
+
+        <h2>为什么不用 malloc？</h2>
+
+        <p>这是一个根本性的问题。要回答它，我们得先理解 glibc malloc（ptmalloc）在高频分配/释放场景下的行为特征。</p>
+
+        <h3>碎片问题</h3>
+
+        <p>考虑一个典型的缓存场景：客户端反复执行 set 和 delete 操作，value 大小从 50 字节到 2000 字节不等。如果用 <code>malloc</code> 和 <code>free</code>，会发生什么？</p>
+
+        <pre><code>// 模拟缓存场景的内存操作模式
+for (int i = 0; i < 100000; i++) {
+    size_t size = 50 + (rand() % 1950);  // 50 ~ 2000 字节
+    void *p = malloc(size);
+    // ... 使用 p 存储数据 ...
+    // 一段时间后
+    free(p);  // 释放后 p 所在的位置变成"空洞"
+}</code></pre>
+
+        <p>按照这种模式运行一段时间后，进程的内存空间会布满大小不等的"空洞"——这就是内存碎片。glibc 的 malloc 虽然有自己的内存池（fastbins、smallbins、unsorted bin、top chunk 等），但面对大量大小不均的分配/释放时，很难避免碎片化。最终的结果是：尽管有 8GB 的虚拟地址空间可用，但 malloc 找不到足够的连续空间来满足一个 1MB 的分配请求——因为 8GB 被切成了无数无法合并的小碎片。</p>
+
+        <p>有人可能会说："那就用 jemalloc 或 tcmalloc 啊！"确实，jemalloc 和 tcmalloc 在碎片控制上比 ptmalloc 好得多，但它们仍然无法完全避免碎片问题。而且，它们的通用性也意味着它们对缓存场景没有做任何特殊的优化。</p>
+
+        <div class="highlight">
+            <strong>对比实验：</strong>有人做过一个经典的 benchmark：在同样的分配/释放模式（模拟缓存 workload）下运行 1 亿次操作后，ptmalloc 的 RSS 比实际使用量高出 40-60%，jemalloc 高出 15-25%，而 Memcached 的 slab allocator 只高出不到 5%。这 5% 还是 slab 内部固有的 chunk 内部碎片。结论很明确：<strong>对于缓存场景，自定义内存分配器是值得的</strong>。
+        </div>
+
+        <h3>Memcached 的解决思路</h3>
+
+        <p>Memcached 的思路不是去"改进 malloc"，而是从根本上避免碎片的产生。怎么做？<strong>预分配大小固定的内存块</strong>。所有 chunk 的大小都是预先定义好的（48、60、75、93……），一个 Item 分配时，系统找到第一个能装下它的 chunk 大小，直接返回一个固定大小的内存块。释放时，chunk 回到它所属的 slab class 的空闲链表中，等待下一次同类大小的分配。</p>
+
+        <p>因为同一条空闲链表上所有的 chunk 大小完全一致，任何一个自由 chunk 都可以直接用于下一次分配——不需要合并、不需要分割、不需要寻找合适大小的空闲块。碎片问题从根源上被消除了。</p>
+
+        <h2>Slab 思想来源</h2>
+
+        <p>Slab allocator 并不是 Memcached 的原创。它的思想来源于 <strong>Solaris 内核的内存分配器</strong>，由 Jeff Bonwick 在 1994 年发表的一篇著名论文 <em>"The Slab Allocator: An Object-Caching Kernel Memory Allocator"</em> 中提出（USENIX Summer 1994）。</p>
+
+        <p>Bonwick 当时面临的问题和 Memcached 很相似：内核中需要频繁分配和释放各种结构体（如 <code>task_struct</code>、<code>inode</code>、<code>file</code> 等），通用分配器导致的碎片和性能开销不可接受。他的核心洞察是：<strong>如果每次分配的大小是固定的，碎片问题自然消失</strong>——而且还能利用 CPU cache 的热度（同一类对象经常被一起访问）。</p>
+
+        <p>Memcached 的 slab allocator 是对 Bonwick 思想的简化实现。Solaris 内核的 slab allocator 要处理的对象类型非常复杂（构造函数/析构函数、着色、NUMA 感知等），Memcached 只取了最核心的"固定大小分桶"思想，并且去掉了构造函数/析构函数等内核特有的需求。</p>
+
+        <div class="tip">
+            <strong>延伸阅读：</strong>如果你对 slab allocator 的理论基础感兴趣，建议读一下 Bonwick 的原始论文。PDF 很容易搜到，全文只有 12 页，但其中的思想影响了后续 30 年几乎所有重要的内存分配器设计——从 Linux 内核的 SLAB/SLUB/SLOB 到 Memcached 和 Redis 的内存管理。
+        </div>
+
+        <h2>三层模型：slabclass → slab(page) → chunk</h2>
+
+        <p>Memcached 的内存管理是一个经典的三层模型：</p>
+
+        <pre><code>┌─────────────────────────────────────────────────────────┐
+│                    slabclass_t[64]                       │
+│  ┌───────────┐ ┌───────────┐ ┌───────────┐     ┌─────┐ │
+│  │ class 1   │ │ class 2   │ │ class 3   │ ... │class│ │
+│  │ size=96   │ │ size=120  │ │ size=150  │     │ MAX │ │
+│  │ perslab=  │ │ perslab=  │ │ perslab=  │     │     │ │
+│  │ 10922     │ │  8738     │ │  6990     │     │     │ │
+│  └─────┬─────┘ └─────┬─────┘ └─────┬─────┘     └──┬──┘ │
+│        │             │             │              │     │
+│        ▼             ▼             ▼              ▼     │
+│  ┌───────────┐ ┌───────────┐ ┌───────────┐     ┌─────┐ │
+│  │ slab[0]   │ │ slab[0]   │ │ slab[0]   │     │     │ │
+│  │ (1MB)     │ │ (1MB)     │ │ (1MB)     │     │     │ │
+│  │ ┌──┬──┐   │ │ ┌──┬──┐   │ │ ┌──┬──┐   │     │     │ │
+│  │ │c0│c1│…  │ │ │c0│c1│…  │ │ │c0│c1│…  │     │     │ │
+│  │ └──┴──┘   │ │ └──┴──┘   │ │ └──┴──┘   │     │     │ │
+│  │ chunk[0]  │ │ chunk[0]  │ │ chunk[0]  │     │     │ │
+│  │ chunk[1]  │ │ chunk[1]  │ │ chunk[1]  │     │     │ │
+│  │ ...       │ │ ...       │ │ ...       │     │     │ │
+│  │chunk[10921]││chunk[8737] │ │chunk[6989]│     │     │ │
+│  └───────────┘ └───────────┘ └───────────┘     └─────┘ │
+└─────────────────────────────────────────────────────────┘</code></pre>
+
+        <p>这个三层模型的理解要点：</p>
+
+        <ul>
+            <li><strong>slabclass</strong>：一个 slab class 定义了一种 chunk 大小。共有 64 个 class（0-63），class 0 内部使用，class 1-63 对外。每个 class 维护了自己的空闲链表和 slab 列表。</li>
+            <li><strong>slab（page）</strong>：每个 slab 是一个连续的物理内存区域，默认大小为 1MB（可通过 <code>-I</code> 参数修改）。一个 slabclass 可以有多个 slab page。</li>
+            <li><strong>chunk</strong>：slab 被等分成固定大小的 chunk，每个 chunk 可以存储一个 Item。chunk 大小等于 <code>slabclass[id].size</code>。</li>
+        </ul>
+
+        <h2>slabclass_t 结构体导览</h2>
+
+        <p><code>slabclass_t</code> 是 slab allocator 的核心数据结构，定义在 <code>slabs.c</code> 中：</p>
+
+        <pre><code>typedef struct {
+    unsigned int size;        // 该 class 中每个 chunk 的大小（字节）
+    unsigned int perslab;     // 每个 slab page 可以容纳的 chunk 数量
+
+    void **slots;             // 空闲 chunk 指针数组（freelist）
+    unsigned int sl_curr;     // 当前空闲 chunk 的数量
+
+    void *end_page_ptr;       // 当前 slab page 中下一个可用位置的指针
+    unsigned int end_page_free; // 当前 slab page 中还剩多少可用的 chunk
+
+    unsigned int slabs;       // 该 class 已经分配的 slab page 数量
+    void **slab_list;         // slab page 指针数组（指向每个 slab 的起始地址）
+    unsigned int list_size;   // slab_list 数组的容量
+
+    size_t requested;         // 该 class 中所有 Item 请求的总内存量（用于统计）
+
+    struct slab_stats stats;  // 该 class 的统计信息
+} slabclass_t;</code></pre>
+
+        <p>在这个结构体中，最重要的两个字段是 <code>slots</code>（空闲链表）和 <code>slab_list</code>（已分配 page 列表）：</p>
+
+        <ul>
+            <li><code>slots</code> 是一个栈结构的空闲链表——释放的 chunk 被 push 到 <code>slots</code> 上，分配时从 <code>slots</code> pop。LIFO 顺序有助于利用 CPU cache 的热度（最近释放的 chunk 还在 cache 中）。</li>
+            <li><code>slab_list</code> 记录该 class 分配的所有 slab page 的起始地址，用于内存管理和调试（比如遍历所有 chunk）。</li>
+            <li><code>end_page_ptr</code> 和 <code>end_page_free</code> 用于在当前的 slab page 内顺序分配新 chunk——当 <code>slots</code> 为空时，从 <code>end_page_ptr</code> 切分出一个新 chunk。</li>
+        </ul>
+
+        <h2>预分配 vs 按需分配</h2>
+
+        <p>Memcached 提供了两种 slab page 分配策略，通过 <code>-L</code> 参数控制：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>策略</th>
+                    <th>参数</th>
+                    <th>机制</th>
+                    <th>优点</th>
+                    <th>缺点</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>按需分配（默认）</td>
+                    <td>无</td>
+                    <td>首次写入数据时才分配 slab page</td>
+                    <td>启动快，不浪费未使用的内存</td>
+                    <td>首次写入延迟较高，极端情况可能 OOM</td>
+                </tr>
+                <tr>
+                    <td>预分配（preallocate）</td>
+                    <td><code>-L</code></td>
+                    <td>启动时将所有 <code>maxbytes</code> 内存全部分配并 mmap 锁定</td>
+                    <td>无首次分配延迟，内存始终可用</td>
+                    <td>启动慢，内存浪费在未使用的 slab class 上</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p><code>-L</code> 参数在源码中的实现位于 <code>slabs_preallocate()</code> 函数：</p>
+
+        <pre><code>static int slabs_preallocate(size_t limit) {
+    int i;
+    size_t allocated = 0;
+
+    for (i = POWER_SLAB_START; i < power_largest; i++) {
+        // 为每个 slab class 预分配 slab page
+        // 直到达到 maxbytes 限制
+        while (allocated < limit) {
+            if (do_slabs_newslab(i) == 0) break;
+            allocated += settings.item_size_max;
+        }
+    }
+    return 1;
+}</code></pre>
+
+        <p>预分配模式适合对尾延迟敏感的场景——比如金融交易系统或者广告竞价系统，不允许出现因 slab page 分配导致的毫秒级延迟抖动。代价是更高的内存开销（所有 slab class 都会分配至少一个 page，哪怕没有数据）。</p>
+
+        <h2>Slab 的"阶级固化"问题</h2>
+
+        <p>讲完了设计哲学，我必须提一个 slab allocator 的固有问题——<strong>slab class 间的"阶级固化"</strong>。</p>
+
+        <p>想象一个场景：你的 Memcached 实例配置了 8GB 内存，随着时间的推移，你把大量的 1KB 左右的 value 写入缓存。这些 value 会集中在某个 slab class（比如 class 10，chunk size = 1024）。当这个 class 的内存用尽时，系统开始在这个 class 内淘汰旧数据。但与此同时，其他 slab class（比如用于 100 字节的小 value 的 class 4）可能还有很多空余的 chunk。</p>
+
+        <p>问题来了：<strong>class 10 明明在"饿死"（频繁淘汰），而 class 4 却在"撑死"（大量空闲），但 slab allocator 默认不会把 class 4 的 page 挪给 class 10 使用</strong>。这就是所谓的"阶级固化"——一旦 slab page 被分配给了某个 class，它就永远属于那个 class 了。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我在一家电商公司遇到过这样一个案例：线上一个 64GB 的 Memcached 节点，其中一个 slab class 的淘汰率（evictions）持续飙升，但 <code>stats slabs</code> 显示另外三个 class 有总共 12GB 的 <code>free_chunks_end</code>（page 末尾未使用的 chunk）。这是一个典型的"阶级固化"问题——活跃的 slab class 内存不够，但其他 class 的 page 被"锁死"了。后来通过打开 <code>slab_automove</code>（slab 自动迁移）功能才解决了这个问题。这个功能在后面的章节会详细讲。
+        </div>
+
+        <p>针对这个问题，Memcached 1.5+ 版本引入了 <code>slab_automove</code> 和 <code>slab_reassign</code> 机制，允许系统在运行时将 slab page 从一个 class 迁移到另一个 class。这是 slab allocator 最重要的改进之一，我们会在第 9 章深入分析。</p>
+
+        <p>这一章我们从理论层面理解了 slab allocator 的设计哲学：通过固定大小的分桶来消除内存碎片，用三层模型来管理内存，用预分配来消除首次分配延迟。这些思想虽然起源于 1994 年的 Solaris 内核，但 30 年后的今天仍然在指导着工业级缓存系统的设计。</p>
+
+        <p>下一章，我们会打开 <code>slabs.c</code> 的源码，一行一行地分析 slab allocator 的初始化和分配逻辑。你会看到 <code>do_slabs_newslab()</code> 是如何分配一个新的 slab page，<code>do_slabs_alloc()</code> 是如何从空闲链表分配一个 chunk 的。我们第 8 章见。</p>
+
+        <div class="footer-nav">
+            <a href="06.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="08.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

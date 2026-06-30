@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第4章 启动流程：main函数逐行解析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html" class="active">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第4章 启动流程：main函数逐行解析</h1>
+
+        <p>大家好，我是你们的讲师。前两章我们把源码地图建立起来了，现在是时候上手读第一段真正的代码了。这一章的目标非常明确：<strong>跟着 <code>main()</code> 函数走一遍 Memcached 的完整启动流程</strong>。</p>
+
+        <p><code>main()</code> 函数位于 <code>memcached.c</code> 中，是整个程序的入口点。我算了一下，从调用 <code>main()</code> 到进入事件循环（<code>event_base_loop()</code>），中间大约有 500 行代码。这 500 行代码涵盖了配置加载、内存初始化、线程创建、网络绑定等所有关键步骤。读懂这一段，你就掌握了 Memcached 的"全局视角"。好，我们直接打开源码来看。</p>
+
+        <h2>main() 函数整体流程</h2>
+
+        <p>在 CGDB 中运行 <code>b main</code> 后按 <code>r</code>，程序会在 <code>main()</code> 的第一行停下来。让我们看看这个函数做什么：</p>
+
+        <pre><code>int main(int argc, char **argv) {
+    // 步骤1: 初始化默认配置
+    settings_init();
+
+    // 步骤2: 解析命令行参数
+    // 处理 -m, -p, -t, -c, -v, -o 等选项
+    // 如果参数不合法则打印帮助信息并退出
+
+    // 步骤3: 守护进程化（如果指定了 -d）
+    // fork() + setsid() + 重定向 fd
+
+    // 步骤4: 设置信号处理
+    // SIGINT/SIGTERM → graceful shutdown
+    // SIGHUP → 重新打开日志文件
+    // SIGPIPE → 忽略
+
+    // 步骤5: 初始化哈希表
+    assoc_init(settings.hashtable_init);
+
+    // 步骤6: 初始化 slab allocator
+    slabs_init(settings.maxbytes, settings.factor, settings.prealloca);
+
+    // 步骤7: 启动 worker 线程
+    // thread_init(settings.num_threads, main_base);
+
+    // 步骤8: 绑定并监听端口
+    // server_sockets(settings.port, ...);
+
+    // 步骤9: 进入事件循环
+    // event_base_loop(main_base, 0);
+}</code></pre>
+
+        <p>这 9 个步骤对应的就是 Memcached 整个生命周期中的启动阶段。下面我们来逐一细看。</p>
+
+        <h2>步骤1: settings_init — 设置默认值</h2>
+
+        <p><code>settings_init()</code> 函数位于 <code>memcached.c</code> 中，大约有 30 行。它负责给全局的 <code>settings</code> 结构体（类型为 <code>struct settings</code>）赋予默认值：</p>
+
+        <pre><code>static void settings_init(void) {
+    settings.maxbytes = 64 * 1024 * 1024;  // 默认 64MB 内存
+    settings.maxconns = 1024;              // 默认最多 1024 个连接
+    settings.port = 11211;                 // 默认端口
+    settings.num_threads = 4;              // 默认 4 个工作线程
+    settings.growth_factor = 1.25f;        // slab class 增长因子
+    settings.chunk_size = 48;              // 最小 chunk 大小
+    settings.evict_to_free = 1;            // 内存不足时允许淘汰
+    settings.prefix_delimiter = ':';       // key 前缀分隔符
+    // ...还有更多字段设置
+}</code></pre>
+
+        <p>这些默认值的设计是有讲究的。比如 <code>maxbytes = 64MB</code> 是一个足够小、不会让初学者意外耗尽内存的值；<code>growth_factor = 1.25</code> 是一个经验值——太大则浪费内存（slab class 之间空隙大），太小则 slab class 数量爆炸；<code>chunk_size = 48</code> 则包含了 key+value 的最小头部开销。</p>
+
+        <h2>步骤2: getopt 命令行解析</h2>
+
+        <p>命令行解析是 <code>main()</code> 中最长的一个代码块（约 200 行）。Memcached 使用 POSIX 标准的 <code>getopt()</code> 函数来解析参数：</p>
+
+        <pre><code>while ((c = getopt(argc, argv, "a:bc:m:p:t:r:u:l:o:MhdvVE:iI:L")) != -1) {
+    switch (c) {
+        case 'm':
+            settings.maxbytes = (size_t)atoll(optarg) * 1024 * 1024;
+            break;
+        case 'p':
+            settings.port = atoi(optarg);
+            break;
+        case 't':
+            settings.num_threads = atoi(optarg);
+            break;
+        case 'c':
+            settings.maxconns = atoi(optarg);
+            break;
+        case 'v':
+            settings.verbose++;
+            break;
+        // ...
+    }
+}</code></pre>
+
+        <p>注意这里的 <code>v</code> 选项比较特殊——每指定一次 <code>-v</code>，<code>verbose</code> 级别加一。<code>-v</code> 输出基本日志，<code>-vv</code> 输出更详细的日志，<code>-vvv</code> 输出几乎所有内部事件。在生产问题排查中，<code>-vv</code> 是最常用的级别（能看到每一次 get/set 操作）。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>参数</th>
+                    <th>默认值</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>-m</code></td>
+                    <td>64</td>
+                    <td>最大内存使用量（MB）</td>
+                </tr>
+                <tr>
+                    <td><code>-p</code></td>
+                    <td>11211</td>
+                    <td>监听端口</td>
+                </tr>
+                <tr>
+                    <td><code>-t</code></td>
+                    <td>4</td>
+                    <td>工作线程数</td>
+                </tr>
+                <tr>
+                    <td><code>-c</code></td>
+                    <td>1024</td>
+                    <td>最大并发连接数</td>
+                </tr>
+                <tr>
+                    <td><code>-v</code></td>
+                    <td>0</td>
+                    <td>日志详细级别（可累加）</td>
+                </tr>
+                <tr>
+                    <td><code>-d</code></td>
+                    <td>无</td>
+                    <td>以守护进程方式运行</td>
+                </tr>
+                <tr>
+                    <td><code>-I</code></td>
+                    <td>1m</td>
+                    <td>slab page 大小（默认 1MB）</td>
+                </tr>
+                <tr>
+                    <td><code>-L</code></td>
+                    <td>无</td>
+                    <td>启动时预分配所有内存（大页面）</td>
+                </tr>
+                <tr>
+                    <td><code>-o</code></td>
+                    <td>无</td>
+                    <td>扩展选项（逗号分隔的 key=value）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>动手练习：</strong>用 CGDB 在 <code>getopt</code> 的循环中加断点，然后分别用 <code>-m 128 -p 11211 -t 4</code> 和 <code>-m 256 -t 8</code> 启动，观察 <code>settings</code> 结构体各字段的变化。你会直观地看到参数解析的实时效果。
+        </div>
+
+        <h2>步骤3: daemonize — 守护进程化</h2>
+
+        <p>当指定了 <code>-d</code> 参数时，Memcached 会将自己变为守护进程。其实现是经典的 <code>fork() + setsid()</code> 模式：</p>
+
+        <pre><code>static int daemonize(int nochdir, int noclose) {
+    int fd;
+    pid_t pid;
+
+    // 第一次 fork
+    pid = fork();
+    if (pid == -1) return -1;
+    if (pid > 0) _exit(0);  // 父进程退出
+
+    // 创建新的 session（脱离控制终端）
+    setsid();
+
+    // 第二次 fork，确保无法重新获得控制终端
+    pid = fork();
+    if (pid == -1) return -1;
+    if (pid > 0) _exit(0);
+
+    // 重定向 stdin/stdout/stderr 到 /dev/null
+    fd = open("/dev/null", O_RDWR);
+    dup2(fd, STDIN_FILENO);
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
+    if (fd > STDERR_FILENO) close(fd);
+
+    return 0;
+}</code></pre>
+
+        <p>这里有一个经典的双 fork 技巧：第一次 fork 后通过 <code>setsid()</code> 创建新 session 让进程脱离控制终端，第二次 fork 确保进程不会因为 session leader 重新打开控制终端而重新获得终端。这种写法在 Unix 网络编程中是标准模式，Memcached 的实现可以作为参考模板。</p>
+
+        <h2>步骤4: 信号处理</h2>
+
+        <p>信号处理是服务器程序必不可少的部分。Memcached 注册了三个关键信号：</p>
+
+        <pre><code>// 注册信号处理函数
+signal(SIGINT, sig_handler);     // Ctrl+C → 优雅关闭
+signal(SIGTERM, sig_handler);    // kill → 优雅关闭
+signal(SIGHUP, sig_handler);     // 重新打开日志文件
+signal(SIGPIPE, SIG_IGN);        // 忽略 SIGPIPE（避免写 socket 时崩溃）
+signal(SIGALRM, sig_handler);    // 定时器（用于 LRU 维护等）</code></pre>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>信号</th>
+                    <th>处理行为</th>
+                    <th>典型触发场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>SIGINT</code></td>
+                    <td>设置 <code>run_state = 1</code>，事件循环退出</td>
+                    <td>Ctrl+C 终止进程</td>
+                </tr>
+                <tr>
+                    <td><code>SIGTERM</code></td>
+                    <td>设置 <code>run_state = 1</code>，事件循环退出</td>
+                    <td><code>kill &lt;pid&gt;</code></td>
+                </tr>
+                <tr>
+                    <td><code>SIGHUP</code></td>
+                    <td>重新打开日志文件（日志轮转场景）</td>
+                    <td><code>kill -HUP &lt;pid&gt;</code></td>
+                </tr>
+                <tr>
+                    <td><code>SIGPIPE</code></td>
+                    <td>忽略</td>
+                    <td>写 socket 时对端断开</td>
+                </tr>
+                <tr>
+                    <td><code>SIGALRM</code></td>
+                    <td>触发定时任务（LRU 爬虫心跳等）</td>
+                    <td>alarm 定时器到期</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>注意 <code>SIGPIPE</code> 的处理：默认情况下，向一个已经关闭的 socket 写入数据会导致进程收到 <code>SIGPIPE</code> 信号，而该信号的默认行为是终止进程。对于网络服务器来说这显然不可接受——客户端断开连接是非常常见的情况。所以 Memcached 选择 <code>SIG_IGN</code> 忽略它，然后通过 <code>write()</code> 的返回值（-1 + errno EPIPE）来检测连接断开。</p>
+
+        <h2>步骤5-6: 核心数据结构初始化</h2>
+
+        <p>信号处理完成后，main() 会依次初始化几个核心子系统：</p>
+
+        <pre><code>// 初始化哈希表（默认为 65536 个桶，约 256KB 内存）
+assoc_init(settings.hashtable_init);
+
+// 初始化 slab allocator（分配初始 page）
+slabs_init(settings.maxbytes, settings.factor, settings.prealloca);
+
+// 初始化维护线程（LRU 爬虫、slab rebalance 等）
+maintenance_thread_init();</code></pre>
+
+        <p>这三个初始化函数会在后面的章节中详细展开——<code>assoc_init</code> 在第 13 章，<code>slabs_init</code> 在第 8 章。这里先记住它们的调用顺序和大致功能即可。</p>
+
+        <h2>步骤7: 线程创建</h2>
+
+        <pre><code>thread_init(settings.num_threads, main_base);</code></pre>
+
+        <p>这是 Memcached 从单线程到多线程架构的关键变化（1.4 版本引入）。<code>thread_init()</code> 会创建 <code>N</code> 个 worker 线程，每个线程有自己的 event base 和连接队列。master 线程（main 所在的线程）负责 accept 新连接，然后通过轮询（round-robin）将连接分发给各 worker 线程。这个过程我们在第 17 章会深入分析。</p>
+
+        <h2>步骤8: 端口绑定</h2>
+
+        <pre><code>server_sockets(settings.port, ...);</code></pre>
+
+        <p>这个函数会创建 TCP socket、设置 SO_REUSEADDR 选项、绑定端口、开始监听。如果指定了 UDP 端口（<code>-U</code>），还会额外创建 UDP socket。绑定的核心代码位于 <code>server_socket()</code> 函数中：</p>
+
+        <pre><code>static int server_socket(const char *interface, int port, ...) {
+    int sfd = socket(AF_INET, SOCK_STREAM, 0);
+    int flags = 1;
+
+    // SO_REUSEADDR：重启后立即重用端口（避免 TIME_WAIT）
+    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &flags, sizeof(flags));
+
+    bind(sfd, (struct sockaddr *)&addr, sizeof(addr));
+    listen(sfd, settings.backlog);
+
+    // 将 socket 添加到 libevent 事件循环
+    event_handler = event_new(main_base, sfd, EV_READ | EV_PERSIST,
+                              do_accept, NULL);
+    event_add(event_handler, NULL);
+
+    return sfd;
+}</code></pre>
+
+        <p>注意这里的 <code>SO_REUSEADDR</code> 选项——在生产环境中，如果你重启 Memcached，旧的连接可能还处于 TIME_WAIT 状态，没有这个选项就无法在同一个端口上立即启动新的进程。</p>
+
+        <h2>步骤9: 进入事件循环</h2>
+
+        <pre><code>event_base_loop(main_base, 0);</code></pre>
+
+        <p>最后一行代码，也是无限循环的开始。<code>event_base_loop()</code> 是 libevent 的核心函数，它会不断地轮询所有已注册的事件（新连接到达、数据可读、定时器到期等），并调用对应的回调函数。从这一刻起，Memcached 就正式进入了"工作模式"。</p>
+
+        <div class="tip">
+            <strong>为什么这是最后一步？</strong>可能你会想：为什么线程创建在端口绑定之前？因为 libevent 的事件循环需要所有资源都就绪后才能启动。反过来想，如果端口绑定成功了但某一步初始化失败了，我们需要一个"回滚"的机会。先创建线程再绑定端口，意味着即使端口绑定失败也能有序退出。
+        </div>
+
+        <h2>GDB 实战演示</h2>
+
+        <p>理论讲完了，我们来点实战。打开你的 CGDB，按下面的步骤操作：</p>
+
+        <pre><code># 1. 启动 CGDB 并加载 memcached
+cgdb memcached
+
+# 2. 在 main 函数设断点
+b main
+
+# 3. 传参运行（64MB 内存，2 个线程）
+r -m 64 -t 2
+
+# 4. 单步到 settings_init() 之前
+# 按 n 逐行执行
+
+# 5. 打印 settings.maxbytes 的默认值
+p settings.maxbytes
+# 输出: 67108864  （64MB 的字节数）
+
+# 6. 跳过 settings_init，再次打印
+n
+p settings.maxbytes
+# 输出: 67108864  （确认默认值已设置）
+
+# 7. 在 getopt 循环中设置观察点
+watch settings.maxbytes
+
+# 8. 继续执行，观察命令行解析对 settings 的影响
+c</code></pre>
+
+        <div class="highlight">
+            <strong>我的体会：</strong>用 GDB 逐行执行 <code>main()</code> 函数是我学习任何 C 项目的第一件事。这比读十篇源码分析文章都管用——因为你能亲眼看到程序"从哪里来，到哪里去"。
+        </div>
+
+        <p>通过本章的逐行分析，你应该已经对 Memcached 的启动流程有了全局认识。从 <code>settings_init()</code> 设置默认配置，到 <code>getopt</code> 解析命令行参数，再到 daemonize、信号注册、核心数据结构初始化、线程创建、端口绑定，最后进入事件循环——每一步背后都有一套成熟的设计思想。</p>
+
+        <p>下一章，我们会聚焦在 <code>struct settings</code> 这个配置系统上，深入看看那 30 多个配置字段各自有什么玄机，以及 <code>growth_factor</code> 和 <code>chunk_size</code> 这些参数对系统行为的具体影响。我们第 5 章见。</p>
+
+        <div class="footer-nav">
+            <a href="03.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="05.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

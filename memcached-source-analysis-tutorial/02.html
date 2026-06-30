@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第2章 环境搭建与源码获取</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html" class="active">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第2章 环境搭建与源码获取</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们聊了为什么要读 Memcached 源码——它的代码量适中、设计思想经典、工程实践丰富。但 "纸上得来终觉浅"——要想真正理解一个系统，光看别人写的分析文章是不够的，你需要在自己的机器上把代码跑起来、打断点、看变量、甚至改几行代码试效果。这一章我们就来做这件事：从零搭建 Memcached 源码阅读环境。</p>
+
+        <p>我见过太多人卡在环境搭建这一步——不是 libevent 版本不对，就是 autotools 工具链缺失，折腾半天连 make 都没跑过就放弃了。这一章我会把每一步拆细，包括常见坑的解法，让你一次把事情做对。好，我们直接开始。</p>
+
+        <h2>获取源码：克隆 1.6.41</h2>
+
+        <p>Memcached 的源码托管在 GitHub 上，直接 clone 最新稳定版。本课程所有分析基于 <strong>1.6.41</strong> 版本——这是 2025 年发布的版本，包含了 extstore、proxy 等新特性，同时又足够稳定。</p>
+
+        <pre><code>git clone https://github.com/memcached/memcached.git
+cd memcached
+git checkout 1.6.41</code></pre>
+
+        <p>如果你克隆时看到的是 master 分支，不要慌——master 是开发分支，可能包含尚未发布的实验性代码。我们用 <code>git checkout 1.6.41</code> 切到稳定标签。建议你也锁在这个版本，方便跟我后面的章节一一对应。</p>
+
+        <div class="tip">
+            <strong>版本选择建议：</strong>1.6.41 是目前最稳定的长期支持版本。如果你在生产环境使用，建议选择 1.6.x 系列的最新小版本。不要用 1.5.x——那个版本缺少 extstore 和 proxy 等重要的新特性。
+        </div>
+
+        <h2>编译安装：autotools 构建流程</h2>
+
+        <p>Memcached 使用经典的 autotools 构建系统。如果你来自 Go 或 Rust 生态，可能会觉得这套工具链有点"复古"——但 autotools 在 C 项目中仍然是事实标准，尤其是需要跨平台兼容的项目。</p>
+
+        <h3>安装依赖</h3>
+
+        <p>在 Ubuntu/Debian 系统上，首先安装编译工具链和 Memcached 的运行时依赖：</p>
+
+        <pre><code>sudo apt update
+sudo apt install build-essential autoconf automake libtool pkg-config
+sudo apt install libevent-dev libssl-dev</code></pre>
+
+        <p>这里的两个关键依赖是：</p>
+
+        <ul>
+            <li><strong>libevent</strong> (2.1+)：Memcached 的网络事件驱动引擎。Memcached 依赖 libevent 来管理 socket 事件、定时器等。libevent 1.x 和 2.x 的 API 有较大差异，Memcached 1.6 要求 libevent >= 2.1。</li>
+            <li><strong>libssl-dev</strong>：用于 SASL 认证支持，不是必需但建议安装，否则编译时某些特性会被禁用。</li>
+        </ul>
+
+        <h3>autoreconf 与 configure</h3>
+
+        <p>克隆下来的源码中，<code>configure</code> 脚本可能没有预生成，需要先运行 autoreconf：</p>
+
+        <pre><code>autoreconf -fi
+./configure --prefix=/usr/local/memcached</code></pre>
+
+        <p><code>autoreconf -fi</code> 的作用是调用 autoconf、automake、libtool 等工具链重新生成 configure 脚本和 Makefile.in 模板。其中 <code>-f</code>（force）表示强制重新生成所有文件，<code>-i</code>（install）表示自动复制缺失的辅助文件（如 config.sub、install-sh）。如果你看到 "possibly undefined macro" 错误，多半是缺少某个 autotools 工具或 pkg-config 没装。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我第一次编译 Memcached 时，运行 <code>autoreconf -fi</code> 后报错 "libtool: command not found"。问题出在 ubuntu 上 <code>libtool</code> 和 <code>libtool-bin</code> 是两个不同的包，apt install 时我只装了前者而忘了装后者。解决方案很简单：<code>sudo apt install libtool-bin</code>。
+        </div>
+
+        <h3>make 与 install</h3>
+
+        <pre><code>make -j$(nproc)
+sudo make install</code></pre>
+
+        <p>编译过程大约需要 1-2 分钟。如果一切顺利，你会看到一个干净的编译输出，没有 warning。Memcached 的代码质量很高，编译时几乎不会产生警告——这也是其代码风格严谨的一个佐证。</p>
+
+        <h2>调试环境配置</h2>
+
+        <p>仅仅能跑起来是不够的——阅读源码最重要的是能设断点、看变量、单步跟踪。我推荐两种调试方式，你可以根据自己的喜好选择。</p>
+
+        <h3>方案一：GDB + CGDB（推荐终端党）</h3>
+
+        <p>GDB 是 C 代码事实上的调试标准。CGDB 是 GDB 的一个 TUI 前端，在终端中同时显示源码和调试命令，比纯 GDB 体验好很多。</p>
+
+        <pre><code>sudo apt install gdb cgdb
+
+# 编译时保留调试信息（默认 Makefile 已经带 -g）
+./configure --prefix=/usr/local/memcached CFLAGS="-g -O0"
+
+make -j$(nproc)
+sudo make install
+
+# 启动 CGDB
+cgdb /usr/local/memcached/bin/memcached</code></pre>
+
+        <p>注意这里 <code>CFLAGS="-g -O0"</code>：<code>-g</code> 生成调试符号，<code>-O0</code> 关闭优化。关闭优化很重要，否则 GCC 会内联函数、重排指令，导致你单步跟踪时看到"跳跃"的执行顺序。调试用 -O0，线上用 -O2，不要搞混。</p>
+
+        <p>在 CGDB 中按 <code>F7</code> 进入源码模式，然后就可以：</p>
+
+        <ul>
+            <li><code>b main</code> —— 在 main 函数设断点</li>
+            <li><code>r</code> —— 运行程序</li>
+            <li><code>n</code> —— 下一行（step over）</li>
+            <li><code>s</code> —— 进入函数（step into）</li>
+            <li><code>p settings.maxbytes</code> —— 打印变量值</li>
+        </ul>
+
+        <h3>方案二：VS Code / CLion（IDE 党）</h3>
+
+        <p>如果你习惯图形化界面，VS Code 搭配 C/C++ 扩展也可以很好地调试 C 项目。打开 Memcached 源码目录后，配置 <code>.vscode/launch.json</code>：</p>
+
+        <pre><code>{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug memcached",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/memcached",
+            "args": ["-m", "64"],
+            "stopAtEntry": true,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb"
+        }
+    ]
+}</code></pre>
+
+        <p>CLion 用户更简单——直接用"Open"打开项目根目录，CLion 会自动识别 CMake 或 Makefile 项目。如果是纯 Makefile 项目，CLion 会提示你配置编译设置，选择"使用 Makefile 编译"即可。</p>
+
+        <h2>跑通测试套件</h2>
+
+        <p>一个能让你安心修改代码的保障是：<strong>测试全过</strong>。Memcached 的测试套件位于 <code>t/</code> 目录下，是基于 Perl 的测试框架：</p>
+
+        <pre><code>make test</code></pre>
+
+        <p>这个命令会启动所有测试用例，包括功能测试、协议测试、压力测试等。全部跑完大约需要 5-10 分钟，取决于你的机器性能。如果所有测试通过，你会看到类似这样的输出：</p>
+
+        <pre><code>All tests successful.
+Files=NN, Tests=MM, X wallclock secs
+Result: PASS</code></pre>
+
+        <p>如果某些测试失败，可以先检查是否有权限问题、端口冲突或 libevent 版本不匹配。最常见的失败原因是你的机器上已经运行了一个 memcached 实例占用了默认端口（11211）：</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong><code>make test</code> 第一次跑时我遇到了一个诡异的失败——某个二进制协议测试总是超时。查了半天发现是我在 docker 里跑的，容器的 <code>net.core.somaxconn</code> 设置太低导致连接队列满。解决方案：<code>sysctl -w net.core.somaxconn=1024</code>。
+        </div>
+
+        <h2>编译选项详解</h2>
+
+        <p>除了默认编译，Memcached 还提供了几个重要的 <code>configure</code> 选项，用于启用特定功能：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>编译选项</th>
+                    <th>说明</th>
+                    <th>依赖</th>
+                    <th>建议</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>--enable-seccomp</code></td>
+                    <td>启用 seccomp BPF 沙箱，限制系统调用</td>
+                    <td>Linux 内核 3.5+</td>
+                    <td>生产环境强烈建议开启</td>
+                </tr>
+                <tr>
+                    <td><code>--enable-extstore</code></td>
+                    <td>启用外部存储（SSD/NVMe）支持</td>
+                    <td>无额外依赖</td>
+                    <td>分析 extstore 模块时需要</td>
+                </tr>
+                <tr>
+                    <td><code>--enable-proxy</code></td>
+                    <td>启用内置 Proxy（Lua 路由）</td>
+                    <td>liblua 5.3+</td>
+                    <td>分析 proxy 模块时需要</td>
+                </tr>
+                <tr>
+                    <td><code>--enable-sasl</code></td>
+                    <td>启用 SASL 认证</td>
+                    <td>libsasl2-dev</td>
+                    <td>需要认证时开启</td>
+                </tr>
+                <tr>
+                    <td><code>--enable-tls</code></td>
+                    <td>启用 TLS/SSL 加密传输</td>
+                    <td>libssl-dev</td>
+                    <td>安全敏感场景</td>
+                </tr>
+                <tr>
+                    <td><code>--enable-dtrace</code></td>
+                    <td>启用 DTrace 动态跟踪</td>
+                    <td>DTrace 工具</td>
+                    <td>性能分析用途</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>对于本课程的阅读目的，建议你这样编译：</p>
+
+        <pre><code>./configure --enable-extstore --enable-proxy --enable-seccomp CFLAGS="-g -O0"
+make -j$(nproc)</code></pre>
+
+        <p>这样所有模块的符号都可用，我们可以随时切到任何模块打点分析。</p>
+
+        <h2>验证安装</h2>
+
+        <p>编译安装完成后，验证一下 Memcached 是否能正常启动：</p>
+
+        <pre><code>memcached -m 64 -p 11211 -d
+echo "stats" | nc localhost 11211</code></pre>
+
+        <p>如果看到一堆 stats 输出（包括 version、uptime、curr_items 等字段），恭喜你——环境搭建成功。</p>
+
+        <div class="highlight">
+            <strong>动手练习：</strong>尝试用 <code>memcached -h</code> 查看所有命令行参数。重点关注 <code>-m</code>（最大内存）、<code>-p</code>（端口号）、<code>-t</code>（工作线程数）、<code>-c</code>（最大连接数）、<code>-v</code>（详细日志输出）。下一章我们会深入分析这些参数在源码中的处理逻辑。
+        </div>
+
+        <p>环境搭建是一个看似琐碎但至关重要的环节。我建议你花半天时间把这一章的步骤完整走一遍，确保你能在自己的机器上完成编译、调试、跑测试的全流程。有了这个基础，后续每一章的分析你都能亲手复现——这才是阅读源码的正确姿势。</p>
+
+        <p>下一章，我们终于要打开源码目录了。我会带你把 Memcached 的每一个 .c 和 .h 文件过一遍，建立完整的源码地图。到时候你就知道："我想看 XXX 功能"应该去翻哪个文件。我们第 3 章见。</p>
+
+        <div class="footer-nav">
+            <a href="01.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="03.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

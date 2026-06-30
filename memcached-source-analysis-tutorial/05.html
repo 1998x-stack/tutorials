@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第5章 配置系统：settings与命令行</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>⚙️ 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 为什么要读Memcached源码</a></li>
+            <li><a href="02.html">第2章 环境搭建与源码获取</a></li>
+            <li><a href="03.html">第3章 源码全景：目录结构与模块划分</a></li>
+            <li><a href="04.html">第4章 启动流程：main函数逐行解析</a></li>
+            <li><a href="05.html" class="active">第5章 配置系统：settings与命令行</a></li>
+            <li><a href="06.html">第6章 日志与统计系统</a></li>
+            <li><a href="07.html">第7章 内存管理概览：slab allocator设计哲学</a></li>
+            <li><a href="08.html">第8章 Slab Allocator初始化与分配</a></li>
+            <li><a href="09.html">第9章 Slab Allocator回收与平衡</a></li>
+            <li><a href="10.html">第10章 Item：数据存储的基本单元</a></li>
+            <li><a href="11.html">第11章 Item生命周期：分配、访问与删除</a></li>
+            <li><a href="12.html">第12章 LRU淘汰机制：三级队列</a></li>
+            <li><a href="13.html">第13章 哈希表：assoc模块详解</a></li>
+            <li><a href="14.html">第14章 哈希表扩容：渐进式rehash</a></li>
+            <li><a href="15.html">第15章 事件驱动：libevent集成</a></li>
+            <li><a href="16.html">第16章 连接状态机：drive_machine详解</a></li>
+            <li><a href="17.html">第17章 多线程模型：Master-Worker架构</a></li>
+            <li><a href="18.html">第18章 并发控制：锁策略与无锁设计</a></li>
+            <li><a href="19.html">第19章 ASCII协议：proto_text详解</a></li>
+            <li><a href="20.html">第20章 二进制协议：proto_bin详解</a></li>
+            <li><a href="21.html">第21章 Meta Protocol：新一代协议</a></li>
+            <li><a href="22.html">第22章 External Storage：混合存储</a></li>
+            <li><a href="23.html">第23章 Built-in Proxy：Lua路由</a></li>
+            <li><a href="24.html">第24章 测试体系：t目录与测试框架</a></li>
+            <li><a href="25.html">第25章 性能调优与生产踩坑</a></li>
+            <li><a href="26.html">第26章 Memcached vs Redis/Valkey源码对比</a></li>
+            <li><a href="27.html">第27章 Memcached的未来与社区生态</a></li>
+            <li><a href="28.html">第28章 综合项目：手写Mini-Memcached</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+        <h1>第5章 配置系统：settings与命令行</h1>
+
+        <p>大家好，我是你们的讲师。上一章我们走了一遍 <code>main()</code> 函数的启动流程，其中一半的代码都在做一件事：解析配置。这一章我们就来深入剖析 Memcached 的配置系统——从 <code>struct settings</code> 的结构体定义，到命令行参数的解析逻辑，再到 <code>-o</code> 扩展选项的设计思路。</p>
+
+        <p>你可能觉得"配置系统有什么好看的？不就是解析一下参数吗？"——其实不然。Memcached 的配置系统有几个很好的设计点：一是所有配置集中在一个结构体中，清晰易查；二是 <code>growth_factor</code> 这样的参数直接影响内存布局，错误的配置可能导致严重的性能灾难；三是 <code>-o</code> 扩展选项的设计给了新特性一个"不破坏现有命令行接口"的接入方式。好，我们从结构体开始。</p>
+
+        <h2>struct settings：30+ 字段全解</h2>
+
+        <p><code>struct settings</code> 定义在 <code>memcached.h</code> 中，是整个系统配置的中枢。下面我把核心字段按功能分类逐一说明：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>分类</th>
+                    <th>字段名</th>
+                    <th>默认值</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td rowspan="3">内存</td>
+                    <td><code>maxbytes</code></td>
+                    <td>64 * 1024 * 1024</td>
+                    <td>最大可用内存（字节），对应 <code>-m</code></td>
+                </tr>
+                <tr>
+                    <td><code>chunk_size</code></td>
+                    <td>48</td>
+                    <td>最小 chunk 大小（字节），对应 <code>-n</code></td>
+                </tr>
+                <tr>
+                    <td><code>growth_factor</code></td>
+                    <td>1.25</td>
+                    <td>相邻 slab class 之间的尺寸增长因子，对应 <code>-f</code></td>
+                </tr>
+                <tr>
+                    <td rowspan="3">网络</td>
+                    <td><code>port</code></td>
+                    <td>11211</td>
+                    <td>TCP 监听端口，对应 <code>-p</code></td>
+                </tr>
+                <tr>
+                    <td><code>udpport</code></td>
+                    <td>11211</td>
+                    <td>UDP 监听端口，对应 <code>-U</code></td>
+                </tr>
+                <tr>
+                    <td><code>backlog</code></td>
+                    <td>1024</td>
+                    <td>listen 的 backlog 大小</td>
+                </tr>
+                <tr>
+                    <td rowspan="3">并发</td>
+                    <td><code>maxconns</code></td>
+                    <td>1024</td>
+                    <td>最大并发连接数，对应 <code>-c</code></td>
+                </tr>
+                <tr>
+                    <td><code>num_threads</code></td>
+                    <td>4</td>
+                    <td>worker 线程数，对应 <code>-t</code>（建议 <= CPU 核数）</td>
+                </tr>
+                <tr>
+                    <td><code>maxconns_fast</code></td>
+                    <td>0</td>
+                    <td>超过最大连接后是否立即关闭新连接</td>
+                </tr>
+                <tr>
+                    <td rowspan="3">淘汰</td>
+                    <td><code>evict_to_free</code></td>
+                    <td>1</td>
+                    <td>内存不足时是否允许淘汰旧数据</td>
+                </tr>
+                <tr>
+                    <td><code>lru_crawler</code></td>
+                    <td>0</td>
+                    <td>是否启用 LRU 爬虫线程</td>
+                </tr>
+                <tr>
+                    <td><code>lru_maintainer</code></td>
+                    <td>0</td>
+                    <td>是否启用 LRU 维护线程（热点/冷热分离）</td>
+                </tr>
+                <tr>
+                    <td rowspan="3">日志</td>
+                    <td><code>verbose</code></td>
+                    <td>0</td>
+                    <td>日志级别（0=无, 1=-v, 2=-vv, 3=-vvv）</td>
+                </tr>
+                <tr>
+                    <td><code>log_file</code></td>
+                    <td>NULL</td>
+                    <td>日志文件路径，对应 <code>-o log_file=</code></td>
+                </tr>
+                <tr>
+                    <td><code>logger_watcher_buf_size</code></td>
+                    <td>512 * 1024</td>
+                    <td>日志 watcher 缓冲区大小</td>
+                </tr>
+                <tr>
+                    <td rowspan="3">扩展</td>
+                    <td><code>ext_page_size</code></td>
+                    <td>0</td>
+                    <td>extstore page 大小（启用 extstore 后生效）</td>
+                </tr>
+                <tr>
+                    <td><code>ext_wbuf_size</code></td>
+                    <td>0</td>
+                    <td>extstore 写缓冲区大小</td>
+                </tr>
+                <tr>
+                    <td><code>slab_automove</code></td>
+                    <td>0</td>
+                    <td>是否自动进行 slab rebalance</td>
+                </tr>
+                <tr>
+                    <td rowspan="2">安全</td>
+                    <td><code>sasl</code></td>
+                    <td>0</td>
+                    <td>是否启用 SASL 认证</td>
+                </tr>
+                <tr>
+                    <td><code>enable_seccomp</code></td>
+                    <td>0</td>
+                    <td>是否启用 seccomp 沙箱</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>这个结构体在 1.6.41 版本中一共有 30+ 个字段。我没有全部罗列在上面——有些是遗留配置（如 <code>binding_protocol</code>），有些是内部维护用的计数器，读者不需要全部记住。重点记住内存、并发、淘汰三组字段即可，它们是对系统行为影响最大的。</p>
+
+        <h2>growth_factor 的数学推导</h2>
+
+        <p><code>growth_factor</code>（简称 <code>factor</code>）是 Memcached 最重要的配置之一，没有"之一"。它决定了各个 slab class 的 chunk 大小如何增长。假设最小 chunk 为 <code>C0 = 48</code>（<code>settings.chunk_size</code>），增长因子为 <code>f = 1.25</code>，则第 <code>i</code> 个 slab class 的 chunk 大小为：</p>
+
+        <pre><code>chunk_size[i] = C0 * f^i    (i = 0, 1, 2, ..., 63)
+
+代入数值:
+class 0: 48
+class 1: 48 * 1.25 = 60
+class 2: 48 * 1.25^2 = 75
+class 3: 48 * 1.25^3 = 93
+...
+class 63: 48 * 1.25^63 ≈ 137,438,953  → 约 131MB</code></pre>
+
+        <p>这里的关键问题是：<strong>当存储一个 80 字节的 Item 时，它会被分配到哪个 class？</strong></p>
+
+        <p>Memcached 的查找算法是 <code>slabs_clsid()</code>：</p>
+
+        <pre><code>unsigned int slabs_clsid(const size_t size) {
+    int res = POWER_SLAB_START;  // 通常为 1（跳过 class 0）
+    // 从 class 1 开始查找，找到第一个 chunk_size >= size 的 class
+    if (size == 0) return 0;
+    while (size > slabclass[res].size) {
+        if (res++ == power_largest) return 0;
+    }
+    return res;
+}</code></pre>
+
+        <p>80 字节的 Item 会落到 class 2（chunk_size = 93），但实际只用了 80 字节，浪费了 13 字节（约 14%）。这就是内部碎片——每个 chunk 内部的未使用空间。不同的 growth_factor 会直接影响内部碎片的比例：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>growth_factor</th>
+                    <th>slab class 数量</th>
+                    <th>最大 chunk（字节）</th>
+                    <th>最坏情况内部碎片</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>1.10</td>
+                    <td>63</td>
+                    <td>~1.6M</td>
+                    <td>~9%</td>
+                    <td>Value 大小差异小</td>
+                </tr>
+                <tr>
+                    <td>1.25</td>
+                    <td>48</td>
+                    <td>~131M</td>
+                    <td>~20%</td>
+                    <td>通用推荐（默认）</td>
+                </tr>
+                <tr>
+                    <td>1.50</td>
+                    <td>32</td>
+                    <td>~24G</td>
+                    <td>~33%</td>
+                    <td>Value 大小差异很大</td>
+                </tr>
+                <tr>
+                    <td>2.00</td>
+                    <td>24</td>
+                    <td>~402G</td>
+                    <td>~50%</td>
+                    <td>不推荐（碎片太多）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p><code>growth_factor = 1.25</code> 是官方推荐的默认值：它在 slab class 数量（覆盖能力）和内部碎片（内存利用率）之间取得了良好的平衡。如果你的业务中 value 大小分布非常集中（比如大多在 100-200 字节），可以尝试降低 factor 来减少碎片。反之，如果 value 从几十字节到几十 KB 都有，保持默认即可。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我曾经见过一个运维同事把 <code>growth_factor</code> 设成了 1.01——他认为"越精细的内存分配越省内存"。结果呢？slab class 数量直接达到了上限 63 个，每个 class 能分到的 page 数量极少，导致频繁的 slab rebalance，性能反而下降了 30%。而且由于 class 太多，LRU 链表被切割得过于细碎，热点数据命中率也大幅下降。<strong>growth_factor 不是越小越好</strong>，它是一个需要综合考虑的工程参数。
+        </div>
+
+        <h2>-o 扩展选项</h2>
+
+        <p>随着 Memcached 功能不断增多，简单的单字母参数已经不够用了。<code>-o</code> 选项支持用逗号分隔的 <code>key=value</code> 形式来传递扩展配置：</p>
+
+        <pre><code>memcached -o "modern,lru_crawler,slab_automove=2,ext_page_size=65536"</code></pre>
+
+        <p><code>-o</code> 选项的解析逻辑在 <code>main()</code> 中的 <code>subopts</code> 分支：</p>
+
+        <pre><code>case 'o':
+    subopts = optarg;
+    while (*subopts != '\0') {
+        switch (getsubopt(&subopts, tokens, &value)) {
+            case SUBOPT_MODERN:
+                settings.modern = true;
+                break;
+            case SUBOPT_SLAB_AUTOMOVE:
+                settings.slab_automove = atoi(value);
+                break;
+            case SUBOPT_LRU_CRAWLER:
+                settings.lru_crawler = true;
+                break;
+            case SUBOPT_EXT_PAGE_SIZE:
+                settings.ext_page_size = atoi(value);
+                break;
+            // ...
+        }
+    }
+    break;</code></pre>
+
+        <p>常用的 <code>-o</code> 扩展选项包括：</p>
+
+        <ul>
+            <li><code>modern</code> —— 启用现代模式（同时开启 LRU maintainer、slab automove 等推荐功能，是一组"一键优化"配置）</li>
+            <li><code>slab_automove=N</code> —— 设置 slab 自动迁移的策略（0=关闭, 1=温和, 2=积极）</li>
+            <li><code>lru_crawler</code> —— 启用 LRU 爬虫</li>
+            <li><code>lru_maintainer</code> —— 启用 LRU 维护线程</li>
+            <li><code>log_file=PATH</code> —— 日志文件路径</li>
+            <li><code>config_file=PATH</code> —— 配置文件路径</li>
+            <li><code>ext_page_size=N</code> —— extstore page 大小</li>
+        </ul>
+
+        <h2>配置文件与环境变量</h2>
+
+        <p>除了命令行参数，Memcached 还支持从配置文件中读取设置。配置文件路径默认为 <code>/etc/memcached.conf</code>，可以通过 <code>-o config_file=</code> 指定：</p>
+
+        <pre><code># /etc/memcached.conf 示例
+-m 2048
+-p 11211
+-t 8
+-c 4096
+-o modern,lru_crawler,slab_automove=1</code></pre>
+
+        <p>配置文件的解析逻辑在 <code>save_line()</code> 函数中——它会读取文件的每一行，忽略以 <code>#</code> 开头的注释行，然后将每行内容当作命令行参数来解析。这意味着配置文件中的语法和命令行完全一致。</p>
+
+        <p>此外，1.6 版本还增加了环境变量的支持。所有配置项都可以通过 <code>MEMCACHED_*</code> 环境变量来覆盖：</p>
+
+        <pre><code>export MEMCACHED_PORT=11211
+export MEMCACHED_MAX_MEMORY=2048
+export MEMCACHED_THREADS=8
+memcached</code></pre>
+
+        <p>环境变量的优先级最低：命令行参数 > 配置文件 > 环境变量 > 默认值。这个优先级设计是合理的——环境变量适合在容器化场景（Docker/K8s）中注入配置，命令行参数适合手动调试。</p>
+
+        <div class="highlight">
+            <strong>源码位置提示：</strong>环境变量解析的代码位于 <code>memcached.c</code> 的 <code>main()</code> 函数中，在 <code>settings_init()</code> 之后、<code>getopt</code> 之前。它的实现方式是调用 <code>getenv()</code> 逐个检查环境变量，如果存在则覆盖 settings 中的对应字段。代码非常直白，建议你自己看一下。
+        </div>
+
+        <h2>配置系统的设计启示</h2>
+
+        <p>回顾 Memcached 的配置系统，有几点设计思路值得学习：</p>
+
+        <ul>
+            <li><strong>单一事实来源</strong>：所有配置集中在一个结构体中，没有分散在各模块的自定义配置。这让代码的可维护性大大提高——想看某个配置的作用，只需查 <code>struct settings</code> 的定义和它的引用点。</li>
+            <li><strong>分层覆盖</strong>：默认值 → 环境变量 → 配置文件 → 命令行参数，形成一个清晰的优先级链路。每一层只覆盖不需要默认值的字段，保持配置的"增量"性质。</li>
+            <li><strong>向后兼容</strong>：<code>-o</code> 扩展选项的引入使得 Memcached 可以在不破坏现有命令行接口的前提下，不断添加新功能。老用户继续用 <code>-m -p</code> 不会受影响，新用户可以用 <code>-o modern</code> 一键启用推荐配置。</li>
+        </ul>
+
+        <p>下一章，我们会从配置系统转向另一个重要的基础设施——日志与统计系统。你会看到 Memcached 如何用环形缓冲区实现高性能日志记录，以及 stats 命令背后的统计收集机制。我们第 6 章见。</p>
+
+        <div class="footer-nav">
+            <a href="04.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="06.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

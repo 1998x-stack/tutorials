@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第12章 Sub-Agent 架构分析</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html" class="active">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第12章 Sub-Agent 架构分析</h2>
+
+        <p>大家好，我是你们的讲师。前几章我们构建的 v2 Agent 已经能"单打独斗"了——它有引擎、有计划、有上下文管理。但现实世界中的软件开发从来不是一个人的战斗。当任务大到一定程度，单 Agent 的局限性就会暴露无遗：上下文污染、串行执行、注意力分散。这一章我们来分析 Claude Code 如何解决这些问题——答案就在 <strong>Sub-Agent 架构</strong>中。</p>
+
+        <p>2025 年中期，Anthropic 的研究员在一次技术分享中讲了一个有意思的案例。他们让一个单 Agent 去重构一个包含 200 多个文件的项目。Agent 工作了 45 分钟，表现已经很不错了——但跟踪数据显示，在第 20 分钟之后，Agent 的决策质量开始明显下降。它开始在已经改过的文件上做重复修改，偶尔会把自己之前的修改又改回去。不是模型能力不够，是<strong>它脑子里装了太多东西</strong>——从第 1 分钟到第 45 分钟的所有工具调用、文件内容、错误信息全部挤在同一个上下文里。这就是"上下文污染"。</p>
+
+        <p>解决方案其实很朴素：<strong>如果一个人干不了，就分给多个人干</strong>。在 Agent 的世界里，这个"分"的机制就是 Sub-Agent。</p>
+
+        <h3>为什么需要 Sub-Agent</h3>
+
+        <p>单 Agent 架构有三个根本性的问题：</p>
+
+        <p><strong>1. 上下文污染</strong>——每个工具调用的输入输出都塞进同一个消息队列。读取大文件的内容、Shell 命令的完整输出、失败的尝试和重试——所有这些"脏数据"都留在上下文中，稀释了对当前真正重要信息的注意力。</p>
+
+        <p><strong>2. 串行执行</strong>——单 Agent 一次只能做一件事。在做任务 A 的时候，即使它在等待任务 A 的某个 API 响应，也无法同时推进任务 B。在"读取文件 → 分析 → 写代码 → 测试"这个串行流程中，所有的时间都浪费在 AI 的思考延迟和 API 往返上了。</p>
+
+        <p><strong>3. 缺乏特化</strong>——同一个系统提示词、同一套工具集，要同时做好"探索代码库"、"实现新功能"、"编写测试"和"审查代码质量"——这些任务需要的思维模式和工具使用习惯完全不同。一个提示词不可能对所有这些任务都是最优的。</p>
+
+        <p>Sub-Agent 架构用一个类比就很好理解：<strong>就像资深工程师把任务分给初级工程师</strong>。资深工程师（主 Agent）制定计划、分配任务、验收成果；初级工程师（Sub-Agent）专注于执行具体任务，完成后只汇报结果。初级工程师的所有"脏活累活"——读代码时的错误尝试、查文档时的死胡同——都不会污染资深工程师的注意力。</p>
+
+        <h3>AgentTool 的源码机制</h3>
+
+        <p>在 Claude Code 中，Sub-Agent 的创建是通过一个特殊的工具——<strong>AgentTool</strong>——来完成的。这个工具的定义非常简洁，但背后的机制极为精妙。</p>
+
+        <p>AgentTool 的核心流程：</p>
+
+        <pre><code># AgentTool 的分发逻辑（伪代码）
+async def handle_agent_tool(task: dict, context: AgentContext) -> str:
+    # 1. Fork：创建干净的上下文
+    sub_messages = [
+        {"role": "system", "content": build_sub_agent_prompt(
+            task_description=task["description"],
+            task_type=task.get("type", "general"),
+            allowed_tools=task.get("allowed_tools", context.tools)
+        )},
+        {"role": "user", "content": task["description"]}
+    ]
+
+    # 2. 注入任务特定的配置
+    sub_options = QueryOptions(
+        max_turns=task.get("max_turns", DEFAULT_MAX_TURNS),
+        model=task.get("model", context.model),
+        system_prompt=build_sub_agent_prompt(...)
+    )
+
+    # 3. 运行独立的 queryLoop
+    # 注意：sub-agent 使用全新消息队列，
+    # 完全独立于主 agent 的上下文
+    sub_agent = SubAgent(
+        messages=sub_messages,
+        tools=task.get("allowed_tools", context.tools),
+        options=sub_options
+    )
+    result = await sub_agent.run()
+
+    # 4. 回收结果：只保留最终文本结果
+    return format_result(result)</code></pre>
+
+        <p>关键点在第 1 步：<strong>fork</strong>。Sub-Agent 启动时接收的是一个全新的、空的消息列表（只包含系统提示词和任务描述）。主 Agent 之前的所有对话历史——所有的读文件结果、查到的信息、犯过的错误——Sub-Agent 一概不知。它只知道自己被分配了什么任务、可以使用什么工具。这种"干净启动"是隔离上下文污染的第一道防线。</p>
+
+        <h3>脏上下文隔离策略</h3>
+
+        <p>"脏上下文"（dirty context）指的是 Sub-Agent 在执行过程中产生的所有中间状态——读文件失败后的重试、找函数定义时的多次尝试、调试时的错误命令输出、途中生成的 Todo 条目。这些内容对 Sub-Agent 自己完成任务是必要的，但对主 Agent 来说是噪音。</p>
+
+        <p>Claude Code 的隔离策略非常简单但有效：<strong>执行完成后，丢弃 Sub-Agent 的完整对话历史，只保留最终结果</strong>。</p>
+
+        <p>对比两种策略：</p>
+        <pre><code># ❌ 策略 A：保留完整子对话
+# 主 Agent 上下文被 Sub-Agent 的所有操作污染
+[
+    {"role": "user", "content": "分析 auth 模块的安全漏洞"},
+    {"role": "assistant", "content": "让我用 Sub-Agent 来深入分析..."},
+    {"role": "user", "content": "[Sub-Agent] Read: auth/login.py → 524 lines"},
+    {"role": "user", "content": "[Sub-Agent] Read: auth/oauth.py → 382 lines"},
+    {"role": "user", "content": "[Sub-Agent] Shell: pip install bandit → OK"},
+    {"role": "user", "content": "[Sub-Agent] Shell: bandit -r auth/ → found 3 issues"},
+    {"role": "user", "content": "[Sub-Agent] 分析结果: 3个安全漏洞..."},
+    # 主 Agent 的上下文已经被 7 条子代理消息填充！
+]
+
+# ✅ 策略 B：只保留摘要结果
+# 主 Agent 上下文保持干净
+[
+    {"role": "user", "content": "分析 auth 模块的安全漏洞"},
+    {"role": "assistant", "content": "让我用 Sub-Agent 来深入分析..."},
+    {"role": "user", "content": "[Sub-Agent 报告] 发现 auth 模块存在 3 个安全漏洞：
+        1. SQL 注入风险 in login.py:45
+        2. OAuth redirect URL 未验证 in oauth.py:102
+        3. Session 超时未设置 in session.py:28"},
+    # 只有 1 条摘要消息！
+]</code></pre>
+
+        <p>策略 A 下，一次 Sub-Agent 调用就增加了 7 条消息到主上下文，如果多次调用，主上下文会迅速膨胀。策略 B 下，无论 Sub-Agent 做了多少操作，最终都只浓缩为一条摘要消息。这不仅仅是消息数量的减少——更重要的是，<strong>主 Agent 的注意力不会被"读中间文件"这种细节分散</strong>。</p>
+
+        <h3>结果回收与摘要</h3>
+
+        <p>Sub-Agent 返回的结果是一个 <code>ResultMessage</code>。如果结果很短（比如 "分析完成，发现 3 个漏洞"），直接注入主上下文。但如果结果很长（比如一份 5000 字的架构分析报告），它会被进一步摘要后再注入。</p>
+
+        <pre><code>async def collect_sub_agent_result(sub_result: SubAgentResult,
+                                    max_direct_tokens: int = 2000) -> str:
+    """回收 Sub-Agent 结果，必要时摘要"""
+    content = sub_result.content
+
+    if count_tokens(content) <= max_direct_tokens:
+        return content  # 足够短，直接使用
+
+    # 太长，需要摘要
+    summary = await llm_call(
+        model="claude-haiku-3-5-20251022",
+        messages=[{
+            "role": "user",
+            "content": f"请将以下 Agent 工作结果摘要为 3-5 句话，"
+                       f"保留所有具体的技术结论和数据：\n\n{content}"
+        }],
+        max_tokens=500
+    )
+    return f"[Sub-Agent 摘要] {summary.content}"</code></pre>
+
+        <p>这个"回收-摘要"机制在上下文预算和信息的完整性之间做了精妙的平衡。短结果直接使用（节省一次模型调用和摘要延迟），长结果才摘要（节省上下文预算，但付出额外延迟）。</p>
+
+        <h3>6 种内置 TaskType 谱系</h3>
+
+        <p>不是所有的 Sub-Agent 任务都一样。Claude Code 定义了 6 种内置的 TaskType，每种有不同的工具权限、最大 turn 数和系统提示词前缀。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>TaskType</th>
+                    <th>用途</th>
+                    <th>允许的工具</th>
+                    <th>max_turns</th>
+                    <th>提示词特点</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>Explore</code></td>
+                    <td>探索代码库、查找信息</td>
+                    <td>Read, Grep, ListFiles, WebSearch</td>
+                    <td>15</td>
+                    <td>强调"理解和发现，不修改任何文件"</td>
+                </tr>
+                <tr>
+                    <td><code>Plan</code></td>
+                    <td>制定实现计划</td>
+                    <td>Read, Grep, TodoWrite, WebSearch</td>
+                    <td>10</td>
+                    <td>强调"输出结构化计划，不要执行"</td>
+                </tr>
+                <tr>
+                    <td><code>Implement</code></td>
+                    <td>实现功能或修复</td>
+                    <td>Read, Write, Edit, Bash, TodoWrite</td>
+                    <td>25</td>
+                    <td>强调"按计划执行，写代码并验证"</td>
+                </tr>
+                <tr>
+                    <td><code>Review</code></td>
+                    <td>代码审查</td>
+                    <td>Read, Grep</td>
+                    <td>10</td>
+                    <td>强调"只读不写，关注安全性、性能、可维护性"</td>
+                </tr>
+                <tr>
+                    <td><code>Fix</code></td>
+                    <td>定向修复已知问题</td>
+                    <td>Read, Edit, Bash</td>
+                    <td>20</td>
+                    <td>强调"精确修复，不要引入不必要的变更"</td>
+                </tr>
+                <tr>
+                    <td><code>General</code></td>
+                    <td>通用任务</td>
+                    <td>全部</td>
+                    <td>15</td>
+                    <td>标准系统提示词</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>每个 TaskType 的提示词前缀都不同。比如 Explore 的提示词包含 "You are an explorer. Do NOT modify any files. Your goal is to understand and report." 而 Implement 的提示词包含 "You are an implementer. Write clean, tested code following the plan."——同样的模型在做不同类型的任务时，会被"角色设定"引导到不同的行为模式上。</p>
+
+        <h3>Sub-Agent 通信模式</h3>
+
+        <p>主 Agent 和 Sub-Agent 之间有三种通信模式：</p>
+
+        <p><strong>1. 单向委托（Fire and Forget）</strong>——主 Agent 启动 Sub-Agent 后不等待结果，继续自己的其他工作。Sub-Agent 完成后将结果存储在共享位置。适用于后台分析、日志扫描等不需要立即响应的任务。</p>
+
+        <p><strong>2. 请求-响应（Request-Response）</strong>——主 Agent 启动 Sub-Agent 并等待结果，期间主 Agent 暂停。这是最常见的模式，适用于大多数需要Sub-Agent完成才能继续的任务。</p>
+
+        <p><strong>3. 结构化交接（Structured Handoff）</strong>——主 Agent 不仅传递任务描述，还传递结构化的数据和指令上下文。Sub-Agent 完成后也可以回传结构化数据。适用于"读取文件 X → 分析模式 → 生成代码"这种需要传递中间产物的场景。</p>
+
+        <p>此外，Claude Code 还有一个 <strong>SendMessageTool</strong> 允许 Sub-Agent 在执行过程中向主 Agent 发送消息——比如 "我遇到了一个意外的依赖冲突，需要你决定怎么处理"。这让通信变成双向的，而不是单向的汇报。</p>
+
+        <div class="highlight">
+            <strong>Sub-Agent 是 Claude Code 最被低估的设计——它用最简单的 fork 机制，解决了 AI Agent 最难的上下文污染问题。</strong>
+        </div>
+
+        <p>理解了 Sub-Agent 的架构原理，下一章我们就要动手实现一个自己的 Sub-Agent 系统——包括上下文隔离、并行调度、结果回收，然后把它们集成到我们不断增长的 Agent 中。准备好写代码了吗？</p>
+
+        <div class="footer-nav">
+            <a href="11.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="13.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

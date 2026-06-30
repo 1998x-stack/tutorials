@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第8章 QueryEngine 主循环源码拆解</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html" class="active">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第8章 QueryEngine 主循环源码拆解</h2>
+
+        <p>大家好，我是你们的讲师。在前七章中，我们从零搭建了一个最简 Agent Loop，实现了四件套工具，也深入理解了 System Prompt 工程的精妙之处。但说句实话——我们目前实现的 Agent 和 Claude Code 之间还隔着一道鸿沟。这道鸿沟的名字叫 <strong>QueryEngine</strong>。</p>
+
+        <p>2025 年 Claude Code 刚发布时，很多开发者尝试复刻它的功能。大家都盯着"模型调用"那几十行代码，做出来的 Agent 却总是卡在各种奇怪的地方——API 返回 400 错误因为消息顺序乱了，Agent 跑着跑着自己停了因为 turn 数没算对，或者 Token 突然超限因为上下文越积越多。后来社区拿到了泄漏的源代码，才发现真正的秘密不在 <code>model.generate()</code>，而在那个叫 <code>queryLoop</code> 的函数里。它是一个独立的引擎，复杂程度远超大多数人的想象。</p>
+
+        <p>queryLoop 是整个系统的心脏。它不是简单的"调用-返回"，而是一个复杂的异步生成器（async generator），它负责消息队列管理、turn 计数、stop_reason 状态机流转、流式输出分发、错误恢复——所有这些加起来，才构成了能让模型稳定工作数十分钟而不出错的引擎。本章我们就来深入拆解这个引擎的核心机制。</p>
+
+        <h3>queryLoop 的签名与职责</h3>
+
+        <p>queryLoop 不是一个普通的函数——它被设计为一个异步生成器。这个选择本身就蕴含了深刻的设计思考。来看它的简化签名：</p>
+
+        <pre><code>async def query_loop(
+    messages: list[Message],
+    tools: list[Tool],
+    options: QueryOptions,
+) -> AsyncGenerator[AssistantMessage | ResultMessage | SystemMessage, None]:</code></pre>
+
+        <p>输入是消息列表、工具定义和配置选项，输出是一个异步流——逐条 yield 模型回复的消息。为什么不是直接返回一个列表？因为流式输出需要实时将 token 推送给 CLI、日志、IDE 等多个消费者，等到全部生成完再返回不符合交互直觉。</p>
+
+        <p>queryLoop 扛起了五个核心职责：</p>
+
+        <ol>
+            <li><strong>消息排序与管理</strong>——确保消息以正确的顺序追加到上下文中，严格遵守 API 协议要求</li>
+            <li><strong>Turn 计数</strong>——跟踪 API 调用次数，防止无限循环消耗预算</li>
+            <li><strong>Stop Reason 处理</strong>——根据模型返回的 stop_reason 决定下一步行动</li>
+            <li><strong>流式分发</strong>——将输出广播到多个消费者（CLI、日志、IDE 插件）</li>
+            <li><strong>错误恢复</strong>——处理 API 错误、超时、速率限制等异常情况</li>
+        </ol>
+
+        <p>这五个职责相互交织。处理 stop_reason 时需要知道当前 turn 数是否已达上限；流式分发时又需要同步更新消息队列。queryLoop 的巧妙之处，就在于把这些看似独立的关注点统一到了一个异步生成器的生命周期中。</p>
+
+        <h3>消息队列管理：追加顺序的陷阱</h3>
+
+        <p>Claude API 对消息队列有一个严格的顺序要求，违反它就会收到 400 错误。这个规则可以概括为一条：<strong>Tool Use 和 Tool Result 必须成对出现，且严格按照调用顺序交替</strong>。</p>
+
+        <pre><code># 正确的消息追加顺序
+user: "请读一下 config.json"
+assistant: [tool_use: read_file]        # 模型决定读文件
+user: [tool_result: {content: "..."}]   # 工具执行结果
+assistant: "配置内容是..."               # 模型基于结果继续
+
+# 错误的顺序 —— 缺少 tool_result
+user: "请读一下 config.json"
+assistant: [tool_use: read_file]
+assistant: "配置内容是..."               # API 400 错误！
+# 原因：tool_use 后必须立即跟 tool_result</code></pre>
+
+        <p>这个规则看似简单，但实际实现中极容易出错。最常见的 bug 是：当同时调用多个工具（并行执行）时，开发者忘记确保每个 <code>tool_use</code> 都有对应的 <code>tool_result</code>，而且结果必须严格按照 tool_use 出现的顺序排列。如果顺序乱了——比如工具 B 执行快先返回，工具 A 执行慢后返回——直接按返回顺序追加就会导致 API 报错。</p>
+
+        <p>Claude Code 内部使用了一个 <code>MessageQueue</code> 类来强制顺序约束。每次追加消息前都会校验：如果最后一条消息包含 <code>tool_use</code>，下一条必须是 <code>tool_result</code>；反之亦然。违反规则的操作会被直接拒绝并抛出清晰的错误。换句话说，这个队列层确保了不管底层工具如何并发，发给 API 的消息永远是"规整"的。</p>
+
+        <h3>Turn 计数与退出条件</h3>
+
+        <p>每个 Agent 都需要一个"刹车"——防止它在无限循环中消耗你的 API 预算。这个刹车就是 <strong>max_turns</strong>。</p>
+
+        <p>但"一次 Turn"的定义并不像表面那么简单。在 Claude Code 中，一个 turn 和一次 API 调用并不严格等同。以下是 turn 的计数规则：</p>
+
+        <ul>
+            <li><strong>普通交互</strong>：模型返回 tool_use，工具执行，结果送回模型，计为 1 turn</li>
+            <li><strong>错误重试</strong>：工具执行失败，模型收到错误信息后重新尝试，这仍然计为 1 个新 turn</li>
+            <li><strong>不计数的操作</strong>：后台上下文压缩（compaction）、系统消息注入、权限确认提示等 Harness 内部操作不计入 turn</li>
+            <li><strong>Auto-turn</strong>：当模型返回 end_turn 但任务明显未完成时，Harness 在某些策略下会自动发起新的 turn</li>
+        </ul>
+
+        <p>当 max_turns 接近极限时，Claude Code 有两种处理模式：</p>
+        <ul>
+            <li><strong>优雅降级</strong>：在达到限制前 5 轮通知模型："你还剩 X 次操作，请尽快完成当前任务"——模型会主动调整策略，优先完成剩余工作</li>
+            <li><strong>硬停止</strong>：达到限制后直接终止循环，返回已收集的结果，不再浪费额外 token</li>
+        </ul>
+
+        <p>默认配置下 max_turns 设置为 50。这个数字不是拍脑袋定的——它是经过大量真实开发任务测试得出的平衡值：既能应对"从零搭建一个微服务"这种复杂场景，又不至于让 API 账单失控。</p>
+
+        <h3>stop_reason 枚举与状态机</h3>
+
+        <p>每次 API 返回的响应中都包含一个 <code>stop_reason</code> 字段。这个枚举值决定了 queryLoop 下一步该做什么，可以说是整个循环的"方向盘"。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>stop_reason</th>
+                    <th>含义</th>
+                    <th>queryLoop 响应</th>
+                    <th>典型场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>end_turn</code></td>
+                    <td>模型主动结束本轮回复</td>
+                    <td>检查任务是否完成；若完成则结束循环，否则继续引导</td>
+                    <td>模型说"所有修改已完成"</td>
+                </tr>
+                <tr>
+                    <td><code>tool_use</code></td>
+                    <td>模型请求调用工具</td>
+                    <td>解析参数 → 分发执行 → 注入结果 → 继续循环</td>
+                    <td>模型调用 Read/Write/Edit</td>
+                </tr>
+                <tr>
+                    <td><code>max_tokens</code></td>
+                    <td>回复在达到 token 上限时被截断</td>
+                    <td>触发上下文压缩或自动继续</td>
+                    <td>生成长篇技术文档时截断</td>
+                </tr>
+                <tr>
+                    <td><code>stop_sequence</code></td>
+                    <td>命中了自定义停止序列</td>
+                    <td>类似 end_turn 处理</td>
+                    <td>代码块结束标记</td>
+                </tr>
+                <tr>
+                    <td><code>refusal</code></td>
+                    <td>模型拒绝执行请求</td>
+                    <td>记录拒绝原因，向用户报告，终止当前分支</td>
+                    <td>拒绝执行危险 shell 命令</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>queryLoop 内部维护了一个简洁的状态机来处理这些 stop_reason：</p>
+
+        <pre><code>state_machine = {
+    "tool_use":     → "dispatch_tool"     → "continue_loop"
+    "end_turn":     → "check_completion"  → "continue_or_finish"
+    "max_tokens":   → "compact_or_continue" → "continue_loop"
+    "refusal":      → "handle_rejection" → "report_to_user"
+    "stop_sequence":→ "check_completion"  → "continue_or_finish"
+}</code></pre>
+
+        <p>这个状态机看似简单，但每个转换背后都有复杂的逻辑。比如 <code>compact_or_continue</code> 分支需要判断当前上下文是否超过预算、是否需要进行压缩、压缩后是否需要重放之前的请求——这些都是确保长时间稳定运行的关键。</p>
+
+        <h3>源码中的踩坑点</h3>
+
+        <p>在阅读 queryLoop 的实现时，有几个细节曾经让我困惑了很久。这里分享四个最容易踩坑的地方。</p>
+
+        <p><strong>1. tool_use 的 null input</strong>：某些情况下，模型会发出一个 input 为 <code>null</code> 的 tool_use 块。比如 <code>{"type": "tool_use", "name": "Read", "input": null}</code>。这是因为模型在流式生成过程中"思维"中断了——它决定调用工具但还没想好参数。queryLoop 必须优雅地处理这种情况：跳过 null input 的 tool_use 块，不执行工具，不报错，继续流程。</p>
+
+        <p><strong>2. 空的 content 数组</strong>：模型偶尔会返回空的 <code>content: []</code>。在大部分框架中这会导致崩溃。queryLoop 的处理：检查 content 是否为空，如果是，生成一个占位符消息继续。</p>
+
+        <p><strong>3. 并发工具执行的竞态条件</strong>：模型同时调用多个工具时，工具的执行是并发的。但结果必须按原始 tool_use 顺序排列再追加。queryLoop 使用 <code>tool_use_id</code> 追踪机制确保排序正确，而不是依赖返回顺序。</p>
+
+        <p><strong>4. 空 Assistant 消息</strong>：极端情况下（网络抖动、API 超时），模型可能返回一条无任何内容的消息。queryLoop 会检测到并重试（最多 3 次），而非直接崩溃——这个重试逻辑是生产环境稳定性的关键保障。</p>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我第一次实现 queryLoop 时就遇到了"空 tool_use"的坑。我的 Agent 运行到第 12 轮时突然抛出 <code>TypeError: Cannot read properties of null</code>，排查了一整个下午才发现是模型在某个窗口边缘状态下生成了一个 input 为 null 的 tool_use 块。解决方案只有一行 <code>if block.input is None: continue</code>，但找这一行的过程足足花了 6 个小时。这个教训告诉我：<strong>在生产级 Agent 中，每一行看似"不可能发生"的边缘情况处理，都对应着一个被坑过的真实故事。</strong>
+        </div>
+
+        <h3>异步生成器的流控设计</h3>
+
+        <p>设计 queryLoop 时，开发者面临一个核心选择：<strong>应该用什么方式暴露模型输出？</strong></p>
+
+        <p>三种常见方案各有优劣：</p>
+        <ul>
+            <li><strong>Callback</strong>：注册回调函数，每次有新消息就调用——但回调在异步场景中容易导致"回调地狱"，且错误处理困难</li>
+            <li><strong>Promise Chain</strong>：用 Promise 串联每一步——但无法实现优雅取消和背压控制</li>
+            <li><strong>Async Generator</strong>：用 <code>async for</code> 消费流——优雅、可取消、自带背压</li>
+        </ul>
+
+        <p>Claude Code 选择 async generator 主要基于三个考量：</p>
+
+        <p><strong>背压处理（Backpressure）</strong>：当生成速度超过消费速度时，async generator 天然支持背压——<code>yield</code> 会暂停执行直到消费者准备好。如果用 callback，消费者来不及处理的消息会堆积在内存中，最终 OOM。</p>
+
+        <p><strong>取消（Cancellation）</strong>：用户随时按 Ctrl+C 中断操作。Async generator 配合 <code>AbortController</code> 可以在下一个 yield 点检查取消信号，清理资源后优雅退出，而不是硬杀死进程。</p>
+
+        <p><strong>多路分发（Fan-out）</strong>：queryLoop 的输出需要同时送到 CLI（实时显示）、日志文件（审计追踪）、Webhook（远程通知）。Async generator 配合 <code>asyncio.TaskGroup</code> 可以轻松实现多消费者模式。</p>
+
+        <p>下面是一个简化版的 queryLoop 实现，展示了上述核心机制：</p>
+
+        <pre><code>import asyncio
+from dataclasses import dataclass
+from enum import Enum
+from typing import AsyncGenerator
+
+class StopReason(Enum):
+    END_TURN = "end_turn"
+    TOOL_USE = "tool_use"
+    MAX_TOKENS = "max_tokens"
+    REFUSAL = "refusal"
+
+@dataclass
+class QueryOptions:
+    max_turns: int = 50
+    model: str = "claude-sonnet-4-20250514"
+    system_prompt: str = ""
+
+class MessageQueue:
+    """强制消息顺序的消息队列"""
+    def __init__(self):
+        self.messages = []
+
+    def append(self, msg: dict):
+        last = self.messages[-1] if self.messages else None
+        # 校验 tool_use → tool_result 交替规则
+        if last and "tool_use" in str(last.get("content", "")):
+            role = msg.get("role", "")
+            assert role == "user", "tool_use 后必须是 tool_result"
+        self.messages.append(msg)
+
+    def validate_order(self, tool_uses: list, tool_results: list):
+        """确保 tool_use 和 tool_result 一一对应"""
+        assert len(tool_uses) == len(tool_results), "数量不匹配"
+        for tu, tr in zip(tool_uses, tool_results):
+            assert tu["id"] == tr["tool_use_id"], "ID 不匹配"
+
+async def query_loop(
+    messages: list,
+    tools: list,
+    options: QueryOptions
+) -> AsyncGenerator[dict, None]:
+    """简化的 queryLoop 实现"""
+    queue = MessageQueue()
+    for m in messages:
+        queue.append(m)
+
+    turn_count = 0
+
+    while turn_count < options.max_turns:
+        response = await model.generate(
+            messages=queue.messages,
+            tools=tools,
+            system=options.system_prompt
+        )
+
+        # 处理空 content
+        content = response.content or [{"type": "text", "text": ""}]
+        stop_reason = StopReason(response.stop_reason)
+        turn_count += 1
+
+        if stop_reason == StopReason.END_TURN:
+            queue.append({"role": "assistant", "content": content})
+            yield response
+            break
+
+        elif stop_reason == StopReason.TOOL_USE:
+            queue.append({"role": "assistant", "content": content})
+
+            # 过滤 null input
+            valid = [b for b in content
+                     if b.get("type") == "tool_use"
+                     and b.get("input") is not None]
+
+            # 并发执行
+            results = await asyncio.gather(*[
+                execute_tool(b["name"], b["input"])
+                for b in valid
+            ], return_exceptions=True)
+
+            # 按原始顺序追加结果
+            for block, result in zip(valid, results):
+                if isinstance(result, Exception):
+                    result = f"Error: {result}"
+                queue.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": str(result)
+                    }]
+                })
+            yield response
+
+        elif stop_reason == StopReason.MAX_TOKENS:
+            yield {"type": "system", "content": "上下文超限，触发压缩"}
+            queue = await compact_context(queue)
+
+        elif stop_reason == StopReason.REFUSAL:
+            yield {"type": "system", "content": "模型拒绝执行"}
+            break
+
+    if turn_count >= options.max_turns:
+        yield {"type": "system", "content": "达到 max_turns 限制"}</code></pre>
+
+        <p>这个实现比完整版简化了很多，但抓住了核心骨架：消息队列的严格管理、stop_reason 驱动的状态流转、并发工具执行的排序保障、以及 turn 计数作为安全网。如果你在自己的 Agent 中实现了这些，它就能稳定运行了。</p>
+
+        <p>掌握了 queryLoop 的核心机制，下一个问题就自然浮现了：Agent 有了引擎，但怎么确保它"有计划地"执行复杂任务？当任务超过 10 步时，模型很容易迷失在自己的思考链条中——它忘记了已经做了什么、还需要做什么。这就是下一章要解决的问题——<strong>Todo 任务规划</strong>，也是我们开始动手构建 v2 Agent 的第一站。</p>
+
+        <div class="footer-nav">
+            <a href="07.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="09.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

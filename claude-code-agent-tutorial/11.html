@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第11章 实现上下文管理</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html" class="active">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第11章 实现上下文管理</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们分析了 Claude Code 的 5 阶段压缩管线——从 Budget Reduction 到 Auto-Compact，每一层都在特定的水位上主动释放上下文空间。但理论归理论，是时候动手了。这一章我们要实现一个完整的上下文管理器，把它集成到我们的 v2 Agent 中。</p>
+
+        <p>在开始之前，先讲一个让人哭笑不得的场景。我见过一个团队做的 Agent，为了"防止上下文溢出"，在每轮对话结束后直接把整个消息历史清空，只保留最后一轮。结果模型每轮都"失忆"，同一个问题反复问用户。这就是"过度压缩"的极端例子——上下文管理不是"有了就行"，而是要在<strong>保留关键信息</strong>和<strong>控制 token 预算</strong>之间找到平衡。这恰恰是最难的地方。</p>
+
+        <h3>上下文管理的设计目标</h3>
+
+        <p>一个优秀的上下文管理器应该同时满足三个目标：</p>
+
+        <ol>
+            <li><strong>不超预算</strong>——任何时候发送给 API 的消息列表都不能超过模型的最大上下文窗口。这是硬约束，没有商量余地。</li>
+            <li><strong>不丢关键信息</strong>——压缩可以丢失细节，但不能丢失关键决策、文件路径、错误消息等对任务至关重要的信息。</li>
+            <li><strong>对 Agent 透明</strong>——Agent 不应该感知到上下文管理器的存在。它不需要操心"上下文满了怎么办"，应该像使用无限内存一样自然地使用上下文。</li>
+        </ol>
+
+        <p>这三个目标之间存在天然的张力。"不超预算"意味着必须压缩；"不丢关键信息"意味着压缩要有选择性；"对 Agent 透明"则要求压缩不能改变 Agent 的行为。处理这个张力的能力，就是上下文管理器质量的分水岭。</p>
+
+        <h3>Token 估算实现</h3>
+
+        <p>第一步是实现可靠的 token 估算。我们用 <code>tiktoken</code> 库配合 <code>cl100k_base</code> 编码来做近似计数。为什么用 tiktoken 而不是 Anthropic 的官方 tokenizer？上一章说过了——速度优先，精度足够。</p>
+
+        <pre><code>import tiktoken
+import json
+from datetime import datetime
+from typing import Optional
+
+ENCODING = tiktoken.get_encoding("cl100k_base")
+
+def count_tokens(text: str) -> int:
+    return len(ENCODING.encode(text))
+
+def count_messages(messages: list[dict]) -> int:
+    """精确计算消息列表的 token 数，含格式开销"""
+    total = 0
+    for msg in messages:
+        total += 4  # 每条消息的元数据开销
+        for key, value in msg.items():
+            if isinstance(value, str):
+                total += count_tokens(value)
+                total += count_tokens(key)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        total += count_block_tokens(item)
+                    elif isinstance(item, str):
+                        total += count_tokens(item)
+            elif isinstance(value, dict):
+                total += count_block_tokens(value)
+    return total
+
+def count_block_tokens(block: dict) -> int:
+    """计算 content block 的 token 数"""
+    total = 0
+    for k, v in block.items():
+        total += count_tokens(k)
+        if isinstance(v, str):
+            total += count_tokens(v)
+        elif isinstance(v, dict):
+            total += count_block_tokens(v)
+    return total</code></pre>
+
+        <h3>滑动窗口截断策略</h3>
+
+        <p>当上下文接近预算上限时，最简单的策略是丢弃最早的历史消息。但"扔掉最老的"有一个关键改进：<strong>保留第一条用户消息</strong>。</p>
+
+        <p>为什么保留第一条？因为用户最初的问题往往定义了整个任务的<strong>目标和范围</strong>。如果把它也丢掉了，Agent 可能逐渐偏离最初的意图。想象一个对话：用户第一句说"帮我重构 auth 模块的数据库层"，然后 30 轮后上下文被截断，第一条消息消失了。Agent 从摘要中知道"在做数据库相关的事情"，但忘了"是 auth 模块"——它可能开始重构其他模块的数据库代码。</p>
+
+        <pre><code>class SlidingWindowManager:
+    """滑动窗口上下文管理器"""
+
+    def __init__(self, max_tokens: int = 200_000,
+                 system_prompt: str = "",
+                 tool_defs: list = None,
+                 safety_margin: float = 0.08):
+        self.max_tokens = max_tokens
+        self.system_prompt = system_prompt
+        self.tool_defs = tool_defs or []
+        self.safety_margin = safety_margin
+        self.window_messages: list[dict] = []
+        self.summary: Optional[str] = None
+
+    def _get_budget(self) -> int:
+        """计算可用于消息历史的 token 预算"""
+        sys_tokens = count_tokens(self.system_prompt) if self.system_prompt else 0
+        tool_tokens = sum(count_tokens(json.dumps(t)) for t in self.tool_defs)
+        usable = int(self.max_tokens * (1 - self.safety_margin))
+        return usable - sys_tokens - tool_tokens
+
+    def add_message(self, message: dict):
+        """追加消息，如果超预算则触发截断"""
+        self.window_messages.append(message)
+        if count_messages(self.window_messages) > self._get_budget():
+            self._truncate()
+
+    def _truncate(self):
+        """滑动窗口截断：保留第一条 + 最后 N 条"""
+        if len(self.window_messages) < 3:
+            return
+
+        first_msg = self.window_messages[0]
+        candidates = self.window_messages[1:]  # 去掉第一条
+
+        # 从最老的消息开始移除，直到预算充足
+        while candidates and count_messages(
+            [first_msg] + candidates
+        ) > self._get_budget():
+            candidates.pop(0)
+
+        self.window_messages = [first_msg] + candidates
+
+    def get_messages(self) -> list[dict]:
+        """获取当前消息列表"""
+        if self.summary:
+            return [{"role": "system",
+                     "content": f"[对话摘要]\n{self.summary}"}] + self.window_messages
+        return self.window_messages</code></pre>
+
+        <h3>自动摘要生成</h3>
+
+        <p>滑动窗口虽然简单有效，但它会丢失被丢弃消息中的所有信息。为了弥补这个缺陷，我们引入<strong>自动摘要生成</strong>——当窗口截断发生时，用一个便宜的模型把丢弃的内容压缩为结构化摘要。</p>
+
+        <p>关键设计决策：<strong>使用 Haiku 而不是 Sonnet 来做摘要</strong>。Haiku 的价格只有 Sonnet 的十分之一，速度却快得多。对于"理解并总结"这个任务，Haiku 的表现和 Sonnet 差距很小——因为摘要不需要创造性推理，只需要忠实提取关键信息。</p>
+
+        <pre><code>class ContextManager:
+    """完整的上下文管理器：滑动窗口 + 自动摘要 + 持久化"""
+
+    def __init__(self, model_max: int = 200_000,
+                 summary_model: str = "claude-haiku-3-5-20251022"):
+        self.window = SlidingWindowManager(max_tokens=model_max)
+        self.summary_model = summary_model
+        self.summary: Optional[str] = None
+        self.is_summarized: bool = False
+
+    async def add_and_check(self, message: dict) -> list[dict]:
+        """追加消息，并在必要时触发摘要"""
+        self.window.add_message(message)
+        current_tokens = count_messages(self.window.window_messages)
+
+        # 如果超过 85% 预算，触发摘要
+        budget = self.window._get_budget()
+        usage_ratio = current_tokens / budget if budget > 0 else 1.0
+
+        if usage_ratio > 0.85 and not self.is_summarized:
+            await self._summarize_early_turns()
+            self.is_summarized = True
+
+        return self.window.get_messages()
+
+    async def _summarize_early_turns(self):
+        """使用 Haiku 对早期对话生成结构化摘要"""
+        messages = self.window.window_messages
+        if len(messages) < 4:
+            return
+
+        # 前半部分需要摘要，后半部分保留原始
+        split_point = len(messages) // 2
+        early_part = messages[:split_point]
+        late_part = messages[split_point:]
+
+        # 构造摘要请求
+        summary_prompt = (
+            "请为以下 AI 对话历史生成结构化摘要。"
+            "保留所有重要的技术决策、文件路径、错误消息和未完成任务。\n\n"
+            + json.dumps(early_part, ensure_ascii=False)
+        )
+
+        # 使用 Haiku 生成摘要（伪代码）
+        summary_response = await llm_call(
+            model=self.summary_model,
+            messages=[{"role": "user", "content": summary_prompt}],
+            max_tokens=2000
+        )
+        self.summary = summary_response.content
+
+        # 用摘要 + 后半部分替换完整窗口
+        self.window.window_messages = late_part
+        self.window.summary = self.summary
+
+    def get_context(self) -> list[dict]:
+        """返回最终发送给 API 的上下文"""
+        return self.window.get_messages()</code></pre>
+
+        <h3>对话持久化</h3>
+
+        <p>除了实时管理，上下文管理器还有一个容易被忽视的职责：<strong>对话持久化</strong>。如果 Agent 运行了 30 分钟然后在最后一步崩溃了，所有中间状态就丢失了——这太浪费了。</p>
+
+        <p>持久化的核心设计原则是 <strong>append-only</strong>。每轮对话的每条消息都追加写入 JSONL 文件，不修改、不删除。这样即使进程崩溃，最后一条完整写入的消息就是恢复点。</p>
+
+        <pre><code>import json
+from pathlib import Path
+
+class ConversationLogger:
+    """对话持久化：append-only JSONL"""
+
+    def __init__(self, log_dir: str = ".agent/logs"):
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file = self.log_dir / f"session_{session_id}.jsonl"
+
+    def log_message(self, role: str, content, metadata: dict = None):
+        """追加写入一条消息"""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "role": role,
+            "content": content,
+            "metadata": metadata or {}
+        }
+        with open(self.log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def replay(self, session_id: str) -> list[dict]:
+        """回放指定 session 的对话，用于调试"""
+        path = self.log_dir / f"session_{session_id}.jsonl"
+        if not path.exists():
+            raise FileNotFoundError(f"Session {session_id} not found")
+        messages = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                messages.append(json.loads(line))
+        return messages</code></pre>
+
+        <h3>集成测试</h3>
+
+        <p>让我们对比一下不同上下文管理策略的效果：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>策略</th>
+                    <th>实现复杂度</th>
+                    <th>Token 利用率</th>
+                    <th>信息保留度</th>
+                    <th>Agent 行为稳定性</th>
+                    <th>适用场景</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>无管理</td>
+                    <td>低</td>
+                    <td>低（容易溢出）</td>
+                    <td>高</td>
+                    <td>低（溢出后崩溃）</td>
+                    <td>简单、轮次少的任务</td>
+                </tr>
+                <tr>
+                    <td>滑动窗口（仅最后 N 条）</td>
+                    <td>低</td>
+                    <td>中</td>
+                    <td>中（丢失早期关键信息）</td>
+                    <td>中</td>
+                    <td>对话逻辑简单、状态可重置的任务</td>
+                </tr>
+                <tr>
+                    <td>滑动窗口 + 摘要</td>
+                    <td>中</td>
+                    <td>高</td>
+                    <td>高（关键信息保留在摘要中）</td>
+                    <td>高</td>
+                    <td>大多数场景</td>
+                </tr>
+                <tr>
+                    <td>混合（窗口 + 摘要 + Auto-Compact）</td>
+                    <td>高</td>
+                    <td>极高</td>
+                    <td>极高</td>
+                    <td>极高</td>
+                    <td>复杂长任务、生产环境</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>我们实现的 <code>ContextManager</code> 属于第三行——"滑动窗口 + 摘要"策略。它在复杂度和效果之间取得了最佳平衡。要升级到第四行的"混合策略"，只需要将第10章描述的 Auto-Compact 作为摘要生成的后备方案接入即可。</p>
+
+        <p>集成到 Agent 后，我们来做一个简单的测试：让 Agent 执行一个 30 轮以上的长任务，然后检查上下文是否始终在预算之内，Agent 行为是否在压缩后保持一致。</p>
+
+        <div class="tip">
+            <strong>工程经验：</strong>摘要模型的选择很关键。Haiku 比 Sonnet 便宜 10 倍，速度也快得多。在摘要场景中，关键不在于模型的"创造力"而在于"信息提取能力"——Haiku 在这方面表现非常好。如果你用 Sonnet 做摘要，相当于用航天发动机驱动自行车——浪费。<strong>坚持"大材小用"的反面：给任务匹配最便宜的模型。</strong>
+        </div>
+
+        <p>现在，我们的 v2 Agent 已经有了引擎（queryLoop）、导航（TodoWrite）、空间管理（ContextManager）。这三件套足够应对大多数单 Agent 任务了。但 Claude Code 还有一个更强大的武器——<strong>Sub-Agent</strong>。它能像人类团队一样分工协作：一个 Agent 读代码，一个 Agent 写代码，一个 Agent 跑测试。下一章我们就来分析 Sub-Agent 的架构设计。</p>
+
+        <div class="footer-nav">
+            <a href="10.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="12.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

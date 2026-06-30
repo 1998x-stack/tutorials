@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第13章 实现 Sub-Agent 系统</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html" class="active">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第13章 实现 Sub-Agent 系统</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们分析了 Claude Code 的 Sub-Agent 架构——fork 机制、脏上下文隔离、TaskType 系统。理论都已经到位了，这一章我们要动手实现一个完整的 Sub-Agent 系统，把它集成到我们的 Agent 中，然后让 v3 Agent 第一次展示"多 Agent 协作"的能力。</p>
+
+        <p>动手之前，分享一个来自社区的教训。有人在实现 Sub-Agent 时没设 max_turns 限制，结果 Sub-Agent 陷入了一个"修复 bug → 引入新 bug → 修复新 bug"的死循环，跑了 200 多轮才被手动终止。API 账单上多了 60 美元。这就是为什么<strong>所有 Sub-Agent 的入口都必须有一道"安全门"</strong>——max_turns 就是那道门。</p>
+
+        <h3>Sub-Agent 的接口设计</h3>
+
+        <p>一个清晰的接口是 Sub-Agent 系统的起点。我们需要定义清楚三件事：</p>
+
+        <ul>
+            <li><strong>输入</strong>：任务描述、可用工具、配置参数</li>
+            <li><strong>执行</strong>：隔离的上下文、独立的 queryLoop</li>
+            <li><strong>输出</strong>：结构化结果（状态、内容、统计数据）</li>
+        </ul>
+
+        <pre><code>from dataclasses import dataclass, field
+from typing import Optional
+
+@dataclass
+class SubAgentConfig:
+    """Sub-Agent 的配置"""
+    task_description: str            # 任务描述
+    task_type: str = "general"       # 任务类型
+    allowed_tools: list = None       # 可用工具列表
+    max_turns: int = 15              # 最大 turn 数
+    model: str = "claude-sonnet-4-20250514"
+    temperature: float = 0.0
+
+@dataclass
+class SubAgentResult:
+    """Sub-Agent 的执行结果"""
+    status: str                      # completed, failed, timeout
+    content: str                     # 最终结果文本
+    turns_used: int                  # 实际使用的 turn 数
+    tokens_used: int                 # 消耗的 token 数
+    error: Optional[str] = None      # 错误信息
+
+class SubAgent:
+    """独立的 Sub-Agent，拥有自己的上下文和 queryLoop"""
+
+    def __init__(self, config: SubAgentConfig, tool_registry: dict):
+        self.config = config
+        self.tools = self._filter_tools(tool_registry)
+
+    def _filter_tools(self, registry: dict) -> list:
+        """根据 allowed_tools 过滤可用工具"""
+        if not self.config.allowed_tools:
+            return list(registry.values())
+        return [registry[name] for name in self.config.allowed_tools
+                if name in registry]
+
+    async def run(self) -> SubAgentResult:
+        """执行 Sub-Agent 任务"""
+        # Fork：创建全新的消息上下文
+        messages = self._build_initial_context()
+        turn_count = 0
+        total_tokens = 0
+
+        while turn_count < self.config.max_turns:
+            try:
+                response = await self._call_model(messages)
+                total_tokens += response.usage.total_tokens
+                turn_count += 1
+
+                stop_reason = response.stop_reason
+
+                if stop_reason == "end_turn":
+                    return SubAgentResult(
+                        status="completed",
+                        content=self._extract_text(response),
+                        turns_used=turn_count,
+                        tokens_used=total_tokens
+                    )
+                elif stop_reason == "tool_use":
+                    messages = await self._handle_tool_use(
+                        messages, response
+                    )
+                elif stop_reason == "refusal":
+                    return SubAgentResult(
+                        status="failed",
+                        content="模型拒绝执行任务",
+                        turns_used=turn_count,
+                        tokens_used=total_tokens,
+                        error="refusal"
+                    )
+            except Exception as e:
+                return SubAgentResult(
+                    status="failed",
+                    content="",
+                    turns_used=turn_count,
+                    tokens_used=total_tokens,
+                    error=str(e)
+                )
+
+        # 超时
+        return SubAgentResult(
+            status="timeout",
+            content=self._extract_last_content(messages),
+            turns_used=turn_count,
+            tokens_used=total_tokens
+        )</code></pre>
+
+        <p>注意这里的 <code>_build_initial_context()</code> 方法——它创建了一个全新的消息列表，只有系统提示词 + 任务描述。主 Agent 的上下文完全被隔离在外。</p>
+
+        <h3>上下文隔离实现</h3>
+
+        <p>实现上下文隔离有两种方式，各有优劣：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>维度</th>
+                    <th>进程内隔离（In-Process）</th>
+                    <th>子进程隔离（Subprocess）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>实现复杂度</td>
+                    <td>低（只需新建消息列表）</td>
+                    <td>高（需要 IPC、序列化、进程管理）</td>
+                </tr>
+                <tr>
+                    <td>安全性</td>
+                    <td>低（共享内存空间）</td>
+                    <td>高（完全隔离）</td>
+                </tr>
+                <tr>
+                    <td>上下文泄露风险</td>
+                    <td>中</td>
+                    <td>极低</td>
+                </tr>
+                <tr>
+                    <td>通信开销</td>
+                    <td>无</td>
+                    <td>中（序列化/反序列化）</td>
+                </tr>
+                <tr>
+                    <td>启动延迟</td>
+                    <td>低（~10ms）</td>
+                    <td>高（~500ms+）</td>
+                </tr>
+                <tr>
+                    <td>适用场景</td>
+                    <td>教学、原型、信任环境</td>
+                    <td>生产环境、多租户、安全敏感</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>对于本教程，我们实现进程内隔离——它足以演示 Sub-Agent 的核心概念。在生产环境中，如果你需要运行不信任的代码或者隔离不同租户的数据，应该使用子进程 + IPC 的方式。</p>
+
+        <pre><code>def _build_initial_context(self) -> list[dict]:
+    """创建 Sub-Agent 的初始上下文（不受主 Agent 污染）"""
+    task_type_prompts = {
+        "explore": "You are an explorer. Your goal is to understand "
+                   "the codebase and gather information. Do NOT modify "
+                   "any files. Be thorough and report your findings.",
+        "implement": "You are an implementer. Write clean, well-tested "
+                     "code following the established patterns. "
+                     "Verify your changes work correctly.",
+        "review": "You are a code reviewer. Focus on security, performance, "
+                  "and maintainability. Do NOT modify any code.",
+        "plan": "You are a technical planner. Break down the task into "
+                "concrete steps. Do NOT execute any steps.",
+        "fix": "You are a bug fixer. Make minimal, targeted changes to "
+               "fix the specific issue. Do not refactor unrelated code.",
+    }
+    prompt = task_type_prompts.get(
+        self.config.task_type,
+        "You are a general-purpose AI agent. Complete the assigned task."
+    )
+    return [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": self.config.task_description}
+    ]</code></pre>
+
+        <h3>结果回收与格式化</h3>
+
+        <p>Sub-Agent 完成后的结果回收是上下文管理的关键一环。我们不仅需要提取最终结果，还需要做一些后处理：</p>
+
+        <pre><code>async def collect_result(self, result: SubAgentResult) -> dict:
+    """回收和格式化 Sub-Agent 执行结果"""
+    if result.status == "completed":
+        content = result.content
+
+        # 如果结果太长，先摘要再返回
+        if count_tokens(content) > 2000:
+            content = await self._summarize_result(content)
+
+        return {
+            "type": "sub_agent_result",
+            "status": "completed",
+            "content": content,
+            "metadata": {
+                "task_type": self.config.task_type,
+                "turns_used": result.turns_used,
+                "tokens_used": result.tokens_used
+            }
+        }
+    elif result.status == "timeout":
+        return {
+            "type": "sub_agent_result",
+            "status": "timeout",
+            "content": f"Sub-Agent 达到 max_turns 限制 "
+                       f"({self.config.max_turns})，任务未完成。",
+            "metadata": {
+                "partial_content": result.content[:1000]
+            }
+        }
+    else:  # failed
+        return {
+            "type": "sub_agent_result",
+            "status": "failed",
+            "content": f"Sub-Agent 执行失败: {result.error}",
+            "metadata": {"error": result.error}
+        }</code></pre>
+
+        <h3>并行 Sub-Agent 调度</h3>
+
+        <p>Sub-Agent 的真正威力在于并行执行。当主 Agent 需要同时"分析三个模块的代码"时，三个 Sub-Agent 可以同时启动，各自分析各自的部分，然后主 Agent 统一收集结果。</p>
+
+        <p>Python 的 <code>asyncio.gather</code> 是实现并行调度的天然选择：</p>
+
+        <pre><code>import asyncio
+
+class SubAgentManager:
+    """管理多个 Sub-Agent 的生命周期"""
+
+    def __init__(self, tool_registry: dict,
+                 concurrency_limit: int = 3):
+        self.tool_registry = tool_registry
+        self.concurrency_limit = concurrency_limit
+        self._active_agents: list[SubAgent] = []
+
+    async def run_parallel(self, tasks: list[SubAgentConfig]) -> list[dict]:
+        """并行执行多个 Sub-Agent 任务"""
+        semaphore = asyncio.Semaphore(self.concurrency_limit)
+
+        async def _run_with_limit(config: SubAgentConfig):
+            async with semaphore:
+                agent = SubAgent(config, self.tool_registry)
+                self._active_agents.append(agent)
+                result = await agent.run()
+                self._active_agents.remove(agent)
+                return await agent.collect_result(result)
+
+        # 并行启动所有任务
+        results = await asyncio.gather(*[
+            _run_with_limit(task) for task in tasks
+        ], return_exceptions=True)
+
+        # 处理个别异常
+        processed = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                processed.append({
+                    "type": "sub_agent_result",
+                    "status": "failed",
+                    "content": f"Sub-Agent 异常: {result}",
+                    "metadata": {"task": tasks[i].task_description}
+                })
+            else:
+                processed.append(result)
+
+        return processed
+
+    async def run_sequential(self, tasks: list[SubAgentConfig]) -> list[dict]:
+        """顺序执行多个 Sub-Agent 任务"""
+        results = []
+        for task in tasks:
+            agent = SubAgent(task, self.tool_registry)
+            result = await agent.run()
+            collected = await agent.collect_result(result)
+            results.append(collected)
+        return results
+
+    def cancel_all(self):
+        """取消所有正在运行的 Sub-Agent（用于 Ctrl+C 场景）"""
+        for agent in self._active_agents:
+            agent.cancel()</code></pre>
+
+        <p>关键设计决策：使用 <code>Semaphore</code> 控制并发度。如果同时启动 10 个 Sub-Agent，每个都要调用 API，很容易触及速率限制。concurrency_limit 默认值 3 是一个保守但安全的选择。对于需要大量并行但 API 预算有限的场景，可以考虑这个值到 5。</p>
+
+        <h3>集成到 v3 Agent</h3>
+
+        <p>现在我们把 AgentTool 注册到 v3 Agent 的工具列表中。注册过程和之前添加 Read、Write、Edit 等工具完全一样——AgentTool 对其他工具来说就是一个普通的工具。</p>
+
+        <pre><code># AgentTool 的定义（作为工具注册）
+agent_tool_schema = {
+    "name": "AgentTool",
+    "description": "创建一个子代理来执行特定任务。"
+                   "子代理拥有独立的上下文，不会污染主代理的对话历史。"
+                   "适用于：代码探索、独立模块实现、并行分析等场景。"
+                   "使用 task_type 控制子代理的行为模式。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "要子代理完成的任务描述，应该清晰具体"
+                    },
+                    "task_type": {
+                        "type": "string",
+                        "enum": ["explore", "implement", "review",
+                                 "plan", "fix", "general"],
+                        "description": "任务类型，决定子代理的行为模式"
+                    },
+                    "allowed_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "子代理可以使用的工具列表"
+                    },
+                    "max_turns": {
+                        "type": "integer",
+                        "description": "子代理的最大 turn 数",
+                        "default": 15
+                    }
+                },
+                "required": ["description"]
+            }
+        },
+        "required": ["task"]
+    }
+}
+
+# Agent 主循环中的调度
+async def handle_agent_tool(task: dict) -> dict:
+    config = SubAgentConfig(
+        task_description=task["description"],
+        task_type=task.get("task_type", "general"),
+        allowed_tools=task.get("allowed_tools"),
+        max_turns=task.get("max_turns", 15)
+    )
+    agent = SubAgent(config, tool_registry)
+    result = await agent.run()
+    return await agent.collect_result(result)</code></pre>
+
+        <p>集成后，主 Agent 的使用方式就像这样：</p>
+
+        <pre><code>用户: "请分析 src/api/、src/auth/、src/db/ 三个模块的代码质量，
+       然后汇总一份改进建议。"
+
+Agent 的思维链:
+1. "我需要同时分析三个模块，用 Sub-Agent 并行执行效率更高。"
+2. → AgentTool(task_type="review", description="分析 src/api/...")
+3. → AgentTool(task_type="review", description="分析 src/auth/...")
+4. → AgentTool(task_type="review", description="分析 src/db/...")
+5. ← 三个 Sub-Agent 并行执行各自的分析
+6. "收集到三份报告，现在汇总成一份完整的改进建议。"
+7. → Write(file="docs/improvements.md", content="...")</code></pre>
+
+        <p>这是多 Agent 协作的雏形——主 Agent 负责规划和决策，Sub-Agent 负责并行执行。虽然每个 Agent 还是单独调用 API，但因为它们是并行的，整体耗时只等于最慢的那个 Sub-Agent 的耗时，而不是三个串行执行的耗时之和。</p>
+
+        <h3>踩坑：子代理的常见问题</h3>
+
+        <p>在实现 Sub-Agent 的过程中，有几个坑几乎每个人都会踩到：</p>
+
+        <p><strong>1. 无限循环</strong>——Sub-Agent 陷入 "修 bug → 引入新 bug" 的死循环。解决方案：max_turns 就是为此而生，必须设置。</p>
+
+        <p><strong>2. 不可用的结果</strong>——Sub-Agent 返回的结果是"我在 login.py 中发现了问题"但没有给出具体的行号和修复建议。解决方案：在系统提示词中要求 Sub-Agent 的输出必须包含具体的文件路径、行号、代码片段。</p>
+
+        <p><strong>3. 工具权限不足</strong>——Sub-Agent 被分配了 Implement 任务却没有 Write 工具。解决方案：每个 TaskType 的 allowed_tools 必须仔细设计，Implement 类型必须有写权限。</p>
+
+        <p><strong>4. API 速率限制</strong>——同时启动 5 个 Sub-Agent，每个都调用 API，很快就触发了 Anthropic 的速率限制。解决方案：Semaphore 控制并发度 + 指数退避重试。</p>
+
+        <p><strong>5. Sub-Agent 的上下文也满了</strong>——Sub-Agent 自己跑了几十轮，也需要上下文管理。解决方案：Sub-Agent 内部的 queryLoop 同样需要接入 ContextManager，不能因为是"子代理"就不做上下文管理。</p>
+
+        <div class="warning">
+            <strong>重点提醒：</strong>Sub-Agent 也有自己的 token 预算。如果主 Agent 的上下文管理器是 200K，Sub-Agent 的也是 200K，一个任务如果有 3 个 Sub-Agent 并行执行，峰值 token 消耗可能是 3 × 200K = 600K。虽然这些不会同时出现在一个上下文中，但 API 费用是实实在在的。在允许 Sub-Agent 大规模并行之前，先算清楚账单。
+        </div>
+
+        <p>现在我们的 v3 Agent 已经拥有了多 Agent 协作的能力。但还有一个问题悬而未决：<strong>Agent 怎么"学会"做特定类型的任务？</strong> 比如，处理 Go 项目的最优实践是什么？使用 React 框架的注意事项有哪些？这些知识不应该塞进主系统提示词（太大了），也不应该靠 Sub-Agent 自己摸索（太慢了）。Claude Code 的解决方案是 <strong>Skills 系统</strong>——下一章我们就来深入分析。</p>
+
+        <div class="footer-nav">
+            <a href="12.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="14.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

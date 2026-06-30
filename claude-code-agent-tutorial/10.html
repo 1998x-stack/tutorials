@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第10章 上下文压缩机制</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html" class="active">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第10章 上下文压缩机制</h2>
+
+        <p>大家好，我是你们的讲师。第9章我们给 Agent 装上了 Todo 导航仪，让它能"有计划地"工作。但当 Agent 运行 20 轮、30 轮、50 轮之后，一个更根本的问题摆在了面前：<strong>上下文，快装不下了</strong>。</p>
+
+        <p>讲一个真实的教训。2025 年，一位开发者用 Claude Code 做一个大型 Java 项目重构。任务很顺利，Agent 孜孜不倦地工作了一个多小时，修改了 30 多个文件。然后——突然——模型开始出现幻觉。它在一个已经改过的文件上又"改"了一遍，但这次是错误地改的；它忘记了 20 分钟前读到的某个类的签名，自己"编造"了一个不存在的方法。这位开发者检查了上下文使用量：195K tokens，几乎撑满了 200K 的窗口。问题不是模型变笨了，而是<strong>上下文里塞了太多东西，关键信息被淹没了</strong>。</p>
+
+        <p>这个故事的教训是什么？<strong>上下文管理不是"有就行"，而是要主动管理</strong>。Claude Code 的解决方案是一套精心设计的 5 阶段压缩管线，在上下文达到危险水位之前主动释放空间。这一章我们就来深入分析这套机制。</p>
+
+        <h3>上下文是一笔有限的预算</h3>
+
+        <p>很多人觉得："200K 的上下文窗口，随便用，够够的。"这是一个危险的误解。200K tokens 不是你"可以用的"空间，而是你的<strong>预算上限</strong>——一旦超过，请求就会失败。</p>
+
+        <p>计算一下这笔预算的使用情况：</p>
+        <ul>
+            <li><strong>System Prompt</strong>：约 8-12K tokens（包含 CLAUDE.md、Todo 快照、权限规则等）</li>
+            <li><strong>Tool Definitions</strong>：约 3-5K tokens（每个工具的 JSON Schema）</li>
+            <li><strong>每轮对话</strong>：约 2-8K tokens（模型回复 + 工具结果）</li>
+            <li><strong>历史上下文</strong>：剩余空间，约 175-187K tokens</li>
+        </ul>
+
+        <p>假设每轮平均消耗 5K tokens，那么 175K 的历史空间大约能容纳 35 轮对话。对于简单任务绰绰有余，但对于"分析整个代码库"或"重构多个模块"这种复杂任务，35 轮可能连一半都走不到。</p>
+
+        <p>解决方案不是扩展窗口——200K 已经是业界领先了。真正的解决方案是<strong>压缩</strong>：在上下文填满之前，主动用更紧凑的形式"重写"历史内容，腾出空间给后续对话。</p>
+
+        <h3>5 阶段压缩管线详解</h3>
+
+        <p>Claude Code 的上下文压缩不是"一把梭"——它由 5 个独立的阶段组成，每个阶段有不同的触发条件、算法和风险特征。管线按顺序执行，一旦某阶段释放了足够的空间，后续阶段就不会触发。这种渐进式设计避免了对上下文不必要的破坏性操作。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>阶段</th>
+                    <th>触发条件</th>
+                    <th>算法</th>
+                    <th>平均节省 token</th>
+                    <th>数据丢失风险</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>1. Budget Reduction</td>
+                    <td>始终运行（首次压缩时）</td>
+                    <td>移除重复/空消息、合并连续同角色消息</td>
+                    <td>5-10%</td>
+                    <td>极低</td>
+                </tr>
+                <tr>
+                    <td>2. Snip</td>
+                    <td>工具结果超过 4K tokens</td>
+                    <td>截断超长 tool_result 到阈值</td>
+                    <td>10-30%</td>
+                    <td>低（仅截断尾部）</td>
+                </tr>
+                <tr>
+                    <td>3. MicroCompact</td>
+                    <td>上下文使用率 > 70%</td>
+                    <td>将旧的 tool_use/tool_result 对摘要为单行描述</td>
+                    <td>20-40%</td>
+                    <td>中（丢失执行细节）</td>
+                </tr>
+                <tr>
+                    <td>4. Context Collapse</td>
+                    <td>MicroCompact 后仍 > 85%</td>
+                    <td>将早期对话折叠为结构化摘要（决策、状态、待办）</td>
+                    <td>40-60%</td>
+                    <td>中高（丢失推理过程）</td>
+                </tr>
+                <tr>
+                    <td>5. Auto-Compact</td>
+                    <td>上下文使用率 > 92%</td>
+                    <td>使用 Sonnet 4 对完整对话进行智能摘要</td>
+                    <td>60-80%</td>
+                    <td>高（依赖模型摘要质量）</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>理解这个管线的关键是：<strong>越靠前的阶段越安全，越靠后的阶段压缩率越高但风险也越大</strong>。系统优先使用低风险的压缩手段，只有在迫不得已时才调用 Auto-Compact——因为它需要用模型来压缩模型自己的输出，这可能引入幻觉和失真。</p>
+
+        <h3>92% 阈值的工程考量</h3>
+
+        <p>为什么 Auto-Compact 的触发阈值是 92% 而不是 95% 或 85%？这背后有一个精密的数学考量。</p>
+
+        <p>假设上下文当前使用了 184K tokens（92% 的 200K）：</p>
+        <ul>
+            <li><strong>压缩后保留的空间</strong>：压缩后约占 40-60K，相当于 20-30%</li>
+            <li><strong>模型回复的生存空间</strong>：剩余的 8%（16K tokens）留给当前 API 调用的输出</li>
+            <li><strong>下一次调用的缓冲</strong>：压缩后，上下文从 184K 降至约 50K，为后续操作留出 150K 的充裕空间</li>
+        </ul>
+
+        <p>如果阈值设为 95%，留给模型回复的只有 10K——对于复杂推理来说太少了，模型可能在生成过程中就被 max_tokens 打断。如果设为 85%，那么压缩触发得太早，浪费了宝贵的上下文预算中还有 15% 的有效空间。</p>
+
+        <p>92% 这个数字来自实际运行数据的统计——在大量真实对话中，92% 是最优平衡点：既不会太早触发浪费空间，也不会太晚触发导致模型回复被截断。Claude Code 团队很可能通过 A/B 测试验证了这个阈值。</p>
+
+        <h3>Sonnet 4 压缩的实际效果</h3>
+
+        <p>Auto-Compact（第 5 阶段）是压缩管线的最后防线。它的工作方式很巧妙：<strong>用 Sonnet 4 模型来"阅读"当前对话，然后写一份摘要</strong>。</p>
+
+        <p>压缩提示词的核心思想：</p>
+
+        <pre><code>你正在审查一段 AI Agent 与用户的对话历史。
+请生成一份摘要，保留所有重要的技术细节、决策、当前状态和未完成的任务。
+摘要应该结构化，包含以下部分：
+## 项目背景
+## 已做出的关键决策
+## 当前状态（已完成的步骤、正在进行的步骤）
+## 发现的重要信息（文件路径、代码片段、错误消息）
+## 未完成的任务</code></pre>
+
+        <p>来看一个实际的 before/after 对比：</p>
+
+        <pre><code>=== 压缩前 (约 85K tokens, 20 轮对话) ===
+[用户] 分析 src/auth/ 目录的代码结构
+[Agent] Read: src/auth/login.py → (文件内容 524 行)
+[Agent] Read: src/auth/oauth.py → (文件内容 382 行)
+[Agent] ...更多的文件读取和讨论...
+[Agent] Edit: src/auth/login.py → 修改了第 45 行的异常处理
+[用户] 检查一下 session 管理是否有安全问题
+[Agent] Read: src/auth/session.py → (文件内容 210 行)
+[Agent] 发现 session 超时设置为 24 小时，过长
+[Agent] Edit: src/auth/session.py → 将超时改为 1 小时
+...（共 20 轮，约 85K tokens）...
+
+=== 压缩后 (约 12K tokens) ===
+## 项目背景
+分析 src/auth/ 目录的安全性和代码质量
+
+## 已做出的关键决策
+1. 加强 login.py 的异常处理（第 45 行，已修改）
+2. 将 session 超时从 24 小时降为 1 小时（session.py，已修改）
+3. 决定暂不动 OAuth 模块，等待 OAUTH-123 ticket 完成
+
+## 当前状态
+- ✅ login.py 异常处理已修复
+- ✅ session 超时已收紧
+- ⏳ 等待：OAuth 模块重构（blocked by OAUTH-123）
+- 📝 待做：检查 refresh token 逻辑
+
+## 发现的重要信息
+- 文件路径: src/auth/login.py, src/auth/session.py, src/auth/oauth.py
+- 关键配置: SESSION_TIMEOUT = 3600 (原值 86400)
+- 错误消息: /var/log/auth.2025-11-01.log 中有大量 "TokenExpired" 警告</code></pre>
+
+        <p>压缩比约为 7:1——从 85K 压缩到 12K，节省了 73K tokens。更重要的是，所有关键信息（文件路径、修改内容、待办事项）都被保留了。Agent 从压缩后的摘要继续工作时，不会丢失上下文。</p>
+
+        <h3>Token 计数实现</h3>
+
+        <p>要实现上下文管理，第一步是准确地知道当前使用了多少 tokens。但"准确"在工程实践中是一个微妙的词。</p>
+
+        <p>目前有两种主流方案：</p>
+        <ul>
+            <li><strong>tiktoken</strong>（OpenAI 开源）：快速、可靠，但只对 OpenAI 模型精确。对 Claude 模型来说是"近似值"</li>
+            <li><strong>Anthropic 的 tokenizer</strong>：官方实现，精确但速度稍慢</li>
+        </ul>
+
+        <p>Claude Code 选择了 tiktoken 作为主要计数工具。为什么？因为<strong>在实时系统中，速度比精度更重要</strong>。tiktoken 的计数偏差在 5% 以内，但这个"足够好"的精度换来了毫秒级的计算速度。而精确计数意味着每次请求前都要遍历整个消息列表进行 tokenization，在上下文已经很大的情况下会明显增加延迟。</p>
+
+        <pre><code>import tiktoken
+
+# cl100k_base 是 Claude 模型使用的编码
+ENCODING = tiktoken.get_encoding("cl100k_base")
+
+def count_tokens(text: str) -> int:
+    """估算一段文本的 token 数"""
+    return len(ENCODING.encode(text))
+
+def count_messages(messages: list[dict]) -> int:
+    """估算整个消息列表的 token 数（包含格式开销）"""
+    total = 0
+    for msg in messages:
+        # 每条消息有约 4 tokens 的格式开销
+        total += 4
+        for key, value in msg.items():
+            if isinstance(value, str):
+                total += count_tokens(value)
+            elif isinstance(value, list):
+                for block in value:
+                    if isinstance(block, dict):
+                        for k, v in block.items():
+                            if isinstance(v, str):
+                                total += count_tokens(v)
+                            total += count_tokens(k)
+            total += count_tokens(key)
+    return total
+
+def estimate_remaining_budget(
+    model_max: int,
+    current: int,
+    system_prompt_tokens: int = 10000,
+    tool_def_tokens: int = 4000,
+    safety_margin: float = 0.08
+) -> int:
+    """估算剩余可用 token 预算"""
+    overhead = system_prompt_tokens + tool_def_tokens
+    usable = int(model_max * (1 - safety_margin))
+    return usable - current - overhead</code></pre>
+
+        <div class="warning">
+            <strong>踩坑实录：</strong>我早期做上下文管理时，直接用 Anthropic 的精确 tokenizer 来做每次 API 调用前的预算检查。结果在一个长达 40 轮的对话中，每次 API 调用前光 token counting 就增加了 300ms 延迟——累计超过 12 秒。用户每次等待回复都多了半分钟。后来换成 tiktoken 近似计数后，延迟降到几乎为零，计数误差最大只有 3%。<strong>在 Agent 系统中，毫秒级的累积效应不可忽视。</strong>
+        </div>
+
+        <p>现在我们理解了 Claude Code 的上下文压缩理论。下一章，我们将亲手实现一个可工作的上下文管理器——把它和 queryLoop、TodoWrite 整合起来，构建一个能长时间稳定运行的 v2 Agent。</p>
+
+        <div class="footer-nav">
+            <a href="09.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="11.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

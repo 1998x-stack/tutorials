@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第14章 Skills 与知识加载机制</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html" class="active">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第14章 Skills 与知识加载机制</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们给 Agent 装上了 Sub-Agent 系统，让它能"多线程"工作。但还有一个根本问题没有解决：<strong>Agent 的领域知识从哪来？</strong></p>
+
+        <p>想象这样一个场景：你让 Agent"用 Go 语言写一个 gRPC 服务"。Agent 确实会用 Go，但它不知道你们团队的项目结构规范——proto 文件放哪里、错误处理用哪个库、日志怎么打。如果把这些规则全部写进系统提示词，prompt 会膨胀到几万 tokens，其中大部分在当前任务中根本用不上。</p>
+
+        <p>这就是 Skills 系统要解决的问题。2025 年 Claude Code 刚推出 Skills 功能时，很多人不理解它和普通系统提示词有什么区别。直到有开发者发了一条推文："我写了一个 <code>react-component.skill.md</code>，里面规定了我们团队的所有 React 模式。现在我告诉 Agent '写一个带搜索的用户列表组件'，它自动遵守了我所有的代码规范。" 这条推文获得了上千点赞，因为大家意识到：<strong>Skills 不是"更多的提示词"，而是"刚好够用的提示词，在需要的时候出现"</strong>。</p>
+
+        <h3>Skills 是什么</h3>
+
+        <p>Skills 是 Claude Code 中一个介于"工具"和"系统提示词"之间的概念。它既不像工具那样执行具体操作，也不像系统提示词那样每轮都生效。Skills 是<strong>按需加载的领域知识模块</strong>。</p>
+
+        <p>用类比来理解：</p>
+        <ul>
+            <li><strong>System Prompt</strong> 是宪法——永远有效，覆盖所有场景</li>
+            <li><strong>Tools</strong> 是政府机构——可以执行具体动作</li>
+            <li><strong>Skills</strong> 是部门规章——只在相关场景下加载，规定了"事情应该怎么做"</li>
+        </ul>
+
+        <p>一个 Skill 就是一个 markdown 文件，包含针对特定任务或领域的指令。例如：</p>
+        <ul>
+            <li><code>react-component.skill.md</code> —— 写 React 组件的规范和模式</li>
+            <li><code>python-testing.skill.md</code> —— 编写 Python 测试的最佳实践</li>
+            <li><code>dockerfile.skill.md</code> —— Dockerfile 的优化技巧和安全规范</li>
+        </ul>
+
+        <p>每个 Skill 文件的核心结构：</p>
+
+        <pre><code># Skill: React 组件开发规范
+
+## 描述
+帮助 Agent 按照团队标准创建和维护 React 组件。
+
+## 文件结构规则
+- 每个组件一个目录，包含 `index.tsx`, `styles.module.css`, `types.ts`
+- Storybook stories 放在 `__stories__/` 子目录
+
+## 命名规范
+- 组件名: PascalCase
+- 样式名: camelCase
+- Props 接口: `{ComponentName}Props`
+
+## 状态管理
+- 优先使用 React Query 管理服务端状态
+- 本地 UI 状态使用 useState / useReducer
+- 全局状态使用 Zustand
+
+## 错误处理
+- 使用 ErrorBoundary 包裹每个路由级组件
+- API 错误统一使用 `handleApiError` 工具函数</code></pre>
+
+        <p>当 Agent 需要创建 React 组件时，它可以通过 SkillTool 加载这个 Skill，获得所有团队规范。不需要时，这些文本完全不占用上下文。</p>
+
+        <h3>CLAUDE.md 的层级体系</h3>
+
+        <p>除了按需加载的 Skills，Claude Code 还有一套<strong>自动加载的层级知识体系</strong>——CLAUDE.md。这套体系分为三个层级：</p>
+
+        <p><strong>全局层（Global）</strong>：<code>~/.claude/CLAUDE.md</code>——用户的家目录下，定义了所有项目中都适用的通用规则，比如"用中文回复"、"任何 API key 不要硬编码"。</p>
+
+        <p><strong>项目层（Project）</strong>：<code>repo-root/CLAUDE.md</code>——项目根目录下，定义了该项目特有的规范和约定，比如"本项目使用 Poetry 管理依赖"、"测试框架用 Pytest"。</p>
+
+        <p><strong>本地层（Local）</strong>：<code>subdirectory/CLAUDE.md</code>——子目录下，定义了子模块的特定规则，比如"这个目录下的代码是自动生成的，不要手动修改"。</p>
+
+        <p>这三层按<strong>距离优先</strong>原则合并：本地层覆盖项目层，项目层覆盖全局层。也就是说，如果项目层说"使用 Poetry"，而本地层说"这个子目录用 Pip"，那么实际生效的是本地层的规则。</p>
+
+        <p>合并后的 CLAUDE.md 总内容被限制在约 12K tokens 以内——这是一个硬性预算。如果超出，后面的内容会被截断。这个限制确保了 CLAUDE.md 不会挤占太多上下文空间，也迫使开发者只写入最重要的规则。</p>
+
+        <h3>SkillTool 源码分析</h3>
+
+        <p>SkillTool 是 Skills 系统的入口。它的工作方式可以概括为：<strong>发现 → 匹配 → 加载 → 注入 → 可选的回收</strong>。</p>
+
+        <pre><code>class SkillLoader:
+    """Skills 加载器：发现、解析和注入 Skill"""
+
+    def __init__(self, skill_dirs: list[str] = None):
+        self.skill_dirs = skill_dirs or [
+            ".claude/skills/",           # 项目级
+            "~/.claude/skills/",         # 用户级
+        ]
+        self._cache: dict[str, Skill] = {}
+
+    def discover_skills(self) -> list[Skill]:
+        """扫描所有 skill 目录，发现可用 Skills"""
+        skills = []
+        for directory in self.skill_dirs:
+            path = Path(directory).expanduser()
+            if not path.exists():
+                continue
+            for f in path.glob("*.skill.md"):
+                skills.append(self._parse_skill(f))
+        return skills
+
+    def _parse_skill(self, path: Path) -> Skill:
+        """解析 Skill 文件，提取 frontmatter 和内容"""
+        content = path.read_text(encoding="utf-8")
+
+        # 解析 frontmatter（文件名约定）
+        # 文件名: {name}.skill.md, name 即 skill 标识
+        name = path.stem.replace(".skill", "")
+
+        # 提取第一行作为描述
+        lines = content.strip().split("\n")
+        description = ""
+        for line in lines:
+            if line.startswith("# ") or line.startswith("## 描述"):
+                continue
+            if line.strip():
+                description = line.strip()[:200]
+                break
+
+        return Skill(
+            name=name,
+            path=str(path),
+            description=description,
+            content=content
+        )
+
+    def match_skill(self, name: str) -> Optional[Skill]:
+        """通过名称或别名查找 Skill（支持模糊匹配）"""
+        name = name.lower().replace(" ", "-")
+        all_skills = self.discover_skills()
+
+        # 精确匹配优先
+        for skill in all_skills:
+            if skill.name.lower() == name:
+                return skill
+
+        # 模糊匹配
+        for skill in all_skills:
+            if name in skill.name.lower():
+                return skill
+
+        return None
+
+    def load_skill(self, skill_name: str) -> Optional[str]:
+        """加载 Skill 内容，准备注入到上下文"""
+        skill = self.match_skill(skill_name)
+        if not skill:
+            return None
+        return f"[来自 Skill: {skill.name}]\n{skill.content}"
+
+    def inject_into_system_prompt(self, base_prompt: str,
+                                   skill_content: str) -> str:
+        """将 Skill 内容注入到系统提示词中"""
+        return f"{base_prompt}\n\n---\n{skill_content}\n---"</code></pre>
+
+        <p>SkillTool 的工具定义也非常简洁：</p>
+
+        <pre><code>skill_tool_schema = {
+    "name": "SkillTool",
+    "description": "加载一个 Skill（专业技能知识模块）。"
+                   "Skills 是 markdown 格式的指导文件，"
+                   "包含特定领域的最佳实践和规范。"
+                   "使用此工具获取特定技术栈或任务的指导。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "skill_name": {
+                "type": "string",
+                "description": "要加载的 Skill 名称"
+            }
+        },
+        "required": ["skill_name"]
+    }
+}</code></pre>
+
+        <h3>懒加载的设计智慧</h3>
+
+        <p>"懒加载"（Lazy Loading）是 Skills 系统最精妙的设计决策。乍看起来好像没什么大不了的——不就是"用的时候再加载"吗？但这个决策的影响远超表面。</p>
+
+        <p>考虑一个对比场景：</p>
+
+        <pre><code>❌ 预加载所有 Skills（假设 20 个 × 2K tokens = 40K tokens）
+系统提示词 = 宪法(8K) + CLAUDE.md(12K) + 工具定义(5K) + Skill1(2K) + Skill2(2K) + ... + Skill20(2K)
+= 8K + 12K + 5K + 40K = 65K tokens
+这 65K 中只有 25K 是每轮都需要的，40K 的 Skills 绝大多数时候用不上
+
+✅ 懒加载 Skills
+系统提示词 = 宪法(8K) + CLAUDE.md(12K) + 工具定义(5K)
+= 25K tokens
+只有 Agent 明确需要时，才通过 SkillTool 加载 1-2 个 Skill（+2-4K）
+= 27-29K tokens</code></pre>
+
+        <p>预加载方案中，65K tokens 中有 40K（62%）是浪费的。对于 200K 的上下文窗口，这个浪费可能还能忍受。但如果项目有 50 个 Skill呢？100K tokens 的预加载几乎吃掉了一半的上下文。更糟糕的是，<strong>模型需要"阅读"大量不相关的内容</strong>，这会稀释它对当前任务的注意力。</p>
+
+        <p>懒加载的另一个好处：<strong>Agent 自己决定什么时候需要 Skill</strong>。如果 Agent 认为"写一个简单的工具函数不需要加载 React 规范"，它就不会调用 SkillTool。这个决策权在 Agent 手中，而不是在开发者手中。这恰恰体现了 Agent 自治的设计哲学。</p>
+
+        <div class="tip">
+            <strong>工程经验：</strong>Skills 虽好，但有一个"技能爆炸"的问题需要警惕。当项目积累了太多 Skill 文件时，Agent 可能花好几轮去"寻找正确的 Skill"——加载一个、不对、再加载另一个。解决方案是给每个 Skill 起一个<strong>高度描述性的名称</strong>（比如 <code>react-component-with-test.skill.md</code> 而不是 <code>react.skill.md</code>），并在 Skill 文件的 frontmatter 中加入关键词标签，便于 Agent 准确匹配。
+        </div>
+
+        <h3>Skill 优先级与冲突解决</h3>
+
+        <p>当多个 Skill 定义了相同的能力，或者 Skill 的内容与 CLAUDE.md 发生冲突时，系统需要一套明确的优先级规则。</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>优先级</th>
+                    <th>来源</th>
+                    <th>示例</th>
+                    <th>优先级规则说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>最高</td>
+                    <td>用户直接指令</td>
+                    <td>用户在对话中说"不要用 f-strings"</td>
+                    <td>对话中的用户指令总是最高优先级</td>
+                </tr>
+                <tr>
+                    <td>高</td>
+                    <td>项目 CLAUDE.md</td>
+                    <td>项目根目录的 CLAUDE.md 规定"使用 Poetry"</td>
+                    <td>项目级配置，适用于所有子模块</td>
+                </tr>
+                <tr>
+                    <td>中</td>
+                    <td>本地 CLAUDE.md</td>
+                    <td>子目录指定的编码规范</td>
+                    <td>仅在该子目录下覆盖项目级规则</td>
+                </tr>
+                <tr>
+                    <td>中低</td>
+                    <td>Active Skill</td>
+                    <td>通过 SkillTool 加载的 React 规范</td>
+                    <td>Skill 的内容仅在被加载的轮次中生效</td>
+                </tr>
+                <tr>
+                    <td>低</td>
+                    <td>全局 CLAUDE.md</td>
+                    <td>~/.claude/CLAUDE.md 的通用规则</td>
+                    <td>兜底规则，被任何其他来源覆盖</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>Skill 的生命周期可以用一张图来总结：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>阶段</th>
+                    <th>操作</th>
+                    <th>参与者</th>
+                    <th>关键决策</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>1. 发现</td>
+                    <td>扫描 <code>.claude/skills/</code> 目录</td>
+                    <td>SkillLoader</td>
+                    <td>哪些目录要扫描？支持自定义路径吗？</td>
+                </tr>
+                <tr>
+                    <td>2. 匹配</td>
+                    <td>根据名称查找 Skill</td>
+                    <td>Agent → SkillTool</td>
+                    <td>精确匹配还是模糊匹配？</td>
+                </tr>
+                <tr>
+                    <td>3. 加载</td>
+                    <td>读取 Skill 文件内容</td>
+                    <td>SkillLoader</td>
+                    <td>从缓存读还是从磁盘读？</td>
+                </tr>
+                <tr>
+                    <td>4. 注入</td>
+                    <td>将内容合并到系统提示词</td>
+                    <td>Harness</td>
+                    <td>注入位置？与现有提示词如何衔接？</td>
+                </tr>
+                <tr>
+                    <td>5. 驻留</td>
+                    <td>Skill 内容在后续轮次中生效</td>
+                    <td>Agent</td>
+                    <td>驻留多久？何时自动回收？</td>
+                </tr>
+                <tr>
+                    <td>6. 回收</td>
+                    <td>从系统提示词中移除</td>
+                    <td>Harness</td>
+                    <td>上下文压缩时回收？还是 Agent 显式请求回收？</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>在实际实现中，回收阶段往往是最容易被忽略的。如果 Agent 加载了一个 Skill，后续的 20 轮对话中它都持续占用上下文，即使 Agent 早已不再需要它。一个改进方案是：<strong>Skill 内容默认只在 1 轮中生效</strong>，如果 Agent 需要持续使用，它可以在后续轮次中再次调用 SkillTool。</p>
+
+        <div class="highlight">
+            <p>理解 Skills 系统的关键在于：<strong>它不是"放更多的提示词"，而是"在最需要的时刻放最正确的提示词"</strong>。懒加载保证了上下文效率，SkillTool 的自主调用保证了 Agent 的灵活性，CLAUDE.md 的层级体系保证了规则的一致性和可覆盖性。这三者加起来，构成了一个优雅的"知识即服务"架构。</p>
+        </div>
+
+        <p>Skills 解决了"知识怎么给 Agent"的问题——按需加载、精准匹配、用完即走。但还有一个更棘手的问题等着我们：<strong>Agent 能做什么，不能做什么？</strong>——这就是权限系统的核心。下一章我们将深入 Claude Code 的权限控制源码，看看它如何在不影响体验的前提下，防止 Agent 做出危险操作。</p>
+
+        <div class="footer-nav">
+            <a href="13.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="15.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

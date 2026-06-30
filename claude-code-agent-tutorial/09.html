@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5, user-scalable=yes">
+    <title>第9章 实现 Todo 任务规划</title>
+    <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<div class="double-border">
+<div class="container">
+    <div class="sidebar">
+        <h3>🤖 课程目录</h3>
+        <ul class="chapter-list">
+            <li><a href="01.html">第1章 AI Coding Agent 前世今生</a></li>
+            <li><a href="02.html">第2章 环境搭建与逆向工具链</a></li>
+            <li><a href="03.html">第3章 从零实现最简 Agent Loop</a></li>
+            <li><a href="04.html">第4章 Claude Code 顶层架构拆解</a></li>
+            <li><a href="05.html">第5章 Tool Use 协议深度解析</a></li>
+            <li><a href="06.html">第6章 实现四件套工具</a></li>
+            <li><a href="07.html">第7章 System Prompt 工程</a></li>
+            <li><a href="08.html">第8章 QueryEngine 主循环源码拆解</a></li>
+            <li><a href="09.html" class="active">第9章 实现 Todo 任务规划</a></li>
+            <li><a href="10.html">第10章 上下文压缩机制</a></li>
+            <li><a href="11.html">第11章 实现上下文管理</a></li>
+            <li><a href="12.html">第12章 Sub-Agent 架构分析</a></li>
+            <li><a href="13.html">第13章 实现 Sub-Agent 系统</a></li>
+            <li><a href="14.html">第14章 Skills 与知识加载机制</a></li>
+            <li><a href="15.html">第15章 权限系统源码拆解</a></li>
+            <li><a href="16.html">第16章 实现权限控制</a></li>
+            <li><a href="17.html">第17章 Bash 沙箱与安全防线</a></li>
+            <li><a href="18.html">第18章 MCP 协议深度解析</a></li>
+            <li><a href="19.html">第19章 实现 MCP 集成</a></li>
+            <li><a href="20.html">第20章 Context Engineering 深度分析</a></li>
+            <li><a href="21.html">第21章 实现 Skills 系统</a></li>
+            <li><a href="22.html">第22章 Harness 设计模式对比</a></li>
+            <li><a href="23.html">第23章 Agent 调试与可观测性</a></li>
+            <li><a href="24.html">第24章 性能优化实战</a></li>
+            <li><a href="25.html">第25章 社区教程与工具生态</a></li>
+            <li><a href="26.html">第26章 前沿趋势：Long-Running Agents</a></li>
+            <li><a href="27.html">第27章 实战：搭建完整 Coding Agent</a></li>
+            <li><a href="28.html">第28章 总结与展望</a></li>
+        </ul>
+    </div>
+    <div class="main-content">
+
+        <h2>第9章 实现 Todo 任务规划</h2>
+
+        <p>大家好，我是你们的讲师。上一章我们拆解了 queryLoop——Agent 的引擎核心。但引擎再好，没有导航系统也是白搭。这一章我们要给 Agent 装上这个导航系统：<strong>Todo 任务规划</strong>。</p>
+
+        <p>为什么需要 Todo？讲个小故事。2025 年夏天，我用自己写的 Agent 做一个"读取项目代码、分析架构、输出文档"的任务。Agent 很卖力地工作了 15 分钟，读完文件 A，去读文件 B，突然又想起文件 A 里的某个细节没注意，折返回去重新读。到第 8 分钟的时候，它已经读了同一个文件 3 遍了。到第 12 分钟，它开始做跟第 2 分钟一模一样的事——它完全忘了自己已经做过什么。那一刻我深切地体会到：<strong>没有外部记忆的 Agent，就像一个患有严重短期记忆障碍的工程师</strong>。</p>
+
+        <p>这个问题的学术名字叫"任务迷失"（task disorientation）。研究表明，给 Agent 加上 TodoWrite 工具后，复杂多步任务的完成率可以翻倍。原因很简单——Todo 是 Agent 的<strong>外置工作记忆</strong>，它不需要把所有中间状态塞进越来越长的上下文，只需要在每轮开始时扫一眼自己的 Todo 清单，就知道"我在哪、我做过什么、下一步该做什么"。</p>
+
+        <h3>为什么 Agent 需要 Todo</h3>
+
+        <p>人类认知科学中有一个经典概念叫"认知负荷"（cognitive load）。人的工作记忆容量大约是 7±2 个项目。超出这个数量，我们就需要外部工具——便签纸、待办清单、项目管理软件——来辅助记忆。</p>
+
+        <p>AI Agent 面临同样的问题。虽然模型的上下文窗口可以做到 200K tokens，但研究表明，模型在长上下文中对信息的"注意力"会显著衰减。一个 Agent 在对话的前 5 轮中做出的决策和发现，到了第 30 轮可能已经完全被后续内容"稀释"了。这不是模型变笨了，而是信息熵太高——大量无关细节淹没了关键信息。</p>
+
+        <p>Todo 系统解决的就是这个问题。它不是把 Agent 的记忆"增强"，而是把记忆<strong>结构化</strong>：</p>
+
+        <ul>
+            <li><strong>任务的完成状态</strong>——已经完成什么，还差什么</li>
+            <li><strong>任务的依赖关系</strong>——哪些任务必须先完成</li>
+            <li><strong>任务的优先级</strong>——先做哪个后做哪个</li>
+            <li><strong>失败记录</strong>——哪个方案试过了不行</li>
+        </ul>
+
+        <p>Claude Code 的 TodoWrite 工具就是为此而生。它提供了 Agent 自主管理的任务清单，Agent 可以随时创建、更新、删除条目。更重要的是，每轮对话开始前，系统会自动注入当前 Todo 状态作为 System Reminder，确保 Agent 永远知道自己所处的进度。</p>
+
+        <h3>Todo 数据模型设计</h3>
+
+        <p>一个生产级的 Todo 系统需要支持哪些字段？</p>
+
+        <pre><code>@dataclass
+class TodoItem:
+    id: str                        # 唯一标识，格式 "todo-{uuid}"
+    title: str                     # 任务标题，简短描述
+    description: str               # 详细描述，可选
+    status: str                    # pending | in_progress | completed | cancelled | blocked
+    dependencies: list[str] = None # 依赖的 todo id 列表（blockedBy）
+    blocked_by: list[str] = None   # 被哪些 todo 阻塞
+    created_at: str = ""           # ISO 时间戳
+    updated_at: str = ""           # ISO 时间戳
+    metadata: dict = None          # 额外信息（文件名、行号等）</code></pre>
+
+        <p>其中 <code>status</code> 字段由以下状态机构成：</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>状态</th>
+                    <th>含义</th>
+                    <th>可转换到</th>
+                    <th>触发条件</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>pending</code></td>
+                    <td>已创建但尚未开始</td>
+                    <td>in_progress, cancelled</td>
+                    <td>Agent 决定开始执行此任务</td>
+                </tr>
+                <tr>
+                    <td><code>in_progress</code></td>
+                    <td>正在执行中</td>
+                    <td>completed, cancelled, blocked</td>
+                    <td>Agent 开始工作 / 遇到阻碍</td>
+                </tr>
+                <tr>
+                    <td><code>completed</code></td>
+                    <td>已完成</td>
+                    <td>—</td>
+                    <td>Agent 确认任务完成</td>
+                </tr>
+                <tr>
+                    <td><code>cancelled</code></td>
+                    <td>已取消（不再执行）</td>
+                    <td>—</td>
+                    <td>任务不再需要</td>
+                </tr>
+                <tr>
+                    <td><code>blocked</code></td>
+                    <td>被其他任务阻塞</td>
+                    <td>pending, in_progress</td>
+                    <td>依赖项完成 / 被解除阻塞</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p>注意一个关键规则：<strong>不能完成一个被阻塞的任务</strong>。如果任务 A 依赖任务 B，B 还没完成，Agent 试图把 A 标记为 completed 时，系统必须拒绝并提示依赖未满足。</p>
+
+        <h3>实现 TodoWrite 工具</h3>
+
+        <p>TodoWrite 工具对外暴露三个操作（operation）：<code>create</code>、<code>update</code>、<code>delete</code>。它的工具定义使用 JSON Schema：</p>
+
+        <pre><code># TodoWrite 工具的 JSON Schema 定义
+todo_write_schema = {
+    "name": "TodoWrite",
+    "description": "创建、更新或删除任务清单中的条目。用于规划和跟踪多步任务的进度。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["create", "update", "delete"],
+                "description": "操作类型：创建新条目、更新现有条目、删除条目"
+            },
+            "todo": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress",
+                                 "completed", "cancelled", "blocked"]
+                    },
+                    "dependencies": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                }
+            }
+        },
+        "required": ["operation", "todo"]
+    }
+}
+
+class TodoManager:
+    """管理 Todo 列表，提供 CRUD 和校验"""
+
+    def __init__(self):
+        self.items: dict[str, TodoItem] = {}
+
+    def create(self, todo: dict) -> dict:
+        tid = f"todo-{uuid4().hex[:8]}"
+        item = TodoItem(
+            id=tid,
+            title=todo["title"],
+            description=todo.get("description", ""),
+            status=todo.get("status", "pending"),
+            dependencies=todo.get("dependencies", []),
+            blocked_by=[],
+            created_at=datetime.now().isoformat(),
+            updated_at=datetime.now().isoformat()
+        )
+        # 解析反向依赖
+        for dep_id in item.dependencies:
+            if dep_id in self.items:
+                self.items[dep_id].blocked_by.append(tid)
+        self.items[tid] = item
+        return {"ok": True, "id": tid, "status": item.status}
+
+    def update(self, todo: dict) -> dict:
+        tid = todo["id"]
+        if tid not in self.items:
+            return {"ok": False, "error": f"Todo {tid} 不存在"}
+
+        item = self.items[tid]
+        new_status = todo.get("status", item.status)
+
+        # 校验：不能完成被阻塞的任务
+        if new_status == "completed" and item.blocked_by:
+            open_blocks = [bid for bid in item.blocked_by
+                          if self.items.get(bid, None)
+                          and self.items[bid].status != "completed"]
+            if open_blocks:
+                return {"ok": False,
+                        "error": f"任务被 {open_blocks} 阻塞，请先完成依赖项"}
+
+        item.status = new_status
+        item.updated_at = datetime.now().isoformat()
+        if "title" in todo:
+            item.title = todo["title"]
+        if "description" in todo:
+            item.description = todo["description"]
+        return {"ok": True, "id": tid, "status": item.status}
+
+    def delete(self, todo_id: str) -> dict:
+        if todo_id not in self.items:
+            return {"ok": False, "error": f"Todo {todo_id} 不存在"}
+        del self.items[todo_id]
+        return {"ok": True}
+
+    def get_pending_blockers(self, todo_id: str) -> list[str]:
+        """获取所有未完成的阻塞项"""
+        item = self.items.get(todo_id)
+        if not item:
+            return []
+        return [bid for bid in (item.dependencies or [])
+                if bid in self.items
+                and self.items[bid].status != "completed"]
+
+    def has_cycle(self) -> bool:
+        """检测依赖图中是否存在循环"""
+        visited = set()
+        path = set()
+
+        def dfs(tid):
+            if tid in path:
+                return True
+            if tid in visited:
+                return False
+            visited.add(tid)
+            path.add(tid)
+            item = self.items.get(tid)
+            if item:
+                for dep in (item.dependencies or []):
+                    if dep in self.items and dfs(dep):
+                        return True
+            path.remove(tid)
+            return False
+
+        return any(dfs(tid) for tid in self.items)</code></pre>
+
+        <h3>System Reminder 注入机制</h3>
+
+        <p>光有 TodoWrite 工具还不够——如果 Agent 不主动查询 Todo，它仍然会"忘记"。Claude Code 的解决方案是在<strong>每一轮对话的系统提示词后自动注入 Todo 快照</strong>。</p>
+
+        <p>这个机制的工作原理：</p>
+        <pre><code># 每轮 API 调用前，注入当前的 Todo 状态
+def build_system_prompt(base_prompt: str, todos: TodoManager) -> str:
+    todo_snapshot = format_todo_snapshot(todos)
+    return f"{base_prompt}\n\n--- 当前任务状态 ---\n{todo_snapshot}"
+
+def format_todo_snapshot(todos: TodoManager) -> str:
+    lines = ["## 任务清单"]
+    for item in sorted(todos.items.values(), key=lambda x: x.created_at):
+        dep_info = ""
+        if item.dependencies:
+            dep_statuses = []
+            for dep_id in item.dependencies:
+                dep = todos.items.get(dep_id)
+                if dep:
+                    dep_statuses.append(f"{dep_id}({dep.status})")
+            dep_info = f" [依赖: {', '.join(dep_statuses)}]"
+        lines.append(f"- [{item.status}] {item.title}{dep_info}")
+    return "\n".join(lines)</code></pre>
+
+        <p>最终注入到系统提示词中的效果：</p>
+
+        <pre><code>--- 当前任务状态 ---
+## 任务清单
+- [completed] 读取项目配置文件
+- [in_progress] 分析数据库连接模块
+- [pending] 编写数据层文档 [依赖: todo-bc3f(completed)]
+- [pending] 编写 API 接口文档 [依赖: todo-a1b2(in_progress)]
+- [blocked] 生成 ER 图 [依赖: todo-a1b2(in_progress)]</code></pre>
+
+        <p>为什么这样有效？因为每一轮 API 调用时，Todo 状态都是最新的。Agent 不需要从漫长的对话历史中回忆"我做到哪了"，它只需要看系统提示词最后几行。这相当于在每个"思维步"开始时给了 Agent 一张清晰的地图——<strong>不需要记忆，只需要阅读</strong>。</p>
+
+        <div class="tip">
+            <strong>Best Practice：</strong>Todo 的粒度很关键。太细（"把第 15 行改为大写"）会导致 Todo 清单比代码还长，管理开销大于收益。太粗（"重构整个项目"）又起不到规划作用。一个经验法则是：<strong>每个 Todo 应该是 Agent 在 1-3 个 tool_use 内能完成的工作</strong>。比如"读取配置文件"粒度正好，"创建用户模块"稍大但还合理，"重构系统"则太粗了。
+        </div>
+
+        <h3>依赖解析与拓扑排序</h3>
+
+        <p>当 Agent 创建了带有依赖关系的 Todo 时，TodoManager 需要做两件事：<strong>验证依赖完整性</strong>和<strong>检测循环依赖</strong>。</p>
+
+        <p>依赖验证的逻辑：</p>
+        <ul>
+            <li>被依赖的 Todo 必须存在（不能引用不存在的 id）</li>
+            <li>不能自依赖（todo A 依赖 todo A）</li>
+            <li>依赖图中不能有环（A→B→C→A）</li>
+        </ul>
+
+        <p>上面的 <code>has_cycle()</code> 方法已经实现了 DFS 环检测。它的复杂度是 O(N + E)，其中 N 是 Todo 数量，E 是依赖关系的数量。对于大多数场景，这个复杂度完全够用。</p>
+
+        <p>依赖图的可视化示例：</p>
+
+        <pre><code>            ┌─────────────┐
+            │ 读取配置文件  │ (completed)
+            └──────┬──────┘
+                   │ blocks
+            ┌──────▼──────┐    ┌──────────────┐
+            │ 分析 DB 模块  │───▶│ 编写数据层文档 │
+            │ (in_progress)│    │ (pending)    │
+            └──────┬──────┘    └──────────────┘
+                   │ blocks
+            ┌──────▼──────┐
+            │ 编写 API 文档 │
+            │ (pending)    │
+            └──────────────┘</code></pre>
+
+        <p>这个依赖图告诉 Agent：必须先完成"读取配置文件"，才能开始"分析 DB 模块"；完成"分析 DB 模块"后，"编写数据层文档"和"编写 API 文档"可以并行进行。</p>
+
+        <h3>集成到 v2 Agent</h3>
+
+        <p>现在我们把 TodoWrite 工具注册到上一章实现的 Agent 中。核心改动只有三处：</p>
+
+        <ol>
+            <li>创建 TodoManager 实例作为一个全局状态对象</li>
+            <li>将 TodoWrite 工具添加到 tools 列表中</li>
+            <li>在每次 queryLoop 调用前注入 Todo 快照到 system prompt</li>
+        </ol>
+
+        <p>来演示一下集成后的效果。假设我们给 Agent 下达一个任务："读取项目的配置文件，分析数据库连接配置，然后写一份数据库架构文档。"</p>
+
+        <p>Agent 的完整工作流：</p>
+
+        <pre><code>用户: "读取项目的配置文件，分析数据库连接配置，然后写一份数据库架构文档。"
+
+=== Turn 1 ===
+Agent 创建 Todo 计划:
+  - [pending] 查找并读取配置文件
+  - [pending] 分析数据库连接配置
+  - [pending] 编写数据库架构文档
+
+Agent 执行: TodoWrite(operation="create", todo={title: "查找并读取配置文件"})
+Agent 执行: Read(file_path="config/database.yaml")
+→ 读取成功，获取到配置内容
+
+Agent 更新: TodoWrite(operation="update",
+              todo={id: "todo-xxx", status: "completed"})
+Agent 创建: TodoWrite(operation="create", todo={
+              title: "分析 PostgreSQL 连接池配置", ...})
+
+=== Turn 2 ===
+Agent 基于配置内容深入分析连接池、迁移配置等...
+
+=== Turn 3 ===
+Agent 完成所有子任务，开始编写文档...</code></pre>
+
+        <p>关键观察：在每个 turn 开始时，Agent 都能看到最新的 Todo 状态。它不需要回顾之前的对话来确认"我读过配置文件了吗"——Todo 清单明确告诉它已经完成了。这大大减少了重复劳动和任务迷失。</p>
+
+        <div class="highlight">
+            <strong>Todo 就是 Agent 的工作记忆。没有 Todo 的 Agent 像一个健忘的工程师，每走一步都忘了前面做了什么。</strong>
+        </div>
+
+        <p>掌握了 Todo 任务规划，我们的 Agent 已经能够"有计划地"工作了。但还有一个致命问题没有解决：<strong>上下文膨胀</strong>。随着对话进行，消息列表越来越长，最终会撑爆 token 预算。下一章我们就来深入分析 Claude Code 的上下文压缩机制——它是怎么在 200K 窗口里优雅地管理可能无限增长的消息的。</p>
+
+        <div class="footer-nav">
+            <a href="08.html">← 上一章</a>
+            <a href="index.html">📖 返回目录</a>
+            <a href="10.html">下一章 →</a>
+        </div>
+    </div>
+</div>
+</div>
+</body>
+</html>

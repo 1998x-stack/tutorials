@@ -1,8 +1,8 @@
 # 1998x-stack Tutorials
 
 <p align="center">
-  <strong>78 free, comprehensive technical tutorials in Chinese</strong><br>
-  From fundamentals to production-ready skills — spanning AI, mathematics, systems, networks, finance, and more.
+  <strong>79 free, comprehensive technical tutorials in Chinese</strong><br>
+  From fundamentals to production-ready skills — spanning AI, mathematics, systems, networks, finance, sci-fi thought experiments, and more.
 </p>
 
 <p align="center">
@@ -15,8 +15,8 @@
 
 | Metric | Count |
 |--------|-------|
-| Total courses | **78** |
-| Disciplines | **10** |
+| Total courses | **79** |
+| Disciplines | **11** |
 | Typical depth | **28 chapters / course** |
 
 Each course is a self-contained, static HTML tutorial with a two-column layout (sidebar navigation + main content), written in conversational Chinese with real-world "踩坑" stories. No build tools, no JavaScript frameworks, no CDN dependencies — just HTML and CSS.
@@ -154,6 +154,14 @@ Each course is a self-contained, static HTML tutorial with a two-column layout (
 | 🤖 | 路径规划算法 from scratch | 28 | [path-planning-algorithms-tutorial](https://1998x-stack.github.io/path-planning-algorithms-tutorial/) |
 | 📐 | 组合优化 · 从入门到精通 | 28 | [combinatorial-optimization-tutorial](https://1998x-stack.github.io/combinatorial-optimization-tutorial/) |
 | 💻 | LeetCode算法面试 · 核心解题技巧与例题讲解 | 28 | [leetcode-tutorial](https://1998x-stack.github.io/leetcode-tutorial/) |
+
+---
+
+## 科幻 / 思想实验 (1 course)
+
+| | Topic | Chapters | URL |
+|---|-------|----------|-----|
+| 🌌 | 宇宙社会学 · 从公理到黑暗森林 | 15 | [cosmic-sociology-tutorial](https://1998x-stack.github.io/cosmic-sociology-tutorial/) |
 
 ---
 

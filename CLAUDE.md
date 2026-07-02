@@ -107,6 +107,11 @@ Tutorials are generated using the **tutorial-publisher skill** (`.claude/skills/
 |-----------|-------|----------|-----|
 | `robotics-tutorial/` | 机器人学 | 28 | `https://1998x-stack.github.io/robotics-tutorial/` |
 
+### 科幻 / 思想实验 (1)
+| Directory | Topic | Chapters | URL |
+|-----------|-------|----------|-----|
+| `cosmic-sociology-tutorial/` | 宇宙社会学 | 15 | `https://1998x-stack.github.io/cosmic-sociology-tutorial/` |
+
 ### 算法 / 数据结构 (4)
 | Directory | Topic | Chapters | URL |
 |-----------|-------|----------|-----|
